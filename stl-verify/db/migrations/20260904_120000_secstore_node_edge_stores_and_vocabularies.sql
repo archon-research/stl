@@ -25,6 +25,7 @@ CREATE TABLE rel_type_vocabulary (
     src_kinds           text[] NOT NULL,
     dst_kinds           text[] NOT NULL,
     cardinality         text NOT NULL CHECK (cardinality IN ('1','n','1_per_class','1_per_parent')),
+    cluster_key         text[] CHECK (cluster_key IS NULL OR cluster_key <> '{}'),
     weight_basis        text REFERENCES weight_basis_vocabulary(basis),
     derived_only        boolean NOT NULL DEFAULT false,
     maturity            text NOT NULL CHECK (maturity IN ('ratified','draft')),
@@ -38,6 +39,7 @@ COMMENT ON COLUMN rel_type_vocabulary.family IS 'One of the six ADR-0007 §5 fam
 COMMENT ON COLUMN rel_type_vocabulary.src_kinds IS 'Legal source node kinds (sec_node.record_type values).';
 COMMENT ON COLUMN rel_type_vocabulary.dst_kinds IS 'Legal destination node kinds.';
 COMMENT ON COLUMN rel_type_vocabulary.cardinality IS 'Expected current-state cardinality; a DQ check over current state, never a write trigger (an open edge always time-overlaps its re-point).';
+COMMENT ON COLUMN rel_type_vocabulary.cluster_key IS 'The payload keys that distinguish a deliberate TWIN of this type, and nothing else: sec_edge.edge_disc is derived from them, so they must be IMMUTABLE over the edge''s life. A mutable key (an outlook, a weight) would fork identity on close-and-open instead of closing the window. NULL = no twins: one logical edge per (rel_type, src_id, dst_id), and a same-pair duplicate collides on the PK rather than becoming an unintended twin (GQ-19). All thirteen ratified types are NULL — the types that need a key (lien seniority, counterparty role, rating agency) are draft, and declare it in the migration that ratifies them.';
 COMMENT ON COLUMN rel_type_vocabulary.weight_basis IS 'Roles: FK→weight_basis_vocabulary.basis. The declared basis for weighted types; NULL = unweighted type.';
 COMMENT ON COLUMN rel_type_vocabulary.derived_only IS 'true: rows of this type are projections written by a loader with lineage, never curated by hand.';
 COMMENT ON COLUMN rel_type_vocabulary.maturity IS 'ratified: decided and stable. draft types are not seeded; they land by migration when ratified.';
@@ -164,8 +166,9 @@ CREATE INDEX sec_node_type_idx ON sec_node (record_type, id, valid_from, process
 
 CREATE TABLE sec_edge (
     edge_id             text GENERATED ALWAYS AS
-                          ('rel:' || rel_type || ':' || src_id || ':' || dst_id || ':' || edge_seq::text) STORED,
-    edge_seq            integer NOT NULL DEFAULT 1 CHECK (edge_seq >= 1),
+                          ('rel:' || rel_type || ':' || src_id || ':' || dst_id || ':' || edge_disc) STORED,
+    edge_disc           text NOT NULL CONSTRAINT sec_edge_disc_shape_chk
+                          CHECK (edge_disc = 'base' OR edge_disc ~ '^[0-9a-f]{16}$'),
     src_id              text NOT NULL,
     src_kind            text NOT NULL,
     dst_id              text NOT NULL,
@@ -190,7 +193,7 @@ CREATE TABLE sec_edge (
     source_system       text NOT NULL,
     content_hash        bytea NOT NULL,
     input_lineage       jsonb,
-    PRIMARY KEY (rel_type, src_id, dst_id, edge_seq, processing_version, valid_from, valid_to),
+    PRIMARY KEY (rel_type, src_id, dst_id, edge_disc, processing_version, valid_from, valid_to),
     CONSTRAINT sec_edge_record_id_key UNIQUE (record_id),
     CONSTRAINT sec_edge_weight_basis_chk CHECK (rel_weight IS NULL OR weight_basis IS NOT NULL),
     -- The cheap half of GQ-11 at the engine boundary: sec_node_id_prefix_chk makes record_type a
@@ -214,8 +217,8 @@ CREATE TABLE sec_edge (
     CONSTRAINT sec_edge_valid_from_finite_chk CHECK (valid_from <> 'infinity' AND valid_from <> '-infinity')
 );
 COMMENT ON TABLE sec_edge IS '[Dimension] Directed, typed, weighted relationship store (ADR-0007 §3/§5). Append-only (full ACL revoke incl. owner — nothing FKs this table); close-and-open at processing_version 0 (valid_to is NOT NULL, ''infinity'' when open, and in the PK); retraction is a tombstone append with a zero-length window. Endpoint-kind legality vs rel_type_vocabulary is loader/validator-enforced (cross-row); single-valued cardinality is a DQ check over current state, never a write trigger. Inverses and closures are derived, never stored. Plain table: governance-rate writes — block-stamped projection types (ALLOCATES) are excluded by design and would need their own hypertable store if ratified.';
-COMMENT ON COLUMN sec_edge.edge_id IS 'Roles: Derived. Generated human-readable identity of the LOGICAL edge; the PK is the seven-column (rel_type, src_id, dst_id, edge_seq, processing_version, valid_from, valid_to) tuple, so one edge_id spans every version and window of that edge.';
-COMMENT ON COLUMN sec_edge.edge_seq IS 'Roles: PK component. DM-6 discriminator: deliberately duplicated edges (multi-typing, per-edge attribute clusters) coexist instead of superseding their twin. Base is 1 per ADR-0007 §3, so a twin is 2; 0 is rejected rather than left as a second spelling of the base edge, since edge_seq is rendered into the stored edge_id. The seq sits inside the row''s identity and is rendered into edge_id, so allocation is a read-then-write on current state: a writer takes pg_advisory_xact_lock on (rel_type, src_id, dst_id) per the read-then-write rule in db/migrations AGENTS.md, and a replay CARRIES the seq from its source, since a recomputed seq changes edge_id and every content_hash chained from it. VEC-622 owns the loader that allocates it.';
+COMMENT ON COLUMN sec_edge.edge_id IS 'Roles: Derived. Generated human-readable identity of the LOGICAL edge; the PK is the seven-column (rel_type, src_id, dst_id, edge_disc, processing_version, valid_from, valid_to) tuple, so one edge_id spans every version and window of that edge.';
+COMMENT ON COLUMN sec_edge.edge_disc IS 'Roles: PK component. DM-6 discriminator, DERIVED rather than allocated (ADR-0007 §3): sec_edge_discriminator(payload, rel_type_vocabulary.cluster_key) — the literal ''base'' where the type declares no cluster key, else the first 16 hex of sha256 over the canonical form of the declared payload subset. Engine-assigned by sec_store_append_guard; a supplied value is verified, never trusted. Deterministic by construction, so a replay reproduces edge_id and every content_hash chained from it without carrying state, and two writers creating DIFFERENT twins concurrently both land instead of racing a read-then-write counter. It is constant across versions and windows only because the cluster key is the IMMUTABLE subset of payload: derived from all of payload it would fork identity on close-and-open, leaving the old row unclosed and two current edges where there is one (GQ-20).';
 COMMENT ON COLUMN sec_edge.src_id IS 'Roles: FK→sec_node.id (soft; SCD2 ids non-unique — resolve via the current view). Edge source.';
 COMMENT ON COLUMN sec_edge.src_kind IS 'Denormalised source kind, CHECKed to agree with src_id''s own prefix (so ''em-…'' cannot be declared SECURITY). That the endpoint EXISTS as a current node is cross-row and stays validator-enforced (GQ-11).';
 COMMENT ON COLUMN sec_edge.dst_id IS 'Roles: FK→sec_node.id (soft). Edge destination.';
@@ -224,7 +227,7 @@ COMMENT ON COLUMN sec_edge.rel_type IS 'Roles: FK→rel_type_vocabulary.rel_type
 COMMENT ON COLUMN sec_edge.rel_weight IS 'Exact decimal numeric(30,18), never float (RP-4.4). Look-through = sum over paths of weight products within one basis. NULL on unweighted types; a NULL weight on a weighted walk is an error, never treated as 1.0.';
 COMMENT ON COLUMN sec_edge.weight_basis IS 'Roles: FK→weight_basis_vocabulary.basis. Mandatory when rel_weight is present (CHECK).';
 COMMENT ON COLUMN sec_edge.weight_asof_block IS 'Block number a market-derived weight was computed at. Raw chain block height. NULL for curated weights.';
-COMMENT ON COLUMN sec_edge.payload IS 'Type-specific attribute cluster (ratio+event_date, agency+rating+outlook, lien seniority, role).';
+COMMENT ON COLUMN sec_edge.payload IS 'Type-specific attribute cluster (ratio+event_date, agency+rating+outlook, lien seniority, role). Split in two by rel_type_vocabulary.cluster_key: the declared keys are immutable and derive edge_disc, everything else is free to change under close-and-open.';
 COMMENT ON COLUMN sec_edge.valid_from IS 'Roles: PK component. Valid-time window start, UTC date, half-open.';
 COMMENT ON COLUMN sec_edge.valid_to IS 'Roles: PK component. Valid-time window end, exclusive; ''infinity'' = open, never NULL. In the key so a re-point closes the current row and opens the new one in one write, both at processing_version 0. A ZERO-LENGTH window (valid_to = valid_from) is a TOMBSTONE — the only way to retract an edge, since an edge has no status to retire it — and it withdraws that WINDOW, so a re-pointed edge takes one tombstone per window (see sec_node.valid_to).';
 COMMENT ON COLUMN sec_edge.record_id IS 'Roles: Audit, UNIQUE. Per-append surrogate; the target of supersedes_record_id, retractions and manifests (PR-2.1).';
@@ -241,7 +244,7 @@ COMMENT ON COLUMN sec_edge.source_system IS 'Roles: Audit. Where the edge came f
 COMMENT ON COLUMN sec_edge.content_hash IS 'Roles: Audit, Derived. sha256 over the canonical stored form — to_jsonb(row) minus record_id, ingest_xid, ingested_at, content_hash and the generated edge_id, with supersedes_record_id replaced by the predecessor''s content_hash — computed by sec_edge_append_guard on every insert (AR-1.2). A supplied value is verified, never trusted.';
 COMMENT ON COLUMN sec_edge.input_lineage IS 'Roles: Audit. For derived edges: source record ids (PR-2.3). NULL on curated edges.';
 -- Resolution index (see sec_node_resolve_idx); sec_edge_src_idx stays for src traversal.
-CREATE INDEX sec_edge_resolve_idx ON sec_edge (rel_type, src_id, dst_id, edge_seq, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC);
+CREATE INDEX sec_edge_resolve_idx ON sec_edge (rel_type, src_id, dst_id, edge_disc, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC);
 CREATE INDEX sec_edge_src_idx ON sec_edge (src_id, rel_type, valid_from DESC, processing_version DESC);
 CREATE INDEX sec_edge_dst_idx ON sec_edge (dst_id, rel_type);
 
@@ -319,29 +322,29 @@ COMMENT ON FUNCTION sec_node_as_of(date, pg_snapshot) IS 'Bitemporal node read: 
 
 CREATE VIEW sec_edge_current AS
 WITH latest AS (
-    SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_seq, valid_from) *
+    SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_disc, valid_from) *
     FROM sec_edge
-    ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
+    ORDER BY rel_type, src_id, dst_id, edge_disc, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
 )
-SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_seq) *
+SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_disc) *
 FROM latest
 WHERE valid_from <= (now() AT TIME ZONE 'utc')::date
   AND (now() AT TIME ZONE 'utc')::date < valid_to
-ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from DESC;
+ORDER BY rel_type, src_id, dst_id, edge_disc, valid_from DESC;
 COMMENT ON VIEW sec_edge_current IS 'Operational reads only (two-step, as sec_node_current). A closed edge, or a window carrying a tombstone, is absent here. Calculations use sec_edge_as_of(effective_at), and replays sec_edge_as_of(effective_at, known_at).';
 
 CREATE FUNCTION sec_edge_as_of(effective_at date)
 RETURNS SETOF sec_edge LANGUAGE sql STABLE AS $$
     WITH latest AS (
-        SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_seq, valid_from) *
+        SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_disc, valid_from) *
         FROM sec_edge
-        ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
+        ORDER BY rel_type, src_id, dst_id, edge_disc, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
     )
-    SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_seq) *
+    SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_disc) *
     FROM latest
     WHERE valid_from <= effective_at
       AND effective_at < valid_to
-    ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from DESC
+    ORDER BY rel_type, src_id, dst_id, edge_disc, valid_from DESC
 $$;
 COMMENT ON FUNCTION sec_edge_as_of(date) IS 'As-of edge read; effective_at is an explicit recorded parameter, never now() (ADR-0006 §4).';
 
@@ -353,15 +356,15 @@ RETURNS SETOF sec_edge LANGUAGE sql STABLE AS $$
         SELECT * FROM sec_edge
         WHERE pg_visible_in_snapshot(ingest_xid, known_at)
     ), latest AS (
-        SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_seq, valid_from) *
+        SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_disc, valid_from) *
         FROM known
-        ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
+        ORDER BY rel_type, src_id, dst_id, edge_disc, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
     )
-    SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_seq) *
+    SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_disc) *
     FROM latest
     WHERE valid_from <= effective_at
       AND effective_at < valid_to
-    ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from DESC
+    ORDER BY rel_type, src_id, dst_id, edge_disc, valid_from DESC
 $$;
 COMMENT ON FUNCTION sec_edge_as_of(date, pg_snapshot) IS 'Bitemporal edge read; see sec_node_as_of(date, pg_snapshot).';
 
@@ -461,16 +464,68 @@ ALTER TABLE sec_node ADD CONSTRAINT sec_node_status_fkey
 -- Write boundary: ingest_xid platform-assigned, content_hash engine-computed (AR-1.2, NFR-5).
 -- ---------------------------------------------------------------------------
 
+-- Canonical jsonb form: drop nulls, normalise numeric scale, recurse. jsonb already orders
+-- object keys deterministically; what it does not do is make 1.0 and 1 the same value, which
+-- is what makes a hash over a payload subset reproducible. VEC-632 owns the model-level form
+-- for content_hash; this is the same primitive and is meant to be reused by it.
+CREATE FUNCTION sec_canonical_jsonb(v jsonb) RETURNS jsonb
+  LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
+BEGIN
+    CASE jsonb_typeof(v)
+    WHEN 'object' THEN
+        RETURN coalesce((SELECT jsonb_object_agg(k, sec_canonical_jsonb(e))
+                           FROM jsonb_each(v) AS t(k, e)
+                          WHERE jsonb_typeof(e) <> 'null'), '{}'::jsonb);
+    WHEN 'array' THEN
+        RETURN coalesce((SELECT jsonb_agg(sec_canonical_jsonb(e) ORDER BY i)
+                           FROM jsonb_array_elements(v) WITH ORDINALITY AS t(e, i)), '[]'::jsonb);
+    WHEN 'number' THEN
+        RETURN to_jsonb(trim_scale((v #>> '{}')::numeric));
+    ELSE
+        RETURN v;
+    END CASE;
+END $$;
+COMMENT ON FUNCTION sec_canonical_jsonb(jsonb) IS 'Canonical form of a jsonb value for hashing: object keys with a JSON null value are dropped (absent and null are the same fact), numbers are trim_scale''d so 1.0 and 1 hash alike, arrays keep their order, and both recurse. Key order is already canonical in jsonb''s own storage. Scoped to a Postgres serialization — a model-defined canonical form (declared field order, date format) is VEC-632''s.';
+
+-- The DM-6 discriminator. A counter needed an allocator, an advisory lock and a carried value
+-- on replay; a function of the declared cluster key needs none of the three (ADR-0007 §3).
+CREATE FUNCTION sec_edge_discriminator(payload jsonb, cluster_key text[]) RETURNS text
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+    SELECT CASE WHEN p = '{}'::jsonb
+                THEN 'base'
+                ELSE left(encode(sha256(convert_to(p::text, 'UTF8')), 'hex'), 16)
+           END
+      FROM (SELECT sec_canonical_jsonb(coalesce(
+                     (SELECT jsonb_object_agg(k, payload -> k)
+                        FROM unnest(cluster_key) AS k
+                       WHERE payload ? k), '{}'::jsonb)) AS p) AS projection
+$$;
+COMMENT ON FUNCTION sec_edge_discriminator(jsonb, text[]) IS 'sec_edge.edge_disc: ''base'' when the type declares no cluster key (NULL, the case for all thirteen ratified types) or when the payload carries none of the declared keys, else the first 16 hex of sha256 over the canonical projection. 16 hex is 64 bits against a handful of twins per (rel_type, src_id, dst_id), and keeps the generated edge_id readable. Absent and JSON-null are the same fact, so a key present as null does not split identity.';
+
 CREATE FUNCTION sec_store_append_guard() RETURNS trigger
   LANGUAGE plpgsql AS $$
 DECLARE
-    computed    bytea;
-    pre_image   jsonb;
-    parent_hash bytea;
+    computed     bytea;
+    pre_image    jsonb;
+    parent_hash  bytea;
+    declared_key text[];
+    derived_disc text;
 BEGIN
     IF NEW.ingest_xid IS DISTINCT FROM pg_current_xact_id() THEN
         RAISE EXCEPTION 'ingest_xid is platform-assigned on %.% and must never be writer-supplied (ADR-0007 §4, ADR-0006 §5); omit the column and let the default stand',
             TG_TABLE_SCHEMA, TG_TABLE_NAME;
+    END IF;
+
+    -- Derived before the pre-image is taken, so content_hash covers the discriminator it ends
+    -- up keyed by. An unknown rel_type finds no cluster key and is left to the FK (23503, GQ-01).
+    IF TG_TABLE_NAME = 'sec_edge' THEN
+        SELECT v.cluster_key INTO declared_key FROM rel_type_vocabulary v WHERE v.rel_type = NEW.rel_type;
+        derived_disc := sec_edge_discriminator(NEW.payload, declared_key);
+        IF NEW.edge_disc IS NOT NULL AND NEW.edge_disc <> derived_disc THEN
+            RAISE EXCEPTION 'edge_disc mismatch on %.%: supplied %, derived % — the discriminator is a function of rel_type_vocabulary.cluster_key over the payload, verified and never trusted (ADR-0007 §3)',
+                TG_TABLE_SCHEMA, TG_TABLE_NAME, NEW.edge_disc, derived_disc;
+        END IF;
+        NEW.edge_disc := derived_disc;
     END IF;
 
     pre_image := to_jsonb(NEW)
@@ -497,7 +552,7 @@ BEGIN
     NEW.content_hash := computed;
     RETURN NEW;
 END $$;
-COMMENT ON FUNCTION sec_store_append_guard() IS 'BEFORE INSERT guard for sec_node / sec_edge: rejects a writer-supplied ingest_xid; computes content_hash over to_jsonb(row) minus the platform-assigned and derived fields, with supersedes_record_id replaced by the predecessor''s content_hash so the digest chains and survives a re-import that reassigns record_ids; rejects a supersedes_record_id naming no stored row; verifies rather than trusts a supplied hash (AR-1.2, NFR-5). Reads only the store it guards, by record_id.';
+COMMENT ON FUNCTION sec_store_append_guard() IS 'BEFORE INSERT guard for sec_node / sec_edge: rejects a writer-supplied ingest_xid; on sec_edge derives edge_disc from the type''s declared cluster key before the pre-image is taken, so the hash covers it; computes content_hash over to_jsonb(row) minus the platform-assigned and derived fields, with supersedes_record_id replaced by the predecessor''s content_hash so the digest chains and survives a re-import that reassigns record_ids; rejects a supersedes_record_id naming no stored row; verifies rather than trusts a supplied hash or discriminator (AR-1.2, NFR-5). Reads the store it guards by record_id, and rel_type_vocabulary by rel_type — both equality lookups on a unique index of a plain table, which is not the per-row hypertable shape AGENTS.md''s plan_cache_mode rule is scoped to.';
 
 CREATE TRIGGER sec_node_append_guard BEFORE INSERT ON sec_node
     FOR EACH ROW EXECUTE FUNCTION sec_store_append_guard();

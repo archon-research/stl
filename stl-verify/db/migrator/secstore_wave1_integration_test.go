@@ -844,3 +844,232 @@ func TestSecStoreKnowledgeTimeReadReplaysWhatWasKnown(t *testing.T) {
 		}
 	})
 }
+
+// TestSecStoreEdgeDiscriminatorIsDerivedNotAllocated covers the DM-6 discriminator.
+//
+// edge_disc is a primary-key component and is rendered into the stored edge_id, so its value is
+// inside row identity and inside every content_hash chained from it. A counter put an unstable
+// value there: it has no allocator, so a twin is allocated by reading current state, two writers
+// creating different twins concurrently compute the same next value and the loser is a primary-key
+// violation rather than a second twin, and a replay that recomputes assigns a different one.
+//
+// It is now a function of the payload subset rel_type_vocabulary.cluster_key declares, which is
+// deterministic by construction and needs neither an allocator nor a carried value.
+//
+// The subtest that matters most is close_and_open_on_a_non_cluster_attribute_keeps_one_identity.
+// Deriving the discriminator from ALL of payload would be wrong in a way the other subtests do not
+// see: edge_id spans every version and window of an edge and sec_edge_current groups on the
+// discriminator, so an attribute corrected under close-and-open would hash to a new identity, the
+// old row would never be closed, and GQ-20 would read two current edges where there is one. The
+// cluster key is the IMMUTABLE subset for exactly that reason, and this pins it.
+func TestSecStoreEdgeDiscriminatorIsDerivedNotAllocated(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	// A twin-bearing type, declared the way the migration that ratifies one would declare it.
+	// All thirteen ratified types declare no cluster key, so none of them admits a twin.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO rel_type_vocabulary
+			(rel_type, family, src_kinds, dst_kinds, cardinality, cluster_key, maturity, description)
+		VALUES ('COLLATERALISED_BY','composition','{SECURITY}','{SECURITY}','n','{lien}','draft','test'),
+		       ('TRANCHE_OF','composition','{SECURITY}','{SECURITY}','n','{attach}','draft','test')`); err != nil {
+		t.Fatalf("declare twin-bearing types: %v", err)
+	}
+
+	insertEdge := func(relType, src, dst, payload, validFrom, validToSQL string) error {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, payload,
+			                      valid_from, valid_to, `+secstoreSpine+`)
+			VALUES ($2,'SECURITY',$3,'SECURITY',$1,$4::jsonb,$5::date,`+validToSQL+`,
+			        'test','SEED_LOAD','discriminator test','test')`,
+			relType, src, dst, payload, validFrom)
+		return err
+	}
+
+	t.Run("seeded_taxonomy_edges_carry_the_base_discriminator", func(t *testing.T) {
+		var total, base, rendered int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*), count(*) FILTER (WHERE edge_disc = 'base'),
+			       count(*) FILTER (WHERE edge_id LIKE '%:base')
+			  FROM sec_edge WHERE rel_type = 'NARROWER_THAN'`).Scan(&total, &base, &rendered); err != nil {
+			t.Fatalf("read seeded edges: %v", err)
+		}
+		if total == 0 || base != total || rendered != total {
+			t.Fatalf("seeded NARROWER_THAN edges: %d rows, %d at 'base', %d rendering ':base' — "+
+				"NARROWER_THAN declares no cluster key, so every row must be the base edge", total, base, rendered)
+		}
+	})
+
+	t.Run("twins_of_one_pair_are_distinguished_by_the_declared_cluster_key", func(t *testing.T) {
+		for _, lien := range []string{"SENIOR", "JUNIOR"} {
+			if err := insertEdge("COLLATERALISED_BY", "sec-d-a", "sec-d-b",
+				`{"lien":"`+lien+`"}`, "2026-01-01", "'infinity'"); err != nil {
+				t.Fatalf("insert %s twin: %v — two deliberate twins of one pair must both land, "+
+					"which is what a counter could not do without an allocator", lien, err)
+			}
+		}
+		var discs, ids int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(DISTINCT edge_disc), count(DISTINCT edge_id) FROM sec_edge
+			 WHERE rel_type = 'COLLATERALISED_BY' AND src_id = 'sec-d-a'`).Scan(&discs, &ids); err != nil {
+			t.Fatalf("read twins: %v", err)
+		}
+		if discs != 2 || ids != 2 {
+			t.Errorf("two twins produced %d discriminators / %d edge_ids, want 2 / 2", discs, ids)
+		}
+	})
+
+	t.Run("an_identical_cluster_payload_is_a_duplicate_not_a_twin", func(t *testing.T) {
+		// GQ-19's accidental duplicate, refused by the engine rather than found later: with a
+		// counter the writer supplied a fresh seq and got a second identity for the same fact.
+		err := insertEdge("COLLATERALISED_BY", "sec-d-a", "sec-d-b", `{"lien":"SENIOR"}`, "2026-01-01", "'infinity'")
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+			t.Fatalf("re-appending an identical SENIOR twin failed with %v, want SQLSTATE 23505", err)
+		}
+	})
+
+	t.Run("a_type_declaring_no_cluster_key_admits_no_twins", func(t *testing.T) {
+		if err := insertEdge("HAS_UNDERLYING", "sec-d-c", "sec-d-d", `{"note":"first"}`, "2026-01-01", "'infinity'"); err != nil {
+			t.Fatalf("first HAS_UNDERLYING edge: %v", err)
+		}
+		err := insertEdge("HAS_UNDERLYING", "sec-d-c", "sec-d-d", `{"note":"second"}`, "2026-01-01", "'infinity'")
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+			t.Fatalf("a second HAS_UNDERLYING edge on the same pair failed with %v, want SQLSTATE 23505 — "+
+				"cluster_key IS NULL means one logical edge per (rel_type, src_id, dst_id)", err)
+		}
+	})
+
+	t.Run("close_and_open_on_a_non_cluster_attribute_keeps_one_identity", func(t *testing.T) {
+		// outlook is NOT in the cluster key, so correcting it must close the window rather than
+		// fork identity. Deriving from all of payload fails here and nowhere else.
+		if err := insertEdge("COLLATERALISED_BY", "sec-d-e", "sec-d-f",
+			`{"lien":"SENIOR","outlook":"stable"}`, "2026-01-01", "'2026-06-01'"); err != nil {
+			t.Fatalf("closing row: %v", err)
+		}
+		if err := insertEdge("COLLATERALISED_BY", "sec-d-e", "sec-d-f",
+			`{"lien":"SENIOR","outlook":"negative"}`, "2026-06-01", "'infinity'"); err != nil {
+			t.Fatalf("reopening row: %v", err)
+		}
+		var discs, current int
+		if err := pool.QueryRow(ctx, `
+			SELECT (SELECT count(DISTINCT edge_disc) FROM sec_edge
+			         WHERE rel_type = 'COLLATERALISED_BY' AND src_id = 'sec-d-e'),
+			       (SELECT count(*) FROM sec_edge_current
+			         WHERE rel_type = 'COLLATERALISED_BY' AND src_id = 'sec-d-e')`).Scan(&discs, &current); err != nil {
+			t.Fatalf("read closed-and-reopened edge: %v", err)
+		}
+		if discs != 1 {
+			t.Errorf("a corrected non-cluster attribute produced %d discriminators, want 1 — the "+
+				"discriminator must be constant across versions and windows, or the old row is never closed", discs)
+		}
+		if current != 1 {
+			t.Errorf("sec_edge_current returns %d rows for one logical edge, want 1 — two would be "+
+				"the resurrection GQ-20 exists to catch, moved into identity", current)
+		}
+	})
+
+	t.Run("numeric_scale_does_not_split_identity", func(t *testing.T) {
+		// {"attach":0.5} and {"attach":0.500} are jsonb-equal and hash differently without a
+		// canonical form, so without one the same twin gets two identities by how it arrived.
+		if err := insertEdge("TRANCHE_OF", "sec-d-g", "sec-d-h", `{"attach":0.5}`, "2026-01-01", "'infinity'"); err != nil {
+			t.Fatalf("first tranche edge: %v", err)
+		}
+		err := insertEdge("TRANCHE_OF", "sec-d-g", "sec-d-h", `{"attach":0.500}`, "2026-01-01", "'infinity'")
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+			t.Fatalf("0.500 against a stored 0.5 failed with %v, want SQLSTATE 23505 — "+
+				"sec_canonical_jsonb trims scale so the two are one identity", err)
+		}
+	})
+
+	t.Run("a_supplied_discriminator_is_verified_never_trusted", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, payload, edge_disc,
+			                      valid_from, `+secstoreSpine+`)
+			VALUES ('sec-d-i','SECURITY','sec-d-j','SECURITY','COLLATERALISED_BY','{"lien":"MEZZ"}',
+			        'deadbeefdeadbeef','2026-01-01','test','SEED_LOAD','forged discriminator','test')`)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
+			t.Fatalf("a forged edge_disc was accepted or failed with %v, want the guard's P0001", err)
+		}
+	})
+
+	t.Run("an_unknown_rel_type_is_still_the_fks_to_reject", func(t *testing.T) {
+		// The guard looks the cluster key up by rel_type. A type with no vocabulary row must fall
+		// through to the foreign key (23503, GQ-01) rather than being shadowed by a guard error.
+		err := insertEdge("NO_SUCH_TYPE", "sec-d-k", "sec-d-l", `{}`, "2026-01-01", "'infinity'")
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23503" {
+			t.Fatalf("unknown rel_type failed with %v, want SQLSTATE 23503 — the guard must not "+
+				"shadow the vocabulary foreign key", err)
+		}
+	})
+
+	t.Run("the_discriminator_reproduces_from_the_payload_alone", func(t *testing.T) {
+		// Replay: nothing but the payload and the declared key is needed to recompute identity,
+		// and the hash chain covers the result.
+		var reproduces, hashes bool
+		if err := pool.QueryRow(ctx, `
+			SELECT bool_and(e.edge_disc = sec_edge_discriminator(e.payload, v.cluster_key)),
+			       bool_and(e.content_hash = sha256(convert_to((to_jsonb(e)
+			           - 'record_id' - 'ingest_xid' - 'ingested_at' - 'content_hash'
+			           - 'edge_id' - 'supersedes_record_id')::text, 'UTF8')))
+			  FROM sec_edge e JOIN rel_type_vocabulary v USING (rel_type)
+			 WHERE e.supersedes_record_id IS NULL`).Scan(&reproduces, &hashes); err != nil {
+			t.Fatalf("recompute identity: %v", err)
+		}
+		if !reproduces {
+			t.Error("a stored edge_disc does not recompute from its payload and declared cluster key")
+		}
+		if !hashes {
+			t.Error("content_hash does not recompute over the stored row, so it no longer covers the discriminator")
+		}
+	})
+
+	t.Run("two_writers_creating_different_twins_concurrently_both_land", func(t *testing.T) {
+		// The counter's headline failure: both writers read the same current state, computed the
+		// same next value, and the loser got a primary-key violation instead of a second twin.
+		// Neither writer reads the store now, so there is nothing to serialise.
+		first, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin first writer: %v", err)
+		}
+		defer first.Rollback(ctx)
+		second, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin second writer: %v", err)
+		}
+		defer second.Rollback(ctx)
+
+		const stmt = `
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, payload,
+			                      valid_from, ` + secstoreSpine + `)
+			VALUES ('sec-d-m','SECURITY','sec-d-n','SECURITY','COLLATERALISED_BY',$1::jsonb,
+			        '2026-01-01','test','SEED_LOAD','concurrent twin','test')`
+		if _, err := first.Exec(ctx, stmt, `{"lien":"SENIOR"}`); err != nil {
+			t.Fatalf("first writer: %v", err)
+		}
+		if _, err := second.Exec(ctx, stmt, `{"lien":"JUNIOR"}`); err != nil {
+			t.Fatalf("second writer blocked or collided with the first: %v — two different twins "+
+				"must not contend, which is what removing the read-then-write allocation buys", err)
+		}
+		if err := first.Commit(ctx); err != nil {
+			t.Fatalf("commit first writer: %v", err)
+		}
+		if err := second.Commit(ctx); err != nil {
+			t.Fatalf("commit second writer: %v", err)
+		}
+		var landed int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(DISTINCT edge_id) FROM sec_edge
+			 WHERE rel_type = 'COLLATERALISED_BY' AND src_id = 'sec-d-m'`).Scan(&landed); err != nil {
+			t.Fatalf("count concurrent twins: %v", err)
+		}
+		if landed != 2 {
+			t.Errorf("%d twins landed from two concurrent writers, want 2", landed)
+		}
+	})
+}

@@ -37,8 +37,8 @@ its tables are classified here from birth so ADR-0006 §1's governance and confo
 apply to them like every other governed table. Three consequences worth knowing before editing
 those entries: the store's audit spine adds canonical columns the ingest vocabulary had no name
 for (`record_id`, `ingest_xid`, `actor`, `change_reason_code`, `supersedes_record_id`,
-`content_hash`, `input_lineage`, …); `src_kinds` / `dst_kinds` are canonically `ARRAY`, which is
-what `information_schema.data_type` reports for a `text[]` column; and three entries in
+`content_hash`, `input_lineage`, …); `src_kinds` / `dst_kinds` / `cluster_key` are canonically
+`ARRAY`, which is what `information_schema.data_type` reports for a `text[]` column; and three entries in
 `overrides` carry the deliberate type divergences — `sec_node.id` is opaque `text` against
 canonical `id`=`int8`, and both stores' `valid_from` is a UTC `date` against canonical
 `timestamptz`, because graph validity is calendar-dated (ADR-0007 §3) and joins the block-time

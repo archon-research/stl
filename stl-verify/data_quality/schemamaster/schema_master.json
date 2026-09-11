@@ -325,6 +325,10 @@
       "class": "R",
       "not_null": true
     },
+    "cluster_key": {
+      "type": "ARRAY",
+      "class": "R"
+    },
     "content_hash": {
       "type": "bytea",
       "class": "A",
@@ -473,8 +477,8 @@
       "type": "text",
       "class": "D"
     },
-    "edge_seq": {
-      "type": "int4",
+    "edge_disc": {
+      "type": "text",
       "class": "R",
       "not_null": true
     },
