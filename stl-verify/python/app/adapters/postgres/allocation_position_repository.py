@@ -1846,10 +1846,7 @@ WITH window_rows AS MATERIALIZED (
     -- the flow read is (VEC-758): last() below picks a per-bucket winner by
     -- created_at, and a correction copies its original's created_at exactly, so
     -- the tie is unbreakable and would resolve arbitrarily.
-    SELECT DISTINCT ON (
-        ap.chain_id, ap.token_id, ap.prime_id, ap.proxy_address,
-        ap.block_number, ap.block_version, ap.tx_hash, ap.log_index, ap.direction
-    )
+    SELECT {_DISTINCT_ON_AP}
         ap.chain_id,
         ap.token_id,
         ap.prime_id,
@@ -1857,6 +1854,11 @@ WITH window_rows AS MATERIALIZED (
         ap.balance,
         ap.underlying_value,
         ap.underlying_token_id,
+        ap.block_number,
+        ap.block_version,
+        ap.log_index,
+        ap.direction,
+        ap.tx_hash,
         ap.created_at,
         t.address AS token_address
     FROM allocation_position ap
@@ -1873,10 +1875,7 @@ WITH window_rows AS MATERIALIZED (
         AND (CAST(:tx_hash AS TEXT) IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(CAST(:tx_hash AS TEXT)))
         AND ap.created_at >= CAST(:seed_from AS TIMESTAMPTZ)
         AND ap.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
-    ORDER BY
-        ap.chain_id, ap.token_id, ap.prime_id, ap.proxy_address,
-        ap.block_number, ap.block_version, ap.tx_hash, ap.log_index,
-        ap.direction, ap.processing_version DESC
+    ORDER BY {_VERSION_ORDER_AP}
 ),
 token_context AS MATERIALIZED (
     -- One row per token: registry underlying, its protocol, and its latest
@@ -1908,8 +1907,14 @@ token_context AS MATERIALIZED (
             SELECT tpc.price_usd
             FROM token_price_current tpc
             WHERE tpc.token_id = wt.token_id
+              AND EXISTS (
+                  SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
+                  WHERE oa.oracle_id = tpc.oracle_id
+                    AND oa.token_id = tpc.token_id
+                    AND oa.enabled
+              )
             ORDER BY tpc.block_number DESC, tpc.block_version DESC,
-                     tpc.processing_version DESC
+                     tpc.processing_version DESC, tpc.oracle_id DESC
             LIMIT 1
         ) AS direct_price_usd
     FROM (SELECT DISTINCT chain_id, token_id, token_address FROM window_rows) wt
@@ -1938,6 +1943,11 @@ valued_rows AS MATERIALIZED (
         ap.proxy_address,
         ap.chain_id,
         ap.token_id,
+        ap.block_number,
+        ap.block_version,
+        ap.log_index,
+        ap.direction,
+        ap.tx_hash,
         ap.created_at,
         CASE
             -- Same refusal as every other valuation read: a row whose own
@@ -1963,13 +1973,17 @@ seed AS (
     -- prototype ran it as a lateral and paid 36 loops for spark's 58 tokens
     -- (same shape of fix as #728 on the exposure read).
     SELECT DISTINCT ON (proxy_address, chain_id, token_id)
-           proxy_address, chain_id, token_id, value_usd
+           proxy_address, chain_id, token_id, value_usd,
+           block_number, block_version, log_index, direction, tx_hash
     FROM valued_rows
     WHERE created_at < CAST(:from_timestamp AS TIMESTAMPTZ)
-    ORDER BY proxy_address, chain_id, token_id, created_at DESC
+    ORDER BY proxy_address, chain_id, token_id,
+             created_at DESC, block_number DESC, block_version DESC, log_index DESC,
+             direction DESC, tx_hash DESC
 ),
 observations AS (
-    SELECT proxy_address, chain_id, token_id, created_at, value_usd
+    SELECT proxy_address, chain_id, token_id, block_number, block_version, log_index,
+           direction, tx_hash, created_at, value_usd
     FROM valued_rows
     WHERE created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
     UNION ALL
@@ -1982,9 +1996,23 @@ observations AS (
     -- that has a row, and locf then carries this value across the buckets
     -- before the entity's first in-window observation. One scan, evaluated
     -- once, rather than per (bucket, entity) group.
-    SELECT proxy_address, chain_id, token_id,
-           CAST(:from_timestamp AS TIMESTAMPTZ) AS created_at, value_usd
+    SELECT proxy_address, chain_id, token_id, block_number, block_version, log_index,
+           direction, tx_hash, CAST(:from_timestamp AS TIMESTAMPTZ) AS created_at, value_usd
     FROM seed
+),
+deduped_observations AS (
+    -- A flow row and a same-block sweep snapshot for one entity share
+    -- created_at exactly, so last() below (ordered on created_at alone) would
+    -- pick between them arbitrarily. The tiebreak matches
+    -- allocation_position_current's newer-wins order (db/migrations
+    -- 20260825_120000): block/version/log_index, then direction/tx_hash for
+    -- the log_index-0 pair a same-block flow row and sweep row both carry.
+    SELECT DISTINCT ON (proxy_address, chain_id, token_id, created_at)
+           proxy_address, chain_id, token_id, created_at, value_usd
+    FROM observations
+    ORDER BY proxy_address, chain_id, token_id, created_at,
+             block_number DESC, block_version DESC, log_index DESC,
+             direction DESC, tx_hash DESC
 ),
 per_entity AS (
     SELECT
@@ -2011,7 +2039,7 @@ per_entity AS (
         -- both read as NULL there.
         locf(last(o.created_at, o.created_at) FILTER (WHERE o.value_usd IS NOT NULL)) AS priced_at,
         locf(last(o.created_at, o.created_at)) AS last_event_at
-    FROM observations o
+    FROM deduped_observations o
     GROUP BY bucket_start, o.proxy_address, o.chain_id, o.token_id
 )
 SELECT
