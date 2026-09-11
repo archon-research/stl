@@ -943,6 +943,8 @@ def test_list_allocation_activity_returns_aggregated_buckets():
             # Null on the flow series, which is the default: the two series are
             # alternatives and only one query runs (VEC-760).
             "balance_usd": None,
+            "priced_entity_count": None,
+            "entity_count": None,
         }
     ]
     kwargs = service.list_activity_buckets.await_args.kwargs
