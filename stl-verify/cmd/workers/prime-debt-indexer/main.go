@@ -74,10 +74,14 @@ type cliConfig struct {
 	chainID           int64
 }
 
+// The MCD Vat. 20260819_140000 seeds the protocol row for this address and backfills every pre-existing
+// snapshot to it, so the two must agree or legacy rows carry a Vat this indexer never read.
+const defaultVatAddress = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
+
 func parseConfig(args []string) (cliConfig, error) {
 	fs := flag.NewFlagSet("prime-debt-indexer", flag.ContinueOnError)
 	dbURL := fs.String("db", env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"), "PostgreSQL connection string")
-	vatAddr := fs.String("vat", env.Get("VAT_ADDRESS", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"), "MCD Vat contract address")
+	vatAddr := fs.String("vat", env.Get("VAT_ADDRESS", defaultVatAddress), "MCD Vat contract address")
 	rpcURL := fs.String("rpc", env.Get("ETH_RPC_URL", ""), "Ethereum JSON-RPC endpoint (e.g. https://eth-mainnet.g.alchemy.com/v2/<key>)")
 	queueURL := fs.String("queue", env.Get("AWS_SQS_QUEUE_URL", ""), "SQS Queue URL")
 	sweepBlocks := fs.Int("sweep-blocks", 75, "Read debt every N blocks")
@@ -258,11 +262,20 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	}
 	primeDebtRepo := postgres.NewPrimeDebtRepository(pool, txm, logger, buildReg.BuildID(), runID)
 
+	// The Vat's protocol row, seeded by 20260819_140000. Resolved once, and a hard failure if it is
+	// missing: every snapshot carries it, and the Sky projection refuses a run for one row without it.
+	protocolID, err := primeDebtRepo.ProtocolIDByAddress(ctx, cfg.chainID, common.HexToAddress(cfg.vatAddr))
+	if err != nil {
+		return fmt.Errorf("resolving the Vat's protocol row: %w", err)
+	}
+	logger.Info("vat protocol row resolved", "vatAddress", cfg.vatAddr, "protocolID", protocolID)
+
 	// Vault debt service
 	svc, err := prime_debt.NewVaultDebtService(
 		prime_debt.Config{
 			SweepEveryNBlocks: cfg.sweepBlocks,
 			ChainID:           cfg.chainID,
+			ProtocolID:        protocolID,
 			MaxMessages:       1,
 			PollInterval:      100 * time.Millisecond,
 			Logger:            logger,
