@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
+	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -38,96 +39,179 @@ func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger, runID build
 	return &BlockMetaRepository{pool: pool, logger: logger, runID: runID}, nil
 }
 
-// pendingBlocksQuery resolves the blocks referenced by the observation tables but not yet in
-// block_meta, one chain at a time. Per-table chain resolution (verified against the schemas):
+// Each referencing table contributes one arm. Chain resolution per table, verified against the schemas:
 //   - borrower, borrower_collateral, sparklend_reserve_data carry protocol_id -> protocol.chain_id.
 //   - allocation_position, protocol_event carry chain_id natively.
-//   - prime_debt (Sky) has no chain column and is Ethereum mainnet, so its chain is the constant 1.
+//   - prime_debt (Sky) has no chain column at all, so its arm is used ONLY for chain 1 and is skipped
+//     otherwise. If prime_debt ever takes rows from another chain the constant would attribute them to
+//     Ethereum and the loader would write wrong timestamps, so the gate is explicit rather than
+//     incidental and TestWorkListSkipsPrimeDebtOffChainOne pins it.
 //
-// referencedBlocksQuery is the set of blocks a chain's observation tables reference. It is evaluated
-// ONCE per run into a temp table: the six arms scan (only protocol_event has an index leading with
-// block_number), so re-running it per batch made enumeration cost O(batches x full scan) -- measured
-// at ~7s per batch against staging's 1.4M referenced blocks, independent of how far the cursor had
-// advanced, which is ~4h for chain 1 alone before a single header is read.
-// workListStatements build the run's work list. Separate statements because the INSERT takes a
-// parameter, and a multi-statement string cannot be sent as one prepared statement.
-var workListStatements = []string{
-	`CREATE TEMP TABLE block_meta_worklist (block_number bigint NOT NULL, block_version integer NOT NULL) ON COMMIT DROP`,
-	`INSERT INTO block_meta_worklist (block_number, block_version)
-	 WITH referenced AS (
-	     SELECT p.chain_id, b.block_number, b.block_version
-	       FROM borrower b JOIN protocol p ON p.id = b.protocol_id
-	     UNION
-	     SELECT p.chain_id, bc.block_number, bc.block_version
-	       FROM borrower_collateral bc JOIN protocol p ON p.id = bc.protocol_id
-	     UNION
-	     SELECT ap.chain_id, ap.block_number, ap.block_version FROM allocation_position ap
-	     UNION
-	     SELECT pe.chain_id, pe.block_number, pe.block_version FROM protocol_event pe
-	     UNION
-	     SELECT p.chain_id, sr.block_number, sr.block_version
-	       FROM sparklend_reserve_data sr JOIN protocol p ON p.id = sr.protocol_id
-	     UNION
-	     SELECT 1::int AS chain_id, pd.block_number, pd.block_version FROM prime_debt pd
-	 )
-	 SELECT r.block_number, r.block_version
-	   FROM referenced r
-	  WHERE r.chain_id = $1
-	    AND NOT EXISTS (
-	        SELECT 1 FROM block_meta m
-	         WHERE m.chain_id = r.chain_id
-	           AND m.block_number = r.block_number
-	           AND m.block_version = r.block_version)`,
-	`CREATE INDEX ON block_meta_worklist (block_number, block_version)`,
-	`ANALYZE block_meta_worklist`,
+// Arms are populated one at a time, each in its own short transaction, and each is windowed on its OWN
+// partition column. A block-number bound prunes nothing on a table partitioned by insert time, so the
+// whole six-arm union opened every chunk of all six tables at once: measured against staging at
+// allocated_by_plan=8016399kB over 1,319 chunk relations, against a mem_guard.limit of 4757 MB with
+// block=on, which refuses the statement outright rather than merely running it slowly.
+type workListArm struct {
+	table   string // the referencing table, and the hypertable whose chunks give the windows
+	partCol string // its partition column; the window is expressed on this and nothing else
+	sql     string // $1 = chain id; %s = the window predicate on partCol
 }
 
-// blockWorkList pages the run's temp work-list. It holds one pooled connection for the run, because a
-// temp table belongs to the session that created it; the transaction is open for the same reason
-// (ON COMMIT DROP), so nothing survives a crash and a fresh run recomputes the set.
+var workListArms = []workListArm{
+	{"borrower", "b.created_at", `
+		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
+		SELECT p.chain_id, b.block_number, b.block_version
+		  FROM borrower b JOIN protocol p ON p.id = b.protocol_id
+		 WHERE p.chain_id = $1 AND %s
+		ON CONFLICT DO NOTHING`},
+	{"borrower_collateral", "bc.created_at", `
+		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
+		SELECT p.chain_id, bc.block_number, bc.block_version
+		  FROM borrower_collateral bc JOIN protocol p ON p.id = bc.protocol_id
+		 WHERE p.chain_id = $1 AND %s
+		ON CONFLICT DO NOTHING`},
+	{"allocation_position", "ap.created_at", `
+		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
+		SELECT ap.chain_id, ap.block_number, ap.block_version FROM allocation_position ap
+		 WHERE ap.chain_id = $1 AND %s
+		ON CONFLICT DO NOTHING`},
+	{"protocol_event", "pe.created_at", `
+		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
+		SELECT pe.chain_id, pe.block_number, pe.block_version FROM protocol_event pe
+		 WHERE pe.chain_id = $1 AND %s
+		ON CONFLICT DO NOTHING`},
+	{"sparklend_reserve_data", "sr.block_number", `
+		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
+		SELECT p.chain_id, sr.block_number, sr.block_version
+		  FROM sparklend_reserve_data sr JOIN protocol p ON p.id = sr.protocol_id
+		 WHERE p.chain_id = $1 AND %s
+		ON CONFLICT DO NOTHING`},
+	{"prime_debt", "pd.synced_at", `
+		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
+		SELECT 1, pd.block_number, pd.block_version FROM prime_debt pd
+		 WHERE $1 = 1 AND %s
+		ON CONFLICT DO NOTHING`},
+}
+
+// chunksPerWindow bounds how many of a table's chunks one statement may open. Planning cost tracks
+// chunks opened at roughly 6 MB each, so this is the knob that keeps a statement under the guard.
+const chunksPerWindow = 16
+
+// windowPredicates returns one predicate per window over table's chunks, expressed on partCol.
+//
+// The bounds are read from TimescaleDB's chunk catalog and interpolated as SQL LITERALS. A bound
+// parameter is not constified at plan time, so the planner would build paths for every chunk and the
+// pruning this exists for would not happen (db/migrations/AGENTS.md). The values come from the
+// catalog, not from a caller, so interpolating them is the sanctioned form rather than a risk.
+// A table with no chunks yields no windows and the arm is skipped entirely.
+func (r *BlockMetaRepository) windowPredicates(ctx context.Context, table, partCol string) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT range_start_integer, range_end_integer, range_start, range_end
+		  FROM timescaledb_information.chunks
+		 WHERE hypertable_name = $1
+		 ORDER BY range_start_integer NULLS LAST, range_start NULLS LAST`, table)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s chunk ranges: %w", table, err)
+	}
+	defer rows.Close()
+	type bound struct{ lo, hi string }
+	var bounds []bound
+	for rows.Next() {
+		var loInt, hiInt *int64
+		var loTS, hiTS *time.Time
+		if err := rows.Scan(&loInt, &hiInt, &loTS, &hiTS); err != nil {
+			return nil, fmt.Errorf("scanning a %s chunk range: %w", table, err)
+		}
+		switch {
+		case loInt != nil && hiInt != nil:
+			bounds = append(bounds, bound{strconv.FormatInt(*loInt, 10), strconv.FormatInt(*hiInt, 10)})
+		case loTS != nil && hiTS != nil:
+			bounds = append(bounds, bound{quoteTimestamp(*loTS), quoteTimestamp(*hiTS)})
+		default:
+			return nil, fmt.Errorf("%s has a chunk with neither an integer nor a time range", table)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating %s chunk ranges: %w", table, err)
+	}
+	var out []string
+	for i := 0; i < len(bounds); i += chunksPerWindow {
+		j := i + chunksPerWindow
+		if j > len(bounds) {
+			j = len(bounds)
+		}
+		out = append(out, fmt.Sprintf("%s >= %s AND %s < %s", partCol, bounds[i].lo, partCol, bounds[j-1].hi))
+	}
+	return out, nil
+}
+
+// quoteTimestamp renders t as a literal PostgreSQL will read back exactly, in UTC.
+func quoteTimestamp(t time.Time) string {
+	return "'" + t.UTC().Format("2006-01-02 15:04:05.999999-07") + "'::timestamptz"
+}
+
+// blockWorkList pages the run's work list. The list is a committed table, so nothing is held open
+// between batches: each page is its own pooled query, and a run that dies leaves the list behind for
+// the next one to resume from rather than discarding hours of enumeration.
 type blockWorkList struct {
-	conn   *pgxpool.Conn
-	tx     pgx.Tx
-	logger *slog.Logger
-	after  outbound.BlockRef
+	pool    *pgxpool.Pool
+	logger  *slog.Logger
+	chainID int64
+	after   outbound.BlockRef
 }
 
-// OpenWorkList evaluates the referenced set for chainID once and returns a cursor over it.
+// OpenWorkList enumerates the blocks chainID references that block_meta lacks, once, into
+// block_meta_worklist, and returns a cursor over it.
+//
+// Every statement here commits on its own. The previous shape held one transaction open for the whole
+// run because its temp table was ON COMMIT DROP, and that transaction's backend_xid pins VACUUM's
+// removable cutoff database-wide even with no snapshot held -- for chain 1 that is hours.
 func (r *BlockMetaRepository) OpenWorkList(ctx context.Context, chainID int64) (outbound.BlockWorkList, error) {
-	conn, err := r.pool.Acquire(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("acquire a connection for the work list: %w", err)
+	if _, err := r.pool.Exec(ctx, `DELETE FROM block_meta_worklist WHERE chain_id = $1`, chainID); err != nil {
+		return nil, fmt.Errorf("clearing the work list for chain %d: %w", chainID, err)
 	}
-	tx, err := conn.Begin(ctx)
-	if err != nil {
-		conn.Release()
-		return nil, fmt.Errorf("begin the work-list transaction: %w", err)
-	}
-	for _, stmt := range workListStatements {
-		var args []any
-		if strings.Contains(stmt, "$1") {
-			args = []any{chainID}
+	for _, arm := range workListArms {
+		if arm.table == "prime_debt" && chainID != 1 {
+			continue
 		}
-		if _, err := tx.Exec(ctx, stmt, args...); err != nil {
-			rollback(ctx, tx, r.logger)
-			conn.Release()
-			return nil, fmt.Errorf("materialize the work list: %w", err)
+		windows, err := r.windowPredicates(ctx, arm.table, arm.partCol)
+		if err != nil {
+			return nil, err
 		}
+		for _, where := range windows {
+			if _, err := r.pool.Exec(ctx, fmt.Sprintf(arm.sql, where), chainID); err != nil {
+				return nil, fmt.Errorf("enumerating %s for chain %d: %w", arm.table, chainID, err)
+			}
+		}
+		r.logger.Debug("work list arm enumerated", "table", arm.table, "chain", chainID, "windows", len(windows))
 	}
-	return &blockWorkList{conn: conn, tx: tx, logger: r.logger,
+	// The pending set is what the arms found minus what block_meta already has. Subtracting here rather
+	// than inside every arm keeps block_meta out of six plans, and it is a plain table, so this is one
+	// relation-level pass instead of six.
+	if _, err := r.pool.Exec(ctx, `
+		DELETE FROM block_meta_worklist w
+		 WHERE w.chain_id = $1
+		   AND EXISTS (SELECT 1 FROM block_meta m
+		                WHERE m.chain_id = w.chain_id
+		                  AND m.block_number = w.block_number
+		                  AND m.block_version = w.block_version)`, chainID); err != nil {
+		return nil, fmt.Errorf("removing already-loaded blocks for chain %d: %w", chainID, err)
+	}
+	return &blockWorkList{pool: r.pool, logger: r.logger, chainID: chainID,
 		after: outbound.BlockRef{Number: -1, Version: -1}}, nil
 }
 
 // Next pages the work-list with a keyset cursor, so the ordered read is not restarted per batch.
 func (w *blockWorkList) Next(ctx context.Context, limit int) ([]outbound.BlockRef, error) {
-	if w.tx == nil {
+	if w.pool == nil {
 		return nil, fmt.Errorf("work list is closed")
 	}
-	rows, err := w.tx.Query(ctx, `
+	rows, err := w.pool.Query(ctx, `
 		SELECT block_number, block_version FROM block_meta_worklist
-		 WHERE (block_number, block_version) > ($1, $2)
+		 WHERE chain_id = $1 AND (block_number, block_version) > ($2, $3)
 		 ORDER BY block_number, block_version
-		 LIMIT $3`, w.after.Number, w.after.Version, limit)
+		 LIMIT $4`, w.chainID, w.after.Number, w.after.Version, limit)
 	if err != nil {
 		return nil, fmt.Errorf("reading the work list: %w", err)
 	}
@@ -149,15 +233,11 @@ func (w *blockWorkList) Next(ctx context.Context, limit int) ([]outbound.BlockRe
 	return out, nil
 }
 
-func (w *blockWorkList) Close(ctx context.Context) {
-	if w.tx == nil {
-		return
-	}
-	if err := w.tx.Rollback(ctx); err != nil && err != pgx.ErrTxClosed {
-		w.logger.Error("closing the block_meta work list", "error", err)
-	}
-	w.conn.Release()
-	w.tx, w.conn = nil, nil
+func (w *blockWorkList) Close(_ context.Context) {
+	// Nothing is held between batches, and the rows are deliberately left behind: a run killed by a
+	// deadline or a restart resumes from them instead of re-enumerating, and the next run clears its
+	// own chain first.
+	w.pool = nil
 }
 
 // blockMetaStageColumns are the block_meta columns the loader fills, in COPY/INSERT order.
