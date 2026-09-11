@@ -14,6 +14,11 @@ it a *different* read rather than a cheaper one:
 * it refuses a row whose own underlying disagrees with the registry's, matching
   every other valuation read, and that refusal poisons the bucket rather than
   silently omitting the entity from the total (VEC-537's failure class);
+* the direct-pricing arm gates on the oracle's enabled mapping too, so a
+  disabled-oracle direct holding reaches the same poisoned state;
+* a tie on ``created_at`` alone (a sweep row and a same-block flow row) is
+  broken by block/version/log_index, both for the carry-in seed and the
+  per-bucket winner;
 * ``protocol_name`` filters it, the same as every other filter on this read;
 * it leaves ``net_flow_usd``/``event_count``/``total_tx_amount`` at ``None``,
   and ``series="flow"`` leaves ``balance_usd`` unset -- one query runs per
@@ -42,15 +47,20 @@ from tests.integration.seed import (
     BS_PROXY_CARRY,
     BS_PROXY_CORRECTED,
     BS_PROXY_DIRECT,
+    BS_PROXY_DIRECT_DISABLED_ORACLE,
     BS_PROXY_DIVERGENT,
     BS_PROXY_MIXED,
+    BS_PROXY_SEED_TIEBREAK,
     BS_PROXY_SEEDED,
     BS_PROXY_SUMMED,
+    BS_PROXY_WINDOW_TIEBREAK,
+    BS_SEED_TIEBREAK_FLOW_VALUE,
     BS_SEEDED_UNDERLYING_VALUE,
     BS_SUMMED_DIRECT_BALANCE,
     BS_SUMMED_UNDERLYING_VALUE,
     BS_UNDERLYING_PRICE,
     BS_VAULT_HEX,
+    BS_WINDOW_TIEBREAK_FLOW_VALUE,
     seed_balance_series_positions,
 )
 
@@ -225,3 +235,34 @@ async def test_buckets_before_the_first_observation_are_null_not_zero(repo: Allo
     oldest_first = sorted(buckets, key=lambda b: b.bucket_start)
     assert oldest_first[0].balance_usd is None, "a bucket before any observation must not report a figure"
     assert oldest_first[-1].balance_usd == BS_CARRY_UNDERLYING_VALUE * BS_UNDERLYING_PRICE
+
+
+async def test_direct_holding_with_only_a_disabled_oracle_is_unpriced(repo: AllocationRepository) -> None:
+    # BS_PROXY_DIRECT_DISABLED_ORACLE's only price comes from a retired
+    # oracle_asset mapping. The direct-pricing arm must gate on `enabled` the
+    # same as the receipt arm, so the entity is present but unpriceable -- the
+    # same poisoned state test_divergent_underlying_is_refused reaches.
+    buckets = await _buckets(repo, BS_PROXY_DIRECT_DISABLED_ORACLE)
+    assert buckets, "a disabled-oracle direct holding must still produce buckets, not vanish"
+    assert all(b.balance_usd is None for b in buckets), [b.balance_usd for b in buckets]
+
+
+async def test_seed_tiebreak_resolves_to_the_later_log_index(repo: AllocationRepository) -> None:
+    # BS_PROXY_SEED_TIEBREAK has a pre-window sweep row (log_index 0, a sweep
+    # never carries its own log_index/tx_hash) and a flow row later in the
+    # same block sharing its created_at. The carry-in seed must resolve to
+    # the flow row deterministically, not whichever one a tie on created_at
+    # alone returns.
+    buckets = await _buckets(repo, BS_PROXY_SEED_TIEBREAK)
+    expected = BS_SEED_TIEBREAK_FLOW_VALUE * BS_UNDERLYING_PRICE
+    assert buckets, "expected buckets seeded from the pre-window pair"
+    assert all(b.balance_usd == expected for b in buckets), [b.balance_usd for b in buckets]
+
+
+async def test_window_tiebreak_resolves_to_the_later_log_index(repo: AllocationRepository) -> None:
+    # Same sweep/flow pair as above, but in-window: the per-bucket winner
+    # (last() over created_at) must resolve identically to the flow row.
+    buckets = await _buckets(repo, BS_PROXY_WINDOW_TIEBREAK)
+    expected = BS_WINDOW_TIEBREAK_FLOW_VALUE * BS_UNDERLYING_PRICE
+    assert buckets, "expected buckets for the window tiebreak proxy"
+    assert buckets[0].balance_usd == expected

@@ -3383,6 +3383,9 @@ BS_PROXY_DIRECT = "4b" * 20
 BS_PROXY_SEEDED = "5b" * 20
 BS_PROXY_MIXED = "6b" * 20
 BS_PROXY_SUMMED = "7b" * 20
+BS_PROXY_DIRECT_DISABLED_ORACLE = "8b" * 20
+BS_PROXY_SEED_TIEBREAK = "9b" * 20
+BS_PROXY_WINDOW_TIEBREAK = "ac" * 20
 
 BS_VAULT_HEX = "b0" * 20
 _BS_PROTOCOL_HEX = "b1" * 20
@@ -3391,6 +3394,7 @@ _BS_UNDERLYING_HEX = "b3" * 20
 _BS_ALT_UNDERLYING_HEX = "b4" * 20
 _BS_RECEIPT_HEX = "b5" * 20
 _BS_DIRECT_HEX = "b6" * 20
+_BS_DISABLED_DIRECT_HEX = "b7" * 20
 
 # Deliberately not 1.0, so a value that skipped the price multiply is visibly
 # wrong rather than coincidentally right.
@@ -3405,6 +3409,17 @@ BS_SEEDED_UNDERLYING_VALUE = Decimal("11")
 BS_MIXED_DIRECT_BALANCE = Decimal("15")
 BS_SUMMED_UNDERLYING_VALUE = Decimal("20")
 BS_SUMMED_DIRECT_BALANCE = Decimal("5")
+BS_DISABLED_DIRECT_BALANCE = Decimal("13")
+BS_DISABLED_DIRECT_PRICE = Decimal("17")
+
+# Same-block pairs (identical created_at, VEC-760) of a sweep row -- always
+# log_index 0, the tracker never sets it for a sweep -- and a flow row at a
+# later log_index in the same block. The flow row is the later state and must
+# win.
+BS_SEED_TIEBREAK_SWEEP_VALUE = Decimal("30")
+BS_SEED_TIEBREAK_FLOW_VALUE = Decimal("70")
+BS_WINDOW_TIEBREAK_SWEEP_VALUE = Decimal("40")
+BS_WINDOW_TIEBREAK_FLOW_VALUE = Decimal("80")
 
 
 async def seed_balance_series_positions(db_url: str) -> None:
@@ -3430,6 +3445,17 @@ async def seed_balance_series_positions(db_url: str) -> None:
     * ``BS_PROXY_SUMMED``    two different priced entities under the same
       proxy, both cleanly priced -> the total must be their sum, not just one
       of them.
+    * ``BS_PROXY_DIRECT_DISABLED_ORACLE`` a direct holding whose only price
+      comes from a disabled oracle mapping -> the direct-pricing arm must gate
+      on ``oracle_asset.enabled`` the same as the receipt arm, so this reaches
+      the same unpriceable (poisoned) state a divergent receipt row does.
+    * ``BS_PROXY_SEED_TIEBREAK``   a pre-window sweep row (``log_index`` 0,
+      the tracker never sets it for a sweep) and a flow row at a later
+      ``log_index`` in the same block -> ``created_at`` alone cannot break
+      the tie, so the carry-in seed must resolve to the flow row, the later
+      state, not whichever one it returns arbitrarily.
+    * ``BS_PROXY_WINDOW_TIEBREAK`` the same sweep/flow pair, in-window -> the
+      per-bucket winner must resolve the same way.
     """
     conn = await asyncpg.connect(db_url)
     try:
@@ -3609,5 +3635,72 @@ async def seed_balance_series_positions(db_url: str) -> None:
                 created_at=three_days_ago,
                 tx_amount=0,
             )
+
+            disabled_direct_id = await insert_token(conn, "bsDIRDIS", 6, bytes.fromhex(_BS_DISABLED_DIRECT_HEX))
+            await conn.execute(
+                "INSERT INTO onchain_token_price "
+                "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+                "VALUES ($1, $2, 1000, 0, NOW(), $3)",
+                disabled_direct_id,
+                oracle_id,
+                BS_DISABLED_DIRECT_PRICE,
+            )
+            await insert_oracle_asset(conn, oracle_id, disabled_direct_id, enabled=False)
+            await insert_allocation_position(
+                conn,
+                token_id=disabled_direct_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_DIRECT_DISABLED_ORACLE,
+                balance=BS_DISABLED_DIRECT_BALANCE,
+                block=1000,
+                tx="ca" * 32,
+                direction="sweep",
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            # A sweep row (log_index 0 -- the tracker never sets it,
+            # allocation_tracker/types.go) beside a real transfer later in the
+            # same block: encodeTxHash's zero-hash sentinel
+            # (allocation_repository.go) is reproduced on the sweep row's tx.
+            for direction, log_index, tx_hex, value in (
+                ("sweep", 0, "00" * 32, BS_SEED_TIEBREAK_SWEEP_VALUE),
+                ("in", 3, "cb" * 32, BS_SEED_TIEBREAK_FLOW_VALUE),
+            ):
+                await insert_allocation_position(
+                    conn,
+                    token_id=receipt_id,
+                    prime_id=prime_id,
+                    proxy_hex=BS_PROXY_SEED_TIEBREAK,
+                    balance=Decimal("100"),
+                    block=900,
+                    log_index=log_index,
+                    tx=tx_hex,
+                    direction=direction,
+                    underlying_value=value,
+                    underlying_token_id=underlying_id,
+                    created_at=pre_window,
+                    tx_amount=0,
+                )
+
+            for direction, log_index, tx_hex, value in (
+                ("sweep", 0, "00" * 32, BS_WINDOW_TIEBREAK_SWEEP_VALUE),
+                ("in", 3, "cd" * 32, BS_WINDOW_TIEBREAK_FLOW_VALUE),
+            ):
+                await insert_allocation_position(
+                    conn,
+                    token_id=receipt_id,
+                    prime_id=prime_id,
+                    proxy_hex=BS_PROXY_WINDOW_TIEBREAK,
+                    balance=Decimal("100"),
+                    block=1000,
+                    log_index=log_index,
+                    tx=tx_hex,
+                    direction=direction,
+                    underlying_value=value,
+                    underlying_token_id=underlying_id,
+                    created_at=three_days_ago,
+                    tx_amount=0,
+                )
     finally:
         await conn.close()
