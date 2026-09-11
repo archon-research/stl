@@ -12,7 +12,10 @@ SKILLFILE_BIN := ./bin/skillfile
 SKILLFILE_RELEASE ?= latest
 SKILLFILE_FORCE_INSTALL ?= 0
 SKILLFILE_MANIFEST := ./Skillfile
-LOCAL_SKILL_SOURCES := $(shell awk '$$1 == "local" && $$2 == "skill" { print $$3 }' $(SKILLFILE_MANIFEST))
+ifeq ($(wildcard $(SKILLFILE_MANIFEST)),)
+$(error $(SKILLFILE_MANIFEST) not found)
+endif
+LOCAL_SKILL_SOURCES := $(shell awk '$$1 == "local" && $$2 == "skill" { sub(/\/+$$/, "", $$3); print $$3 }' $(SKILLFILE_MANIFEST))
 LOCAL_SKILLS := $(notdir $(LOCAL_SKILL_SOURCES))
 SKILL_DEPLOY_TARGETS := .claude/skills .codex/skills .github/skills
 
@@ -96,10 +99,11 @@ skills-deploy-local: ## Sync canonical local skills to every generated deploymen
 				rm -rf "$$target/$$skill"; \
 			done < "$$managed"; \
 		fi; \
+		mkdir -p "$$target"; \
 		for source in $(LOCAL_SKILL_SOURCES); do \
 			skill="$${source##*/}"; \
-			mkdir -p "$$target/$$skill"; \
-			rsync -a --delete "$$source/" "$$target/$$skill/"; \
+			rm -rf "$$target/$$skill"; \
+			cp -a "$$source" "$$target/$$skill"; \
 		done; \
 		printf '%s\n' $(LOCAL_SKILLS) > "$$managed"; \
 	done
@@ -107,6 +111,13 @@ skills-deploy-local: ## Sync canonical local skills to every generated deploymen
 skills-validate: skillfile-install-cli ## Validate Skillfile and generated local skill copies
 	@$(SKILLFILE_BIN) validate
 	@set -e; \
+	for source in skills/*; do \
+		[ -d "$$source" ] || continue; \
+		case " $(LOCAL_SKILL_SOURCES) " in \
+			*" $$source "*) ;; \
+			*) echo "Local skill is not declared in $(SKILLFILE_MANIFEST): $$source"; exit 1 ;; \
+		esac; \
+	done; \
 	for source in $(LOCAL_SKILL_SOURCES); do \
 		for target in $(SKILL_DEPLOY_TARGETS); do \
 			deployed="$$target/$$(basename "$$source")"; \
