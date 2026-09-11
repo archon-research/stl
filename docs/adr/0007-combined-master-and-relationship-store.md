@@ -754,10 +754,10 @@ adding or changing a rule is a reviewed change, and rule ids are stable referenc
 | GQ-03 | `status` legal for the node's kind | engine (FK on record_type, status) | reject |
 | GQ-04 | node id prefix matches its kind | engine (CHECK) | reject |
 | GQ-05 | address values are lowercase hex, no 0x | validator | reject |
-| GQ-06 | `valid_from < valid_to` | engine (CHECK) | reject |
+| GQ-06 | `valid_from <= valid_to` (`=` is the zero-length tombstone window, §3) | engine (CHECK) | reject |
 | GQ-07 | spine completeness: actor, reason code + text, source_system present | engine (NOT NULL) | reject |
 | GQ-10 | structural identity per kind (a token has address + chain) | validator, REQUIRED | reject write |
-| GQ-11 | endpoint existence and kind: each endpoint names a current node and its kind matches the stored src/dst_kind and the rel_type triple | validator, write-time | reject write |
+| GQ-11 | endpoint existence and kind: each endpoint names a current node and its kind matches the stored src/dst_kind and the rel_type triple | engine (guard) | reject write |
 | GQ-12 | edge targets within the shape's permitted set (subtree lookup against `dim_cluster`) | validator, REQUIRED | reject write |
 | GQ-13 | exactly one `BELONGS_TO` per concept class per node | validator, EXPECTED | flag + block metrics |
 | GQ-14 | required edges per effective shape (`ISSUED_BY`, `PEGGED_TO`, `HAS_UNDERLYING` by subtype) | validator, EXPECTED | flag + block metrics |
