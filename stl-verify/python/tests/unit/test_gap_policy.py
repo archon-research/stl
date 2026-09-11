@@ -163,3 +163,21 @@ def test_flow_without_a_zero_is_rejected() -> None:
 def test_flow_with_a_prior_is_rejected() -> None:
     with pytest.raises(ValueError, match="no prior value"):
         apply_gap_policy(SeriesKind.FLOW, {}, query=_query(), zero=0, prior=99)
+
+
+# --- misuse ---------------------------------------------------------------
+
+
+def test_an_observation_off_the_grid_is_rejected_rather_than_emitted() -> None:
+    off_grid = _bucket(1) + timedelta(minutes=17)
+
+    with pytest.raises(ValueError, match="must be bucket starts within the requested window"):
+        apply_gap_policy(SeriesKind.LEVEL, {off_grid: Decimal("1")}, query=_query())
+
+
+def test_an_observation_outside_the_window_is_rejected_rather_than_dropped() -> None:
+    with pytest.raises(ValueError, match="must be bucket starts within the requested window"):
+        apply_gap_policy(SeriesKind.LEVEL, {_bucket(-1): Decimal("1")}, query=_query())
+
+    with pytest.raises(ValueError, match="must be bucket starts within the requested window"):
+        apply_gap_policy(SeriesKind.LEVEL, {_bucket(5): Decimal("1")}, query=_query())

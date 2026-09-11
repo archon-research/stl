@@ -104,8 +104,10 @@ def apply_gap_policy[T](
     Raises ``ValueError`` when a flow series is applied without a ``zero``, or
     with a ``prior``: a count observed before the window says nothing about
     whether the window's leading buckets were covered, which is the distinction
-    the leading ``null`` exists to keep.
+    the leading ``null`` exists to keep. Also raises when ``observed`` carries a
+    key the query could not have returned.
     """
+    _reject_uncovered_observations(query, observed)
     if kind is SeriesKind.FLOW:
         if zero is None:
             raise ValueError("a flow series needs the zero value its empty buckets carry")
@@ -115,7 +117,7 @@ def apply_gap_policy[T](
     carried = prior
     observed_yet = False
     points: list[GapFilledPoint[T]] = []
-    for bucket_start in _covered_buckets(query, observed):
+    for bucket_start in sorted({*bucket_starts(query), *observed}):
         if bucket_start in observed:
             carried = observed[bucket_start]
             observed_yet = True
@@ -129,8 +131,18 @@ def apply_gap_policy[T](
     return points
 
 
-def _covered_buckets(query: TimeSeriesQuery, observed: Mapping[datetime, object]) -> list[datetime]:
-    """The generated grid plus any bucket observed at the exclusive upper bound, oldest first."""
-    oldest = _floor_to_bucket(query.from_timestamp, query.bucket)
-    within_window = (bucket for bucket in observed if oldest <= bucket <= query.to_timestamp)
-    return sorted({*bucket_starts(query), *within_window})
+def _reject_uncovered_observations(query: TimeSeriesQuery, observed: Mapping[datetime, object]) -> None:
+    """Refuse an observation the query could not have answered with.
+
+    An observation keyed off the grid, or outside the window, is a caller
+    defect. Emitting it as a point of its own — which the union with the
+    generated grid would do — answers with a series that reads as complete
+    while sitting on a grid nobody asked for.
+    """
+    width = query.bucket
+    oldest = _floor_to_bucket(query.from_timestamp, width)
+    uncovered = sorted(
+        bucket for bucket in observed if (bucket - _EPOCH) % width or not oldest <= bucket <= query.to_timestamp
+    )
+    if uncovered:
+        raise ValueError(f"observed buckets must be bucket starts within the requested window: {uncovered}")
