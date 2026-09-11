@@ -19,16 +19,18 @@ var _ outbound.EventRepository = (*EventRepository)(nil)
 type EventRepository struct {
 	logger  *slog.Logger
 	buildID buildregistry.BuildID
+	runID   buildregistry.RunID
 }
 
 // NewEventRepository creates a new PostgreSQL Event repository.
-func NewEventRepository(logger *slog.Logger, buildID buildregistry.BuildID) *EventRepository {
+func NewEventRepository(logger *slog.Logger, buildID buildregistry.BuildID, runID buildregistry.RunID) *EventRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &EventRepository{
 		logger:  logger,
 		buildID: buildID,
+		runID:   runID,
 	}
 }
 
@@ -40,12 +42,12 @@ func (r *EventRepository) SaveEvent(ctx context.Context, tx pgx.Tx, event *entit
 	}
 
 	_, err := tx.Exec(ctx,
-		`INSERT INTO protocol_event (chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data, created_at, build_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		`INSERT INTO protocol_event (chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data, created_at, build_id, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		 ON CONFLICT (chain_id, block_number, block_version, tx_hash, log_index, processing_version, created_at) DO NOTHING`,
 		event.ChainID, event.ProtocolID, event.BlockNumber, event.BlockVersion,
 		event.TxHash, event.LogIndex, event.ContractAddress, event.EventName, event.EventData,
-		event.CreatedAt, int(r.buildID))
+		event.CreatedAt, int(r.buildID), r.runID)
 
 	if err != nil {
 		return fmt.Errorf("failed to save protocol event: %w", err)
@@ -65,12 +67,12 @@ func (r *EventRepository) SaveBatch(ctx context.Context, tx pgx.Tx, evts []*enti
 			return fmt.Errorf("event must not be nil")
 		}
 		batch.Queue(
-			`INSERT INTO protocol_event (chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data, created_at, build_id)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			`INSERT INTO protocol_event (chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data, created_at, build_id, run_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 			 ON CONFLICT (chain_id, block_number, block_version, tx_hash, log_index, processing_version, created_at) DO NOTHING`,
 			event.ChainID, event.ProtocolID, event.BlockNumber, event.BlockVersion,
 			event.TxHash, event.LogIndex, event.ContractAddress, event.EventName, event.EventData,
-			event.CreatedAt, int(r.buildID),
+			event.CreatedAt, int(r.buildID), r.runID,
 		)
 	}
 	br := tx.SendBatch(ctx, batch)

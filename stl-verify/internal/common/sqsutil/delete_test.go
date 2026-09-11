@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -52,5 +53,20 @@ func TestDeleteMessage_CountsTheSettleOutcome(t *testing.T) {
 				t.Errorf("settles = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDeleteMessage_CompletesWhenShutdownLandsMidCall(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	consumer := &mockConsumer{beforeDelete: cancel}
+
+	err := DeleteMessage(ctx, consumer, testutil.DiscardLogger(), 1, makeMsg("1", "h1", blockEvent(100)))
+
+	if err != nil {
+		t.Fatalf("expected the interrupted delete to complete, got %v", err)
+	}
+	if got := consumer.deleted(); !slices.Equal(got, []string{"h1"}) {
+		t.Errorf("expected the interrupted delete to reach the queue, got deletes %v", got)
 	}
 }

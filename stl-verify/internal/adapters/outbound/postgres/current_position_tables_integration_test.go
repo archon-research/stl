@@ -84,15 +84,15 @@ func setupCurrentTables(t *testing.T) *currentTablesFixture {
 	ctx := context.Background()
 	resetCurrentTables(t, ctx)
 
-	positionRepo, err := NewPositionRepository(currentTablesPool, nil, 0, 100)
+	positionRepo, err := NewPositionRepository(currentTablesPool, nil, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("new position repository: %v", err)
 	}
-	priceRepo, err := NewOnchainPriceRepository(currentTablesPool, nil, 0, 100)
+	priceRepo, err := NewOnchainPriceRepository(currentTablesPool, nil, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("new onchain price repository: %v", err)
 	}
-	tokenRepo, err := NewTokenRepository(currentTablesPool, nil, 0)
+	tokenRepo, err := NewTokenRepository(currentTablesPool, nil, 0, buildregistry.RunID(1))
 	if err != nil {
 		t.Fatalf("new token repository: %v", err)
 	}
@@ -100,7 +100,7 @@ func setupCurrentTables(t *testing.T) *currentTablesFixture {
 	if err != nil {
 		t.Fatalf("new tx manager: %v", err)
 	}
-	allocRepo := NewAllocationRepository(currentTablesPool, txm, tokenRepo, nil, buildregistry.BuildID(1))
+	allocRepo := NewAllocationRepository(currentTablesPool, txm, tokenRepo, nil, buildregistry.BuildID(1), buildregistry.RunID(1))
 
 	f := &currentTablesFixture{
 		positionRepo: positionRepo, priceRepo: priceRepo, allocRepo: allocRepo,
@@ -261,10 +261,12 @@ func assertCachesMatchHistory(t *testing.T, ctx context.Context) {
 			FROM borrower_collateral
 			ORDER BY protocol_id, user_id, token_id,
 			         block_number DESC, block_version DESC, processing_version DESC`},
+		// block_timestamp (20260910_120000) is a copy of the winning row's
+		// "timestamp", carried for the reads and not a term of the comparison.
 		{"token_price_current", `TABLE token_price_current`, `
 			SELECT DISTINCT ON (oracle_id, token_id)
 			       oracle_id::bigint, token_id, price_usd, block_number,
-			       block_version::int, processing_version
+			       block_version::int, processing_version, "timestamp" AS block_timestamp
 			FROM onchain_token_price
 			ORDER BY oracle_id, token_id,
 			         block_number DESC, block_version DESC, processing_version DESC`},
@@ -574,7 +576,7 @@ func (f *currentTablesFixture) saveAllocations(t *testing.T, ctx context.Context
 // version only when build_id matches too, so a re-save from another build lands as
 // processing_version + 1 instead of colliding with ON CONFLICT DO NOTHING.
 func (f *currentTablesFixture) allocRepoForBuild(buildID int) *AllocationRepository {
-	return NewAllocationRepository(currentTablesPool, f.txm, f.tokenRepo, nil, buildregistry.BuildID(buildID))
+	return NewAllocationRepository(currentTablesPool, f.txm, f.tokenRepo, nil, buildregistry.BuildID(buildID), buildregistry.RunID(1))
 }
 
 // cachedAllocation returns the whole payload of one cache row, which is what the

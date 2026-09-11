@@ -83,4 +83,4 @@ spec:
       # The worker does not drain: an in-flight activity is cancelled on shutdown
       # and Temporal retries it on the next worker. Safe because the write is
       # insert-only and conflicts away within a build, so a retry converges.
-      terminationGracePeriodSeconds: 60
+      terminationGracePeriodSeconds: 90

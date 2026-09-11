@@ -113,7 +113,7 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 	}
 
 	// Create real repository
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create onchain price repository: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 	// Only the first block should be stored (change detection filters the rest).
 	constantPrices := []*big.Int{big.NewInt(100_000_000), big.NewInt(250_000_000_000)}
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000021", "IDP1", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -358,7 +358,7 @@ func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000031", "LB1", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -418,7 +418,7 @@ func TestIntegration_BackfillRun_RespectsDeploymentBlock(t *testing.T) {
 	tokenID1 := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000051", "DEP1", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -493,7 +493,7 @@ func TestIntegration_BackfillRun_ConcurrentBindingsDoNotCapRange(t *testing.T) {
 	testutil.SeedProtocolOracle(t, ctx, pool, protocolID, oracle1ID, 100)
 	testutil.SeedProtocolOracle(t, ctx, pool, protocolID, oracle2ID, 160)
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -601,7 +601,7 @@ func TestIntegration_BackfillRun_PartialTokenFailure(t *testing.T) {
 		}, nil
 	}
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -679,7 +679,7 @@ func TestIntegration_BackfillRun_DuplicateBlocksSafeWithOnConflict(t *testing.T)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID1)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID2)
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -767,7 +767,7 @@ func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 		}, nil
 	}
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}

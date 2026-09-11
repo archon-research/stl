@@ -50,6 +50,50 @@ async def insert_user(conn: asyncpg.Connection, address: bytes) -> int:
     )
 
 
+async def insert_morpho_adapter(
+    conn: asyncpg.Connection,
+    *,
+    vault_id: int,
+    address: bytes,
+    asset_token_id: int,
+    block: int,
+    removed_at_block: int | None = None,
+) -> None:
+    """Insert a VaultV2 Morpho Blue market adapter (type 1) added to its vault at ``block``.
+
+    ``removed_at_block`` appends a RemoveAdapter row so the adapter leaves ``morpho_adapter_current``.
+    """
+    adapter_id = await conn.fetchval(
+        """
+        INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id)
+        VALUES ($1, $2, $3)
+        RETURNING id
+        """,
+        vault_id,
+        address,
+        asset_token_id,
+    )
+    await conn.execute(
+        """
+        INSERT INTO morpho_adapter_membership
+            (morpho_adapter_id, block_number, log_index, timestamp, is_member, adapter_type, observed_via)
+        VALUES ($1, $2, 0, NOW(), true, 1, 'add_adapter_event')
+        """,
+        adapter_id,
+        block,
+    )
+    if removed_at_block is not None:
+        await conn.execute(
+            """
+            INSERT INTO morpho_adapter_membership
+                (morpho_adapter_id, block_number, log_index, timestamp, is_member, adapter_type, observed_via)
+            VALUES ($1, $2, 0, NOW(), false, NULL, 'remove_adapter_event')
+            """,
+            adapter_id,
+            removed_at_block,
+        )
+
+
 async def insert_protocol(
     conn: asyncpg.Connection,
     name: str,
@@ -449,6 +493,7 @@ async def insert_maple_loan_collateral(
     decimals: int,
     value_usd: int | None,
     state: str = "Deposited",
+    liquidation_level: int | None = None,
     build_id: int = 0,
 ) -> None:
     """Insert a maple_loan_collateral snapshot row.
@@ -462,8 +507,9 @@ async def insert_maple_loan_collateral(
     await conn.execute(
         """
         INSERT INTO maple_loan_collateral
-            (maple_loan_id, synced_at, asset_symbol, asset_amount, asset_decimals, asset_value_usd, state, build_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            (maple_loan_id, synced_at, asset_symbol, asset_amount, asset_decimals, asset_value_usd, state,
+             liquidation_level, build_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         """,
         loan_id,
         synced_at,
@@ -472,6 +518,7 @@ async def insert_maple_loan_collateral(
         decimals,
         Decimal(value_usd) if value_usd is not None else None,
         state,
+        Decimal(liquidation_level) if liquidation_level is not None else None,
         build_id,
     )
 
@@ -1428,6 +1475,23 @@ RUV_LOCF_STALE_VALUE = Decimal("100")  # bucket 0, backdated 10 min in
 RUV_LOCF_NEWER_VALUE = Decimal("140")  # bucket 0, 20 min in; must win within the bucket
 RUV_LOCF_LATER_VALUE = Decimal("180")  # bucket 2; ends the carried value
 
+RUV_CONTEST_PROXY_HEX = "aa" * 20
+_RUV_CONTEST_PROTOCOL_HEX = "d2" * 20
+_RUV_CONTEST_LOW_ORACLE_HEX = "d3" * 20
+_RUV_CONTEST_HIGH_ORACLE_HEX = "d4" * 20
+_RUV_CONTEST_UNDERLYING_HEX = "ba" * 20
+_RUV_CONTEST_RECEIPT_HEX = "c8" * 20
+
+# One (underlying, protocol) priced by two enabled oracles, the low-id one
+# revised twice. Blocks are ordered low@2000 < high@2050 < low@2100 so the
+# winner is decided by block_number, and picking it wrong is observable:
+# keeping the low oracle's superseded row hands the win to the high oracle,
+# and ranking oracle_id above recency does the same.
+RUV_CONTEST_BALANCE = Decimal("60")
+RUV_CONTEST_LOW_ORACLE_STALE_PRICE = Decimal("2.00")
+RUV_CONTEST_HIGH_ORACLE_PRICE = Decimal("3.00")
+RUV_CONTEST_WINNING_PRICE = Decimal("4.00")
+
 RUV_MORPHO_SHARE_BALANCE = Decimal("1000")
 RUV_MORPHO_UNDERLYING_VALUE = Decimal("1023.917201")
 # Distinct from RUV_UNDERLYING_PRICE so a cross-binding price mixup is visible.
@@ -1501,6 +1565,7 @@ async def seed_receipt_underlying_value_positions(db_url: str) -> None:
 
             await _ruv_seed_locf_series(conn, prime_id=prime_id, protocol_id=protocol_id, underlying_id=underlying_id)
             await _ruv_seed_morpho_like_position(conn, prime_id=prime_id)
+            await _ruv_seed_price_contest_position(conn, prime_id=prime_id)
     finally:
         await conn.close()
 
@@ -1543,6 +1608,78 @@ async def _ruv_seed_locf_series(
             underlying_token_id=underlying_id,
             created_at=RUV_LOCF_BASE_TS + offset,
         )
+
+
+async def _ruv_seed_price_contest_position(conn: asyncpg.Connection, *, prime_id: int) -> None:
+    """Seed a receipt position whose underlying has a contested latest price.
+
+    Two enabled oracles price it and the low-id one is revised, so resolving
+    "latest" wrongly is observable rather than masked by a single candidate:
+    the low oracle's superseded row and the high oracle's row both lose to the
+    low oracle's revision, on ``block_number`` before ``oracle_id``. Everything
+    the read touches is seeded here, so the scenario does not lean on
+    migration-seeded registry rows.
+    """
+    protocol_id = await conn.fetchval(
+        "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+        "VALUES (1, $1, 'ruvContest', 'lending') RETURNING id",
+        bytes.fromhex(_RUV_CONTEST_PROTOCOL_HEX),
+    )
+    low_oracle_id = await conn.fetchval(
+        "INSERT INTO oracle (name, display_name, chain_id, address) "
+        "VALUES ('ruv_contest_low', 'RUV contest low-id oracle', 1, $1) RETURNING id",
+        bytes.fromhex(_RUV_CONTEST_LOW_ORACLE_HEX),
+    )
+    high_oracle_id = await conn.fetchval(
+        "INSERT INTO oracle (name, display_name, chain_id, address) "
+        "VALUES ('ruv_contest_high', 'RUV contest high-id oracle', 1, $1) RETURNING id",
+        bytes.fromhex(_RUV_CONTEST_HIGH_ORACLE_HEX),
+    )
+    # The winner must be the LOW-id oracle, so that ranking oracle_id above
+    # recency would flip the result instead of coinciding with it.
+    if not low_oracle_id < high_oracle_id:
+        raise RuntimeError("seed premise broken: the revised oracle must have the lower id")
+    for oracle_id in (low_oracle_id, high_oracle_id):
+        await conn.execute(
+            "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+            protocol_id,
+            oracle_id,
+        )
+
+    underlying_id = await insert_token(conn, "contestUSD", 6, bytes.fromhex(_RUV_CONTEST_UNDERLYING_HEX))
+    receipt_token_id = await insert_token(conn, "contestReceipt", 6, bytes.fromhex(_RUV_CONTEST_RECEIPT_HEX))
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=protocol_id,
+        underlying_token_id=underlying_id,
+        address=bytes.fromhex(_RUV_CONTEST_RECEIPT_HEX),
+        symbol="contestReceipt",
+    )
+
+    prices = [
+        (low_oracle_id, 2000, RUV_CONTEST_LOW_ORACLE_STALE_PRICE),
+        (high_oracle_id, 2050, RUV_CONTEST_HIGH_ORACLE_PRICE),
+        (low_oracle_id, 2100, RUV_CONTEST_WINNING_PRICE),
+    ]
+    for oracle_id, block, price in prices:
+        await insert_onchain_price(conn, token_id=underlying_id, oracle_id=oracle_id, price=price, block=block)
+    for oracle_id in (low_oracle_id, high_oracle_id):
+        await insert_oracle_asset(conn, oracle_id, underlying_id)
+
+    await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=RUV_CONTEST_PROXY_HEX)
+    await insert_allocation_position(
+        conn,
+        token_id=receipt_token_id,
+        prime_id=prime_id,
+        proxy_hex=RUV_CONTEST_PROXY_HEX,
+        balance=RUV_CONTEST_BALANCE,
+        block=2100,
+        tx="2a" * 32,
+        direction="in",
+        underlying_value=RUV_CONTEST_BALANCE,
+        underlying_token_id=underlying_id,
+        created_at=RUV_LOCF_BASE_TS + dt.timedelta(minutes=10),
+    )
 
 
 async def _ruv_seed_morpho_like_position(conn: asyncpg.Connection, *, prime_id: int) -> None:
@@ -1621,6 +1758,9 @@ async def _ruv_seed_morpho_like_position(conn: asyncpg.Connection, *, prime_id: 
 #   * FR_PROXY_DISTANCE         donors on both sides at different distances ->
 #                               the closer one wins regardless of side
 #   * FR_PROXY_TIE              donors equidistant -> the at-or-before one wins
+#   * FR_PROXY_SAME_BLOCK       two donors in the flow's own block -> the higher
+#                               log_index wins (it carries the LOWER ratio, so a
+#                               "pick the max ratio" shortcut would fail)
 #   * FR_PROXY_MIXED            ratio in + ratio out + legacy in + sweep, one
 #                               bucket; the legacy row borrows the out row's
 #                               ratio (nearest at-or-before)
@@ -1639,6 +1779,7 @@ FR_PROXY_ATOKEN = "8e" * 20
 FR_PROXY_DONOR_DIVERGENT = "9e" * 20
 FR_PROXY_DISTANCE = "ae" * 20
 FR_PROXY_TIE = "be" * 20
+FR_PROXY_SAME_BLOCK = "ce" * 20
 _FR_PROXY_DONOR = "fe" * 20
 
 _FR_VAULT_HEX = "97" * 20
@@ -1718,6 +1859,13 @@ FR_TIE_BEFORE_DONOR_BALANCE = Decimal("100")
 FR_TIE_BEFORE_DONOR_UNDERLYING_VALUE = Decimal("110")
 FR_TIE_AFTER_DONOR_BALANCE = Decimal("100")
 FR_TIE_AFTER_DONOR_UNDERLYING_VALUE = Decimal("130")
+FR_SAME_BLOCK_TX_AMOUNT = Decimal("80")
+FR_SAME_BLOCK_BALANCE = Decimal("600")
+FR_SAME_BLOCK = 9950
+FR_SAME_BLOCK_LOW_LOG_DONOR_BALANCE = Decimal("100")
+FR_SAME_BLOCK_LOW_LOG_DONOR_UNDERLYING_VALUE = Decimal("150")
+FR_SAME_BLOCK_HIGH_LOG_DONOR_BALANCE = Decimal("100")
+FR_SAME_BLOCK_HIGH_LOG_DONOR_UNDERLYING_VALUE = Decimal("120")
 
 # Mixed bucket: both own-ratio rows sit at the same 1.17 share ratio; the
 # legacy row borrows the out row's ratio (nearest at-or-before, one block).
@@ -1783,6 +1931,7 @@ async def seed_flow_share_ratio_activity(db_url: str) -> None:
             donor_div_token = await receipt("d9" * 20, "frVaultDonorDiv")
             distance_token = await receipt("da" * 20, "frVaultDistance")
             tie_token = await receipt("db" * 20, "frVaultTie")
+            same_block_token = await receipt("dd" * 20, "frVaultSameBlock")
             mixed_token = await receipt("dc" * 20, "frVaultMixed")
 
             donor = _FR_PROXY_DONOR
@@ -1917,6 +2066,16 @@ async def seed_flow_share_ratio_activity(db_url: str) -> None:
                 ),
                 (tie_token, FR_PROXY_TIE, "in", FR_TIE_TX_AMOUNT, FR_TIE_BALANCE, None, None, 9900),
                 (
+                    same_block_token,
+                    FR_PROXY_SAME_BLOCK,
+                    "in",
+                    FR_SAME_BLOCK_TX_AMOUNT,
+                    FR_SAME_BLOCK_BALANCE,
+                    None,
+                    None,
+                    FR_SAME_BLOCK,
+                ),
+                (
                     tie_token,
                     donor,
                     "sweep",
@@ -2002,6 +2161,27 @@ async def seed_flow_share_ratio_activity(db_url: str) -> None:
                     created_at=FR_BUCKET_TS,
                     tx_amount=tx_amount,
                 )
+            # Same-block donors for FR_PROXY_SAME_BLOCK: identical block, differing
+            # log_index, so only the log_index tiebreak separates them.
+            for log_index, balance, underlying_value in (
+                (3, FR_SAME_BLOCK_LOW_LOG_DONOR_BALANCE, FR_SAME_BLOCK_LOW_LOG_DONOR_UNDERLYING_VALUE),
+                (7, FR_SAME_BLOCK_HIGH_LOG_DONOR_BALANCE, FR_SAME_BLOCK_HIGH_LOG_DONOR_UNDERLYING_VALUE),
+            ):
+                await insert_allocation_position(
+                    conn,
+                    token_id=same_block_token,
+                    prime_id=prime_id,
+                    proxy_hex=donor,
+                    balance=balance,
+                    block=FR_SAME_BLOCK,
+                    tx=f"{0x70 + log_index:02x}" * 32,
+                    direction="sweep",
+                    log_index=log_index,
+                    underlying_value=underlying_value,
+                    underlying_token_id=underlying_id,
+                    created_at=FR_BUCKET_TS,
+                    tx_amount=Decimal(0),
+                )
     finally:
         await conn.close()
 
@@ -2050,7 +2230,7 @@ _ANCHORAGE_CLOSED_SNAPSHOT = dt.datetime(2026, 6, 13, 12, 0, 0, tzinfo=dt.timezo
 _ANCHORAGE_OTHER_SNAPSHOT = dt.datetime(2026, 6, 20, 12, 0, 0, tzinfo=dt.timezone.utc)
 
 
-async def _insert_anchorage_snapshot(
+async def insert_anchorage_snapshot(
     conn: asyncpg.Connection,
     *,
     prime_id: int,
@@ -2137,7 +2317,7 @@ async def seed_anchorage_custody(db_url: str) -> None:
 
             # Current cohort: PKG-A and PKG-B are single rows; PKG-C carries a
             # superseded processing_version whose correction (pv 1) must win.
-            await _insert_anchorage_snapshot(
+            await insert_anchorage_snapshot(
                 conn,
                 prime_id=prime_id,
                 package_id="PKG-A",
@@ -2147,7 +2327,7 @@ async def seed_anchorage_custody(db_url: str) -> None:
                 asset_quantity=Decimal("2000"),
                 snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
             )
-            await _insert_anchorage_snapshot(
+            await insert_anchorage_snapshot(
                 conn,
                 prime_id=prime_id,
                 package_id="PKG-B",
@@ -2158,7 +2338,7 @@ async def seed_anchorage_custody(db_url: str) -> None:
                 snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
             )
             # PKG-C original (pv 0, build_id 0): wrong values that must be superseded.
-            await _insert_anchorage_snapshot(
+            await insert_anchorage_snapshot(
                 conn,
                 prime_id=prime_id,
                 package_id="PKG-C",
@@ -2170,7 +2350,7 @@ async def seed_anchorage_custody(db_url: str) -> None:
                 build_id=0,
             )
             # PKG-C correction (pv 1, build_id 1): the values that make the cohort sums.
-            await _insert_anchorage_snapshot(
+            await insert_anchorage_snapshot(
                 conn,
                 prime_id=prime_id,
                 package_id="PKG-C",
@@ -2186,7 +2366,7 @@ async def seed_anchorage_custody(db_url: str) -> None:
             # active packages but active=false. Only the `active` predicate
             # excludes it (the cohort filter does not, since it shares the max
             # snapshot_time). Non-zero values so its leak would move every sum.
-            await _insert_anchorage_snapshot(
+            await insert_anchorage_snapshot(
                 conn,
                 prime_id=prime_id,
                 package_id="PKG-INACTIVE",
@@ -2204,7 +2384,7 @@ async def seed_anchorage_custody(db_url: str) -> None:
                 ("PKG-Y", Decimal("70000000"), Decimal("1000")),
                 ("PKG-Z", Decimal("71327771"), Decimal("500")),
             ]:
-                await _insert_anchorage_snapshot(
+                await insert_anchorage_snapshot(
                     conn,
                     prime_id=prime_id,
                     package_id=package_id,
@@ -2271,7 +2451,7 @@ async def _seed_anchorage_multi_asset_prime(conn: asyncpg.Connection, token_id: 
         tx=_ANCHORAGE_MULTI_TX,
         direction="in",
     )
-    await _insert_anchorage_snapshot(
+    await insert_anchorage_snapshot(
         conn,
         prime_id=prime_id,
         package_id="PKG-B1",
@@ -2282,7 +2462,7 @@ async def _seed_anchorage_multi_asset_prime(conn: asyncpg.Connection, token_id: 
         snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
         asset_type="BTC",
     )
-    await _insert_anchorage_snapshot(
+    await insert_anchorage_snapshot(
         conn,
         prime_id=prime_id,
         package_id="PKG-E1",
@@ -2294,7 +2474,7 @@ async def _seed_anchorage_multi_asset_prime(conn: asyncpg.Connection, token_id: 
         asset_type="ETH",
     )
     # PKG-MX: two rows, same package_id / package-level loan, different asset types.
-    await _insert_anchorage_snapshot(
+    await insert_anchorage_snapshot(
         conn,
         prime_id=prime_id,
         package_id="PKG-MX",
@@ -2306,7 +2486,7 @@ async def _seed_anchorage_multi_asset_prime(conn: asyncpg.Connection, token_id: 
         asset_type="BTC",
         asset_weighted_value=Decimal("40"),
     )
-    await _insert_anchorage_snapshot(
+    await insert_anchorage_snapshot(
         conn,
         prime_id=prime_id,
         package_id="PKG-MX",
@@ -2342,7 +2522,7 @@ async def _seed_anchorage_other_prime(conn: asyncpg.Connection, token_id: int) -
         tx=_ANCHORAGE_OTHER_TX,
         direction="in",
     )
-    await _insert_anchorage_snapshot(
+    await insert_anchorage_snapshot(
         conn,
         prime_id=prime_id,
         package_id="PKG-O1",
@@ -2485,7 +2665,7 @@ async def seed_prime_fan_out(db_url: str, *, with_off_contract_proxy: bool = Fal
                 direction="in",
             )
 
-            await _insert_anchorage_snapshot(
+            await insert_anchorage_snapshot(
                 conn,
                 prime_id=spark_id,
                 package_id="FAN-OUT-PKG",

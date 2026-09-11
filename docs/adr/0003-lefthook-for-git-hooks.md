@@ -1,9 +1,9 @@
 # ADR-0003: Lefthook for better dev experience via git-hooks
 
-**Status**: Accepted  
-**Proposed**: @r0hitsharma  
-**Date**: 2026-05-08  
-**Deciders**: @vector
+- **Status**: Accepted
+- **Proposed**: @r0hitsharma
+- **Date**: 2026-05-08
+- **Deciders**: @vector
 
 ## Context
 

@@ -74,11 +74,20 @@ class Settings(BaseSettings):
     auth_enabled: bool = False
     oidc_issuer: str = ""  # e.g. http://keycloak.auth.svc/realms/archon
     oidc_audience: str = ""  # `aud` the API validates
+    # Split from the issuer because `iss` is Keycloak's browser-reachable
+    # KC_HOSTNAME while pods fetch keys from the in-cluster Service. Empty =
+    # derive from the issuer.
+    oidc_jwks_url: str = ""
     openfga_url: str = ""  # e.g. http://openfga.auth.svc:8080
     # Published by the openfga-store ConfigMap (store/model ids are created by
     # the store-bootstrap Job; they cannot be known at deploy-authoring time).
     openfga_store_id: str = ""
     openfga_model_id: str = ""
+    openfga_store_name: str = "auth"
+    openfga_api_key: SecretStr = SecretStr("")
+    # Must track OpenFGA's own OPENFGA_LIST_OBJECTS_MAX_RESULTS: a ceiling
+    # above the server's max makes a truncated allow-list look complete.
+    openfga_list_ceiling: int = 1000
 
     risk_default_gap_pct: Decimal = Field(default=Decimal("0.15"), ge=0, le=1)
     suraf_inputs_dir: Path = ENV_DIR / "suraf" / "inputs"
@@ -133,16 +142,17 @@ class Settings(BaseSettings):
     # positions × proxies, which this ceiling does not bound — it only decides how
     # far a replica gets before callers queue on pool_timeout and surface as 500s.
     # Bounding the fan-out itself is VEC-532.
-    db_pool_size: int = Field(default=10, ge=1)
-    db_max_overflow: int = Field(default=20, ge=0)
+    db_pool_size: int = Field(default=4, ge=1)
+    db_max_overflow: int = Field(default=2, ge=0)
     # How long a caller queues for a connection before its request fails. Left on
     # SQLAlchemy's unset 30s, a saturated replica holds a worker for half a minute
     # per queued caller, so one burst on the fan-out also stalls the endpoints that
     # never touch this pool. Set well above a healthy acquisition so it fires on
     # real exhaustion rather than on load: the fan-out's own queries run in
     # hundreds of milliseconds, so ten seconds of queueing means saturation, and
-    # failing then keeps it legible instead of silently slow.
-    db_pool_timeout: int = Field(default=10, ge=1)
+    # failing then keeps it legible instead of silently slow. At the pool size
+    # above, queueing is routine rather than saturation, so the default is longer.
+    db_pool_timeout: int = Field(default=30, ge=1)
     # Ceiling on how long a pooled connection lives before it is re-opened.
     # Bounds the blast radius of a connection the disconnect handling misses:
     # after a pooler incident (see create_db_engine), a poisoned connection can

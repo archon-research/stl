@@ -24,10 +24,6 @@ const (
 	v2SnapshotVaultFee     v2SnapshotType = "vault_fee"
 )
 
-type UnprobeableReason string
-
-const UnprobeableGasExhausted UnprobeableReason = "gas_exhausted"
-
 // adapterTypeLabel renders an adapter classification as a metric label. Two
 // collapses are forbidden because VectorMorphoV2UnknownAdapters counts "unknown"
 // exactly: a value outside the modelled set renders numerically rather than as
@@ -61,13 +57,12 @@ type Telemetry struct {
 	meter  metric.Meter
 
 	// Counters
-	blocksProcessed       metric.Int64Counter
-	eventsProcessed       metric.Int64Counter
-	rpcCallsTotal         metric.Int64Counter
-	errorsTotal           metric.Int64Counter
-	adapterRegistrations  metric.Int64Counter
-	v2SnapshotsWritten    metric.Int64Counter
-	unprobeableCandidates metric.Int64Counter
+	blocksProcessed      metric.Int64Counter
+	eventsProcessed      metric.Int64Counter
+	rpcCallsTotal        metric.Int64Counter
+	errorsTotal          metric.Int64Counter
+	adapterRegistrations metric.Int64Counter
+	v2SnapshotsWritten   metric.Int64Counter
 
 	// Histograms
 	blockDuration   metric.Float64Histogram
@@ -155,14 +150,6 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider,
 		return nil, fmt.Errorf("creating v2SnapshotsWritten counter: %w", err)
 	}
 
-	t.unprobeableCandidates, err = meter.Int64Counter(
-		"morpho.vault.candidates.unprobeable",
-		metric.WithDescription("Discovery candidates discarded because their own on-chain probe cannot be answered, by reason"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("creating unprobeableCandidates counter: %w", err)
-	}
-
 	t.symbolsMissing, err = meter.Int64Gauge(
 		"morpho.token.symbol.missing",
 		metric.WithDescription("Tokens still missing a symbol as seen by the latest reconciliation sweep (capped at the sweep batch size)"),
@@ -200,6 +187,10 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider,
 	if err != nil {
 		return nil, fmt.Errorf("creating rpcDuration histogram: %w", err)
 	}
+
+	// VectorMorphoIndexerStalled reads blocks.processed with rate()==0; seed so
+	// it is computable from process start (see telemetry.SeedCounter).
+	telemetry.SeedStatusCounter(context.Background(), t.blocksProcessed, t.chainAttr)
 
 	return t, nil
 }
@@ -297,18 +288,6 @@ func (t *Telemetry) RecordV2Snapshot(ctx context.Context, snapshotType v2Snapsho
 	t.v2SnapshotsWritten.Add(ctx, 1, metric.WithAttributes(
 		t.chainAttr,
 		attribute.String("snapshot.type", string(snapshotType)),
-	))
-}
-
-// Every discard increments, a memo hit included, so this counts what the candidate
-// set holds rather than how often the bisection ran.
-func (t *Telemetry) RecordUnprobeableCandidate(ctx context.Context, reason UnprobeableReason) {
-	if t == nil {
-		return
-	}
-	t.unprobeableCandidates.Add(ctx, 1, metric.WithAttributes(
-		t.chainAttr,
-		attribute.String("reason", string(reason)),
 	))
 }
 

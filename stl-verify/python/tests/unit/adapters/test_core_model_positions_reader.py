@@ -6,11 +6,15 @@ import pytest
 
 from app.adapters.postgres.core_model_positions_reader import (
     PositionRow,
+    anchorage_asset_prices,
+    build_anchorage_users_frame,
     build_market_frame,
     build_morpho_users_frame,
+    build_syrup_users_frame,
     build_users_frame,
     morpho_liquidation_incentive,
     supply_prices,
+    syrup_attested_prices,
 )
 
 _PRICES = {"WETH": 2000.0, "WSTETH": 2400.0, "USDT": 1.0, "USDS": 1.0, "DAI": 1.0, "USDC": 1.0, "WBTC": 1.0}
@@ -218,3 +222,306 @@ def test_morpho_zero_collateral_borrowers_are_excluded():
 def test_morpho_unpriced_token_fails_the_build():
     with pytest.raises(ValueError, match="CBBTC"):
         build_morpho_users_frame([_morpho_row(collateral_price=None)])
+
+
+# Syrup (Maple)
+
+
+def _syrup_row(
+    address_hex="aa" * 20,
+    principal=25_000_000 * 10**6,
+    acm_ratio=None,
+    symbol="BTC",
+    amount=505 * 10**8,
+    decimals=8,
+    value_usd=int(78276.425 * 10**8),
+    liquidation_level=1_111_111,
+):
+    """One loan row as the SQL returns it: raw units, ratios in fixed-point x1e6 / x1e8."""
+    return SimpleNamespace(
+        borrower_address=bytes.fromhex(address_hex),
+        principal_owed=principal,
+        acm_ratio=acm_ratio,
+        synced_at=None,
+        asset_symbol=symbol,
+        asset_amount=amount,
+        asset_decimals=decimals,
+        asset_value_usd=value_usd,
+        liquidation_level=liquidation_level,
+    )
+
+
+def test_syrup_row_reproduces_a_real_ba_parquet_row():
+    # users_syrup_usdc.parquet row 0x198aec...: 100M USDC against 2627.055713 BTC
+    # at Maple's attested 71,809.935 — lltv 0.83001, ltv 0.530086, hf 1.565803,
+    # liquidation_incentive 1.02. The staging loan of that borrower carries
+    # liquidation_level 1204800, whose inverse is that exact lltv.
+    row = build_syrup_users_frame(
+        [
+            _syrup_row(
+                principal=100_000_000 * 10**6,
+                amount=262_705_571_300,  # 2627.055713 BTC in 8 dp
+                value_usd=int(71809.935 * 10**8),
+                liquidation_level=1_204_800,
+            )
+        ],
+        "USDC",
+        6,
+    ).iloc[0]
+    assert row["lltv"] == pytest.approx(0.83001, abs=1e-5)
+    assert row["ltv"] == pytest.approx(0.530086, abs=1e-6)
+    assert row["health_factor"] == pytest.approx(1.565803, abs=1e-5)
+    assert row["liquidation_incentive"] == pytest.approx(1.02)
+    assert row["btc_supply"] == pytest.approx(2627.055713)
+    assert row["btc_supply_usd"] == pytest.approx(188_648_700, rel=1e-6)
+    assert row["usdc_borrow"] == row["usdc_borrow_usd"] == pytest.approx(100_000_000)
+    assert row["total_borrow_usd"] == pytest.approx(100_000_000)
+    assert row["total_collateral_usd"] == pytest.approx(row["btc_supply_usd"])
+    assert row["wallet_address"] == "0x" + "aa" * 20
+
+
+def test_syrup_keeps_one_row_per_loan_so_wallets_repeat():
+    df = build_syrup_users_frame([_syrup_row(), _syrup_row()], "USDC", 6)
+    assert list(df["wallet_address"]) == ["0x" + "aa" * 20] * 2
+
+
+def test_syrup_par_coverage_trigger_loans_are_excluded(caplog):
+    # liquidation_level <= 1e6 means the loan is margin-called at/above full
+    # coverage (stable-on-stable terms): no price risk to simulate, and its
+    # LT >= 1 would break the liquidator's -1 + LT*(1+bonus) < 0 guard.
+    rows = [
+        _syrup_row(),
+        _syrup_row(address_hex="bb" * 20, symbol="PYUSD", value_usd=10**8, liquidation_level=900_000),
+        _syrup_row(address_hex="cc" * 20, symbol="USDC", value_usd=10**8, liquidation_level=1_000_000),
+    ]
+    df = build_syrup_users_frame(rows, "USDC", 6)
+    assert list(df["wallet_address"]) == ["0x" + "aa" * 20]
+    assert (df["lltv"] < 1.0).all()
+    assert "at/above par coverage" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        dict(symbol=None, amount=None, decimals=8, value_usd=None, liquidation_level=None),  # no collateral row
+        dict(symbol=""),
+        dict(amount=None),
+        dict(amount=0),
+        dict(value_usd=None),
+        dict(liquidation_level=None),
+    ],
+)
+def test_syrup_loans_without_usable_collateral_are_excluded(broken, caplog):
+    rows = [_syrup_row(), _syrup_row(address_hex="bb" * 20, **broken)]
+    df = build_syrup_users_frame(rows, "USDC", 6)
+    assert list(df["wallet_address"]) == ["0x" + "aa" * 20]
+    assert "no usable collateral" in caplog.text
+
+
+def test_syrup_all_loans_excluded_fails_rather_than_an_empty_market():
+    with pytest.raises(ValueError, match="no simulatable external Active syrup loans"):
+        build_syrup_users_frame([_syrup_row(liquidation_level=900_000)], "USDC", 6)
+
+
+def test_syrup_each_loan_is_valued_at_its_own_attested_price():
+    # Prod 2026-09-10 01:10 cycle: two loans of one cycle attested ETH a hair
+    # apart (Maple values loans at slightly different moments).
+    rows = [
+        _syrup_row(symbol="ETH", decimals=18, amount=10 * 10**18, value_usd=int(2473.725 * 10**8)),
+        _syrup_row(
+            address_hex="bb" * 20, symbol="ETH", decimals=18, amount=10 * 10**18, value_usd=int(2473.59 * 10**8)
+        ),
+    ]
+    df = build_syrup_users_frame(rows, "USDC", 6)
+    assert list(df["eth_supply_usd"]) == pytest.approx([24737.25, 24735.90])
+
+
+def test_syrup_market_price_is_the_quantity_weighted_mean_of_per_loan_prices():
+    # 30 ETH @ 2473.725 and 10 ETH @ 2473.59: sum(supply) x oracle_price must
+    # equal the users frame's sum(supply_usd).
+    rows = [
+        _syrup_row(symbol="ETH", decimals=18, amount=30 * 10**18, value_usd=int(2473.725 * 10**8)),
+        _syrup_row(
+            address_hex="bb" * 20, symbol="ETH", decimals=18, amount=10 * 10**18, value_usd=int(2473.59 * 10**8)
+        ),
+    ]
+    prices = syrup_attested_prices(rows)
+    df = build_syrup_users_frame(rows, "USDC", 6)
+    assert prices == pytest.approx({"ETH": (30 * 2473.725 + 10 * 2473.59) / 40})
+    assert df["eth_supply"].sum() * prices["ETH"] == pytest.approx(df["eth_supply_usd"].sum())
+
+
+def test_syrup_price_spread_beyond_the_defect_limit_is_refused():
+    # A >10% spread within one cycle is a units or snapshot-join defect, not
+    # per-loan valuation timing.
+    rows = [_syrup_row(), _syrup_row(address_hex="bb" * 20, value_usd=int(70000.0 * 10**8))]
+    with pytest.raises(ValueError, match="attested BTC prices span"):
+        syrup_attested_prices(rows)
+
+
+def test_syrup_acm_disagreement_warns(caplog):
+    # Computed coverage: 505 * 78276.425 / 25M = 1.5812; an acm_ratio of 2.0
+    # is a >1% disagreement and must be surfaced.
+    build_syrup_users_frame([_syrup_row(acm_ratio=2_000_000)], "USDC", 6)
+    assert "acm_ratio" in caplog.text
+
+
+def test_syrup_acm_agreement_stays_quiet(caplog):
+    build_syrup_users_frame([_syrup_row(acm_ratio=1_581_184)], "USDC", 6)
+    assert "acm_ratio" not in caplog.text
+
+
+def test_syrup_attested_prices_cover_only_valued_symbols():
+    rows = [_syrup_row(), _syrup_row(address_hex="bb" * 20, symbol="XRP", value_usd=None)]
+    assert syrup_attested_prices(rows) == pytest.approx({"BTC": 78276.425})
+
+
+def test_syrup_price_disagreement_on_an_excluded_stable_does_not_fail_the_market():
+    # Two PYUSD loans attested a hair apart would otherwise fail the whole
+    # market over a symbol the frame never uses (their loans are excluded).
+    rows = [
+        _syrup_row(),
+        _syrup_row(address_hex="bb" * 20, symbol="PYUSD", value_usd=99982038, liquidation_level=900_000),
+        _syrup_row(address_hex="cc" * 20, symbol="PYUSD", value_usd=99982040, liquidation_level=900_000),
+    ]
+    assert syrup_attested_prices(rows) == pytest.approx({"BTC": 78276.425})
+    assert len(build_syrup_users_frame(rows, "USDC", 6)) == 1
+
+
+def _anchorage_row(
+    package_id="0cb3a89e30d0aa19f671",
+    prime_id=1,
+    exposure=150_000_000.0,
+    package_value=185_804_734.1519485304,
+    current_ltv=None,
+    margin_call_ltv=0.85,
+    critical_ltv=0.9,
+    margin_return_ltv=0.7,
+    asset_type="BTC",
+    asset_price=65_572.72,
+    asset_quantity=2833.56758957,
+    asset_weighted_value=None,
+    ltv_timestamp=1,
+):
+    """One cohort row as the SQL returns it (the defaults are a real staging package)."""
+    return SimpleNamespace(
+        prime_id=prime_id,
+        package_id=package_id,
+        exposure_value=exposure,
+        package_value=package_value,
+        current_ltv=current_ltv if current_ltv is not None else (exposure / package_value if package_value else 0.0),
+        margin_call_ltv=margin_call_ltv,
+        critical_ltv=critical_ltv,
+        margin_return_ltv=margin_return_ltv,
+        asset_type=asset_type,
+        asset_price=asset_price,
+        asset_quantity=asset_quantity,
+        asset_weighted_value=asset_weighted_value if asset_weighted_value is not None else package_value,
+        ltv_timestamp=ltv_timestamp,
+    )
+
+
+def test_anchorage_row_reproduces_a_real_staging_package():
+    row = build_anchorage_users_frame([_anchorage_row()]).iloc[0]
+    assert row["wallet_address"] == "0cb3a89e30d0aa19f671"
+    assert row["lltv"] == pytest.approx(0.9)
+    assert row["ltv"] == pytest.approx(0.8072991287581084)
+    assert row["health_factor"] == pytest.approx(0.9 / 0.8072991287581084)
+    assert row["liquidation_incentive"] == pytest.approx(1.02)
+    assert row["btc_supply"] == pytest.approx(2833.56758957)
+    assert row["btc_supply_usd"] == pytest.approx(185_804_734.15, rel=1e-9)
+    assert row["usdc_borrow"] == row["usdc_borrow_usd"] == pytest.approx(150_000_000)
+    assert row["total_collateral_usd"] == pytest.approx(185_804_734.15, rel=1e-9)
+    assert row["total_borrow_usd"] == pytest.approx(150_000_000)
+
+
+def test_anchorage_one_row_per_package():
+    df = build_anchorage_users_frame([_anchorage_row(), _anchorage_row(package_id="410e7ac982c41b3ccfdf")])
+    assert sorted(df["wallet_address"]) == ["0cb3a89e30d0aa19f671", "410e7ac982c41b3ccfdf"]
+
+
+def test_anchorage_multi_asset_package_sums_per_symbol_and_keeps_package_totals():
+    package_value = 150_000.0
+    rows = [
+        _anchorage_row(
+            exposure=100_000.0,
+            package_value=package_value,
+            asset_type="BTC",
+            asset_price=100_000.0,
+            asset_quantity=1.0,
+            asset_weighted_value=100_000.0,
+        ),
+        _anchorage_row(
+            exposure=100_000.0,
+            package_value=package_value,
+            asset_type="ETH",
+            asset_price=5_000.0,
+            asset_quantity=10.0,
+            asset_weighted_value=50_000.0,
+        ),
+    ]
+    row = build_anchorage_users_frame(rows).iloc[0]
+    assert row["btc_supply"] == pytest.approx(1.0)
+    assert row["btc_supply_usd"] == pytest.approx(100_000.0)
+    assert row["eth_supply"] == pytest.approx(10.0)
+    assert row["eth_supply_usd"] == pytest.approx(50_000.0)
+    assert row["total_collateral_usd"] == pytest.approx(package_value)
+    assert row["total_borrow_usd"] == pytest.approx(100_000.0)
+
+
+def test_anchorage_custody_only_packages_are_skipped():
+    df = build_anchorage_users_frame([_anchorage_row(), _anchorage_row(package_id="idle", exposure=0.0)])
+    assert list(df["wallet_address"]) == ["0cb3a89e30d0aa19f671"]
+
+
+def test_anchorage_zero_package_value_with_a_loan_is_excluded_loudly(caplog):
+    rows = [
+        _anchorage_row(),
+        _anchorage_row(package_id="baddebt", package_value=0.0, current_ltv=0.0, asset_weighted_value=0.0),
+    ]
+    df = build_anchorage_users_frame(rows)
+    assert list(df["wallet_address"]) == ["0cb3a89e30d0aa19f671"]
+    assert "zero package value" in caplog.text
+
+
+def test_anchorage_all_packages_excluded_fails_rather_than_an_empty_market():
+    with pytest.raises(ValueError, match="no active anchorage packages with a drawn loan"):
+        build_anchorage_users_frame([_anchorage_row(exposure=0.0)])
+
+
+def test_anchorage_stored_ltv_disagreement_warns(caplog):
+    build_anchorage_users_frame([_anchorage_row(current_ltv=0.5)])
+    assert "stored current_ltv" in caplog.text
+
+
+def test_anchorage_asset_value_disagreement_warns(caplog):
+    build_anchorage_users_frame([_anchorage_row(asset_price=70_000.0)])
+    assert "asset_weighted_value" in caplog.text
+
+
+def test_anchorage_consistent_package_stays_quiet(caplog):
+    build_anchorage_users_frame([_anchorage_row()])
+    assert "disagrees" not in caplog.text
+
+
+def test_anchorage_threshold_triple_disagreement_warns(caplog):
+    rows = [_anchorage_row(), _anchorage_row(package_id="other", margin_call_ltv=0.8)]
+    build_anchorage_users_frame(rows)
+    assert "distinct (margin_call, critical, margin_return)" in caplog.text
+
+
+def test_anchorage_prices_take_the_newest_ltv_timestamp():
+    rows = [
+        _anchorage_row(asset_price=65_572.72, ltv_timestamp=2),
+        _anchorage_row(package_id="other", asset_price=65_571.59, ltv_timestamp=1),
+    ]
+    assert anchorage_asset_prices(rows) == pytest.approx({"BTC": 65_572.72})
+
+
+def test_anchorage_intra_poll_price_spread_warns(caplog):
+    rows = [
+        _anchorage_row(asset_price=65_000.0, ltv_timestamp=2),
+        _anchorage_row(package_id="other", asset_price=60_000.0, ltv_timestamp=1),
+    ]
+    anchorage_asset_prices(rows)
+    assert "disagree on the BTC price" in caplog.text

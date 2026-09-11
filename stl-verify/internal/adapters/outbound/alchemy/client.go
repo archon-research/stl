@@ -374,6 +374,22 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 	return result, nil
 }
 
+// ChainID fetches the chain the node serves. A worker's chain and its node URL
+// arrive as independent configuration, and every block number it reads means
+// something else on another chain, so this is what proves the two agree.
+func (c *Client) ChainID(ctx context.Context) (int64, error) {
+	raw, err := c.callSingle(ctx, "eth_chainId", "chainId", []any{})
+	if err != nil {
+		return 0, err
+	}
+
+	var result string
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return 0, fmt.Errorf("failed to parse chain ID: %w", err)
+	}
+	return hexutil.ParseInt64(result)
+}
+
 // GetCurrentBlockNumber fetches the latest block number.
 func (c *Client) GetCurrentBlockNumber(ctx context.Context) (int64, error) {
 	req := jsonRPCRequest{

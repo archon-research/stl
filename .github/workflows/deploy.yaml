@@ -67,7 +67,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
         with:
           platforms: arm64
 
@@ -78,7 +78,7 @@ jobs:
       # build-only runs (push=false), which can run from any branch.
       - name: Configure AWS credentials (staging)
         if: ${{ inputs.push }}
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ env.STAGING_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -129,7 +129,7 @@ jobs:
       # ORB-299: read-only ECR creds so the pre-stamp verify below can confirm
       # every image the staging overlay references exists before we commit.
       - name: Configure AWS credentials (staging ECR read)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
           aws-region: eu-west-1
@@ -369,7 +369,7 @@ jobs:
 
       # Pull images from staging ECR, retag and push to prod (no build needed)
       - name: Configure AWS credentials (staging)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ env.STAGING_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -391,7 +391,7 @@ jobs:
 
       # Retag and push to prod ECR
       - name: Configure AWS credentials (prod)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ env.PROD_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -443,7 +443,7 @@ jobs:
       # ORB-299: read-only ECR creds so the pre-stamp verify can confirm every
       # image the prod overlay references exists in prod ECR before we commit.
       - name: Configure AWS credentials (prod ECR read)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
           aws-region: eu-west-1
@@ -482,13 +482,12 @@ jobs:
           for attempt in $(seq 1 "$MAX_RETRIES"); do
             echo "Attempt ${attempt}/${MAX_RETRIES}"
 
-            # The overlay, the roster and the renderer all come from the exact
-            # main commit the bump is parented on, so a roster or renderer merge
-            # racing this job cannot leave the block out of step with the tree
-            # deploy-prod validates.
+            # The whole tree comes from the exact main commit the bump is
+            # parented on: the guards below diff against it, so a retry after
+            # main moved under attempt 1 must not carry this run's older tree.
             git fetch -q origin main
             MAIN_SHA=$(git rev-parse FETCH_HEAD)
-            git checkout -q FETCH_HEAD -- "$KUSTOMIZATION" "$ROSTER" scripts/deploy/render-overlay-images.sh
+            git reset -q --hard FETCH_HEAD
 
             # Render the whole images block from the roster (ORB-362). ci.yml
             # deploy-base reads this file's newTag off origin/main as the

@@ -44,21 +44,31 @@ func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
 
 func (h *capturingHandler) hasWarnContaining(sub string) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, r := range h.records {
-		if r.Level == slog.LevelWarn && strings.Contains(r.Message, sub) {
-			return true
-		}
-	}
-	return false
+	return len(h.warnsContaining(sub)) > 0
 }
 
-// captureLogs replaces the service logger with a records-capturing one.
+func (h *capturingHandler) warnsContaining(sub string) []map[string]string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var found []map[string]string
+	for _, r := range h.records {
+		if r.Level != slog.LevelWarn || !strings.Contains(r.Message, sub) {
+			continue
+		}
+		attrs := map[string]string{}
+		r.Attrs(func(a slog.Attr) bool {
+			attrs[a.Key] = a.Value.String()
+			return true
+		})
+		found = append(found, attrs)
+	}
+	return found
+}
+
+// captureLogs returns the handler the harness wired into the service and its
+// multicaller at construction, so a test can assert on any line emitted.
 func (h *serviceTestHarness) captureLogs() *capturingHandler {
-	handler := &capturingHandler{}
-	h.svc.logger = slog.New(handler)
-	return handler
+	return h.logs
 }
 
 // --- transaction / probe observer ---
@@ -117,7 +127,7 @@ func (h *serviceTestHarness) adapterProbeResults(adapterType entity.MorphoAdapte
 	results := make([]outbound.Result, adapterProbeCallsPerAdapter)
 	for i, marker := range adapterMarkers {
 		if marker.adapterType == adapterType {
-			results[i] = outbound.Result{Success: true, ReturnData: h.packAddress(common.HexToAddress("0x1"))}
+			results[i] = outbound.Result{Success: true, ReturnData: packAddress(common.HexToAddress("0x1"))}
 			continue
 		}
 		results[i] = outbound.Result{Success: false, ReturnData: nil}
@@ -1532,8 +1542,8 @@ func (h *serviceTestHarness) feeGetterResults(perfFee, mgmtFee *big.Int, perfRec
 	return []outbound.Result{
 		{Success: true, ReturnData: h.packUint256(perfFee)},
 		{Success: true, ReturnData: h.packUint256(mgmtFee)},
-		{Success: true, ReturnData: h.packAddress(perfRecip)},
-		{Success: true, ReturnData: h.packAddress(mgmtRecip)},
+		{Success: true, ReturnData: packAddress(perfRecip)},
+		{Success: true, ReturnData: packAddress(mgmtRecip)},
 	}
 }
 
