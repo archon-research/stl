@@ -2,6 +2,7 @@ import type { RangePreset, TimeRange } from '@archon-research/design-system';
 import { useMemo } from 'react';
 
 import {
+  latestAllocationCoverage,
   parseNumericValue,
   toChartSeries,
   wadToUnits,
@@ -18,6 +19,9 @@ import { usePrimeChartData } from './usePrimeChartData';
 
 export type PrimeChartSeries = {
   allocationBalanceSeries: ChartDatum[];
+  // The latest bucket's own pricing coverage behind `allocationBalanceSeries`.
+  // Null once it prices every position it knows about (VEC-760).
+  allocationCoverage: { pricedEntityCount: number; entityCount: number } | null;
   primeDebtSeries: ChartDatum[];
   totalCapitalSeries: ChartDatum[];
   collateralSeries: ChartDatum[];
@@ -155,6 +159,11 @@ export function usePrimeChartSeries(
     [activityBuckets],
   );
 
+  const allocationCoverage = useMemo(
+    () => latestAllocationCoverage(activityBuckets),
+    [activityBuckets],
+  );
+
   const primeDebtSeries = useMemo<ChartDatum[]>(
     () => toChartSeries(debtBuckets, (bucket) => wadToUnits(bucket.debt_wad)),
     [debtBuckets],
@@ -231,6 +240,7 @@ export function usePrimeChartSeries(
   return useMemo(
     () => ({
       allocationBalanceSeries,
+      allocationCoverage,
       primeDebtSeries,
       totalCapitalSeries,
       collateralSeries,
@@ -248,6 +258,7 @@ export function usePrimeChartSeries(
     }),
     [
       allocationBalanceSeries,
+      allocationCoverage,
       primeDebtSeries,
       totalCapitalSeries,
       collateralSeries,

@@ -1,4 +1,8 @@
-import type { Allocation, Prime } from '../types/allocation';
+import type {
+  Allocation,
+  AllocationActivityBucket,
+  Prime,
+} from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
 import { getChainExplorerUrl, getChainName } from './chain-metadata';
 import { logging } from './logging';
@@ -635,6 +639,25 @@ export function toChartSeries<T extends { bucket_start: string }>(
       (point) =>
         Number.isFinite(point.value) && Number.isFinite(point.timestamp),
     );
+}
+
+// The most recent bucket's own pricing coverage, oldest-first so the latest
+// observation is the last element. Null once it prices every position it
+// knows about, so a caller only has something to name when the total is
+// partial.
+export function latestAllocationCoverage(
+  buckets: readonly Pick<
+    AllocationActivityBucket,
+    'priced_entity_count' | 'entity_count'
+  >[],
+): { pricedEntityCount: number; entityCount: number } | null {
+  const latest = buckets.at(-1);
+  const priced = latest?.priced_entity_count;
+  const total = latest?.entity_count;
+  if (priced == null || total == null || priced >= total) {
+    return null;
+  }
+  return { pricedEntityCount: priced, entityCount: total };
 }
 
 export function balancedColumns(count: number, maxColumns: number): number {

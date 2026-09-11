@@ -20,6 +20,7 @@ const point = (label: string, value: number): ChartDatum => ({
 
 const emptySeries = (): PrimeChartSeries => ({
   allocationBalanceSeries: [],
+  allocationCoverage: null,
   primeDebtSeries: [],
   totalCapitalSeries: [],
   collateralSeries: [],
@@ -148,6 +149,39 @@ describe('buildMetricCharts drop rule', () => {
     );
 
     expect(chartFor(specs, 'risk-capital')?.errorMessage ?? null).toBeNull();
+  });
+});
+
+describe('buildMetricCharts allocation coverage', () => {
+  it('carries the coverage onto the activity chart when the bucket is partial', () => {
+    const specs = buildMetricCharts(
+      inputs({
+        series: {
+          ...emptySeries(),
+          allocationBalanceSeries: [point('day 1', 10)],
+          allocationCoverage: { pricedEntityCount: 49, entityCount: 58 },
+        },
+      }),
+    );
+
+    expect(chartFor(specs, 'allocation-activity-volume')?.coverage).toEqual({
+      pricedEntityCount: 49,
+      entityCount: 58,
+    });
+  });
+
+  it('leaves the coverage null for a fully-priced bucket', () => {
+    const specs = buildMetricCharts(
+      inputs({
+        series: {
+          ...emptySeries(),
+          allocationBalanceSeries: [point('day 1', 10)],
+          allocationCoverage: null,
+        },
+      }),
+    );
+
+    expect(chartFor(specs, 'allocation-activity-volume')?.coverage).toBeNull();
   });
 });
 
