@@ -54,6 +54,12 @@ pre-commit:
           perl -i -0pe 's/\n+$/\n/' "$file"
         done
 
+    # Deliberately not excluded from stl-verify: stl-verify/lefthook.yml drops
+    # db/** from every command, which is why long blocks went uncaught.
+    sql-comment-length:
+      glob: "**/*.sql"
+      run: stl-verify/ci/check-sql-comments.sh {staged_files}
+
     check-merge-conflict:
       glob: "**/*"
       exclude: "stl-verify/.*"

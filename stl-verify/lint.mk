@@ -5,7 +5,7 @@
 #
 # Note: Lefthook automatically handles changed-file workflow on git commit/push
 
-.PHONY: install-hooks format lint help
+.PHONY: install-hooks format lint help sql-comment-check
 
 LEFTHOOK_VERSION ?= v1.13.6
 LEFTHOOK := $(shell command -v lefthook 2>/dev/null || echo "$$(go env GOPATH)/bin/lefthook")
@@ -26,6 +26,11 @@ install-hooks: ## Install lefthook pre-commit/push hooks
 	  echo "    export PATH=\"\$$(go env GOPATH)/bin:\$$PATH\""; \
 	  echo ""; \
 	fi
+
+# Scope is files ADDED vs BASE: migrations already on main are frozen by the
+# migrator's checksum, so a tree-wide check would fail on files nobody may fix.
+sql-comment-check: ## Cap SQL `--` blocks at SQL_COMMENT_MAX_LINES (added *.sql)
+	@ci/check-sql-comments.sh
 
 # Local development helpers — just delegate to language-specific tooling
 

@@ -1,8 +1,6 @@
--- Stress test verification queries.
--- Run with: psql $DATABASE_URL -v chain_id=1 -v window=64 -f stress-test/verify/checks.sql
--- Use window=64 normally; set window=$((64+REORG_DEPTH)) when reorgs were injected.
---
--- All queries should return 0 for a healthy canonical chain.
+-- Stress test verification queries; every one returns 0 on a healthy chain.
+-- psql $DATABASE_URL -v chain_id=1 -v window=64 -f stress-test/verify/checks.sql
+-- Use window=$((64+REORG_DEPTH)) instead when reorgs were injected.
 
 -- 1. No gaps in canonical block numbers
 -- Returns: number of missing block numbers in the canonical chain.

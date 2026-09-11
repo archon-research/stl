@@ -409,7 +409,7 @@ tools:
 # CI target for lint/format/static/security checks. go vet, staticcheck, and
 # go fix -diff are covered by golangci-lint v2 (govet, staticcheck, modernize
 # linters — see .golangci.yml); running them separately tripled analysis time.
-ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check check-overlay-images golangci-lint golangci-lint-new vulncheck
+ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check sql-comment-check check-overlay-images golangci-lint golangci-lint-new vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks

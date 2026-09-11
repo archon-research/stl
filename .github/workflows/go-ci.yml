@@ -18,8 +18,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Full history so the changed-code lint below can find the merge
-          # base with origin/main.
+          # Full history so the changed-code lint and sql-comment-check can
+          # find the merge base with origin/main.
           fetch-depth: 0
 
       - name: Setup Go
@@ -38,7 +38,7 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
 
       - name: Format and module checks
-        run: make fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check
+        run: make fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check sql-comment-check
 
       # Runs the golangci-lint binary directly (not `make golangci-lint`) so
       # the action can manage the binary install and analysis cache. Covers
