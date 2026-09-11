@@ -258,20 +258,11 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	}
 	primeDebtRepo := postgres.NewPrimeDebtRepository(pool, txm, logger, buildReg.BuildID(), runID)
 
-	// The Vat's protocol row, seeded by 20260819_140000. Resolved once, and a hard failure if it is
-	// missing: every snapshot carries it, and the Sky projection refuses a run for one row without it.
-	protocolID, err := primeDebtRepo.ProtocolIDByAddress(ctx, cfg.chainID, common.HexToAddress(cfg.vatAddr))
-	if err != nil {
-		return fmt.Errorf("resolving the Vat's protocol row: %w", err)
-	}
-	logger.Info("vat protocol row resolved", "vatAddress", cfg.vatAddr, "protocolID", protocolID)
-
 	// Vault debt service
 	svc, err := prime_debt.NewVaultDebtService(
 		prime_debt.Config{
 			SweepEveryNBlocks: cfg.sweepBlocks,
 			ChainID:           cfg.chainID,
-			ProtocolID:        protocolID,
 			MaxMessages:       1,
 			PollInterval:      100 * time.Millisecond,
 			Logger:            logger,
