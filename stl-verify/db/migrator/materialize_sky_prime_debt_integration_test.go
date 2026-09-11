@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -23,7 +24,7 @@ import (
 // One behaviour per function, each seeding its own database, so a projection failure cannot cascade into
 // unrelated assertions.
 
-// skyPrimeDebtHolders are the vault addresses the seed creates, as the projection emits them.
+// Fixture identities, as the projection emits them.
 const (
 	skyPrimeA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	skyPrimeB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -38,17 +39,14 @@ func skyKey(ilk string) string { return skyVat + ":" + ilk }
 // seedSkyPrimeDebt gives a test its own migrated database, seeds the fixture and runs the projection
 // once, returning what it reported written.
 //
-// Prime A (vault aa) borrows in ILK-A (two observations) and ILK-B; Prime B (vault bb) never carried
-// debt in ILK-A (single debt 0 row -> nothing emitted); Prime C (vault cc) borrows ILK-A then repays to
-// 0 (open + one closing zero-row).
+// Prime A (vault aa) borrows in ILK-A (blocks 100 and 200, and block 200 again at block_version 1 and at
+// processing_version 1) and ILK-B; Prime B (vault bb) never carried debt in ILK-A (single debt 0 row ->
+// nothing emitted); Prime C (vault cc) borrows ILK-A then repays to 0 (open + one closing zero-row).
 func seedSkyPrimeDebt(t *testing.T) (context.Context, *pgxpool.Pool, int64) {
 	t.Helper()
 	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupMigratedPostgres(ctx, t)
 	t.Cleanup(cleanup)
-	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations: %v", err)
-	}
 	seed := `
 DO $$
 DECLARE paid bigint; pbid bigint; pcid bigint;
@@ -63,6 +61,10 @@ BEGIN
   INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id) VALUES
     (paid, 'ILK-A', 1000, 100, 0, '2026-01-01T00:00:00Z', 0, 0),
     (paid, 'ILK-A', 1500, 200, 0, '2026-01-02T00:00:00Z', 0, 0),
+    -- Same block, next block_version; and the same (block, version) again from build 1, which the
+    -- processing_version trigger stamps as processing_version 1. Both are distinct observations.
+    (paid, 'ILK-A', 1700, 200, 1, '2026-01-02T00:00:00Z', 0, 0),
+    (paid, 'ILK-A', 1600, 200, 0, '2026-01-02T00:00:00Z', 0, 1),
     -- Distinct synced_at from A/ILK-A above: prime_debt's UNIQUE key is
     -- (prime_id, block_number, block_version, processing_version, synced_at) with NO ilk_name, so two
     -- ilks of one prime at one block must carry different synced_at (as they do in prod) or they collide.
@@ -81,7 +83,7 @@ END $$;`
 	return ctx, pool, written
 }
 
-// A/ILK-A (2 obs) + A/ILK-B (1) + C/ILK-A (open + close = 2) = 5 rows; B/ILK-A never entered, skipped.
+// A/ILK-A (4 obs) + A/ILK-B (1) + C/ILK-A (open + close = 2) = 7 rows; B/ILK-A never entered, skipped.
 // Distinct positions: A/ILK-A, A/ILK-B, C/ILK-A = 3.
 func TestMaterializeSkyPrimeDebtProjectionShape(t *testing.T) {
 	ctx, pool, written := seedSkyPrimeDebt(t)
@@ -94,11 +96,11 @@ func TestMaterializeSkyPrimeDebtProjectionShape(t *testing.T) {
 		FROM position_state`).Scan(&rows, &distinctPositions, &collisions, &badLen); err != nil {
 		t.Fatalf("position_state summary: %v", err)
 	}
-	if rows != 5 {
-		t.Errorf("position_state rows = %d, want 5", rows)
+	if rows != 7 {
+		t.Errorf("position_state rows = %d, want 7", rows)
 	}
-	if written != 5 {
-		t.Errorf("materialize returned %d, want 5", written)
+	if written != 7 {
+		t.Errorf("materialize returned %d, want 7", written)
 	}
 	if distinctPositions != 3 {
 		t.Errorf("distinct position_id = %d, want 3", distinctPositions)
@@ -121,7 +123,7 @@ func TestMaterializeSkyPrimeDebtPerPosition(t *testing.T) {
 		wantQty    string
 		wantRows   int
 	}{
-		{"A ILK-A latest of two observations", "ILK-A", skyPrimeA, "1500", 2},
+		{"A ILK-A latest by (block, block_version, processing_version)", "ILK-A", skyPrimeA, "1700", 4},
 		{"A ILK-B", "ILK-B", skyPrimeA, "500", 1},
 		{"B ILK-A never entered (debt 0) emits nothing", "ILK-A", skyPrimeB, "", 0},
 		{"C ILK-A repaid: borrow + one closing zero-row", "ILK-A", skyPrimeC, "0", 2},
@@ -162,17 +164,23 @@ func TestMaterializeSkyPrimeDebtIsIdempotent(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&rows); err != nil {
 		t.Fatalf("re-count: %v", err)
 	}
-	if rows != 5 {
-		t.Errorf("after re-run: position_state=%d, want 5 (the rerun must append nothing)", rows)
+	if rows != 7 {
+		t.Errorf("after re-run: position_state=%d, want 7 (the rerun must append nothing)", rows)
 	}
 }
 
 // The identity is the native pair: chain 1, protocol_id NULL, instrument_key = vat_address:ilk_name,
-// holder = the vault address. So every position_id is recomputable from the row's own fields, and no
-// protocol.id (a BIGSERIAL, environment-local) participates -- the same position hashes the same in
-// every database, which the earlier revision that hashed the Vat's protocol row could not promise.
+// holder = the vault address. Every position_id is recomputable from the row's own fields, and no
+// protocol.id (a BIGSERIAL, environment-local) participates, so a position hashes the same in every database.
 func TestSkyPrimeDebtIdentityIsTheNativeVatIlkPair(t *testing.T) {
 	ctx, pool, _ := seedSkyPrimeDebt(t)
+	var protocols int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM protocol`).Scan(&protocols); err != nil {
+		t.Fatalf("count protocol rows: %v", err)
+	}
+	if protocols == 0 {
+		t.Fatal("protocol is empty; the surrogate control below would compare against nothing")
+	}
 	var rows, nonNullProtocol, offChain, offVat, notRecomputable, matchesASurrogate int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*),
@@ -180,8 +188,9 @@ func TestSkyPrimeDebtIdentityIsTheNativeVatIlkPair(t *testing.T) {
 		       count(*) FILTER (WHERE chain_id IS DISTINCT FROM 1),
 		       count(*) FILTER (WHERE instrument_key NOT LIKE $1 || ':%'),
 		       count(*) FILTER (WHERE position_id <> position_id(1, NULL, instrument_key, holder_id)),
-		       count(*) FILTER (WHERE position_id = position_id(1, (SELECT min(id) FROM protocol), instrument_key, holder_id))
-		FROM position_state`, skyVat).Scan(&rows, &nonNullProtocol, &offChain, &offVat, &notRecomputable, &matchesASurrogate); err != nil {
+		       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM protocol p
+		                                      WHERE ps.position_id = position_id(1, p.id, ps.instrument_key, ps.holder_id)))
+		FROM position_state ps`, skyVat).Scan(&rows, &nonNullProtocol, &offChain, &offVat, &notRecomputable, &matchesASurrogate); err != nil {
 		t.Fatalf("read position_state: %v", err)
 	}
 	if rows == 0 {
@@ -194,35 +203,41 @@ func TestSkyPrimeDebtIdentityIsTheNativeVatIlkPair(t *testing.T) {
 		t.Errorf("%d position_id(s) differ from position_id(1, NULL, instrument_key, holder_id); the id must follow from the native fields alone", notRecomputable)
 	}
 	if matchesASurrogate != 0 {
-		t.Errorf("%d position_id(s) equal a hash that includes a protocol.id surrogate; none may", matchesASurrogate)
+		t.Errorf("%d position_id(s) equal a hash carrying one of the %d protocol.id surrogates; none may", matchesASurrogate, protocols)
 	}
 }
 
-// position_key() rejects a blank or ';'-bearing identity field with an error that names no row. The
-// wrapper refuses first, by name, and writes nothing.
-func TestSkyPrimeDebtRefusesAnIlkNamePositionKeyWouldReject(t *testing.T) {
-	for _, c := range []struct{ name, ilk, want string }{
-		{"blank ilk_name", "   ", "has a blank or delimiter-bearing ilk_name '   '"},
-		{"delimiter in ilk_name", "ILK;X", "has a blank or delimiter-bearing ilk_name 'ILK;X'"},
+// Once the Vat is prefixed, position_key() accepts a blank or padded ilk_name and hashes it; a vault
+// address that is not 20 bytes fails only inside the shared materializer, naming no row. This guard is
+// the only thing that names either, and it writes nothing.
+func TestSkyPrimeDebtRefusesAnInputThatCannotKeyAPosition(t *testing.T) {
+	const goodVault = "ffffffffffffffffffffffffffffffffffffffff"
+	for _, c := range []struct{ name, ilk, vaultHex, want string }{
+		{"blank ilk_name", "   ", goodVault, "has ilk_name '   '"},
+		{"leading space in ilk_name", " ILK-A", goodVault, "has ilk_name ' ILK-A'"},
+		{"trailing space in ilk_name", "ILK-A ", goodVault, "has ilk_name 'ILK-A '"},
+		{"delimiter in ilk_name", "ILK;X", goodVault, "has ilk_name 'ILK;X'"},
+		{"empty vault_address", "ILK-A", "", "vault_address ''"},
+		{"19-byte vault_address", "ILK-A", goodVault[:38], "vault_address '" + goodVault[:38] + "'"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ctx := context.Background()
 			pool, cleanup := setupMigratedPostgres(ctx, t)
 			defer cleanup()
 			if _, err := pool.Exec(ctx, `
-			WITH p AS (INSERT INTO prime (name, vault_address) VALUES ('orphan', '\xffffffffffffffffffffffffffffffffffffffff') RETURNING id)
+			WITH p AS (INSERT INTO prime (name, vault_address) VALUES ('orphan', decode($2, 'hex')) RETURNING id)
 			INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id)
-			SELECT p.id, $1, 7, 100, 0, '2026-01-01T00:00:00Z', 0, 0 FROM p`, c.ilk); err != nil {
+			SELECT p.id, $1, 7, 100, 0, '2026-01-01T00:00:00Z', 0, 0 FROM p`, c.ilk, c.vaultHex); err != nil {
 				t.Fatalf("seed: %v", err)
 			}
 			var written int64
 			err := pool.QueryRow(ctx, `SELECT materialize_sky_prime_debt()`).Scan(&written)
-			if err == nil || !strings.Contains(err.Error(), c.want) {
-				t.Fatalf("want a refusal naming %q, got written=%d err=%v", c.want, written, err)
+			if err == nil || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "prime 'orphan'") {
+				t.Fatalf("want a refusal naming prime 'orphan' and %q, got written=%d err=%v", c.want, written, err)
 			}
 			var rows int
 			if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&rows); err != nil {
-				t.Fatal(err)
+				t.Fatalf("count position_state: %v", err)
 			}
 			if rows != 0 {
 				t.Errorf("refused run left %d rows", rows)
@@ -244,8 +259,8 @@ func TestSkyPrimeDebtSameKeyEarlierSyncedAtWins(t *testing.T) {
 	DO $s$ DECLARE pid bigint; BEGIN
 	  INSERT INTO prime (name, vault_address) VALUES ('tie', '\xdddddddddddddddddddddddddddddddddddddddd') RETURNING id INTO pid;
 	  INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id) VALUES
-	    (pid, 'TIE-A', 100, 500, 0, '2026-06-01T10:00:00Z', 0, 0),
-	    (pid, 'TIE-A', 250, 500, 0, '2026-06-01T11:00:00Z', 0, 0);   -- same key, later sync, different debt
+	    (pid, 'TIE-A', 250, 500, 0, '2026-06-01T11:00:00Z', 0, 0),   -- the later sync is inserted first, so
+	    (pid, 'TIE-A', 100, 500, 0, '2026-06-01T10:00:00Z', 0, 0);   -- heap order cannot stand in for the ORDER BY
 	END $s$`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -266,9 +281,8 @@ func TestSkyPrimeDebtSameKeyEarlierSyncedAtWins(t *testing.T) {
 }
 
 // The Sky migration must not touch prime_debt: no column, no backfill, no protocol row. prime_debt is a
-// compressed hypertable, and a whole-table UPDATE inside the migrator's single transaction fails past
-// timescaledb.max_tuples_decompressed_per_dml_transaction (100000 by default; measured: 99k rows pass,
-// 101k fail with SQLSTATE 53400). Legacy rows already sitting in compressed chunks must still project.
+// compressed hypertable, and a whole-table UPDATE inside the migrator's single transaction is capped by
+// timescaledb.max_tuples_decompressed_per_dml_transaction. Legacy rows in compressed chunks must still project.
 func TestSkyMigrationLeavesPrimeDebtUntouched(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupPostgres(ctx, t)
@@ -278,7 +292,7 @@ func TestSkyMigrationLeavesPrimeDebtUntouched(t *testing.T) {
 	const skyMigration = "20260819_140000_materialize_sky_prime_debt.sql"
 	entries, err := os.ReadDir(getMigrationsPath())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("list migrations: %v", err)
 	}
 	// Two staging cuts: everything before the Sky migration, and that plus the Sky migration alone, so the
 	// assertions bracket exactly the one file (later migrations legitimately add columns to prime_debt).
@@ -289,25 +303,28 @@ func TestSkyMigrationLeavesPrimeDebtUntouched(t *testing.T) {
 		}
 		src, err := os.ReadFile(filepath.Join(getMigrationsPath(), e.Name()))
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("read %s: %v", e.Name(), err)
 		}
 		if err := os.WriteFile(filepath.Join(throughSky, e.Name()), src, 0o644); err != nil {
-			t.Fatal(err)
+			t.Fatalf("stage %s: %v", e.Name(), err)
 		}
 		if e.Name() == skyMigration {
 			continue
 		}
 		if err := os.WriteFile(filepath.Join(before, e.Name()), src, 0o644); err != nil {
-			t.Fatal(err)
+			t.Fatalf("stage %s: %v", e.Name(), err)
 		}
 	}
 	if err := migrator.New(pool, before).ApplyAll(ctx); err != nil {
 		t.Fatalf("migrations before %s: %v", skyMigration, err)
 	}
+	if err := testutil.DisableScheduledJobs(ctx, pool); err != nil {
+		t.Fatalf("disable policy jobs: %v", err)
+	}
 	const columnsSQL = `SELECT string_agg(column_name, ',' ORDER BY ordinal_position) FROM information_schema.columns WHERE table_name = 'prime_debt'`
 	var columnsBefore string
 	if err := pool.QueryRow(ctx, columnsSQL).Scan(&columnsBefore); err != nil {
-		t.Fatal(err)
+		t.Fatalf("prime_debt columns before the Sky migration: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
 	DO $s$ DECLARE pid bigint; BEGIN
@@ -331,15 +348,22 @@ func TestSkyMigrationLeavesPrimeDebtUntouched(t *testing.T) {
 		t.Fatalf("the Sky migration: %v", err)
 	}
 	var columnsAfter string
-	var vatRows, stillCompressed int
+	var vatRows, partiallyDecompressed int
+	var rowstoreBytes int64
 	if err := pool.QueryRow(ctx, columnsSQL).Scan(&columnsAfter); err != nil {
-		t.Fatal(err)
+		t.Fatalf("prime_debt columns after the Sky migration: %v", err)
 	}
+	// timescaledb_information.chunks.is_compressed stays true after DML on a compressed chunk; what moves
+	// is the catalog's partial bit (status & 8) and the row-store heap, which compress_chunk leaves empty.
 	if err := pool.QueryRow(ctx, `
 		SELECT (SELECT count(*) FROM protocol WHERE address = decode($1, 'hex')),
-		       (SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_name = 'prime_debt' AND is_compressed)`,
-		skyVat).Scan(&vatRows, &stillCompressed); err != nil {
-		t.Fatal(err)
+		       count(*) FILTER (WHERE (c.status & 8) <> 0),
+		       coalesce(sum(pg_relation_size(c.relid)), 0)
+		FROM _timescaledb_catalog.chunk c
+		JOIN _timescaledb_catalog.hypertable h ON h.id = c.hypertable_id
+		WHERE h.table_name = 'prime_debt'`,
+		skyVat).Scan(&vatRows, &partiallyDecompressed, &rowstoreBytes); err != nil {
+		t.Fatalf("prime_debt chunk state after the Sky migration: %v", err)
 	}
 	if columnsAfter != columnsBefore {
 		t.Errorf("the Sky migration changed prime_debt's columns:\n before %s\n after  %s", columnsBefore, columnsAfter)
@@ -347,8 +371,8 @@ func TestSkyMigrationLeavesPrimeDebtUntouched(t *testing.T) {
 	if vatRows != 0 {
 		t.Errorf("the Sky migration inserted %d protocol row(s) for the Vat; the Vat is an address in the key, not a protocol row", vatRows)
 	}
-	if stillCompressed != compressed {
-		t.Errorf("%d of %d compressed chunks are still compressed after the migration; it must not write to prime_debt", stillCompressed, compressed)
+	if partiallyDecompressed != 0 || rowstoreBytes != 0 {
+		t.Errorf("the Sky migration wrote to prime_debt: %d of %d compressed chunks carry the partial-decompression bit and the row-store heaps hold %d bytes; want 0 and 0", partiallyDecompressed, compressed, rowstoreBytes)
 	}
 	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
 		t.Fatalf("remaining migrations: %v", err)

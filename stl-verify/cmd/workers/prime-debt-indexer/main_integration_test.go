@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -722,5 +723,21 @@ func TestRunIntegration_InvalidVatFlag(t *testing.T) {
 	}, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid vat address")
+	}
+}
+
+// The Sky projection hardcodes this Vat as the prefix of every instrument_key; the two copies must agree
+// or rows written by this indexer project under an identity that is not theirs.
+func TestDefaultVatAddressIsTheSkyProjectionsVat(t *testing.T) {
+	sql, err := os.ReadFile(filepath.Join("..", "..", "..", "db", "migrations", "20260819_140000_materialize_sky_prime_debt.sql"))
+	if err != nil {
+		t.Fatalf("read the Sky migration: %v", err)
+	}
+	want := "'" + strings.TrimPrefix(defaultVatAddress, "0x") + ":' || o.ilk_name"
+	if !strings.Contains(string(sql), want) {
+		t.Fatalf("position_sky_prime_debt does not build its instrument_key from %s; the view and the indexer default have drifted apart", defaultVatAddress)
+	}
+	if strings.ToLower(defaultVatAddress) != defaultVatAddress {
+		t.Fatalf("defaultVatAddress %s is not lowercase; position_key() hashes the exact text", defaultVatAddress)
 	}
 }

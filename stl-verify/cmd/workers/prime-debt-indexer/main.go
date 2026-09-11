@@ -74,10 +74,14 @@ type cliConfig struct {
 	chainID           int64
 }
 
+// The MCD Vat. position_sky_prime_debt (20260819_140000) keys every snapshot under this address on chain 1
+// and prime_debt records neither, so overriding -vat or CHAIN_ID needs that projection to carry them first.
+const defaultVatAddress = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
+
 func parseConfig(args []string) (cliConfig, error) {
 	fs := flag.NewFlagSet("prime-debt-indexer", flag.ContinueOnError)
 	dbURL := fs.String("db", env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"), "PostgreSQL connection string")
-	vatAddr := fs.String("vat", env.Get("VAT_ADDRESS", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"), "MCD Vat contract address")
+	vatAddr := fs.String("vat", env.Get("VAT_ADDRESS", defaultVatAddress), "MCD Vat contract address")
 	rpcURL := fs.String("rpc", env.Get("ETH_RPC_URL", ""), "Ethereum JSON-RPC endpoint (e.g. https://eth-mainnet.g.alchemy.com/v2/<key>)")
 	queueURL := fs.String("queue", env.Get("AWS_SQS_QUEUE_URL", ""), "SQS Queue URL")
 	sweepBlocks := fs.Int("sweep-blocks", 75, "Read debt every N blocks")
