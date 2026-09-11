@@ -22,11 +22,9 @@ JOIN "user"       u ON u.id = o.user_id;
 
 COMMENT ON VIEW position_morpho_vault IS '[Operational] VEC-403 projection: Morpho vault positions as native position rows, one per vault deposit; instrument_key = vault contract address, holder_id = depositor address, quantity = assets in the vault asset''s native decimals, deal_type LOAN. Emits the position_state column contract; closure is applied by materialize_position_projection().';
 
--- Wrapper over the shared materializer: the projection view above holds all the Morpho-vault-specific
--- logic. It refuses first, because holder_id is the depositor's address alone while chain_id comes from
--- the vault, and morpho_vault_position constrains neither against the other.
--- Dropped rather than replaced: keeping the old argument list beside the new one makes a
--- call that omits the run ambiguous, as it did for the spine.
+-- Refuses first: holder_id is the depositor's address alone while chain_id comes from the vault, and
+-- morpho_vault_position constrains neither against the other. Dropped, not replaced: a surviving old
+-- signature makes a run-less call ambiguous.
 DROP FUNCTION IF EXISTS materialize_morpho_vault(integer);
 
 CREATE OR REPLACE FUNCTION materialize_morpho_vault(p_build_id integer DEFAULT 0,
