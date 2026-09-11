@@ -277,9 +277,9 @@ patches:
   # metadata.annotations map — an `add` to /metadata/annotations/... would fail on
   # a missing parent. `name` is a placeholder; `target` selects the resources.
   #
-  # Deployments only: the two Jobs (migrate, transform-bootstrap) are out of scope
-  # per ADR-013, and the controller has Job support disabled. No StatefulSets or
-  # DaemonSets exist in this repo.
+  # Deployments only: the migrate Job is out of scope per ADR-013, and the
+  # controller has Job support disabled. No StatefulSets or DaemonSets exist in
+  # this repo.
   #
   # Requires the platform controller plus RespectIgnoreDifferences=true on the
   # stl ArgoCD Applications (both in the infra repo). Harmless without them —

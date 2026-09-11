@@ -635,6 +635,22 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: transform-bootstrap
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # Backfill window, read by the transform-bootstrap worker at STARTUP (VEC-490),
+  # not when a run is started: a malformed value fails the pod rather than a run
+  # already in flight, and changing the window is a config change plus a rollout.
+  # BOOTSTRAP_FROM is the known VEC-484 history start; leaving it unset derives
+  # each source's earliest raw row instead. BOOTSTRAP_STEP is the per-_bootstrap-call
+  # window. BOOTSTRAP_SOURCE (unset here) scopes a re-run to one source.
+  BOOTSTRAP_FROM: "2025-01-01"
+  BOOTSTRAP_STEP: "720h"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: optimism-watcher-data-validator
 data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"

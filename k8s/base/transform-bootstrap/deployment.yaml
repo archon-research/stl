@@ -1,0 +1,79 @@
+# transform-bootstrap (VEC-490): an idle Temporal worker that copies pre-existing
+# raw history into the transformation layer. The AFTER INSERT triggers only enqueue
+# NEW raw rows, so pre-existing history is copied once by this backfill.
+#
+# A long-running Deployment, not a k8s Job: it polls the Temporal task queue
+# "transform-bootstrap" and idles until someone starts a run from the Temporal UI
+# (Workflow Type "TransformBootstrap"). It registers NO schedule, so nothing runs
+# on an ArgoCD sync and a re-stamped image cannot re-trigger a backfill. A Job was
+# immutable, which forced a hand-pinned image tag (CI tag-stamping would mutate it)
+# and a re-merge to retry; ArgoCD owns the tag here, so that cannot recur, and a
+# retry is starting the workflow again rather than a merge.
+#
+# The run window is BOOTSTRAP_FROM/STEP/SOURCE in the transform-bootstrap
+# ConfigMap, read at startup — changing it is a config change plus a rollout,
+# which is what keeps a re-run reproducible.
+#
+# That ConfigMap is Reloader-watched (ADR-013), so editing it IS a rollout and
+# will cancel a run in flight. With MaximumAttempts 1 and no resumable progress
+# that loses the whole walk rather than restarting it mid-way, so scope a re-run
+# before starting it, never during one.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transform-bootstrap
+spec:
+  # 1 replica: the worker must be up to accept a run. It emits no cronjob runs for
+  # long stretches, which is expected — it is covered by VectorOnDemandWorkerDown
+  # (a slack message: nothing goes stale while it is down, only the ability to
+  # START a run) and deliberately excluded from the scheduled-worker page and from
+  # VectorCronjobAllRunsFailing.
+  replicas: 1
+  # Recreate, per k8s/AGENTS.md "Rollout strategy": this is a single consumer of one
+  # Temporal task queue, and RollingUpdate's maxSurge rounds up to a second pod at
+  # replicas: 1. Declared explicitly (never left to the API-server default) because
+  # SSA prunes only fields ArgoCD owns, so a defaulted strategy can never be
+  # retrofitted — the change is rejected on every sync and blocks the whole
+  # Application while app health stays green (#640).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: transform-bootstrap
+  template:
+    metadata:
+      labels:
+        app: transform-bootstrap
+    spec:
+      serviceAccountName: transform-bootstrap
+      containers:
+        - name: transform-bootstrap
+          image: transform-bootstrap
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            # TEMPORAL_HOST_PORT/NAMESPACE + BOOTSTRAP_FROM/STEP/SOURCE.
+            - configMapRef:
+                name: transform-bootstrap
+            # DATABASE_URL. Reuses the transform-worker Secret (created by the
+            # transform-worker ExternalSecret); bootstrap deploys alongside the worker.
+            - secretRef:
+                name: transform-worker
+          resources:
+            # The backfill runs in-process once started, so keep the old Job's limits;
+            # requests stay low because the worker idles almost always.
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+      # 90s = lifecycle.PodTerminationGracePeriod, asserted for every Go worker
+      # Deployment by TestEveryGoWorkerDeploymentGrantsThePodGracePeriod. The old
+      # Job's 60s is below it.
+      #
+      # A rollout mid-run cancels the in-flight backfill. That is safe (the
+      # _bootstrap_* upserts are IS DISTINCT FROM guarded, so starting again
+      # re-does the work and reaches the same state) but it restarts from the
+      # first window, so schedule deploys around an active run.
+      terminationGracePeriodSeconds: 90

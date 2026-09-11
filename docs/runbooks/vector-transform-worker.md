@@ -115,8 +115,19 @@ the raw count, so it surfaces as negative drift above.
    `SELECT tgname, tgenabled FROM pg_trigger WHERE tgrelid = 'public.<table>'::regclass AND NOT tgisinternal`
    (expect `_transform_enqueue`, enabled). If missing/disabled, re-apply the
    migration or re-enable, then re-bootstrap the gap window.
-4. Static positive drift after bootstrap: re-run `transform-bootstrap` for the
-   affected source (`-source <table>`); the guarded upsert makes it idempotent.
+4. Static positive drift after bootstrap: re-run the backfill by starting the
+   `transform-bootstrap` workflow (Temporal UI → Start Workflow, task queue
+   `transform-bootstrap`, Workflow Type `TransformBootstrap`, no input, or
+   `temporal workflow start --namespace vector --task-queue transform-bootstrap
+   --type TransformBootstrap --workflow-id transform-bootstrap`). Use that exact
+   workflow ID, unsuffixed — it is the only guard against two concurrent walks.
+   To scope the re-run to one source, set `BOOTSTRAP_SOURCE=<table>` in the
+   transform-bootstrap ConfigMap and let the worker roll **before** starting the
+   run: that edit is itself a rollout (Reloader), so doing it during a run
+   cancels it with no retry and no resume. Revert it afterwards, or every later
+   run stays narrowed to that table. The guarded upsert makes the run itself
+   idempotent. See docs/runbooks/vector-cronjobs.md, "Special case:
+   transform-bootstrap".
 5. Negative drift: investigate raw deletes / an errant transform; do not ignore.
 
 Enabling: this rule is warning because it is also nonzero during the initial

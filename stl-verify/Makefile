@@ -2361,7 +2361,9 @@ _docker-release-cronjob-%-internal:
 # transform-bootstrap (VEC-490): the one-off VEC-484 history backfill. It is not a
 # cronjob (no Temporal schedule) so it is not auto-discovered, but it ships in the
 # shared cronjob ECR repo with a name-prefixed tag (transform-bootstrap-<sha>), so
-# it needs no dedicated repo. Run as a one-off k8s Job, not on a schedule.
+# it needs no dedicated repo. Runs as a long-lived Deployment that idles on its
+# task queue (VEC-490); an operator starts a run by hand, so it is neither a k8s
+# Job nor scheduled.
 docker-release-transform-bootstrap: ecr-login _docker-release-transform-bootstrap-internal
 
 _docker-release-transform-bootstrap-internal:

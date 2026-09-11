@@ -1,6 +1,6 @@
 //go:build integration
 
-package main
+package transform_bootstrap
 
 import (
 	"context"
@@ -20,13 +20,13 @@ func TestMain(m *testing.M) {
 	os.Exit(testutil.RunShared(m, testutil.Shared{TimescaleDSN: &sharedDSN}))
 }
 
-// TestRunBootstrap_CopiesHistoryAndSeedsParity exercises the correctness-critical
-// bootstrap binary end to end: it seeds a raw row, clears the change queue so only
-// the bootstrap (not the worker) can materialise it, runs runBootstrap, and asserts
-// the transformed table is populated and the parity ledger seeded (drift 0). This
-// covers the binary's window loop, single-connection session setup, the
+// TestRun_CopiesHistoryAndSeedsParity exercises the correctness-critical
+// bootstrap service end to end: it seeds a raw row, clears the change queue so only
+// the bootstrap (not the worker) can materialise it, runs Run, and asserts the
+// transformed table is populated and the parity ledger seeded (drift 0). This
+// covers the service's window loop, single-connection session setup, the
 // _bootstrap_<t>() copy, and the _parity_verify_all ledger seed.
-func TestRunBootstrap_CopiesHistoryAndSeedsParity(t *testing.T) {
+func TestRun_CopiesHistoryAndSeedsParity(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
@@ -45,8 +45,9 @@ func TestRunBootstrap_CopiesHistoryAndSeedsParity(t *testing.T) {
 
 	// One window covering the seeded row, scoped to this one source.
 	from := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	if err := runBootstrap(ctx, pool, from, 365*24*time.Hour, "morpho_market_state", slog.Default()); err != nil {
-		t.Fatalf("runBootstrap: %v", err)
+	p := Params{From: from, Step: 365 * 24 * time.Hour, Source: "morpho_market_state"}
+	if err := Run(ctx, pool, p, slog.Default()); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 
 	if got := countTransformed(ctx, t, pool); got != 1 {
@@ -64,11 +65,11 @@ func TestRunBootstrap_CopiesHistoryAndSeedsParity(t *testing.T) {
 	}
 }
 
-// TestRunBootstrap_DerivesStartFromEarliestRawRow: with a zero from (the -from-unset
-// sentinel), runBootstrap starts each source at its own earliest raw row rather than a
+// TestRun_DerivesStartFromEarliestRawRow: with a zero Params.From (the
+// derive-per-source sentinel), Run starts each source at its own earliest raw row rather than a
 // fixed default, so history older than any hardcoded start is still copied. The seeded
 // row predates the old 2025-01-01 default, so a correct derive copies it and parity is 0.
-func TestRunBootstrap_DerivesStartFromEarliestRawRow(t *testing.T) {
+func TestRun_DerivesStartFromEarliestRawRow(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
@@ -81,8 +82,9 @@ func TestRunBootstrap_DerivesStartFromEarliestRawRow(t *testing.T) {
 	}
 
 	// Zero from => derive per source from min(raw time column).
-	if err := runBootstrap(ctx, pool, time.Time{}, 30*24*time.Hour, "morpho_market_state", slog.Default()); err != nil {
-		t.Fatalf("runBootstrap: %v", err)
+	p := Params{Step: 30 * 24 * time.Hour, Source: "morpho_market_state"}
+	if err := Run(ctx, pool, p, slog.Default()); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 
 	if got := countTransformed(ctx, t, pool); got != 1 {
