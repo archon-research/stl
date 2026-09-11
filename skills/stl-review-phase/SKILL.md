@@ -8,7 +8,9 @@ description: Repo-specific review lenses for stl. Use after a substantive change
 Use the host's dedicated review workflow before applying these lenses:
 
 - **Claude Code:** run `/code-review` (add `--fix` to apply findings to the
-  working tree).
+  working tree). If it is unavailable, perform a separate manual pass over
+  the four lenses below and state that no dedicated review workflow was
+  available.
 - **Codex:** run `codex review --uncommitted` for working-tree changes. For a
   branch or commit review, use `codex review --base <branch>` or
   `codex review --commit <sha>`. Then verify the four lenses below in a

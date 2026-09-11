@@ -12,7 +12,8 @@ SKILLFILE_BIN := ./bin/skillfile
 SKILLFILE_RELEASE ?= latest
 SKILLFILE_FORCE_INSTALL ?= 0
 SKILLFILE_MANIFEST := ./Skillfile
-LOCAL_SKILLS := $(notdir $(wildcard skills/*))
+LOCAL_SKILL_SOURCES := $(shell awk '$$1 == "local" && $$2 == "skill" { print $$3 }' $(SKILLFILE_MANIFEST))
+LOCAL_SKILLS := $(notdir $(LOCAL_SKILL_SOURCES))
 SKILL_DEPLOY_TARGETS := .claude/skills .codex/skills .github/skills
 
 UNAME_S := $(shell uname -s)
@@ -79,18 +80,34 @@ skills-install-dry-run: skillfile-install-cli ## Preview install/update changes 
 
 skills-deploy-local: ## Sync canonical local skills to every generated deployment target
 	@set -e; \
-	for skill in $(LOCAL_SKILLS); do \
-		for target in $(SKILL_DEPLOY_TARGETS); do \
+	for source in $(LOCAL_SKILL_SOURCES); do \
+		if [ ! -d "$$source" ]; then \
+			echo "Local skill source is missing: $$source"; \
+			exit 1; \
+		fi; \
+	done; \
+	for target in $(SKILL_DEPLOY_TARGETS); do \
+		managed="$$target/.skillfile-local-skills"; \
+		if [ -f "$$managed" ]; then \
+			while IFS= read -r skill; do \
+				[ -z "$$skill" ] && continue; \
+				case " $(LOCAL_SKILLS) " in *" $$skill "*) continue ;; esac; \
+				case "$$skill" in */*|.|..) echo "Invalid managed skill name: $$skill"; exit 1 ;; esac; \
+				rm -rf "$$target/$$skill"; \
+			done < "$$managed"; \
+		fi; \
+		for source in $(LOCAL_SKILL_SOURCES); do \
+			skill="$${source##*/}"; \
 			mkdir -p "$$target/$$skill"; \
-			rsync -a --delete "skills/$$skill/" "$$target/$$skill/"; \
+			rsync -a --delete "$$source/" "$$target/$$skill/"; \
 		done; \
+		printf '%s\n' $(LOCAL_SKILLS) > "$$managed"; \
 	done
 
-skills-validate: skillfile-install-cli ## Validate Skillfile and checked-in Claude copies
+skills-validate: skillfile-install-cli ## Validate Skillfile and generated local skill copies
 	@$(SKILLFILE_BIN) validate
 	@set -e; \
-	for source in skills/*; do \
-		[ -d "$$source" ] || continue; \
+	for source in $(LOCAL_SKILL_SOURCES); do \
 		for target in $(SKILL_DEPLOY_TARGETS); do \
 			deployed="$$target/$$(basename "$$source")"; \
 			if [ ! -d "$$deployed" ] || ! diff -qr "$$source" "$$deployed" >/dev/null; then \
@@ -100,8 +117,8 @@ skills-validate: skillfile-install-cli ## Validate Skillfile and checked-in Clau
 		done; \
 	done
 # Orphan check disabled: remote-sourced skills (e.g. the github-hosted gh-stack)
-# deploy into .claude/skills/ but have no local skills/ source, so they would be
-# flagged here. The stale-deployment loop above still guards local skills.
+# have no local source, so they would be flagged here. The stale-deployment loop
+# above still guards local skills.
 #	for deployed in .claude/skills/*; do \
 #		[ -d "$$deployed" ] || continue; \
 #		source="skills/$$(basename "$$deployed")"; \
