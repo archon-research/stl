@@ -3386,6 +3386,7 @@ BS_PROXY_SUMMED = "7b" * 20
 BS_PROXY_DIRECT_DISABLED_ORACLE = "8b" * 20
 BS_PROXY_SEED_TIEBREAK = "9b" * 20
 BS_PROXY_WINDOW_TIEBREAK = "ac" * 20
+BS_PROXY_ZERO_UNPRICEABLE = "bc" * 20
 
 BS_VAULT_HEX = "b0" * 20
 _BS_PROTOCOL_HEX = "b1" * 20
@@ -3654,6 +3655,21 @@ async def seed_balance_series_positions(db_url: str) -> None:
                 balance=BS_DISABLED_DIRECT_BALANCE,
                 block=1000,
                 tx="ca" * 32,
+                direction="sweep",
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            # An emptied position in the same unpriceable token: nothing can
+            # price it, and it is worth nothing regardless.
+            await insert_allocation_position(
+                conn,
+                token_id=disabled_direct_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_ZERO_UNPRICEABLE,
+                balance=Decimal("0"),
+                block=1000,
+                tx="cf" * 32,
                 direction="sweep",
                 created_at=three_days_ago,
                 tx_amount=0,

@@ -884,6 +884,8 @@ class AllocationRepository:
                     if series == "balance" and row.balance_usd is not None
                     else None
                 ),
+                priced_entity_count=(row.priced_entity_count if series == "balance" else None),
+                entity_count=(row.entity_count if series == "balance" else None),
             )
             for row in rows
         ]
@@ -1950,6 +1952,12 @@ valued_rows AS MATERIALIZED (
         ap.tx_hash,
         ap.created_at,
         CASE
+            -- An empty position is worth nothing whatever it is denominated in
+            -- and whatever it would have been priced at, so it is valued
+            -- without consulting a price. Arithmetically this arm is what
+            -- `0 * price` would give, except that in SQL `0 * NULL` is NULL,
+            -- which would report the position as unpriceable.
+            WHEN COALESCE(ap.underlying_value, ap.balance) = 0 THEN 0
             -- Same refusal as every other valuation read: a row whose own
             -- underlying disagrees with the registry's is denominated in a
             -- different asset than the price multiplies, so it is not priced.
@@ -1966,9 +1974,9 @@ valued_rows AS MATERIALIZED (
            LIKE '%' || LOWER(CAST(:protocol_name AS TEXT)) || '%' ESCAPE '\\')
 ),
 seed AS (
-    -- Each entity's most recently recorded state strictly before the window --
-    -- priced or not (see `poisoned` below for why an unpriceable one is kept
-    -- rather than skipped in favour of an older price). Resolved as a single
+    -- Each entity's most recently recorded state strictly before the window,
+    -- priced or not: the newest state decides whether the entity counts as
+    -- priced, so an unpriceable one has to reach the aggregate. Resolved as a single
     -- DISTINCT ON scan rather than a per-entity correlated subquery -- the
     -- prototype ran it as a lateral and paid 36 loops for spark's 58 tokens
     -- (same shape of fix as #728 on the exposure read).
@@ -2027,16 +2035,15 @@ per_entity AS (
         o.token_id,
         -- gapfill + locf, not the plain time_bucket the other bucketed reads
         -- use: a bucket with no observation of its own has to report the last
-        -- known value, not nothing. Ignores an unpriceable observation rather
-        -- than locf-ing straight through it -- `poisoned` below is what stops
-        -- that observation from being silently skipped over instead.
+        -- known value, not nothing. The FILTER carries the newest PRICED value;
+        -- priced_at and last_event_at below are what tell the aggregate whether
+        -- that value is still the entity's current state.
         locf(last(o.value_usd, o.created_at) FILTER (WHERE o.value_usd IS NOT NULL)) AS priced_value,
         -- The created_at of that same latest-priced observation, and of the
-        -- latest observation of ANY kind. Comparing the two is how `poisoned`
-        -- tells "not observed yet" (both NULL -- a legitimate zero
-        -- contribution) apart from "observed, but currently unpriceable"
-        -- (the any-kind one is newer): locf on value_usd alone cannot, since
-        -- both read as NULL there.
+        -- latest observation of ANY kind. Comparing the two separates "not
+        -- observed yet" (both NULL) from "observed, but its current state is
+        -- unpriceable" (the any-kind one is newer). locf on value_usd alone
+        -- cannot: both read as NULL there.
         locf(last(o.created_at, o.created_at) FILTER (WHERE o.value_usd IS NOT NULL)) AS priced_at,
         locf(last(o.created_at, o.created_at)) AS last_event_at
     FROM deduped_observations o
@@ -2047,22 +2054,28 @@ SELECT
     CAST(NULL AS INTEGER) AS event_count,
     CAST(NULL AS NUMERIC) AS total_tx_amount,
     CAST(NULL AS NUMERIC) AS net_flow_usd,
-    -- NOT a plain SUM. A bucket before any entity has been observed has no
-    -- known value at all (every entity's priced_value is NULL), and SUM
-    -- correctly reports NULL there. But an entity that HAS been observed and
-    -- whose latest recorded state is unpriceable (a disabled oracle_asset, a
-    -- token missing from token_price_current, a divergent underlying) is
-    -- PRESENT, not absent -- and a plain SUM silently skips its NULL
-    -- contribution, returning a confident total for the entities that
-    -- happen to be known. That is the same silent-zero failure class
-    -- VEC-537 describes, one step removed: the number looks plausible and is
-    -- missing a real position. So the whole bucket goes NULL instead,
-    -- whenever any entity's most recent state is unpriceable.
-    CASE
-        WHEN bool_or(last_event_at IS NOT NULL AND (priced_at IS NULL OR last_event_at > priced_at))
-            THEN NULL
-        ELSE SUM(priced_value)
-    END AS balance_usd
+    -- The total of the entities this bucket can currently price, and how many
+    -- of the entities it knows about that is. An entity counts as priced only
+    -- when its NEWEST recorded state is the one that carries the price: an
+    -- older priced observation locf'd past a newer unpriceable one is a stale
+    -- number for a position whose current state is unknown, so it is excluded
+    -- from the total and counted as unpriced rather than quietly standing in.
+    --
+    -- Reporting the subtotal alongside the counts is what lets a caller tell a
+    -- complete total from a partial one. SUM alone cannot: it skips NULL
+    -- members, so a bucket missing a real position returns a confident number
+    -- (VEC-537's failure, one step removed). Callers that require completeness
+    -- compare the two counts; the retirement of the partial state once every
+    -- position is priceable is VEC-782.
+    SUM(priced_value) FILTER (
+        WHERE last_event_at IS NOT NULL AND priced_at IS NOT NULL AND priced_at >= last_event_at
+    ) AS balance_usd,
+    COUNT(*) FILTER (
+        WHERE last_event_at IS NOT NULL AND priced_at IS NOT NULL AND priced_at >= last_event_at
+    ) AS priced_entity_count,
+    -- Entities observed at or before this bucket. One never observed yet is
+    -- not part of the prime here and is not counted as missing.
+    COUNT(*) FILTER (WHERE last_event_at IS NOT NULL) AS entity_count
 FROM per_entity
 GROUP BY bucket_start
 ORDER BY bucket_start DESC

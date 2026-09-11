@@ -44,6 +44,7 @@ from tests.integration.seed import (
     BS_CORRECTED_ORIGINAL_UNDERLYING_VALUE,
     BS_DIRECT_BALANCE,
     BS_DIRECT_PRICE,
+    BS_MIXED_DIRECT_BALANCE,
     BS_PROXY_CARRY,
     BS_PROXY_CORRECTED,
     BS_PROXY_DIRECT,
@@ -54,6 +55,7 @@ from tests.integration.seed import (
     BS_PROXY_SEEDED,
     BS_PROXY_SUMMED,
     BS_PROXY_WINDOW_TIEBREAK,
+    BS_PROXY_ZERO_UNPRICEABLE,
     BS_SEED_TIEBREAK_FLOW_VALUE,
     BS_SEEDED_UNDERLYING_VALUE,
     BS_SUMMED_DIRECT_BALANCE,
@@ -161,14 +163,58 @@ async def test_divergent_underlying_is_refused(repo: AllocationRepository) -> No
     assert all(b.balance_usd is None for b in buckets), [b.balance_usd for b in buckets]
 
 
-async def test_unpriceable_entity_poisons_the_total_instead_of_being_dropped(repo: AllocationRepository) -> None:
+async def test_unpriceable_entity_is_reported_as_missing_coverage_not_dropped(
+    repo: AllocationRepository,
+) -> None:
     # BS_PROXY_MIXED holds a priced direct holding AND a divergent (unpriceable)
-    # receipt row. A plain SUM would silently skip the unpriceable entity and
-    # report just the direct holding's value -- a confident but wrong total,
-    # the exact VEC-537 failure class B5 closes. The whole bucket must go None.
+    # receipt row. A plain SUM would skip the unpriceable entity and report just
+    # the direct holding's value as if it were the whole proxy -- a confident
+    # but short total, the VEC-537 failure class. The total is still the priced
+    # subtotal, but the counts say it covers only one of the two entities, so a
+    # caller can tell it apart from a complete one.
     buckets = await _buckets(repo, BS_PROXY_MIXED)
     assert buckets, "expected buckets for the mixed proxy"
-    assert all(b.balance_usd is None for b in buckets), [b.balance_usd for b in buckets]
+    priced = BS_MIXED_DIRECT_BALANCE * BS_DIRECT_PRICE
+    observed = [b for b in buckets if b.entity_count]
+    assert observed, "expected buckets after the first observation"
+    for bucket in observed:
+        assert bucket.balance_usd == priced, [b.balance_usd for b in observed]
+        assert bucket.entity_count == 2, [b.entity_count for b in observed]
+        assert bucket.priced_entity_count == 1, [b.priced_entity_count for b in observed]
+        assert bucket.priced_entity_count < bucket.entity_count
+
+
+async def test_an_emptied_position_is_worth_zero_even_when_it_cannot_be_priced(
+    repo: AllocationRepository,
+) -> None:
+    # The token's only oracle is disabled, so no price exists for it. The
+    # position is empty, so its value is zero at any price and the bucket is
+    # fully covered -- it is not missing information, there is nothing to miss.
+    # In SQL `0 * NULL` is NULL, which would have reported this as unpriceable
+    # and dragged the bucket into partial coverage on a position worth nothing.
+    buckets = await _buckets(repo, BS_PROXY_ZERO_UNPRICEABLE)
+    observed = [b for b in buckets if b.entity_count]
+    assert observed, "expected buckets after the first observation"
+    for bucket in observed:
+        assert bucket.balance_usd == 0, [b.balance_usd for b in observed]
+        assert bucket.priced_entity_count == bucket.entity_count, [
+            (b.priced_entity_count, b.entity_count) for b in observed
+        ]
+
+
+async def test_a_fully_priced_proxy_reports_equal_counts(repo: AllocationRepository) -> None:
+    # The counts are only meaningful if they agree when nothing is missing --
+    # otherwise a caller cannot use priced < total as the partial signal.
+    buckets = await _buckets(repo, BS_PROXY_DIRECT)
+    observed = [b for b in buckets if b.entity_count]
+    assert observed, "expected buckets after the first observation"
+    for bucket in observed:
+        assert bucket.priced_entity_count == bucket.entity_count, [
+            (b.priced_entity_count, b.entity_count) for b in observed
+        ]
+    # A bucket before the entity exists reports no entities rather than an
+    # entity that is merely unpriced, so "partial" never fires on empty history.
+    assert all(b.priced_entity_count == 0 for b in buckets if not b.entity_count)
 
 
 async def test_multiple_entities_under_one_proxy_are_summed(repo: AllocationRepository) -> None:
