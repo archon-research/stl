@@ -1,28 +1,6 @@
--- VEC-621: the concept taxonomy, promoted from the ref_* vocabularies. 352 CONCEPT nodes +
--- 149 NARROWER_THAN edges, generated 2026-08-26 from the live ref_* tables (asset classes,
--- security types/subtypes, sectors, jurisdictions, currencies, ratings, entity types, roles).
---
--- The promotion test (ADR-0007 §2): a vocabulary value becomes a node only when something
--- needs to point at it — a NARROWER_THAN parent, a classification membership, a peg target.
--- Deal, origination and corporate-action types fail the test and stay reference rows. The
--- ref_* tables keep their rows and inbound FKs; the vocabulary stays authoritative for the
--- code, the node for the edges.
---
--- Security-type ids are namespaced concept-st-<asset_class>-<type> because type codes repeat
--- across asset classes (OTHER appears 12 times). Every insert is a literal: this file reads
--- no other table at apply time, so it cannot drift with the ref_* content after the fact —
--- later ref changes promote via new migrations.
---
--- actor is 'migration:20260904_120100', not 'seed': the column contract is a real, non-shared
--- principal (PR-2.5) and these rows are immutable, so a placeholder would be permanent. The
--- migration filename is the attributable actor for a seed; a curator's principal arrives with
--- VEC-624 for curated appends.
---
--- sec_store_append_guard (20260904_120000) computes a content_hash for every row on insert, so
--- these 501 rows are inside the hash chain from the first append (AR-1.2), and it assigns
--- ingest_xid, which no row here supplies.
---
--- Requires 20260904_120000 (stores + vocabularies).
+-- VEC-621: the concept taxonomy promoted from the ref_* vocabularies (ADR-0007 §2) — 352 CONCEPT
+-- nodes and 149 NARROWER_THAN edges, every insert a literal so this file cannot drift with ref_*.
+-- Requires 20260904_120000. The promotion test, id namespacing and actor choice are in the PR.
 
 INSERT INTO sec_node (id, record_type, status, attrs, valid_from, actor, change_reason_code, change_reason, source_system) VALUES
  ('concept-instrument_type','CONCEPT','ACTIVE','{"concept_class": "instrument_type", "label": "Instrument type (root)", "definition": "Root of the instrument classification taxonomy: asset class L1 -> security type L2 -> security subtype L3.", "vocabulary_source": "house"}'::jsonb,'2026-08-26','migration:20260904_120100','SEED_LOAD','Seed: house','house'),
