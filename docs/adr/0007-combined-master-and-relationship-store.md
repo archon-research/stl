@@ -1126,10 +1126,11 @@ each is named with where it lands. Nothing in this list is settled by this docum
 | D-3 / PRD §8 (phasing) | this document specifies the Phase-2 model in full — bitemporality, hash chain from row one, GDPR pseudonymisation, 39 relationship types. The PRD prescribes a bounded, partly throwaway Phase 1 over the TerminusDB underlyings. The position taken: the model is specified once and adopted in waves, because the store is empty today and retrofitting bitemporality or the hash chain onto populated tables is the expensive order. The Phase-1 slice is real and named | VEC-631 (TerminusDB underlyings, Atlas §6, retire the legacy access package); wave 1 is #875 |
 | CH-4 (NFAT beacon for Laniakea phase one) | not addressed, and not deferred anywhere until now. The model imposes no obstacle — a beacon reads the pivot like any other consumer — but the requirement is numbered and needs an owner | VEC-762 |
 
-## Realization (explicitly not decided here)
+## Realization (decided separately from the model)
 
-The model above is the contract. The realization decisions below are open, to be made
-separately and on evidence, and none of them may change the model:
+The model above is the contract. These decisions are made separately and on evidence, and none
+of them may change the model. §1 is settled — wave 1 took it, and the entry records what it took
+and what followed. §2 to §4 are open:
 
 1. **Node attribute representation.** Fixed typed columns versus a JSON document per node (join
    keys as real columns, attributes in a payload). The trade, recorded as input:
