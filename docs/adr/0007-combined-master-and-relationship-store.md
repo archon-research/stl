@@ -223,6 +223,13 @@ Semantics, independent of realization:
 - **Append-only, close-and-open** (AR-1.1, AR-1.4). A change closes the current row and opens a
   new one; a re-point, a type change, an ended link, and a backdated late-learned link are all
   data changes. A retraction is a tombstone append that supersedes the retracted row.
+- **Valid time is total, and `valid_to` is part of the key.** `valid_to` is `NOT NULL` and
+  carries an `'infinity'` sentinel while the window is open, and it sits in the primary key of
+  both stores. That is what makes close-and-open, an ended link and a tombstone ordinary appends
+  at `processing_version` 0: with `valid_to` outside the key a closing row collides with the row
+  it closes, so every curated edit would have to allocate a correction version, which ADR-0006 §3
+  reserves for correction runs. A tombstone is a zero-length window, and it withdraws that
+  **window** — a record closed and reopened takes one tombstone per window.
 - **Current state is a two-step read**: latest version per logical edge
   (`src_id`, `rel_type`, `dst_id`, `edge_disc`) first, then the valid-time window. The order
   matters — filtering on validity first resurrects superseded edges.
@@ -726,7 +733,7 @@ adding or changing a rule is a reviewed change, and rule ids are stable referenc
 | GQ-02 | `rel_weight` requires `weight_basis` | engine (CHECK) | reject |
 | GQ-03 | `status` legal for the node's kind | engine (FK on record_type, status) | reject |
 | GQ-04 | node id prefix matches its kind | engine (CHECK) | reject |
-| GQ-05 | address values are lowercase hex, no 0x | engine (CHECK) | reject |
+| GQ-05 | address values are lowercase hex, no 0x | validator | reject |
 | GQ-06 | `valid_from < valid_to` | engine (CHECK) | reject |
 | GQ-07 | spine completeness: actor, reason code + text, source_system present | engine (NOT NULL) | reject |
 | GQ-10 | structural identity per kind (a token has address + chain) | validator, REQUIRED | reject write |
@@ -1057,7 +1064,7 @@ technology must enforce it; "platform" means it lives outside this store.
 | PRD | requirement | where it lands |
 |---|---|---|
 | AR-1.1 | append-only, no in-place update/delete | model: both stores append-only by contract; enforced on Postgres per ADR-0006 §1 |
-| AR-1.2 | immutable records, tamper-evident | model: per-record content hash **from the first append**; chaining/anchoring mechanism is a realization choice |
+| AR-1.2 | immutable records, tamper-evident | model: per-record content hash **from the first append**; chaining/anchoring mechanism is a realization choice. Adding a column to either store later changes the hash of rows appended **after** it, never of rows already stored, so the chain stays verifiable across a schema change |
 | AR-1.3 | storage-level deletion prevention | realization: ADR-0006 §1 — INSERT-only application role, statement-level guard trigger, no-retention conformance test driven by `schema_master.json` |
 | AR-1.4 | retraction as tombstone append | model: tombstone supersession, §3 |
 | AR-1.5 | retention per data class | platform/realization; the model never deletes; derived pivot rows are regenerable and need only live while manifests cite them |
@@ -1134,6 +1141,12 @@ separately and on evidence, and none of them may change the model:
    | Typing | untyped payload values | typed columns |
    | Versioning (SCD2) | by row; payload diff is manual | by row; column diff is direct |
    | Query on an attribute | JSON/GIN index, or promote to a column | plain B-tree index |
+
+   **Decided in wave 1**: kind-specific attributes live in an `attrs jsonb` document, with the
+   identity contract — id, `record_type`, status, the valid-time and provenance spine — as typed
+   columns. One consequence is recorded rather than left implicit: GQ-05 (address values lowercase
+   hex, no `0x`) had no column to hang a `CHECK` on and moves from engine enforcement to the
+   validator, joining the cross-row structural rules.
 
    The shape mechanism (§6) narrows this trade: required fields and datatypes are enforced by
    shapes in either representation, so the residual difference is typing depth and query
