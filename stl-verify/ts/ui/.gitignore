@@ -28,3 +28,4 @@ vite.config.d.ts
 *.njsproj
 *.sln
 *.sw?
+dist-curation
