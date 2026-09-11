@@ -891,12 +891,21 @@ class AllocationActivityBucketResponse(BaseModel):
     """Allocation activity aggregated into a single time bucket."""
 
     bucket_start: datetime = Field(description="Inclusive start of the time bucket (UTC).")
-    event_count: int = Field(description="Number of activity events in the bucket.", examples=[42])
-    total_tx_amount: PlainDecimal = Field(
-        description="Sum of `tx_amount` across the bucket's events, serialized as a JSON string.",
+    event_count: int | None = Field(
+        default=None,
+        description="Number of activity events in the bucket. Null on `series=balance`, which does not compute it.",
+        examples=[42],
+    )
+    total_tx_amount: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Sum of `tx_amount` across the bucket's events, serialized as a JSON string. Null on "
+            "`series=balance`, which does not compute it."
+        ),
         examples=["1234567890000000000000"],
     )
-    net_flow_usd: PlainDecimal = Field(
+    net_flow_usd: PlainDecimal | None = Field(
+        default=None,
         description=(
             "Signed net flow valued in USD (inflows positive, outflows negative). Only receipt-token "
             "flows are valued: each is converted to underlying units at its row's share ratio "
@@ -905,9 +914,47 @@ class AllocationActivityBucketResponse(BaseModel):
             "no valued row at all, then priced at the receipt token's latest underlying oracle "
             "price. Rows whose recorded underlying diverges from the registry's are refused and "
             "contribute 0, as do direct holdings. Lets clients reconstruct a balance series by "
-            "anchoring at the current total and cumulating net flows backwards."
+            "anchoring at the current total and cumulating net flows backwards. Null on "
+            "`series=balance`, which does not compute it."
         ),
         examples=["1234567.89"],
+    )
+    balance_usd: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Position value in USD read from each bucket's own recorded state, present only when "
+            "`series=balance`. Unlike `net_flow_usd` this needs no client-side reconstruction and no "
+            "anchor, so it is valid for a window that does not end at now. It is also a different "
+            "measure: true mark-to-market rather than cost basis, so a share-price move on a receipt "
+            "token appears here even in a bucket with no transaction, and yield accrual is included. "
+            "Valued as COALESCE(underlying_value, balance) x the registry underlying's latest oracle "
+            "price, refusing any row whose own underlying diverges from the registry's. Null on "
+            "`series=flow`. Totals only the positions this bucket can price -- compare "
+            "`priced_entity_count` with `entity_count` before treating it as complete."
+        ),
+        examples=["3280541138.58"],
+    )
+    priced_entity_count: int | None = Field(
+        default=None,
+        description=(
+            "How many of the bucket's positions `balance_usd` accounts for, present only when "
+            "`series=balance`. A position counts when its most recent recorded state could be "
+            "priced; one carrying only an older price, superseded by a newer state that cannot be "
+            "priced, does not. Null on `series=flow`."
+        ),
+        examples=[31],
+    )
+    entity_count: int | None = Field(
+        default=None,
+        description=(
+            "How many positions the bucket knows about, present only when `series=balance`. Equal "
+            "to `priced_entity_count` when the total is complete, and greater when some position "
+            "could not be priced -- pricing is all-or-nothing per token, so one token without an "
+            "enabled oracle makes every position in it unpriceable. Counts only positions observed "
+            "at or before this bucket, so a leading bucket reports 0 rather than treating a "
+            "position that does not exist yet as missing. Null on `series=flow`."
+        ),
+        examples=[58],
     )
 
 
@@ -984,13 +1031,25 @@ async def list_allocation_activity(
     ] = None,
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=1000, description="Max results (default 100, max 1000)."),
+    series: Literal["flow", "balance"] = Query(
+        default="flow",
+        description=(
+            "Which aggregated series to return. `flow` (default) keeps the existing behaviour: event "
+            "counts, tx-amount sums and signed USD net flow, from which a client reconstructs a "
+            "balance by anchoring at the current total. `balance` returns `balance_usd` read directly "
+            "from each bucket's recorded state — substantially cheaper, valid for windows that do not "
+            "end at now, and mark-to-market rather than cost basis. Ignored unless "
+            "`aggregation_method=end-period`."
+        ),
+    ),
     service: AllocationService = Depends(_get_service),
     allowed: frozenset[str] | None = Depends(allowed_prime_vaults),
 ) -> AllocationActivityEnvelope:
     """Errors:
 
-    - 422 if ``prime_id`` is malformed (or ``limit`` is out of range), or if
-      ``aggregation_method=end-period`` without a ``prime_id`` while authorization is on.
+    - 422 if ``prime_id`` is malformed (or ``limit`` is out of range), if
+      ``aggregation_method=end-period`` without a ``prime_id`` while authorization is on,
+      or if ``series=balance`` without ``aggregation_method=end-period``.
     - 200 with an empty ``data`` list if filters match no rows — including when
       ``prime_id`` is well-formed but unknown, and when the caller may not view
       it. ``prime_id`` is treated as a filter here, not a path resource, so
@@ -1004,6 +1063,10 @@ async def list_allocation_activity(
         # A bucket is one number over many primes; scope it to a named prime
         # rather than serving the caller's whole permitted set as a total.
         raise HTTPException(status_code=422, detail="prime_id is required for aggregated activity")
+    if series != "flow" and not time_series.is_bucketed:
+        # series picks between two aggregate SQL statements that only run
+        # when aggregation_method=end-period is set.
+        raise HTTPException(status_code=422, detail="series is only applicable with aggregation_method=end-period")
     # Selective = an index-seekable exact filter. Substring filters
     # (protocol_name/token_symbol) and low-cardinality filters (chain_id,
     # action_type) do not qualify because they cannot prune chunks.
@@ -1029,6 +1092,7 @@ async def list_allocation_activity(
                 to_timestamp=time_series.to_timestamp,
                 bucket_seconds=time_series.bucket.total_seconds(),
                 limit=limit,
+                series=series,
             )
             return AllocationActivityEnvelope(
                 AggregatedAllocationActivityEnvelope(

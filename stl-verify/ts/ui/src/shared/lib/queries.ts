@@ -447,7 +447,18 @@ export const activitySeriesQuery = (primeId: string, window: SeriesWindow) =>
   api.queryOptions(
     'get',
     '/v1/allocations/activity',
-    { params: { query: { prime_id: primeId, ...bucketQuery(window) } } },
+    {
+      params: {
+        query: {
+          prime_id: primeId,
+          // Each bucket's own recorded position value: mark-to-market, sees
+          // yield accrual, and needs no anchor, so it is valid for a window
+          // that does not end at now.
+          series: 'balance',
+          ...bucketQuery(window),
+        },
+      },
+    },
     {
       ...CACHE.series,
       select: selectActivityBuckets,

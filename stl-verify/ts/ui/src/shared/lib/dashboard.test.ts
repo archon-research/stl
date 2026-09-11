@@ -33,6 +33,7 @@ import {
   getPrimeGroupKey,
   getProtocolLabel,
   groupPrimesByVault,
+  latestAllocationCoverage,
   parseNumericValue,
   riskModelCaptionSuffix,
   sortAllocations,
@@ -524,6 +525,46 @@ describe('toChartSeries', () => {
     );
 
     expect(series).toEqual([]);
+  });
+});
+
+describe('latestAllocationCoverage', () => {
+  it('reports null for a fully-priced bucket', () => {
+    const coverage = latestAllocationCoverage([
+      { priced_entity_count: 58, entity_count: 58 },
+    ]);
+
+    expect(coverage).toBeNull();
+  });
+
+  it('names the counts for a partially-priced bucket', () => {
+    const coverage = latestAllocationCoverage([
+      { priced_entity_count: 49, entity_count: 58 },
+    ]);
+
+    expect(coverage).toEqual({ pricedEntityCount: 49, entityCount: 58 });
+  });
+
+  // series=flow reports both fields null.
+  it('reports null when the bucket carries no counts', () => {
+    const coverage = latestAllocationCoverage([
+      { priced_entity_count: null, entity_count: null },
+    ]);
+
+    expect(coverage).toBeNull();
+  });
+
+  it('reads only the most recent bucket, oldest-first', () => {
+    const coverage = latestAllocationCoverage([
+      { priced_entity_count: 1, entity_count: 10 },
+      { priced_entity_count: 58, entity_count: 58 },
+    ]);
+
+    expect(coverage).toBeNull();
+  });
+
+  it('reports null for no buckets', () => {
+    expect(latestAllocationCoverage([])).toBeNull();
   });
 });
 

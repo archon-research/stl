@@ -25,7 +25,7 @@ import {
 import { PRIMES } from '../fixtures/registry.ts';
 import { decimalString, usdString } from '../fixtures/series.ts';
 import { LIST_DELAY_MS, SERIES_DELAY_MS, mock } from '../mock-api.ts';
-import { notFound, problemResponse } from '../problem.ts';
+import { notFound, problemResponse, unprocessable } from '../problem.ts';
 import {
   bucketStarts,
   equalsInsensitive,
@@ -33,6 +33,7 @@ import {
   readChainId,
   readProvenance,
   readLimit,
+  readSeries,
   resolveWindow,
   rawWindowEcho,
   resampledWindowEcho,
@@ -96,15 +97,32 @@ function activityBuckets(
   bucketStartsMs: readonly number[],
   intervalMs: number,
   usdPerUnit: ReadonlyMap<number, number>,
+  series: 'flow' | 'balance',
 ): AllocationActivityBucket[] {
   // The callback's return annotation is what makes the literal fresh; the
   // function's own `AllocationActivityBucket[]` is not enough, because a
   // `.map()` result is checked for assignability rather than for excess keys.
+  //
+  // The two series are alternatives on the real endpoint -- one query runs,
+  // and the other's fields are left out. Mirrored here so a screen built
+  // against the mocks cannot accidentally rely on both being populated.
   return bucketStartsMs.map((startMs): AllocationActivityBucket => {
     const inBucket = rows.filter((row) => {
       const createdMs = Date.parse(row.created_at);
       return createdMs >= startMs && createdMs < startMs + intervalMs;
     });
+
+    if (series === 'balance') {
+      const coverage = coverageAt(rows, startMs + intervalMs, usdPerUnit);
+      return {
+        bucket_start: iso(startMs),
+        balance_usd: usdString(
+          balanceAt(rows, startMs + intervalMs, usdPerUnit),
+        ),
+        entity_count: coverage.entityCount,
+        priced_entity_count: coverage.pricedEntityCount,
+      };
+    }
 
     return {
       bucket_start: iso(startMs),
@@ -115,6 +133,54 @@ function activityBuckets(
       ),
     };
   });
+}
+
+/**
+ * The bucket's closing position value, as `series=balance` reports it: the
+ * cumulative signed flow of everything up to the bucket's end -- an
+ * approximation of the endpoint's own recorded-state read, which the fixture
+ * has no equivalent of.
+ *
+ * Derived from the same rows the flow series uses, for the reason the comment
+ * above `activityBuckets` gives: one source, so a screen toggling between the
+ * two cannot show a chart and a table that disagree. It is monotonic in the
+ * same direction as the real series and lands on the same final value, which
+ * is what a consumer of the fixture can rely on.
+ */
+function balanceAt(
+  rows: readonly AllocationActivity[],
+  endMs: number,
+  usdPerUnit: ReadonlyMap<number, number>,
+): number {
+  return sumBy(
+    rows.filter((row) => Date.parse(row.created_at) < endMs),
+    (row) => signedFlowUsd(row, usdPerUnit),
+  );
+}
+
+/**
+ * How many distinct token positions the bucket knows about by `endMs`, and how
+ * many of them price -- the same rows `balanceAt` sums, read for coverage
+ * instead of value. Pricing is real fixture data, not synthesized: tokens 9
+ * and 12 hold no `receipt_token_id` anywhere in `seedAllocations`, so they are
+ * unpriced the same way an oracle-less token is on the real endpoint, and any
+ * bucket whose window has seen one is a partial one.
+ */
+function coverageAt(
+  rows: readonly AllocationActivity[],
+  endMs: number,
+  usdPerUnit: ReadonlyMap<number, number>,
+): { entityCount: number; pricedEntityCount: number } {
+  const tokenIds = new Set(
+    rows
+      .filter((row) => Date.parse(row.created_at) < endMs)
+      .map((row) => row.token_id),
+  );
+  const pricedEntityCount = [...tokenIds].filter((id) =>
+    usdPerUnit.has(id),
+  ).length;
+
+  return { entityCount: tokenIds.size, pricedEntityCount };
 }
 
 function sumBy(
@@ -226,6 +292,10 @@ export function allocationHandlers(): MockHandler[] {
       if (!chainId.ok) {
         return response.untyped(problemResponse(chainId.problem));
       }
+      const series = readSeries(query.get('series'));
+      if (!series.ok) {
+        return response.untyped(problemResponse(series.problem));
+      }
       const { bucketed, frequencyMs, fromMs, toMs } = resolved.value;
       const filters: ActivityFilters = {
         primeId: query.get('prime_id'),
@@ -248,8 +318,21 @@ export function allocationHandlers(): MockHandler[] {
             bucketStarts(fromMs, toMs, frequencyMs, limit.value),
             frequencyMs,
             receiptTokenUsdPerUnit(nowMs),
+            series.value,
           ),
         });
+      }
+
+      // series picks between two aggregate queries that only run when
+      // aggregation_method=end-period is set.
+      if (series.value !== 'flow') {
+        return response.untyped(
+          problemResponse(
+            unprocessable(
+              'series is only applicable with aggregation_method=end-period',
+            ),
+          ),
+        );
       }
 
       return response(200).json({

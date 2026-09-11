@@ -411,3 +411,32 @@ export function readProvenance(
   }
   return { ok: true, value: named ?? legacy };
 }
+
+const ACTIVITY_SERIES = ['flow', 'balance'] as const;
+export type AllocationActivitySeries = (typeof ACTIVITY_SERIES)[number];
+
+/**
+ * The aggregated arm's ``series`` selector. Defaults to `flow`, matching the
+ * endpoint, and rejects anything else by name rather than coercing a typo
+ * (`series=blance`) to the default -- the real endpoint would 422 it via its
+ * `Literal["flow", "balance"]`, and a mock that quietly accepted it would let
+ * that typo pass every mock-backed test.
+ */
+export function readSeries(
+  raw: string | null,
+): Parsed<AllocationActivitySeries> {
+  if (raw === null) {
+    return { ok: true, value: 'flow' };
+  }
+  const match = ACTIVITY_SERIES.find((candidate) => candidate === raw);
+  if (match === undefined) {
+    return {
+      ok: false,
+      problem: invalidQueryParam(
+        'series',
+        `value is not a valid enumeration member; permitted: ${ACTIVITY_SERIES.join(', ')}`,
+      ),
+    };
+  }
+  return { ok: true, value: match };
+}

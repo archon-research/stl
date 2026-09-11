@@ -3371,3 +3371,352 @@ async def seed_processing_version_dedup_scenarios(db_url: str) -> None:
                 )
     finally:
         await conn.close()
+
+
+# --- VEC-760 balance series (series="balance") ----------------------------
+# Each scenario gets its own proxy so a test can assert on one in isolation:
+# the read sums every entity under the proxies it is given.
+BS_PROXY_CARRY = "1b" * 20
+BS_PROXY_CORRECTED = "2b" * 20
+BS_PROXY_DIVERGENT = "3b" * 20
+BS_PROXY_DIRECT = "4b" * 20
+BS_PROXY_SEEDED = "5b" * 20
+BS_PROXY_MIXED = "6b" * 20
+BS_PROXY_SUMMED = "7b" * 20
+BS_PROXY_DIRECT_DISABLED_ORACLE = "8b" * 20
+BS_PROXY_SEED_TIEBREAK = "9b" * 20
+BS_PROXY_WINDOW_TIEBREAK = "ac" * 20
+BS_PROXY_ZERO_UNPRICEABLE = "bc" * 20
+
+BS_VAULT_HEX = "b0" * 20
+_BS_PROTOCOL_HEX = "b1" * 20
+_BS_ORACLE_HEX = "b2" * 20
+_BS_UNDERLYING_HEX = "b3" * 20
+_BS_ALT_UNDERLYING_HEX = "b4" * 20
+_BS_RECEIPT_HEX = "b5" * 20
+_BS_DIRECT_HEX = "b6" * 20
+_BS_DISABLED_DIRECT_HEX = "b7" * 20
+
+# Deliberately not 1.0, so a value that skipped the price multiply is visibly
+# wrong rather than coincidentally right.
+BS_UNDERLYING_PRICE = Decimal("2")
+BS_DIRECT_PRICE = Decimal("3")
+
+BS_CARRY_UNDERLYING_VALUE = Decimal("50")
+BS_CORRECTED_ORIGINAL_UNDERLYING_VALUE = Decimal("10")
+BS_CORRECTED_FIXED_UNDERLYING_VALUE = Decimal("90")
+BS_DIRECT_BALANCE = Decimal("7")
+BS_SEEDED_UNDERLYING_VALUE = Decimal("11")
+BS_MIXED_DIRECT_BALANCE = Decimal("15")
+BS_SUMMED_UNDERLYING_VALUE = Decimal("20")
+BS_SUMMED_DIRECT_BALANCE = Decimal("5")
+BS_DISABLED_DIRECT_BALANCE = Decimal("13")
+BS_DISABLED_DIRECT_PRICE = Decimal("17")
+
+# Same-block pairs (identical created_at, VEC-760) of a sweep row -- always
+# log_index 0, the tracker never sets it for a sweep -- and a flow row at a
+# later log_index in the same block. The flow row is the later state and must
+# win.
+BS_SEED_TIEBREAK_SWEEP_VALUE = Decimal("30")
+BS_SEED_TIEBREAK_FLOW_VALUE = Decimal("70")
+BS_WINDOW_TIEBREAK_SWEEP_VALUE = Decimal("40")
+BS_WINDOW_TIEBREAK_FLOW_VALUE = Decimal("80")
+
+
+async def seed_balance_series_positions(db_url: str) -> None:
+    """Seed the ``series="balance"`` scenarios into the given database.
+
+    Rows are placed relative to ``now`` so a test can ask for a window in days
+    and land them in known buckets:
+
+    * ``BS_PROXY_CARRY``     one receipt row 3 days ago, nothing since -> LOCF.
+    * ``BS_PROXY_CORRECTED`` a row and its ``processing_version`` correction at
+      the same instant, with different values -> the dedup must pick the
+      correction, not the original and not both.
+    * ``BS_PROXY_DIVERGENT`` a receipt row whose own ``underlying_token_id``
+      disagrees with the registry's -> refused, present but unpriceable, so it
+      poisons its buckets to ``None`` rather than dropping out silently.
+    * ``BS_PROXY_DIRECT``    a direct holding, priced by its own token price.
+    * ``BS_PROXY_SEEDED``    its only row is BEFORE the window -> the carry-in
+      seed has to supply it.
+    * ``BS_PROXY_MIXED``     one priced direct holding and one divergent
+      receipt row -- two different entities under the same proxy -> the
+      priced entity's value must not silently stand in for the total once the
+      divergent one poisons it.
+    * ``BS_PROXY_SUMMED``    two different priced entities under the same
+      proxy, both cleanly priced -> the total must be their sum, not just one
+      of them.
+    * ``BS_PROXY_DIRECT_DISABLED_ORACLE`` a direct holding whose only price
+      comes from a disabled oracle mapping -> the direct-pricing arm must gate
+      on ``oracle_asset.enabled`` the same as the receipt arm, so this reaches
+      the same unpriceable (poisoned) state a divergent receipt row does.
+    * ``BS_PROXY_SEED_TIEBREAK``   a pre-window sweep row (``log_index`` 0,
+      the tracker never sets it for a sweep) and a flow row at a later
+      ``log_index`` in the same block -> ``created_at`` alone cannot break
+      the tie, so the carry-in seed must resolve to the flow row, the later
+      state, not whichever one it returns arbitrarily.
+    * ``BS_PROXY_WINDOW_TIEBREAK`` the same sweep/flow pair, in-window -> the
+      per-bucket winner must resolve the same way.
+    """
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('bs_balance', $1) RETURNING id",
+                bytes.fromhex(BS_VAULT_HEX),
+            )
+            protocol_id = await conn.fetchval(
+                "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+                "VALUES (1, $1, 'bsLike', 'lending') RETURNING id",
+                bytes.fromhex(_BS_PROTOCOL_HEX),
+            )
+            oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('bs_balance', 'Balance series test oracle', 1, $1) RETURNING id",
+                bytes.fromhex(_BS_ORACLE_HEX),
+            )
+            await conn.execute(
+                "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+                protocol_id,
+                oracle_id,
+            )
+
+            underlying_id = await insert_token(conn, "bsUSDC", 6, bytes.fromhex(_BS_UNDERLYING_HEX))
+            await _insert_price(conn, underlying_id, oracle_id, BS_UNDERLYING_PRICE)
+            alt_underlying_id = await insert_token(conn, "bsALT", 6, bytes.fromhex(_BS_ALT_UNDERLYING_HEX))
+            await _insert_price(conn, alt_underlying_id, oracle_id, Decimal("5"))
+
+            receipt_id = await insert_token(conn, "bsRCPT", 6, bytes.fromhex(_BS_RECEIPT_HEX))
+            await insert_receipt_token_row(
+                conn,
+                protocol_id=protocol_id,
+                underlying_token_id=underlying_id,
+                address=bytes.fromhex(_BS_RECEIPT_HEX),
+                symbol="bsRCPT",
+            )
+            direct_id = await insert_token(conn, "bsDIR", 6, bytes.fromhex(_BS_DIRECT_HEX))
+            await _insert_price(conn, direct_id, oracle_id, BS_DIRECT_PRICE)
+
+            now = dt.datetime.now(dt.UTC)
+            three_days_ago = now - dt.timedelta(days=3)
+            # Comfortably inside the seed reach, but outside any window a test asks for.
+            pre_window = now - dt.timedelta(days=12)
+
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_CARRY,
+                balance=Decimal("100"),
+                block=1000,
+                tx="c1" * 32,
+                direction="sweep",
+                underlying_value=BS_CARRY_UNDERLYING_VALUE,
+                underlying_token_id=underlying_id,
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            # The correction repeats the row with the SAME created_at and a fresh
+            # build_id, which is how the assign trigger hands out
+            # processing_version=1 -- see insert_allocation_position's docstring.
+            for build_id, value in (
+                (0, BS_CORRECTED_ORIGINAL_UNDERLYING_VALUE),
+                (1, BS_CORRECTED_FIXED_UNDERLYING_VALUE),
+            ):
+                await insert_allocation_position(
+                    conn,
+                    token_id=receipt_id,
+                    prime_id=prime_id,
+                    proxy_hex=BS_PROXY_CORRECTED,
+                    balance=Decimal("100"),
+                    block=1000,
+                    tx="c2" * 32,
+                    direction="sweep",
+                    underlying_value=value,
+                    underlying_token_id=underlying_id,
+                    created_at=three_days_ago,
+                    tx_amount=0,
+                    build_id=build_id,
+                )
+
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_DIVERGENT,
+                balance=Decimal("100"),
+                block=1000,
+                tx="c3" * 32,
+                direction="sweep",
+                underlying_value=Decimal("77"),
+                underlying_token_id=alt_underlying_id,
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            await insert_allocation_position(
+                conn,
+                token_id=direct_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_DIRECT,
+                balance=BS_DIRECT_BALANCE,
+                block=1000,
+                tx="c4" * 32,
+                direction="sweep",
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_SEEDED,
+                balance=Decimal("100"),
+                block=900,
+                tx="c5" * 32,
+                direction="sweep",
+                underlying_value=BS_SEEDED_UNDERLYING_VALUE,
+                underlying_token_id=underlying_id,
+                created_at=pre_window,
+                tx_amount=0,
+            )
+
+            await insert_allocation_position(
+                conn,
+                token_id=direct_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_MIXED,
+                balance=BS_MIXED_DIRECT_BALANCE,
+                block=1000,
+                tx="c6" * 32,
+                direction="sweep",
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_MIXED,
+                balance=Decimal("100"),
+                block=1000,
+                tx="c7" * 32,
+                direction="sweep",
+                underlying_value=Decimal("77"),
+                underlying_token_id=alt_underlying_id,
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_SUMMED,
+                balance=Decimal("100"),
+                block=1000,
+                tx="c8" * 32,
+                direction="sweep",
+                underlying_value=BS_SUMMED_UNDERLYING_VALUE,
+                underlying_token_id=underlying_id,
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=direct_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_SUMMED,
+                balance=BS_SUMMED_DIRECT_BALANCE,
+                block=1000,
+                tx="c9" * 32,
+                direction="sweep",
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            disabled_direct_id = await insert_token(conn, "bsDIRDIS", 6, bytes.fromhex(_BS_DISABLED_DIRECT_HEX))
+            await conn.execute(
+                "INSERT INTO onchain_token_price "
+                "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+                "VALUES ($1, $2, 1000, 0, NOW(), $3)",
+                disabled_direct_id,
+                oracle_id,
+                BS_DISABLED_DIRECT_PRICE,
+            )
+            await insert_oracle_asset(conn, oracle_id, disabled_direct_id, enabled=False)
+            await insert_allocation_position(
+                conn,
+                token_id=disabled_direct_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_DIRECT_DISABLED_ORACLE,
+                balance=BS_DISABLED_DIRECT_BALANCE,
+                block=1000,
+                tx="ca" * 32,
+                direction="sweep",
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            # An emptied position in the same unpriceable token: nothing can
+            # price it, and it is worth nothing regardless.
+            await insert_allocation_position(
+                conn,
+                token_id=disabled_direct_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_ZERO_UNPRICEABLE,
+                balance=Decimal("0"),
+                block=1000,
+                tx="cf" * 32,
+                direction="sweep",
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            # A sweep row (log_index 0 -- the tracker never sets it,
+            # allocation_tracker/types.go) beside a real transfer later in the
+            # same block: encodeTxHash's zero-hash sentinel
+            # (allocation_repository.go) is reproduced on the sweep row's tx.
+            for direction, log_index, tx_hex, value in (
+                ("sweep", 0, "00" * 32, BS_SEED_TIEBREAK_SWEEP_VALUE),
+                ("in", 3, "cb" * 32, BS_SEED_TIEBREAK_FLOW_VALUE),
+            ):
+                await insert_allocation_position(
+                    conn,
+                    token_id=receipt_id,
+                    prime_id=prime_id,
+                    proxy_hex=BS_PROXY_SEED_TIEBREAK,
+                    balance=Decimal("100"),
+                    block=900,
+                    log_index=log_index,
+                    tx=tx_hex,
+                    direction=direction,
+                    underlying_value=value,
+                    underlying_token_id=underlying_id,
+                    created_at=pre_window,
+                    tx_amount=0,
+                )
+
+            for direction, log_index, tx_hex, value in (
+                ("sweep", 0, "00" * 32, BS_WINDOW_TIEBREAK_SWEEP_VALUE),
+                ("in", 3, "cd" * 32, BS_WINDOW_TIEBREAK_FLOW_VALUE),
+            ):
+                await insert_allocation_position(
+                    conn,
+                    token_id=receipt_id,
+                    prime_id=prime_id,
+                    proxy_hex=BS_PROXY_WINDOW_TIEBREAK,
+                    balance=Decimal("100"),
+                    block=1000,
+                    log_index=log_index,
+                    tx=tx_hex,
+                    direction=direction,
+                    underlying_value=value,
+                    underlying_token_id=underlying_id,
+                    created_at=three_days_ago,
+                    tx_amount=0,
+                )
+    finally:
+        await conn.close()
