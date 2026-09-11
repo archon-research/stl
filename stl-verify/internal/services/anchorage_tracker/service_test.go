@@ -313,7 +313,7 @@ func TestService_Run(t *testing.T) {
 	snapRepo := &mockSnapshotRepo{}
 	opRepo := &mockOperationRepo{}
 
-	svc := NewService(client, snapRepo, opRepo, 1, nil)
+	svc := NewService(client, snapRepo, opRepo, 1, nil, nil)
 
 	if err := svc.Run(context.Background()); err != nil {
 		t.Fatalf("Run failed: %v", err)
@@ -345,7 +345,7 @@ func TestService_RunSkipsInactivePackages(t *testing.T) {
 	snapRepo := &mockSnapshotRepo{}
 	opRepo := &mockOperationRepo{}
 
-	svc := NewService(client, snapRepo, opRepo, 1, nil)
+	svc := NewService(client, snapRepo, opRepo, 1, nil, nil)
 
 	if err := svc.Run(context.Background()); err != nil {
 		t.Fatalf("Run failed: %v", err)
@@ -358,7 +358,7 @@ func TestService_RunSkipsInactivePackages(t *testing.T) {
 
 func TestService_RunFailsOnAPIError(t *testing.T) {
 	client := &mockClient{fetchErr: fmt.Errorf("api down")}
-	svc := NewService(client, &mockSnapshotRepo{}, &mockOperationRepo{}, 1, nil)
+	svc := NewService(client, &mockSnapshotRepo{}, &mockOperationRepo{}, 1, nil, nil)
 
 	err := svc.Run(context.Background())
 	if err == nil {
@@ -372,7 +372,7 @@ func TestService_BackfillOperations(t *testing.T) {
 	}
 	opRepo := &mockOperationRepo{}
 
-	svc := NewService(client, &mockSnapshotRepo{}, opRepo, 1, nil)
+	svc := NewService(client, &mockSnapshotRepo{}, opRepo, 1, nil, nil)
 
 	n, err := svc.BackfillOperations(context.Background())
 	if err != nil {
