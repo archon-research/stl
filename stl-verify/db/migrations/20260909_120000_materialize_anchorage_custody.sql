@@ -40,11 +40,9 @@ JOIN anchorage_known_custody_type k ON k.custody_type = s.custody_type;
 
 COMMENT ON VIEW position_anchorage_custody IS '[Operational] VEC-408 projection: Anchorage custody packages as off-chain position rows, one per (prime, package, asset_type, custody_type, snapshot_time, processing_version) — the source''s own grain. instrument_key = ''anchorage:'' package_id '':'' asset_type: provider-prefixed because a package id is unique only within Anchorage and, with chain_id and protocol_id NULL, nothing else in the hashed id separates providers; asset-scoped because the source carries one row per asset and asset_type names the units of quantity. holder_id = the prime''s vault address. quantity = asset_quantity as the custodian reports it, in that asset''s own units. deal_type is CUSTODY_COLLATERAL for every row: the source''s pledgor_id, secured_party_id and current_ltv are NOT NULL, so it cannot express an unencumbered package. Off-chain: chain_id and protocol_id NULL, block_number = the instant in whole epoch seconds, not a block on any chain. active and state are deliberately not read: closure fires only on a reported asset_quantity of 0, so a package that STOPS being reported stays open at its last quantity — staleness is answered from position_projection_run, not from this view. Emits the shared position_state column contract; closure is applied by materialize_position_projection().';
 
--- Names every input the view cannot place, then delegates; each case would otherwise be dropped or
--- collide silently. It takes the materializer's OWN lock key first, so a row inserted after the check
--- cannot slip past, and matches its enable_tiered_reads, or it would read fewer chunks than the view.
--- Dropped rather than replaced: keeping the old argument list beside the new one makes a
--- call that omits the run ambiguous, as it did for the spine.
+-- Takes the materializer's OWN lock key first, so a row inserted after the check cannot slip past, and
+-- matches its enable_tiered_reads, or it would read fewer chunks than the view.
+-- Dropped, not replaced: a surviving old signature makes a run-less call ambiguous.
 DROP FUNCTION IF EXISTS materialize_anchorage_custody(integer);
 
 CREATE OR REPLACE FUNCTION materialize_anchorage_custody(p_build_id integer DEFAULT 0,
