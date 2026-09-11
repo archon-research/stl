@@ -423,33 +423,19 @@ else
   echo "  FAIL check() did not handle a short call as expected"
 fi
 
-# --weekly-refresh (finding #7): recorded in the JSON and named in the human
-# summary, so a consumer reading a day of verdicts can tell a legitimate
-# all-CHANGED refresh day from real churn without guessing from the date.
+# The JSON envelope carries generatedAt so a week of verdicts can be ordered and
+# correlated with deploys.
 rm -rf "${WORK}/responses"
 respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
 respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:two)"
-JSON_R="${WORK}/refresh.json"
-check "--weekly-refresh is named in the human summary" 0 "flagged --weekly-refresh" -- \
-  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA" --json "$JSON_R" --weekly-refresh
-if [ "$(jq -r '.weeklyRefresh' "$JSON_R" 2>/dev/null)" = "true" ]; then
-  PASSED=$((PASSED + 1)); echo "  ok   --weekly-refresh is recorded as weeklyRefresh:true in the JSON"
+JSON_G="${WORK}/generated.json"
+check "the JSON envelope is written" 0 "Verdicts written" -- \
+  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA" --json "$JSON_G"
+if [ -n "$(jq -r '.generatedAt // empty' "$JSON_G" 2>/dev/null)" ]; then
+  PASSED=$((PASSED + 1)); echo "  ok   generatedAt is recorded in the JSON envelope"
 else
-  FAILED=$((FAILED + 1)); echo "  FAIL weeklyRefresh was not recorded as true in the JSON"
-  cat "$JSON_R" 2>/dev/null | sed 's/^/         /'
-fi
-
-rm -rf "${WORK}/responses"
-respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
-respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one)"
-JSON_NR="${WORK}/no-refresh.json"
-check "without --weekly-refresh the JSON records it as false" 0 "Verdicts written" -- \
-  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA" --json "$JSON_NR"
-if [ "$(jq -r '.weeklyRefresh' "$JSON_NR" 2>/dev/null)" = "false" ]; then
-  PASSED=$((PASSED + 1)); echo "  ok   weeklyRefresh defaults to false in the JSON"
-else
-  FAILED=$((FAILED + 1)); echo "  FAIL weeklyRefresh did not default to false in the JSON"
-  cat "$JSON_NR" 2>/dev/null | sed 's/^/         /'
+  FAILED=$((FAILED + 1)); echo "  FAIL generatedAt missing from the JSON envelope"
+  cat "$JSON_G" 2>/dev/null | sed 's/^/         /'
 fi
 
 echo "${PASSED} passed, ${FAILED} failed"

@@ -26,15 +26,8 @@
 # diff IDs instead, which are not comparable with what a registry stores, and
 # comparing the two would report every service as changed.
 #
-# Expect one all-CHANGED day per week, and do not read it as a fault. The
-# weekly security refresh (.github/workflows/image-security-refresh.yaml)
-# rebuilds every image with the layer cache disabled, so the OS package layers
-# move and the first deploy after it legitimately differs from every pinned
-# image. That is the deploy this whole mechanism is meant to allow — patches
-# landing — but it means a week of shadow verdicts contains one day where
-# essentially every image reports CHANGED. Anyone reconciling those verdicts to
-# justify the cutover should exclude that day, or read it as the refresh rather
-# than as churn the comparison failed to suppress.
+# A base-image bump legitimately reports nearly every image CHANGED: the source
+# changed, so the layers should. That is a correct verdict, not churn.
 #
 # Verdicts, one per image:
 #   UNCHANGED  both resolve, layers identical -> the deploy could keep the pinned
@@ -70,7 +63,7 @@
 # evaluate a single image exits non-zero rather than printing an empty summary.
 #
 # Usage:
-#   compare-image-layers.sh --kustomization <file> --tag <40-hex-sha> [--json <path>] [--weekly-refresh]
+#   compare-image-layers.sh --kustomization <file> --tag <40-hex-sha> [--json <path>]
 #
 #   --kustomization  the overlay whose pinned tags are the "already running"
 #                    side. Read as it stands on disk, so run this BEFORE the
@@ -81,16 +74,6 @@
 #                    prefix kept — the same rule verify-ecr-images.sh uses)
 #   --json           also write the verdicts as JSON, for collecting a week of
 #                    them and reconciling every disagreement
-#   --weekly-refresh tell this run it follows the Monday 04:00 UTC
-#                    image-security-refresh, so a wave of CHANGED verdicts is
-#                    the refresh landing, not churn. This script has no
-#                    reliable way to infer that itself (the caller knows when
-#                    it is running; guessing from the current date here would
-#                    just move the unreliable inference inside the thing nobody
-#                    can double-check), so it is a flag the caller sets, not a
-#                    computation done here. Recorded in the JSON as
-#                    weeklyRefresh and noted in the human summary; changes no
-#                    verdict.
 #
 # Requires AWS credentials for the account the overlay's images name, with
 # ecr:BatchGetImage — the same permission verify-ecr-images.sh needs and the
@@ -102,7 +85,6 @@ set -euo pipefail
 KUSTOMIZATION=""
 TAG=""
 JSON_OUT=""
-WEEKLY_REFRESH=0
 
 die() { echo "::error::$*" >&2; exit 2; }
 
@@ -111,7 +93,6 @@ while [ $# -gt 0 ]; do
     --kustomization)  KUSTOMIZATION="${2:-}"; shift 2 ;;
     --tag)             TAG="${2:-}"; shift 2 ;;
     --json)            JSON_OUT="${2:-}"; shift 2 ;;
-    --weekly-refresh)  WEEKLY_REFRESH=1; shift ;;
     -h|--help) sed -n '/^# Usage:/,/^# Requires AWS/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
@@ -330,16 +311,12 @@ while IFS=$'\t' read -r newName pinnedTag; do
 done < "$PAIRS_FILE"
 
 if [ -n "$JSON_OUT" ]; then
-  # generatedAt is recorded so a week of verdicts can be reconciled against the
-  # refresh workflow's actual run history, which is authoritative. weeklyRefresh
-  # stays caller-supplied and defaults to false: a reconciler should cross-check
-  # the timestamp rather than trust a flag nobody could verify.
+  # generatedAt lets a week of verdicts be ordered and correlated with deploys.
   jq -s \
     --arg deploySha "$TAG" \
     --arg kustomization "$KUSTOMIZATION" \
     --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --argjson weeklyRefresh "$([ "$WEEKLY_REFRESH" -eq 1 ] && echo true || echo false)" \
-    '{deploySha: $deploySha, kustomization: $kustomization, generatedAt: $generatedAt, weeklyRefresh: $weeklyRefresh, results: .}' \
+    '{deploySha: $deploySha, kustomization: $kustomization, generatedAt: $generatedAt, results: .}' \
     "$ROWS_FILE" > "$JSON_OUT"
   echo "Verdicts written to ${JSON_OUT}"
 fi
@@ -351,14 +328,6 @@ of this verdict — more entries than the ${PAIR_COUNT} images counted here, sin
 bases share one image — so any image reported unchanged above names pods that rolled
 for no reason.
 SUMMARY
-
-if [ "$WEEKLY_REFRESH" -eq 1 ]; then
-  cat <<REFRESH
-This run is flagged --weekly-refresh: it follows the Monday 04:00 UTC
-image-security-refresh, so a wave of CHANGED verdicts above is that refresh
-landing, not churn the comparison failed to suppress.
-REFRESH
-fi
 
 # The exit code reports whether the comparison worked, never what the deploy
 # should do. A run that determined nothing has told us nothing, and the one
