@@ -5,7 +5,7 @@
 # without a per-commit rebuild trigger (ORB-366; see stl-verify/python/Dockerfile).
 #
 # It never re-pushes a SHA that already has one: that tag is what
-# build_registry's identity governs -- see ADR-0007.
+# build_registry's identity governs -- see ADR-0008.
 #
 # ARCT-420 (tag immutability) is code-complete but NOT yet applied -- every
 # stl-sentinel* repo still reports MUTABLE, so DOCKER_PUSH=0 below is the only guard.

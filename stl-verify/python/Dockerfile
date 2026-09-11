@@ -56,7 +56,7 @@ RUN groupadd --system --gid 10001 appuser \
 # GIT_COMMIT now lands at the end of the file, where it cannot reach a layer.
 #
 # Patches land on the first deploy after the weekly refresh (image-security-refresh.yaml),
-# not on the refresh itself, which pushes no image -- see ADR-0007.
+# not on the refresh itself, which pushes no image -- see ADR-0008.
 #
 # Then strip OS packages the service never uses at runtime (perl, bash,
 # ncurses, util-linux, gzip, tar, sed, coreutils, apt, ...). They exist only

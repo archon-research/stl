@@ -1222,7 +1222,7 @@ endif
 endif
 endif
 # --pull is not redundant with --no-cache: base images still resolve from the
-# local store even with the layer cache disabled, so a stale one would persist -- see ADR-0007.
+# local store even with the layer cache disabled, so a stale one would persist -- see ADR-0008.
 docker_no_cache_flag = $(if $(filter-out 0,$(DOCKER_NO_CACHE)),--no-cache --pull)
 ifeq ($(DOCKER_CACHE),1)
 ifndef DOCKER_CACHE_REPO
