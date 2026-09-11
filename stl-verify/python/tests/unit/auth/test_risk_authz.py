@@ -12,6 +12,7 @@ exposure. They are covered below against a real service.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Mapping
 from decimal import Decimal
 from types import SimpleNamespace
@@ -317,3 +318,38 @@ def test_openfga_outage_fails_closed_on_a_risk_route(resolves_to_vault):
     fga.check.side_effect = FgaError("down")
     response = _client(fga=fga, principal=_principal()).get(f"/v1/risk/rrc?asset_id={ASSET_ID}&prime_id={OTHER_PRIME}")
     assert response.status_code == 503
+
+
+# --- the untracked-holder deny is legible in the decision event (ORB-402) ---
+
+
+@pytest.mark.parametrize("path", POOL_ROUTES)
+def test_an_untracked_largest_holder_denies_with_its_own_reason(monkeypatch, caplog, path):
+    """A largest holder we do not track denies every caller until holdings
+    shift — deliberate, but it presents as an outage. The decision event names
+    it so triage does not start at the database."""
+    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=None))
+    fga = _allow()
+    client, _ = _pool_client(fga=fga, principal=_principal())
+
+    with caplog.at_level(logging.INFO, logger="app.api.deps"):
+        response = client.get(path)
+
+    assert response.status_code == 404
+    fga.check.assert_not_awaited()
+    reasons = [r.reason for r in caplog.records if getattr(r, "event", None) == deps.AUTHZ_EVENT]
+    assert reasons == ["holder_untracked"]
+
+
+def test_an_untracked_holder_and_a_caller_named_unknown_prime_answer_identically(monkeypatch):
+    """The reason lives in the decision event ONLY: a distinct body would make
+    the response an oracle for which denials are holder-driven."""
+    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=None))
+    pool_client, _ = _pool_client(fga=_allow(), principal=_principal())
+    named_client = _client(fga=_allow(), principal=_principal())
+
+    pool = pool_client.get(f"/v1/risk/{ASSET_ID}/bad-debt?gap_pct=0.1")
+    named = named_client.get(f"/v1/risk/rrc?asset_id={ASSET_ID}&prime_id={PRIME}")
+
+    assert pool.status_code == named.status_code == 404
+    assert pool.content == named.content
