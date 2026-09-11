@@ -436,11 +436,7 @@ func run(ctx context.Context, args []string) error {
    are picked up automatically, via its `$(CRONJOBS)` loop. Forgetting it
    is caught loudly rather than silently: that target is what the deploy
    builds with, so the image is never pushed and the overlay's pinned tag
-   reaches the cluster as ImagePullBackOff (ORB-313). The weekly
-   image-security refresh
-   (`.github/workflows/image-security-refresh.yaml`) rebuilds from the
-   same target, so an image wired in here needs no separate registration
-   to keep receiving OS security updates.
+   reaches the cluster as ImagePullBackOff (ORB-313).
 8. **Coordinate with infra.** Open a PR in the Infrastructure repo for
    the SQS queue, SNS subscription, IAM policy, and any secrets — your
    code PR depends on those resources existing.

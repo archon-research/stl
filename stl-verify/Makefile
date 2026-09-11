@@ -1190,55 +1190,19 @@ docker-push: ecr-login
 # stay cache-free and cannot fail on it. CI provides the driver via
 # docker/setup-buildx-action and passes both vars. `ignore-error=true` keeps a
 # failed cache push (auth/network) from failing an otherwise-good build, and a
-# missing cache on import is a normal miss. The cache is exported when
-# DOCKER_CACHE_EXPORT is 1, which by default means "whenever we push", so a
-# build-only run (DOCKER_PUSH=0) imports the cache but never overwrites it and
-# only real pushes update the shared cache.
+# missing cache on import is a normal miss. The cache is exported whenever we
+# push, so a build-only run (DOCKER_PUSH=0) imports the cache but never
+# overwrites it and only real pushes update the shared cache.
 #   $(1) = cache key, unique per image (used as the cache tag)
-#
-# The security refresh is the one caller that overrides both (ORB-366):
-# DOCKER_NO_CACHE=1 rebuilds the floating layers — Alpine's `apk add` and
-# Debian's `apt-get upgrade`, which a warm cache otherwise replays forever —
-# and DOCKER_CACHE_EXPORT=1 publishes the result, so the next real deploy of
-# any commit inherits the patched layers without pushing an image for a SHA
-# that already has one. Re-pushing is not merely redundant: the SHA tag is what
-# build_registry's (git_hash, service) identity names, so replacing its bytes
-# would silently change what a governed row points at. ARCT-420 will make ECR
-# reject it outright, but that is not yet applied -- every stl-sentinel* repo
-# still reports MUTABLE (checked 2026-09-09), so today only this flag stops it.
-DOCKER_NO_CACHE     ?= 0
-DOCKER_CACHE_EXPORT ?= $(if $(filter-out 0,$(DOCKER_PUSH)),1,0)
-# Every cache flag lives inside the DOCKER_CACHE=1 block below, so asking for an
-# export without enabling the cache silently exported nothing — the same
-# outcome as the swallowed push error, by a different route.
-# Keyed on origin, not value: the default is derived from DOCKER_PUSH, which is
-# defined further down, so a value test here would depend on definition order.
-# Only an explicitly requested export can be a mistake.
-ifneq ($(filter command line environment,$(origin DOCKER_CACHE_EXPORT)),)
-ifneq ($(DOCKER_CACHE),1)
-ifneq ($(filter-out 0,$(DOCKER_CACHE_EXPORT)),)
-$(error DOCKER_CACHE_EXPORT=1 requires DOCKER_CACHE=1, or nothing is exported)
-endif
-endif
-endif
-# --pull is not redundant with --no-cache: base images still resolve from the
-# local store even with the layer cache disabled, so a stale one would persist -- see ADR-0008.
-docker_no_cache_flag = $(if $(filter-out 0,$(DOCKER_NO_CACHE)),--no-cache --pull)
 ifeq ($(DOCKER_CACHE),1)
 ifndef DOCKER_CACHE_REPO
 $(error DOCKER_CACHE=1 requires DOCKER_CACHE_REPO, e.g. ghcr.io/<owner>/<repo>/buildcache)
 endif
-# The cache push is advisory for a deploy build — a failed cache push must not
-# fail a good image — and load-bearing for the security refresh, which builds
-# with DOCKER_PUSH=0 and so produces nothing else at all. With ignore-error=true
-# a GHCR 429/5xx there gave exit 0, published nothing, and never reached
-# notify-refresh-failure, so OS patching would silently revert to never. That
-# one case must fail loudly, so ignore-error follows which run it is.
-docker_cache_ignore_error = $(if $(and $(filter 0,$(DOCKER_PUSH)),$(filter-out 0,$(DOCKER_CACHE_EXPORT))),false,true)
-docker_cache_to = --cache-to type=registry,ref=$(DOCKER_CACHE_REPO):$(1),mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=$(docker_cache_ignore_error)
+# Advisory: a failed cache push must not fail an image that built fine.
+docker_cache_to = --cache-to type=registry,ref=$(DOCKER_CACHE_REPO):$(1),mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true
 docker_cache_flags = \
 	--cache-from type=registry,ref=$(DOCKER_CACHE_REPO):$(1) \
-	$(if $(filter-out 0,$(DOCKER_CACHE_EXPORT)),$(call docker_cache_to,$(1)))
+	$(if $(filter-out 0,$(DOCKER_PUSH)),$(call docker_cache_to,$(1)))
 endif
 
 # Canonical arm64 build + push for a single image. Internal target; callers set:
@@ -1251,11 +1215,8 @@ endif
 #   IMG_TAG         image tag (default: $(IMAGE_TAG))
 #   IMG_LATEST_TAG  moving tag pushed alongside IMG_TAG (default: latest)
 # Set DOCKER_PUSH=0 to build only: validate the build and import the registry
-# cache, without loading or pushing the final image. Cache export follows
-# DOCKER_CACHE_EXPORT, which defaults to "whenever we push", so a build-only run
-# reuses the cache but does not warm/overwrite it. Useful for a CI build check
-# that needs no ECR credentials. The security refresh is the one caller that
-# sets DOCKER_CACHE_EXPORT=1 with DOCKER_PUSH=0.
+# cache, without loading or pushing the final image. A build-only run reuses the
+# cache but never overwrites it, so it needs no ECR credentials.
 IMG_TAG        ?= $(IMAGE_TAG)
 IMG_LATEST_TAG ?= latest
 DOCKER_PUSH    ?= 1
@@ -1277,7 +1238,7 @@ _docker-release-image:
 	echo "==> Building $(IMG_NAME) image for linux/arm64..." && \
 	echo "    Tag: $(IMG_TAG)" && \
 	docker buildx build --platform linux/arm64 \
-		$(call docker_cache_flags,$(IMG_CACHE_KEY)) $(docker_no_cache_flag) \
+		$(call docker_cache_flags,$(IMG_CACHE_KEY)) \
 		$(IMG_EXTRA_ARGS) $$GIT_ARGS \
 		-f $(IMG_DOCKERFILE) \
 		$$TAGS \

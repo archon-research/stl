@@ -50,13 +50,7 @@ Root repo map and cross-cutting rules: [../AGENTS.md](../AGENTS.md).
   the prod promotion (ORB-313). A brand-new service lands its build + roster line in a separate PR first
   (CONTRIBUTING.md section 14).
 - Merging to `main` deploys to staging via ArgoCD, then prod after manual approval.
-- **OS patches arrive on a schedule, not by accident.** Images no longer carry a per-commit value above
-  the OS-update layer, so an unchanged service rebuilds to an identical image and its pods stop rolling
-  for nothing (ORB-366) — but that also removed the incidental rebuild that used to pull in `apt-get
-  upgrade` on every release. `.github/workflows/image-security-refresh.yaml` replaces it: a cache-free
-  rebuild of every image, Mondays 04:00 UTC, which pushes no image and only re-exports the shared build
-  cache. `DOCKER_PUSH=0` is what stops the push today, not the registry: ECR tag immutability (ARCT-420)
-  is code-complete but not yet applied, and every `stl-sentinel*` repository still reports MUTABLE — see
-  ADR-0008 before flipping `DOCKER_PUSH=1`. So patches reach the cluster on the **first deploy after**
-  that run, not on the run itself. A week where nothing deploys is a week where nothing is patched.
+- **OS patches come from a base-image bump, nothing else.** Images carry no per-commit value above the
+  OS-update layer (ORB-366), so a warm cache replays those layers until a `FROM` line changes. Base
+  images are not yet digest-pinned and no bot bumps them, so today nothing refreshes them: VEC-783.
 - AWS resources (SQS queues, SNS subscriptions, IAM, secrets) live in a separate private infrastructure repo and must land **before** the code that needs them.
