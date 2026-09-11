@@ -100,13 +100,6 @@ def test_level_leaves_buckets_before_the_first_observation_null_and_unmarked() -
     assert not any(point.filled for point in leading)
 
 
-def test_level_fills_leading_buckets_from_a_value_observed_before_the_window() -> None:
-    points = apply_gap_policy(SeriesKind.LEVEL, {}, query=_query(), prior=Decimal("42"))
-
-    assert all(point.value == Decimal("42") for point in points)
-    assert all(point.filled for point in points)
-
-
 def test_level_treats_an_observed_null_as_observed() -> None:
     points = apply_gap_policy(SeriesKind.LEVEL, {_bucket(2): None}, query=_query())
 
@@ -160,9 +153,9 @@ def test_flow_without_a_zero_is_rejected() -> None:
         apply_gap_policy(SeriesKind.FLOW, {}, query=_query())
 
 
-def test_flow_with_a_prior_is_rejected() -> None:
-    with pytest.raises(ValueError, match="no prior value"):
-        apply_gap_policy(SeriesKind.FLOW, {}, query=_query(), zero=0, prior=99)
+def test_level_with_a_zero_is_rejected() -> None:
+    with pytest.raises(ValueError, match="not a zero"):
+        apply_gap_policy(SeriesKind.LEVEL, {}, query=_query(), zero=Decimal("0"))
 
 
 # --- misuse ---------------------------------------------------------------
@@ -175,9 +168,7 @@ def test_an_observation_off_the_grid_is_rejected_rather_than_emitted() -> None:
         apply_gap_policy(SeriesKind.LEVEL, {off_grid: Decimal("1")}, query=_query())
 
 
-def test_an_observation_outside_the_window_is_rejected_rather_than_dropped() -> None:
+@pytest.mark.parametrize("outside", [-1, 5], ids=["below the window", "above the window"])
+def test_an_observation_outside_the_window_is_rejected_rather_than_dropped(outside: int) -> None:
     with pytest.raises(ValueError, match="must be bucket starts within the requested window"):
-        apply_gap_policy(SeriesKind.LEVEL, {_bucket(-1): Decimal("1")}, query=_query())
-
-    with pytest.raises(ValueError, match="must be bucket starts within the requested window"):
-        apply_gap_policy(SeriesKind.LEVEL, {_bucket(5): Decimal("1")}, query=_query())
+        apply_gap_policy(SeriesKind.LEVEL, {_bucket(outside): Decimal("1")}, query=_query())

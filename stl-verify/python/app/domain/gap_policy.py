@@ -16,12 +16,8 @@ either       ``null`` before the first observation: nothing to carry, and
 Marking filled points is the load-bearing part. A mean computed over
 forward-filled data is biased toward stale values and looks entirely
 plausible, and arithmetic over a returned series is a first-class use of this
-API. The marker rides only on filled points, so a long response carries a
-handful of extra fields rather than one per point.
-
-A requested frequency is deliberately never validated against a series'
-cadence: an hourly request on a daily series answers with 23 filled points and
-one observed point per day, which is honest and visible to the caller.
+API. The marker rides only on filled points, so a response carries one extra
+field per filled point rather than one per point.
 
 Domain layer, standard library only, so any transport can share one policy.
 """
@@ -33,9 +29,13 @@ from enum import StrEnum
 
 from app.domain.time_series import TimeSeriesQuery
 
-# ``time_bucket`` cuts on multiples of the bucket width since the Unix epoch,
-# so the grid below is anchored there too and the two agree bucket for bucket.
-_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+# ``time_bucket`` cuts on multiples of the bucket width measured from the
+# Postgres epoch, so the grid below is anchored there too. A width that does not
+# divide a day evenly, or a week multiple (which TimescaleDB anchors on Monday
+# 2000-01-03 instead), would need the origin it actually uses rather than this
+# one; ``_reject_uncovered_observations`` turns that disagreement into a loud
+# error rather than a shifted series.
+_BUCKET_ORIGIN = datetime(2000, 1, 1, tzinfo=UTC)
 
 
 class SeriesKind(StrEnum):
@@ -62,7 +62,7 @@ class GapFilledPoint[T]:
 
 
 def _floor_to_bucket(moment: datetime, width: timedelta) -> datetime:
-    return _EPOCH + (moment - _EPOCH) // width * width
+    return _BUCKET_ORIGIN + (moment - _BUCKET_ORIGIN) // width * width
 
 
 def bucket_starts(query: TimeSeriesQuery) -> list[datetime]:
@@ -89,32 +89,25 @@ def apply_gap_policy[T](
     *,
     query: TimeSeriesQuery,
     zero: T | None = None,
-    prior: T | None = None,
 ) -> list[GapFilledPoint[T]]:
     """Fill the query's bucket grid from ``observed``, newest point first.
 
     ``observed`` is keyed by bucket start; membership is what makes a bucket
     observed, so a bucket whose value is genuinely ``None`` stays unmarked.
     ``zero`` is what an empty bucket of a flow series carries, supplied by the
-    caller because a flow point is not always a bare count. ``prior`` is the
-    last value observed *before* the window, where the caller can read one: it
-    fills the leading buckets of a level series instead of leaving them
-    ``null``.
+    caller because a flow point is not always a bare count.
 
-    Raises ``ValueError`` when a flow series is applied without a ``zero``, or
-    with a ``prior``: a count observed before the window says nothing about
-    whether the window's leading buckets were covered, which is the distinction
-    the leading ``null`` exists to keep. Also raises when ``observed`` carries a
-    key the query could not have returned.
+    Raises ``ValueError`` on a flow series without a ``zero``, on a level series
+    with one — it would be read as the empty-bucket value and is not — and on an
+    ``observed`` key the query could not have returned.
     """
     _reject_uncovered_observations(query, observed)
-    if kind is SeriesKind.FLOW:
-        if zero is None:
-            raise ValueError("a flow series needs the zero value its empty buckets carry")
-        if prior is not None:
-            raise ValueError("a flow series has no prior value to carry; its leading empty buckets are null")
+    if kind is SeriesKind.FLOW and zero is None:
+        raise ValueError("a flow series needs the zero value its empty buckets carry")
+    if kind is SeriesKind.LEVEL and zero is not None:
+        raise ValueError("a level series carries its last observed value into an empty bucket, not a zero")
 
-    carried = prior
+    carried: T | None = None
     observed_yet = False
     points: list[GapFilledPoint[T]] = []
     for bucket_start in sorted({*bucket_starts(query), *observed}):
@@ -142,7 +135,7 @@ def _reject_uncovered_observations(query: TimeSeriesQuery, observed: Mapping[dat
     width = query.bucket
     oldest = _floor_to_bucket(query.from_timestamp, width)
     uncovered = sorted(
-        bucket for bucket in observed if (bucket - _EPOCH) % width or not oldest <= bucket <= query.to_timestamp
+        bucket for bucket in observed if (bucket - _BUCKET_ORIGIN) % width or not oldest <= bucket <= query.to_timestamp
     )
     if uncovered:
         raise ValueError(f"observed buckets must be bucket starts within the requested window: {uncovered}")

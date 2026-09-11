@@ -184,6 +184,8 @@ def test_apply_cache_control_sets_no_store_when_both_defaulted() -> None:
 
 
 class _Point(BucketPoint):
+    """One bucket of a series, for the schema tests."""
+
     bucket_start: datetime
     value: Decimal | None = None
 
@@ -213,3 +215,10 @@ def test_the_published_schema_keeps_the_fields_under_the_marker() -> None:
     schema = _Point.model_json_schema(mode="serialization")
 
     assert set(schema["properties"]) == {"bucket_start", "value", "filled"}
+
+
+def test_the_published_schema_keeps_the_model_name_and_docstring() -> None:
+    schema = _Point.model_json_schema(mode="serialization")
+
+    assert schema["title"] == "_Point"
+    assert schema["description"] == "One bucket of a series, for the schema tests."

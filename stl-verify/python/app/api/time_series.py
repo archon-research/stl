@@ -7,13 +7,13 @@ types live here too, since they are an HTTP-contract concern.
 """
 
 from datetime import UTC, datetime
-from typing import Any, cast
+from inspect import cleandoc
+from typing import Any
 
 from fastapi import HTTPException, Query, Response
 from pydantic import BaseModel, Field, GetJsonSchemaHandler, SerializerFunctionWrapHandler, model_serializer
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema
-from pydantic_core.core_schema import ModelSchema
 
 from app.domain.time_series import (
     AggregationMethod,
@@ -126,11 +126,9 @@ def _resolve_or_422(
 class BucketPoint(BaseModel):
     """Base for one point of a bucketed series, carrying the filled marker.
 
-    A level series carries its last observed value into an empty bucket, so the
-    point has to say which of the two it is: a mean over carried values is
-    biased toward stale ones and looks entirely plausible. The marker is
-    serialized only where it is true, so a 1,464-point response pays for a
-    handful of extra fields rather than 1,464.
+    The wire form of the marker ``app.domain.gap_policy`` sets: serialized only
+    where it is true, so a response pays one extra field per filled point
+    rather than one per point.
     """
 
     filled: bool = Field(
@@ -145,7 +143,7 @@ class BucketPoint(BaseModel):
     @model_serializer(mode="wrap")
     def _drop_unfilled_marker(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         serialized = handler(self)
-        if not serialized.get("filled"):
+        if not self.filled:
             serialized.pop("filled", None)
         return serialized
 
@@ -153,9 +151,15 @@ class BucketPoint(BaseModel):
     def __get_pydantic_json_schema__(cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
         # Pydantic derives a serialization schema from the wrap serializer's
         # return annotation, which would publish every subclass as a bare
-        # object. Schema comes from the fields under it instead.
-        model_schema = cast(ModelSchema, core_schema)
-        return handler.resolve_ref_schema(handler(model_schema["schema"]))
+        # object. Schema comes from the fields under it, with the name and
+        # docstring the model node carries put back on top.
+        if core_schema["type"] != "model":
+            return handler(core_schema)
+        schema = handler.resolve_ref_schema(handler(core_schema["schema"]))
+        schema.setdefault("title", core_schema.get("config", {}).get("title") or cls.__name__)
+        if cls.__doc__:
+            schema.setdefault("description", cleandoc(cls.__doc__))
+        return schema
 
 
 class TimeSeriesWindow(BaseModel):
