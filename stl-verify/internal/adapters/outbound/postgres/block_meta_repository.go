@@ -137,10 +137,7 @@ func (r *BlockMetaRepository) windowPredicates(ctx context.Context, table, partC
 	}
 	var out []string
 	for i := 0; i < len(bounds); i += chunksPerWindow {
-		j := i + chunksPerWindow
-		if j > len(bounds) {
-			j = len(bounds)
-		}
+		j := min(i+chunksPerWindow, len(bounds))
 		out = append(out, fmt.Sprintf("%s >= %s AND %s < %s", partCol, bounds[i].lo, partCol, bounds[j-1].hi))
 	}
 	return out, nil
