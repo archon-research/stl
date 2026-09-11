@@ -255,10 +255,12 @@ func TestSecStoreRejectsAnIllegalRelTypeTriple(t *testing.T) {
 	}
 
 	t.Run("endpoint_kind_outside_the_record_type_set_is_rejected", func(t *testing.T) {
+		// No rel_type declares NOT_A_KIND, so the guard's triple check refuses it before the
+		// CHECK constraints are reached — BEFORE triggers run ahead of constraint validation.
 		err := insertEdge("kind", "ISSUED_BY", "sec-t-triple-a", "NOT_A_KIND", "em-t-triple-a", "ENTITY")
 		var pgErr *pgconn.PgError
-		if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
-			t.Fatalf("insert with src_kind NOT_A_KIND failed with %v, want SQLSTATE 23514 (check_violation)", err)
+		if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
+			t.Fatalf("insert with src_kind NOT_A_KIND failed with %v, want the guard's P0001 (GQ-11)", err)
 		}
 	})
 
@@ -271,11 +273,12 @@ func TestSecStoreRejectsAnIllegalRelTypeTriple(t *testing.T) {
 	})
 
 	t.Run("endpoint_kind_contradicting_its_own_id_prefix_is_rejected", func(t *testing.T) {
-		// sec_node_id_prefix_chk makes record_type a function of the prefix, so this much is
-		// single-row checkable even though endpoint EXISTENCE is not.
+		// Every case declares kinds HAS_UNDERLYING allows (SECURITY -> SECURITY), so the guard's
+		// triple check passes them and the prefix CHECKs are what reject them — which is what
+		// this pins.
 		for _, c := range []struct{ name, srcID, srcKind, dstID, dstKind string }{
 			{"em- declared SECURITY", "em-90001", "SECURITY", "sec-t-x", "SECURITY"},
-			{"unprefixed src", "total-garbage", "ENTITY", "sec-t-x", "SECURITY"},
+			{"unprefixed src", "total-garbage", "SECURITY", "sec-t-x", "SECURITY"},
 			{"empty dst", "sec-t-y", "SECURITY", "", "SECURITY"},
 		} {
 			err := insertEdge(c.name, "HAS_UNDERLYING", c.srcID, c.srcKind, c.dstID, c.dstKind)
@@ -300,13 +303,23 @@ func TestSecStoreRejectsAnIllegalRelTypeTriple(t *testing.T) {
 		}
 	})
 
-	t.Run("illegal_triple_is_not_yet_rejected_at_the_write_boundary", func(t *testing.T) {
-		// The documented gap, asserted so it cannot be forgotten. INVERT THIS SUBTEST when
-		// VEC-622's validator or a legal-pairs FK starts refusing the write.
-		if err := insertEdge("triple", "ISSUED_BY", "sec-t-triple-c", "SECURITY", "concept-t-triple-c", "CONCEPT"); err != nil {
-			t.Fatalf("SECURITY -> CONCEPT ISSUED_BY was refused with %v — if that is deliberate, this subtest is now inverted: assert the rejection and delete this comment (GQ-11, VEC-622)", err)
+	t.Run("illegal_rel_type_triple_is_rejected", func(t *testing.T) {
+		// ISSUED_BY is declared SECURITY -> ENTITY, so a CONCEPT destination is illegal. The
+		// guard reads the vocabulary row for cluster_key, so the triple costs one predicate on
+		// a read that already happens.
+		err := insertEdge("triple", "ISSUED_BY", "sec-t-triple-c", "SECURITY", "concept-t-triple-c", "CONCEPT")
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
+			t.Fatalf("SECURITY -> CONCEPT ISSUED_BY failed with %v, want P0001 from the guard (GQ-11)", err)
 		}
-		t.Log("known gap: an illegal (rel_type, src_kind, dst_kind) triple lands. Legality is two array columns on the vocabulary, which no CHECK or FK on sec_edge can read, so ADR-0007 §3 assigns GQ-11 to the validator (VEC-622)")
+	})
+
+	t.Run("a_legal_triple_still_lands", func(t *testing.T) {
+		// BELONGS_TO is declared {SECURITY,ENTITY,ACCOUNT} -> {CONCEPT}, so the same CONCEPT
+		// destination that ISSUED_BY refuses is legal here.
+		if err := insertEdge("legal", "BELONGS_TO", "sec-t-triple-d", "SECURITY", "concept-t-triple-d", "CONCEPT"); err != nil {
+			t.Fatalf("a legal triple must land: %v", err)
+		}
 	})
 }
 

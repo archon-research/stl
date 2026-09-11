@@ -34,11 +34,11 @@ CREATE TABLE rel_type_vocabulary (
     change_reason       text NOT NULL DEFAULT 'SEED_LOAD',
     run_id              bigint REFERENCES writer_run(id)
 );
-COMMENT ON TABLE rel_type_vocabulary IS '[Configuration] Governed relationship vocabulary (ADR-0007 §5). Adding or ratifying a type is a reviewed migration. Endpoint legality is the (rel_type, src_kind, dst_kind) triple, enforced by the loader/validator (cross-row; an FK cannot see the endpoint row). Plain table: governance-rate writes.';
+COMMENT ON TABLE rel_type_vocabulary IS '[Configuration] Governed relationship vocabulary (ADR-0007 §5). Adding or ratifying a type is a reviewed migration. Endpoint legality is the (rel_type, src_kind, dst_kind) triple, enforced on write by sec_store_append_guard, which reads this row anyway to derive edge_disc. Plain table: governance-rate writes.';
 COMMENT ON COLUMN rel_type_vocabulary.rel_type IS 'Roles: PK. The edge type name, UPPER_SNAKE.';
 COMMENT ON COLUMN rel_type_vocabulary.family IS 'One of the six ADR-0007 §5 families.';
-COMMENT ON COLUMN rel_type_vocabulary.src_kinds IS 'Legal source node kinds (sec_node.record_type values).';
-COMMENT ON COLUMN rel_type_vocabulary.dst_kinds IS 'Legal destination node kinds.';
+COMMENT ON COLUMN rel_type_vocabulary.src_kinds IS 'Legal source node kinds (sec_node.record_type values), enforced on write by sec_store_append_guard (GQ-11). Independent of dst_kinds, so the pair space is the cross product.';
+COMMENT ON COLUMN rel_type_vocabulary.dst_kinds IS 'Legal destination node kinds, enforced on write with src_kinds (GQ-11).';
 COMMENT ON COLUMN rel_type_vocabulary.cardinality IS 'Expected current-state cardinality; a DQ check over current state, never a write trigger (an open edge always time-overlaps its re-point).';
 COMMENT ON COLUMN rel_type_vocabulary.cluster_key IS 'The payload keys that distinguish a deliberate TWIN of this type, and nothing else: sec_edge.edge_disc is derived from them, so they must be IMMUTABLE over the edge''s life and every edge of the type must carry them (the guard refuses a payload that does not). A mutable key — an outlook, a weight — would fork identity on close-and-open instead of closing the window. NULL = no twins: one logical edge per (rel_type, src_id, dst_id), and a same-pair duplicate collides on the PK rather than becoming an unintended twin (GQ-19). Twelve of the thirteen ratified types are NULL; SPLIT_FROM keys on ex_date because two corporate actions on one pair are two edges, and without the key the second collapses onto the first in every resolved read. THIS COLUMN IS NOT AMENDABLE IN PLACE: reference_table_immutable() blocks UPDATE, so a declared value is frozen for the life of the row and a change means a migration that drops the trigger, updates, and recreates it — under LOCK TABLE sec_edge, since the guard reads this column without a row lock and an in-flight writer would otherwise key an edge on the old declaration. A draft type declares its key in the migration that ratifies it, which is an ordinary INSERT.';
 COMMENT ON COLUMN rel_type_vocabulary.weight_basis IS 'Roles: FK→weight_basis_vocabulary.basis. The declared basis for weighted types; NULL = unweighted type.';
@@ -221,9 +221,9 @@ COMMENT ON TABLE sec_edge IS '[Dimension] Directed, typed, weighted relationship
 COMMENT ON COLUMN sec_edge.edge_id IS 'Roles: Derived. Generated human-readable identity of the LOGICAL edge; the PK is the seven-column (rel_type, src_id, dst_id, edge_disc, processing_version, valid_from, valid_to) tuple, so one edge_id spans every version and window of that edge.';
 COMMENT ON COLUMN sec_edge.edge_disc IS 'Roles: PK component. DM-6 discriminator, DERIVED rather than allocated (ADR-0007 §3): sec_edge_discriminator(payload, rel_type_vocabulary.cluster_key) — the literal ''base'' where the type declares no cluster key, else the first 16 hex of sha256 over the canonical form of the declared payload subset. Engine-assigned by sec_store_append_guard; a supplied value is verified, never trusted. Deterministic by construction, so a replay reproduces edge_id and every content_hash chained from it without carrying state, and two writers creating DIFFERENT twins concurrently both land instead of racing a read-then-write counter. It is constant across versions and windows only because the cluster key is the IMMUTABLE subset of payload: derived from all of payload it would fork identity on a correction, leaving the superseded row current alongside its replacement (GQ-20). Reproducibility is per vocabulary version — nothing in the row records which cluster_key produced it, so an amended declaration changes the discriminator, and with it edge_id and every chained content_hash, for rows appended after it.';
 COMMENT ON COLUMN sec_edge.src_id IS 'Roles: FK→sec_node.id (soft; SCD2 ids non-unique — resolve via the current view). Edge source.';
-COMMENT ON COLUMN sec_edge.src_kind IS 'Denormalised source kind, CHECKed to agree with src_id''s own prefix (so ''em-…'' cannot be declared SECURITY). That the endpoint EXISTS as a current node is cross-row and stays validator-enforced (GQ-11).';
+COMMENT ON COLUMN sec_edge.src_kind IS 'Denormalised source kind, CHECKed to agree with src_id''s own prefix (so ''em-…'' cannot be declared SECURITY) and checked against rel_type_vocabulary.src_kinds by the guard (GQ-11). That the endpoint EXISTS as a current node is cross-row and stays validator-enforced.';
 COMMENT ON COLUMN sec_edge.dst_id IS 'Roles: FK→sec_node.id (soft). Edge destination.';
-COMMENT ON COLUMN sec_edge.dst_kind IS 'Denormalised destination kind, CHECKed to agree with dst_id''s own prefix. Endpoint existence stays validator-enforced (GQ-11).';
+COMMENT ON COLUMN sec_edge.dst_kind IS 'Denormalised destination kind, CHECKed to agree with dst_id''s own prefix and against rel_type_vocabulary.dst_kinds by the guard (GQ-11). Endpoint existence stays validator-enforced.';
 COMMENT ON COLUMN sec_edge.rel_type IS 'Roles: FK→rel_type_vocabulary.rel_type, PK component. The governed type.';
 COMMENT ON COLUMN sec_edge.rel_weight IS 'Exact decimal numeric(30,18), never float (RP-4.4). Look-through = sum over paths of weight products within one basis. NULL on unweighted types; a NULL weight on a weighted walk is an error, never treated as 1.0.';
 COMMENT ON COLUMN sec_edge.weight_basis IS 'Roles: FK→weight_basis_vocabulary.basis. Mandatory when rel_weight is present (CHECK).';
@@ -509,6 +509,8 @@ DECLARE
     pre_image    jsonb;
     parent_hash  bytea;
     declared_key text[];
+    declared_src text[];
+    declared_dst text[];
     derived_disc text;
     parent_disc  text;
     vocab_found  boolean;
@@ -521,9 +523,18 @@ BEGIN
     -- Derived before the pre-image is taken, so content_hash covers the discriminator it ends up
     -- keyed by. Keyed on the column rather than the table name, which a rename would defeat.
     IF to_jsonb(NEW) ? 'edge_disc' THEN
-        SELECT v.cluster_key, true INTO declared_key, vocab_found
+        SELECT v.cluster_key, v.src_kinds, v.dst_kinds, true
+          INTO declared_key, declared_src, declared_dst, vocab_found
           FROM rel_type_vocabulary v WHERE v.rel_type = NEW.rel_type;
         IF coalesce(vocab_found, false) THEN
+            -- GQ-11's triple, on the row already read for cluster_key. src_kinds and dst_kinds are
+            -- independent sets, so this is the cross product; a type legal only over matched pairs
+            -- (SAME_AS, SUPERSEDES) needs the legal-pairs shape VEC-622 owns.
+            IF NOT (NEW.src_kind = ANY (declared_src) AND NEW.dst_kind = ANY (declared_dst)) THEN
+                RAISE EXCEPTION '% is declared % -> %, so (%, %) is not a legal endpoint pair for it (ADR-0007 §5, GQ-11)',
+                    NEW.rel_type, declared_src, declared_dst, NEW.src_kind, NEW.dst_kind;
+            END IF;
+
             derived_disc := sec_edge_discriminator(NEW.payload, declared_key);
             IF derived_disc IS NULL THEN
                 RAISE EXCEPTION 'payload carries none of the cluster keys % that % declares, so this edge has no identity to take; the discriminator is derived from them (ADR-0007 §3)',
