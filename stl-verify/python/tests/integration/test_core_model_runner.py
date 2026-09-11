@@ -66,7 +66,7 @@ class _TruncatedReader(ParquetCoreModelDataReader):
 #   the silent Gaussian fallback) must move these numbers.
 # - syrup: five collateral tokens with JUMPS on (the production default), so
 #   it exercises the cross-asset t-Copula, the jump calibration the C-08 fix
-#   changes, and margin-call liquidations with non-zero losses (3 of 50
+#   changes, and margin-call liquidations with non-zero losses (4 of 50
 #   scenarios lose).
 _GOLDEN_CASES = {
     "morpho_cbbtc_usdc": {
@@ -103,15 +103,15 @@ _GOLDEN_CASES = {
             # JUMPS deliberately left at its default (true).
         },
         "expected": {
-            "crr_el_pct": Decimal("0.8362"),
-            "crr_es_pct": Decimal("16.844187"),
-            "crr_var_pct": Decimal("10.500622"),
+            "crr_el_pct": Decimal("0.605311"),
+            "crr_es_pct": Decimal("13.138924"),
+            "crr_var_pct": Decimal("4.932652"),
             "hhi": Decimal("14.069008"),
             "n_scenarios": 50,
             "n_loss_scenarios": 4,
             "n_catastrophic_scenarios": 4,
-            "crr_el_se_pct": 0.5140769139405964,
-            "crr_el_rel_se": 0.6147777172995316,
+            "crr_el_se_pct": 0.43821062711199477,
+            "crr_el_rel_se": 0.7239429028063681,
         },
     },
 }

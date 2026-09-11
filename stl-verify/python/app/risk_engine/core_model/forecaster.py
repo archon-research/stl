@@ -8,7 +8,7 @@
 # ============================================================
 
 import warnings
-from typing import Optional, Union
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -127,7 +127,7 @@ class Forecaster:
         step: int,
         prices: pd.Series,
         correlated_uniform: pd.Series,
-        jump_params: Optional[Union[dict, int]],
+        jump_params: Optional[dict],
         use_log_return: bool,
     ) -> tuple[pd.Series, pd.Series, pd.Series]:
         """
@@ -224,7 +224,11 @@ class Forecaster:
 
     @staticmethod
     def brownian_bridge_hourly(
-        daily_returns: pd.Series, daily_vol: pd.Series, jump_series: pd.Series, hours: int = 24, seed: int | None = 0
+        daily_returns: pd.Series,
+        daily_vol: pd.Series,
+        jump_series: Optional[pd.Series],
+        hours: int = 24,
+        seed: int | None = 0,
     ) -> pd.Series:
 
         hourly_returns = []
@@ -247,9 +251,11 @@ class Forecaster:
 
             r_cont_hourly = R_d / hours + sigma_d * np.sqrt(dt) * Z
 
-            if np.isnan(r_cont_hourly).any() or np.isinf(r_cont_hourly).any():
-                print(f"[BB] Bad hourly returns at {t}: R_d={R_d}, sigma_d={sigma_d}")
-                r_cont_hourly = np.zeros(hours)  # fallback
+            if not np.isfinite(r_cont_hourly).all():
+                # A non-finite return must fail here, not persist as a flat path (audit C-09).
+                raise ValueError(
+                    f"non-finite hourly returns in the Brownian bridge at step {t}: R_d={R_d}, sigma_d={sigma_d}"
+                )
 
             if jump_series is not None:
                 hourly_jumps = jump_series.loc[t]  # shape (24,)
@@ -263,7 +269,7 @@ class Forecaster:
         self,
         prices_series: pd.Series,
         correlated_eps: pd.Series,
-        jump_params: pd.DataFrame,
+        jump_params: Optional[dict],
         use_log_returns: Optional[bool] = True,
         forecasted_step: Optional[int] = None,
         token_name: Optional[str] = None,
@@ -396,7 +402,6 @@ class Simulator:
         forecasted_step: int,
         use_log_returns: bool,
         use_brownian_bridge: bool,
-        jump_parameters: pd.DataFrame,
         n_sims: int,
         seed: int,
         market_df: pd.DataFrame,
@@ -440,9 +445,7 @@ class Simulator:
                 rolling_vol = full_log_returns.rolling(21).std()
                 token_vol_floor = float(np.percentile(rolling_vol.dropna(), vol_floor_pct * 100))
 
-            # Per-token jump params take priority; fall back to the shared
-            # jump_parameters argument for backwards compatibility with main.py.
-            token_jump_params = result_per_token[token].get("jump_params", jump_parameters)
+            token_jump_params = result_per_token[token]["jump_params"]
 
             # Lindy factor: uncertainty premium for assets with short price history.
             # Returns 1.0 when lindy_alpha=0.0 (disabled) → no change to behaviour.
