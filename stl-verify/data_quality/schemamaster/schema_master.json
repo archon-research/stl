@@ -2112,41 +2112,6 @@
       "canonical": "valid_from",
       "accepted_type": "date",
       "reason": "VEC-617: as sec_node.valid_from — UTC calendar date per ADR-0007 §3."
-    },
-    {
-      "table": "rel_type_vocabulary",
-      "column": "valid_from",
-      "canonical": "valid_from",
-      "accepted_type": "date",
-      "reason": "VEC-617: the combined master's governed vocabularies are versioned reference tables (ADR-0006 §1/§4) whose valid_from is the same UTC calendar date as the stores they govern (ADR-0007 §3/§5), so the key reads consistently across the store. Canonical valid_from=timestamptz is the ingest layer's effective-time stamp."
-    },
-    {
-      "table": "weight_basis_vocabulary",
-      "column": "valid_from",
-      "canonical": "valid_from",
-      "accepted_type": "date",
-      "reason": "VEC-617: the combined master's governed vocabularies are versioned reference tables (ADR-0006 §1/§4) whose valid_from is the same UTC calendar date as the stores they govern (ADR-0007 §3/§5), so the key reads consistently across the store. Canonical valid_from=timestamptz is the ingest layer's effective-time stamp."
-    },
-    {
-      "table": "change_reason_vocabulary",
-      "column": "valid_from",
-      "canonical": "valid_from",
-      "accepted_type": "date",
-      "reason": "VEC-617: the combined master's governed vocabularies are versioned reference tables (ADR-0006 §1/§4) whose valid_from is the same UTC calendar date as the stores they govern (ADR-0007 §3/§5), so the key reads consistently across the store. Canonical valid_from=timestamptz is the ingest layer's effective-time stamp."
-    },
-    {
-      "table": "concept_class_vocabulary",
-      "column": "valid_from",
-      "canonical": "valid_from",
-      "accepted_type": "date",
-      "reason": "VEC-617: the combined master's governed vocabularies are versioned reference tables (ADR-0006 §1/§4) whose valid_from is the same UTC calendar date as the stores they govern (ADR-0007 §3/§5), so the key reads consistently across the store. Canonical valid_from=timestamptz is the ingest layer's effective-time stamp."
-    },
-    {
-      "table": "node_status_vocabulary",
-      "column": "valid_from",
-      "canonical": "valid_from",
-      "accepted_type": "date",
-      "reason": "VEC-617: the combined master's governed vocabularies are versioned reference tables (ADR-0006 §1/§4) whose valid_from is the same UTC calendar date as the stores they govern (ADR-0007 §3/§5), so the key reads consistently across the store. Canonical valid_from=timestamptz is the ingest layer's effective-time stamp."
     }
   ],
   "fills": [
