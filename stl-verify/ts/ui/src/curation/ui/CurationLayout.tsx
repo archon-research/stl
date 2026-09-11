@@ -209,7 +209,10 @@ const navHeadingClassName = css({
 const navLinkClassName = css({
   position: 'relative',
   display: 'block',
-  px: '3',
+  // Indented past the section heading's own gutter, so the items read as
+  // belonging to the heading above them rather than as a flat list beside it.
+  paddingInlineStart: '5',
+  paddingInlineEnd: '3',
   py: '2',
   borderRadius: 'md',
   fontSize: 'sm',

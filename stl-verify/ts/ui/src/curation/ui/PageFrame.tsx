@@ -32,8 +32,6 @@ export type PageFrameProps = {
   title: ReactNode;
   /** Sits under the title; one line on what the resource is for. */
   description?: ReactNode;
-  /** Trailing controls on the title row — the primary action lives here. */
-  actions?: ReactNode;
   /** Status chips and the like, beside the title. */
   meta?: ReactNode;
   children: ReactNode;
@@ -43,7 +41,6 @@ export function PageFrame({
   crumbs,
   title,
   description,
-  actions,
   meta,
   children,
 }: PageFrameProps) {
@@ -61,9 +58,6 @@ export function PageFrame({
             <p className={descriptionClassName}>{description}</p>
           )}
         </div>
-        {actions !== undefined && (
-          <div className={actionsClassName}>{actions}</div>
-        )}
       </div>
 
       {children}
@@ -108,6 +102,31 @@ function Breadcrumbs({ crumbs }: { crumbs: readonly Crumb[] }) {
         })}
       </ol>
     </nav>
+  );
+}
+
+/**
+ * The row directly above a table: filters on the left, actions on the right.
+ *
+ * The primary action used to sit opposite the page title, which put it a long
+ * way from the table it adds a row to and left it floating in whitespace beside
+ * the description. Here it reads as part of the table's own chrome — and the
+ * filter it shares the line with acts on the same rows.
+ */
+export function PageToolbar({
+  filter,
+  actions,
+}: {
+  filter?: ReactNode;
+  actions?: ReactNode;
+}) {
+  return (
+    <div className={toolbarClassName}>
+      <div className={toolbarFilterClassName}>{filter}</div>
+      {actions !== undefined && (
+        <div className={actionsClassName}>{actions}</div>
+      )}
+    </div>
   );
 }
 
@@ -238,6 +257,21 @@ const descriptionClassName = css({
 });
 
 const actionsClassName = flex({ align: 'center', gap: '2', flexShrink: 0 });
+
+const toolbarClassName = flex({
+  align: 'center',
+  justify: 'space-between',
+  gap: '3',
+  flexWrap: 'wrap',
+  // Pulls the toolbar toward the table it belongs to, away from the page header.
+  marginBottom: '-2',
+});
+
+const toolbarFilterClassName = css({
+  maxWidth: 'sm',
+  flex: '1',
+  minWidth: '0',
+});
 
 const sectionClassName = css({
   display: 'flex',

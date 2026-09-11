@@ -10,7 +10,7 @@ import { api } from '../lib/api.ts';
 import type { EdgeRow, NodeRow } from '../lib/contract.ts';
 import type { CurationResource } from '../schema/registry.ts';
 import { type Column, DataTable } from './DataTable.tsx';
-import { PageFrame, PageSection } from './PageFrame.tsx';
+import { PageFrame, PageSection, PageToolbar } from './PageFrame.tsx';
 
 /**
  * One list view for every resource, driven by the registry's column set.
@@ -28,21 +28,23 @@ export function ResourceListView({ resource }: { resource: CurationResource }) {
       crumbs={[{ label: 'Curate' }, { label: resource.label }]}
       title={resource.label}
       description={resource.description}
-      actions={
-        <Link to="/$resourceKey/new" params={{ resourceKey: resource.key }}>
-          <Button emphasis="solid" colorPalette="blue">
-            New {resource.singular}
-          </Button>
-        </Link>
-      }
     >
-      <div className={filterClassName}>
-        <SearchInput
-          value={term}
-          onValueChange={setTerm}
-          placeholder="Filter"
-        />
-      </div>
+      <PageToolbar
+        filter={
+          <SearchInput
+            value={term}
+            onValueChange={setTerm}
+            placeholder="Filter"
+          />
+        }
+        actions={
+          <Link to="/$resourceKey/new" params={{ resourceKey: resource.key }}>
+            <Button emphasis="solid" colorPalette="blue">
+              New {resource.singular}
+            </Button>
+          </Link>
+        }
+      />
 
       <PageSection bleed>
         {resource.store === 'node' && (
@@ -373,8 +375,6 @@ function AliasRows({ term }: { term: string }) {
     />
   );
 }
-
-const filterClassName = css({ maxWidth: 'sm', minWidth: '0' });
 
 const statusClassName = css({
   fontSize: 'sm',
