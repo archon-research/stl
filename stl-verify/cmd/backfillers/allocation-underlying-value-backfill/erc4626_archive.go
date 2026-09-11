@@ -69,12 +69,14 @@ func (r *erc4626ArchiveResolver) multicallerForChain(ctx context.Context, chainI
 	return mc, nil
 }
 
-// isERC4626ArchiveCandidate reports whether a row is an erc4626-like receipt
-// token with enough registry data to attempt a real conversion read. Rows the
+// isERC4626ArchiveCandidate reports whether a row is an erc4626-like holding
+// with enough registry data to attempt a real conversion read -- a
+// receipt_token match, or a non-receipt-token row the axis-synome registry
+// itself resolved to type erc4626 (applyRegistryUnderlyings). Rows the
 // registry cannot resolve an underlying for are left to the same fallback
 // path a missing archive result takes, unchanged from before this file existed.
 func isERC4626ArchiveCandidate(c candidateRow) bool {
-	return c.isReceiptToken && !c.underlyingIsOneToOne && c.underlyingAddress != nil && c.underlyingDecimals != nil
+	return !c.underlyingIsOneToOne && c.underlyingAddress != nil && c.underlyingDecimals != nil
 }
 
 // resolve reads convertToAssets(balance) for every erc4626 candidate at its

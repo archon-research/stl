@@ -14,6 +14,14 @@
 // price-ratio derivation from onchain_token_price only for a row the archive
 // could not answer (see classify.go).
 //
+// A row with no receipt_token match still gets the aToken/erc4626 treatment
+// when the axis-synome registry itself resolves it to one of those types: the
+// live tracker (internal/services/allocation_tracker.underlyingValuation)
+// denominates from the registry's asset_address, not from receipt_token, so a
+// registry-erc4626 token absent from receipt_token was already being valued
+// on ingest and must not be left behind here (see applyRegistryUnderlyings in
+// token_type_registry.go).
+//
 // Sweeps are in scope alongside in/out transfers: validateTransferParties
 // requires both transfer parties only for a transfer-driven row, and requires
 // them absent for a sweep, so a pre-cutover sweep is already a valid entity
@@ -148,7 +156,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("fetch candidates: %w", err)
 	}
 
-	classified, err := resolveAndClassify(ctx, candidates, cfg)
+	classified, err := resolveAndClassify(ctx, pool, candidates, cfg)
 	if err != nil {
 		return err
 	}
@@ -231,14 +239,22 @@ func logCandidatesFetched(candidates []candidateRow, limit int) {
 	}
 }
 
-// resolveAndClassify reads the real erc4626 conversions this batch's rows
-// need from the archive, then classifies every candidate (falling back to the
-// price-ratio derivation only where the archive could not answer).
-func resolveAndClassify(ctx context.Context, candidates []candidateRow, cfg cliConfig) ([]positionSource, error) {
+// resolveAndClassify promotes every non-receipt-token row the axis-synome
+// registry itself resolves to erc4626 or atoken (see
+// applyRegistryUnderlyings), reads the real erc4626 conversions this batch's
+// rows need from the archive, then classifies every candidate (falling back
+// to the price-ratio derivation only where the archive could not answer).
+func resolveAndClassify(ctx context.Context, pool *pgxpool.Pool, candidates []candidateRow, cfg cliConfig) ([]positionSource, error) {
 	tokenTypes, err := loadTokenTypeRegistry()
 	if err != nil {
 		return nil, fmt.Errorf("loading token type registry: %w", err)
 	}
+
+	underlyingDecimals, err := fetchUnderlyingDecimals(ctx, pool, registryUnderlyingKeys(candidates, tokenTypes))
+	if err != nil {
+		return nil, fmt.Errorf("resolving registry underlying decimals: %w", err)
+	}
+	candidates = applyRegistryUnderlyings(candidates, tokenTypes, underlyingDecimals)
 
 	archiveResolver, err := newERC4626ArchiveResolver()
 	if err != nil {
@@ -255,6 +271,50 @@ func resolveAndClassify(ctx context.Context, candidates []candidateRow, cfg cliC
 	}
 	logClassification(stats, len(classified))
 	return classified, nil
+}
+
+// fetchUnderlyingDecimals resolves the token table's own decimals for the
+// registry-named assets applyRegistryUnderlyings needs. The axis-synome
+// contract carries an address, never a decimals count, and the write path
+// descales the raw underlying amount by whatever decimals this returns, so a
+// wrong guess here would corrupt the stored value, not just fail loudly.
+func fetchUnderlyingDecimals(ctx context.Context, pool *pgxpool.Pool, keys []tokenDecimalsKey) (tokenDecimalsLookup, error) {
+	out := make(tokenDecimalsLookup, len(keys))
+	if len(keys) == 0 {
+		return out, nil
+	}
+
+	chainIDs := make([]int64, len(keys))
+	addresses := make([][]byte, len(keys))
+	for i, k := range keys {
+		chainIDs[i] = k.chainID
+		addresses[i] = k.address.Bytes()
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT t.chain_id, t.address, t.decimals
+		FROM token t
+		JOIN unnest($1::bigint[], $2::bytea[]) AS want(chain_id, address)
+		  ON t.chain_id = want.chain_id AND t.address = want.address
+		WHERE t.decimals IS NOT NULL`,
+		chainIDs, addresses)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			chainID  int64
+			addr     []byte
+			decimals int32
+		)
+		if err := rows.Scan(&chainID, &addr, &decimals); err != nil {
+			return nil, err
+		}
+		out[tokenDecimalsKey{chainID: chainID, address: common.BytesToAddress(addr)}] = decimals
+	}
+	return out, rows.Err()
 }
 
 func logDryRunPreview(classified []positionSource) {

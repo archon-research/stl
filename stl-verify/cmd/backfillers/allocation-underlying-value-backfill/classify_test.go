@@ -18,7 +18,7 @@ func erc20Registry(t *testing.T, chainID int64, addr common.Address) tokenTypeRe
 	if err != nil {
 		t.Fatalf("entity.ChainName(%d): %v", chainID, err)
 	}
-	return tokenTypeRegistry{tokenTypeKey(chain, addr): "erc20"}
+	return tokenTypeRegistry{tokenTypeKey(chain, addr): tokenTypeEntry{tokenType: "erc20"}}
 }
 
 var (
@@ -60,10 +60,12 @@ func TestClassifyCandidates_DirectHolding(t *testing.T) {
 
 func TestClassifyCandidates_AToken(t *testing.T) {
 	underlying := testUnderlying
+	decimals := int32(18)
 	c := baseCandidate()
 	c.isReceiptToken = true
 	c.underlyingIsOneToOne = true
 	c.underlyingAddress = &underlying
+	c.underlyingDecimals = &decimals
 
 	out, stats, err := classifyCandidates([]candidateRow{c}, nil, nil, cliConfig{})
 	if err != nil {
@@ -74,6 +76,34 @@ func TestClassifyCandidates_AToken(t *testing.T) {
 	}
 	if out[0].position.Underlying.Value.Cmp(c.balance) != 0 {
 		t.Errorf("aToken underlying value = %s, want 1:1 with balance %s", out[0].position.Underlying.Value, c.balance)
+	}
+}
+
+// TestClassifyCandidates_ATokenNormalizesDifferingDecimals guards the raw
+// underlying amount against being written under the wrong decimals when the
+// underlying's decimals differ from the share token's: aTokenPosition must
+// read the underlying's own decimals, not assume parity with the share.
+func TestClassifyCandidates_ATokenNormalizesDifferingDecimals(t *testing.T) {
+	underlying := testUnderlying
+	underlyingDecimals := int32(6) // share token is 18 decimals (baseCandidate)
+	c := baseCandidate()
+	c.isReceiptToken = true
+	c.underlyingIsOneToOne = true
+	c.underlyingAddress = &underlying
+	c.underlyingDecimals = &underlyingDecimals
+
+	out, stats, err := classifyCandidates([]candidateRow{c}, nil, nil, cliConfig{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stats.aToken != 1 || len(out) != 1 {
+		t.Fatalf("stats = %+v, len(out) = %d, want aToken=1", stats, len(out))
+	}
+	if out[0].position.Underlying.AssetDecimals != 6 {
+		t.Errorf("Underlying.AssetDecimals = %d, want the underlying's own 6, not the share token's 18", out[0].position.Underlying.AssetDecimals)
+	}
+	if out[0].position.Underlying.Value.Cmp(c.balance) != 0 {
+		t.Errorf("aToken underlying value = %s, want the raw balance %s carried through unscaled", out[0].position.Underlying.Value, c.balance)
 	}
 }
 
@@ -245,6 +275,7 @@ func TestClassifyCandidates_ProtocolNameDrivesClassification_NotSymbol(t *testin
 	aToken.isReceiptToken = true
 	aToken.underlyingIsOneToOne = true // resolved from protocol name "SparkLend"
 	aToken.underlyingAddress = &underlying
+	aToken.underlyingDecimals = &decimals
 	aToken.protocolName = "SparkLend"
 
 	vault := baseCandidate()
@@ -271,6 +302,87 @@ func TestClassifyCandidates_ProtocolNameDrivesClassification_NotSymbol(t *testin
 	}
 }
 
+// TestClassifyCandidates_RegistryERC4626ValuedViaArchive guards VEC-780: a
+// token typed erc4626 in the axis-synome registry but absent from
+// receipt_token (sUSDS, sparkPrimeUSDC1 and friends are real examples) must
+// still be valued from a real archive convertToAssets read, denominated in
+// the registry's own asset_address -- exactly like a receipt_token-matched
+// erc4626 row, just routed here instead of via receipt_token.
+func TestClassifyCandidates_RegistryERC4626ValuedViaArchive(t *testing.T) {
+	underlying := testUnderlying
+	decimals := int32(6)
+	c := baseCandidate()
+	c.tokenAddress = testVault
+	c.isReceiptToken = false
+	c.underlyingAddress = &underlying
+	c.underlyingDecimals = &decimals
+
+	archiveRaw := big.NewInt(1_234_567_000)
+	out, stats, err := classifyCandidates([]candidateRow{c}, map[int]*big.Int{0: archiveRaw}, nil, cliConfig{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stats.convertedERC4626ArchiveViaRegistry != 1 || len(out) != 1 {
+		t.Fatalf("stats = %+v, len(out) = %d, want convertedERC4626ArchiveViaRegistry=1", stats, len(out))
+	}
+	if out[0].position.Underlying.AssetAddress != underlying {
+		t.Errorf("Underlying.AssetAddress = %s, want the registry's own asset address %s", out[0].position.Underlying.AssetAddress, underlying)
+	}
+	if out[0].position.Underlying.Value.Cmp(archiveRaw) != 0 {
+		t.Errorf("Underlying.Value = %s, want the archive result %s", out[0].position.Underlying.Value, archiveRaw)
+	}
+}
+
+// TestClassifyCandidates_RegistryATokenValued1to1 guards VEC-780: a token
+// typed atoken in the axis-synome registry but absent from receipt_token must
+// still resolve 1:1, denominated in the registry's own asset_address.
+func TestClassifyCandidates_RegistryATokenValued1to1(t *testing.T) {
+	underlying := testUnderlying
+	decimals := int32(18)
+	c := baseCandidate()
+	c.isReceiptToken = false
+	c.underlyingAddress = &underlying
+	c.underlyingDecimals = &decimals
+	c.underlyingIsOneToOne = true
+
+	out, stats, err := classifyCandidates([]candidateRow{c}, nil, nil, cliConfig{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stats.aTokenViaRegistry != 1 || len(out) != 1 {
+		t.Fatalf("stats = %+v, len(out) = %d, want aTokenViaRegistry=1", stats, len(out))
+	}
+	if out[0].position.Underlying.AssetAddress != underlying {
+		t.Errorf("Underlying.AssetAddress = %s, want the registry's own asset address %s", out[0].position.Underlying.AssetAddress, underlying)
+	}
+	if out[0].position.Underlying.Value.Cmp(c.balance) != 0 {
+		t.Errorf("Underlying.Value = %s, want 1:1 with balance %s", out[0].position.Underlying.Value, c.balance)
+	}
+}
+
+// TestClassifyCandidates_RegistryTypeUnresolvableUnderlyingIsSkippedDistinctly
+// guards the diagnostic split in the dry-run log: a row the registry
+// resolves to atoken/erc4626 but whose asset_address applyRegistryUnderlyings
+// could not find decimals for must land in skippedNoUnderlying, the same
+// bucket a receipt_token row with an unresolved underlying uses -- not the
+// generic skippedNotPlainERC20 bucket a curve/NAV-RWA row (or one absent from
+// the registry) uses.
+func TestClassifyCandidates_RegistryTypeUnresolvableUnderlyingIsSkippedDistinctly(t *testing.T) {
+	c := baseCandidate()
+	c.isReceiptToken = false
+	// Simulates applyRegistryUnderlyings leaving the row unpromoted because
+	// fetchUnderlyingDecimals had no answer for the registry's asset_address.
+	registry := tokenTypeRegistry{tokenTypeKey("mainnet", c.tokenAddress): tokenTypeEntry{tokenType: "erc4626", assetAddress: &testUnderlying}}
+
+	out, stats, err := classifyCandidates([]candidateRow{c}, nil, registry, cliConfig{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stats.skippedNoUnderlying != 1 || stats.skippedNotPlainERC20 != 0 || len(out) != 0 {
+		t.Fatalf("stats = %+v, len(out) = %d, want skippedNoUnderlying=1", stats, len(out))
+	}
+}
+
 // TestClassifyCandidates_NonReceiptTokenSkippedWhenNotPlainERC20 guards B1: a
 // row with no receipt_token match is not necessarily a plain erc20 -- Curve
 // LP shares, NAV/RWA shares and pre-cutover uni_v3 rows clear that check too
@@ -280,7 +392,7 @@ func TestClassifyCandidates_NonReceiptTokenSkippedWhenNotPlainERC20(t *testing.T
 	c := baseCandidate()
 	c.isReceiptToken = false
 
-	registry := tokenTypeRegistry{tokenTypeKey("mainnet", testDirect): "curve"}
+	registry := tokenTypeRegistry{tokenTypeKey("mainnet", testDirect): tokenTypeEntry{tokenType: "curve"}}
 	out, stats, err := classifyCandidates([]candidateRow{c}, nil, registry, cliConfig{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -312,10 +424,12 @@ func TestClassifyCandidates_NonReceiptTokenSkippedWhenAbsentFromRegistry(t *test
 // classification path (toEntity, not any one caller, sets it).
 func TestClassifyCandidates_ScaledBalanceCarriedThrough(t *testing.T) {
 	underlying := testUnderlying
+	decimals := int32(18)
 	c := baseCandidate()
 	c.isReceiptToken = true
 	c.underlyingIsOneToOne = true
 	c.underlyingAddress = &underlying
+	c.underlyingDecimals = &decimals
 	c.scaledBalance = big.NewInt(900_000_000_000_000_000)
 
 	out, _, err := classifyCandidates([]candidateRow{c}, nil, nil, cliConfig{})

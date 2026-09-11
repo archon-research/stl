@@ -678,6 +678,72 @@ func TestRunIntegration_NonReceiptTokenNotInRegistryIsNotCorrected(t *testing.T)
 }
 
 // ---------------------------------------------------------------------------
+// VEC-780: the live tracker denominates erc4626/atoken positions from the
+// registry's own asset_address, not from receipt_token, so a row typed
+// erc4626 in the axis-synome contract but absent from receipt_token must
+// still get the real archive conversion -- never skipped as "not plain
+// erc20", and never self-denominated. sUSDS/USDS is a real registry entry
+// (contract_address/asset_address read straight from
+// contracts/axis-synome/axis_synome_entities.json), not a fabricated pair.
+// ---------------------------------------------------------------------------
+
+func TestRunIntegration_RegistryERC4626AbsentFromReceiptTokenIsValued(t *testing.T) {
+	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	ctx := context.Background()
+	t.Setenv("BUILD_GIT_HASH", "test")
+
+	seedChain(t, ctx, pool)
+	primeID := sparkPrimeID(t, ctx, pool)
+
+	const (
+		sUSDSAddr = "0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD"
+		usdsAddr  = "0xdC035D45d973E3EC169d2276DDab16f1e407384F"
+	)
+	vaultID := testutil.SeedToken(t, ctx, pool, 1, sUSDSAddr, "sUSDS", 18)
+	// The underlying must already be a known token: applyRegistryUnderlyings
+	// resolves decimals from the token table, never from the registry or the
+	// share token. No receipt_token row is seeded for sUSDS -- that absence is
+	// exactly what this test guards.
+	underlyingID := testutil.SeedToken(t, ctx, pool, 1, usdsAddr, "USDS", 18)
+
+	proxy := common.HexToAddress("0x00900000000000000000000000000000000000aa")
+	insertHistoricalPosition(t, ctx, pool, historicalPosition{
+		tokenID: vaultID, primeID: primeID, proxyAddress: proxy,
+		balance: "1000.000000000000000000", blockNumber: 25_900_000,
+		txHash: fmt.Sprintf("0x%064d", 40), logIndex: 0,
+		txAmount: "1000.000000000000000000", direction: "sweep",
+		createdAt: mustParseTime(t, "2026-01-09T00:00:00Z"),
+	})
+
+	// 1.105 USDS per sUSDS share, matching the real observed ratio.
+	converted, _ := new(big.Int).SetString("1105000000000000000000", 10)
+	rpcServer := startConvertToAssetsRPC(t, []bool{true}, []*big.Int{converted})
+	defer rpcServer.Close()
+	t.Setenv("ALCHEMY_API_KEY", "test-key")
+	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
+
+	if err := run(ctx, []string{"-db", dbURL, "-dry-run=false", "-limit", "10"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var underlyingValue string
+	var underlyingTokenID int64
+	if err := pool.QueryRow(ctx,
+		`SELECT underlying_value::text, underlying_token_id FROM allocation_position WHERE token_id = $1 AND processing_version > 0`,
+		vaultID,
+	).Scan(&underlyingValue, &underlyingTokenID); err != nil {
+		t.Fatalf("query corrected row: %v", err)
+	}
+	if underlyingValue != "1105.000000000000000000" {
+		t.Errorf("underlying_value = %q, want the real archive conversion 1105.0 (1000 shares * 1.105)", underlyingValue)
+	}
+	if underlyingTokenID != underlyingID {
+		t.Errorf("underlying_token_id = %d, want USDS's token id %d, not a self-reference", underlyingTokenID, underlyingID)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // B2: scaled_balance is a real, separately-tracked field (aToken
 // scaledBalanceOf, curve/erc4626 raw share count) and must survive a
 // correction unchanged, not go silently NULL.

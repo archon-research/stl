@@ -10,16 +10,22 @@ import (
 // classificationStats tallies how each candidate row was resolved, so the
 // operator can see which source produced each erc4626 conversion -- a real
 // archive read or the price-ratio fallback -- and why any row was skipped.
+// The ViaRegistry counters are the same routes, but for a row with no
+// receipt_token match at all: the registry's own asset_address resolved it
+// instead (see registryPromotableEntry).
 type classificationStats struct {
-	direct                     int
-	aToken                     int
-	convertedERC4626Archive    int
-	convertedERC4626PriceRatio int
-	skippedNoUnderlying        int
-	skippedNotPlainERC20       int
-	skippedNoPriceHistory      int
-	skippedPriceTooStale       int
-	skippedRatioNotExact       int
+	direct                                int
+	aToken                                int
+	aTokenViaRegistry                     int
+	convertedERC4626Archive               int
+	convertedERC4626ArchiveViaRegistry    int
+	convertedERC4626PriceRatio            int
+	convertedERC4626PriceRatioViaRegistry int
+	skippedNoUnderlying                   int
+	skippedNotPlainERC20                  int
+	skippedNoPriceHistory                 int
+	skippedPriceTooStale                  int
+	skippedRatioNotExact                  int
 }
 
 // positionSource pairs a resolved position with how it was derived, purely
@@ -39,7 +45,16 @@ func classifyCandidates(candidates []candidateRow, archiveResults map[int]*big.I
 
 	for i, c := range candidates {
 		switch {
-		case !c.isReceiptToken:
+		case !c.isReceiptToken && c.underlyingAddress == nil:
+			if entry, ok := tokenTypes.lookup(c.chainID, c.tokenAddress); ok && (entry.tokenType == "atoken" || entry.tokenType == "erc4626") {
+				// The registry resolved a route for this row (see
+				// registryPromotableEntry) but the asset_address it named
+				// isn't a token we know decimals for yet -- an unresolved
+				// underlying, the same outcome a receipt_token row with no
+				// registry match for its own underlying already gets.
+				stats.skippedNoUnderlying++
+				continue
+			}
 			if !tokenTypes.isPlainERC20(c.chainID, c.tokenAddress) {
 				// Curve LP shares, NAV/RWA shares and uni_v3 pool/lp rows all
 				// clear the receipt_token check too (it is seeded only for
@@ -59,7 +74,11 @@ func classifyCandidates(candidates []candidateRow, archiveResults map[int]*big.I
 				continue
 			}
 			out = append(out, pos)
-			stats.aToken++
+			if c.isReceiptToken {
+				stats.aToken++
+			} else {
+				stats.aTokenViaRegistry++
+			}
 
 		default:
 			pos, skip, err := classifyERC4626(c, archiveResults[i], cfg)
@@ -75,16 +94,28 @@ func classifyCandidates(candidates []candidateRow, archiveResults map[int]*big.I
 				stats.skippedRatioNotExact++
 			default:
 				out = append(out, pos)
-				if pos.source == sourceERC4626Archive {
-					stats.convertedERC4626Archive++
-				} else {
-					stats.convertedERC4626PriceRatio++
-				}
+				recordERC4626Conversion(&stats, pos.source, c.isReceiptToken)
 			}
 		}
 	}
 
 	return out, stats, nil
+}
+
+// recordERC4626Conversion tallies a resolved erc4626 conversion into the
+// (archive vs price-ratio) x (receipt_token vs registry) counter it came
+// from.
+func recordERC4626Conversion(stats *classificationStats, source string, isReceiptToken bool) {
+	switch {
+	case source == sourceERC4626Archive && isReceiptToken:
+		stats.convertedERC4626Archive++
+	case source == sourceERC4626Archive:
+		stats.convertedERC4626ArchiveViaRegistry++
+	case isReceiptToken:
+		stats.convertedERC4626PriceRatio++
+	default:
+		stats.convertedERC4626PriceRatioViaRegistry++
+	}
 }
 
 // directHoldingPosition denominates a non-receipt-token row in itself: the
@@ -95,14 +126,16 @@ func directHoldingPosition(c candidateRow) positionSource {
 }
 
 // aTokenPosition resolves a 1:1 aToken holding: the raw underlying amount
-// equals the raw balance, only the denominating asset differs. ok is false
-// when the registry has no resolved underlying for this receipt_token row,
-// which classifyCandidates counts as skippedNoUnderlying.
+// equals the raw balance -- only the denominating asset and its decimals
+// differ, so this reads the underlying's own decimals rather than assuming
+// they match the share token's. ok is false when the underlying address or
+// its decimals are unresolved, which classifyCandidates counts as
+// skippedNoUnderlying.
 func aTokenPosition(c candidateRow) (positionSource, bool) {
-	if c.underlyingAddress == nil {
+	if c.underlyingAddress == nil || c.underlyingDecimals == nil {
 		return positionSource{}, false
 	}
-	return positionSource{toEntity(c, *c.underlyingAddress, c.tokenDecimals, c.balance), "aToken"}, true
+	return positionSource{toEntity(c, *c.underlyingAddress, *c.underlyingDecimals, c.balance), "aToken"}, true
 }
 
 type erc4626Skip int
@@ -160,9 +193,12 @@ func logClassification(stats classificationStats, total int) {
 		"positions_to_write", total,
 		"direct_holdings", stats.direct,
 		"atoken_holdings", stats.aToken,
+		"atoken_holdings_via_registry", stats.aTokenViaRegistry,
 		"erc4626_converted_via_archive", stats.convertedERC4626Archive,
+		"erc4626_converted_via_archive_via_registry", stats.convertedERC4626ArchiveViaRegistry,
 		"erc4626_converted_via_price_ratio", stats.convertedERC4626PriceRatio,
-		"skipped_receipt_token_without_registry_underlying", stats.skippedNoUnderlying,
+		"erc4626_converted_via_price_ratio_via_registry", stats.convertedERC4626PriceRatioViaRegistry,
+		"skipped_no_resolved_underlying", stats.skippedNoUnderlying,
 		"skipped_not_plain_erc20", stats.skippedNotPlainERC20,
 		"skipped_erc4626_no_price_history", stats.skippedNoPriceHistory,
 		"skipped_erc4626_price_too_stale", stats.skippedPriceTooStale,
