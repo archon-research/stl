@@ -167,7 +167,11 @@ async def _authorized_pool_prime(
     """
     pool_prime = await service.resolve_pool_prime(receipt_token_id)
     if pool_prime is not None:
-        await check_prime_view(request, principal, str(pool_prime))
+        # holder_untracked, not prime_not_found: WE resolved this address, the
+        # caller never named it. An untracked largest holder denies everyone
+        # until holdings shift, and without its own reason that reads as an
+        # outage (ORB-402). Response body unchanged — unknown ≡ unpermitted.
+        await check_prime_view(request, principal, str(pool_prime), not_found_reason="holder_untracked")
     return pool_prime
 
 
