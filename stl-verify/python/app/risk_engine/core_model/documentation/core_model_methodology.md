@@ -140,7 +140,7 @@ A candidate model is accepted only if it passes all three residual diagnostics:
 - **Ljung-Box** on squared standardised residuals (no remaining ARCH effects)
 - **ARCH-LM test** on standardised residuals (no remaining heteroskedasticity)
 
-Accepted candidates are then subject to a **rolling 1-step-ahead VaR backtest**. The model is trained on a window of `TRAIN_SIZE` days and the 1-day-ahead VaR is computed at level `backtest_alpha = 1 - PERC`. The window then rolls forward by 1 day, producing approximately (`N_history` − `TRAIN_SIZE`) non-overlapping hit observations — roughly 1 280 over a 4-year history with a 180-day training window. Two statistical tests are applied to the resulting hit sequence:
+Accepted candidates are then subject to a **rolling 1-step-ahead VaR backtest**. The model is trained on a window of `TRAIN_SIZE` days and the 1-day-ahead VaR is computed at a fixed `backtest_alpha = 0.05` tail. This is the upstream default, not derived from `PERC`: a 5% tail gives roughly twice the expected hits (~64 over 4 years) of the simulation percentile (`1 − PERC = 0.025` by default), which argues for keeping it, but whether the gate should follow `PERC` instead is an open question (see the VEC-766 PR). The window then rolls forward by 1 day, producing approximately (`N_history` − `TRAIN_SIZE`) non-overlapping hit observations — roughly 1 280 over a 4-year history with a 180-day training window. Two statistical tests are applied to the resulting hit sequence:
 
 - **Kupiec POF test** — tests unconditional coverage: does the observed exceedance rate match `backtest_alpha`?
 - **Christoffersen test** — tests conditional coverage: are exceedances independent over time?
