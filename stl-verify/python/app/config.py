@@ -79,10 +79,10 @@ class Settings(BaseSettings):
     # derive from the issuer.
     oidc_jwks_url: str = ""
     openfga_url: str = ""  # e.g. http://openfga.auth.svc:8080
-    # Published by the openfga-store ConfigMap (store/model ids are created by
-    # the store-bootstrap Job; they cannot be known at deploy-authoring time).
-    openfga_store_id: str = ""
-    openfga_model_id: str = ""
+    # The store is resolved by NAME at first use (see app/auth/fga.py) — there
+    # is deliberately no store-id or model-id setting here. Whether the model
+    # id should be pinned is ADR-015 open question 7 (ORB-430), not settled by
+    # their absence.
     openfga_store_name: str = "auth"
     openfga_api_key: SecretStr = SecretStr("")
     # Must track OpenFGA's own OPENFGA_LIST_OBJECTS_MAX_RESULTS: a ceiling
