@@ -25,7 +25,10 @@ type Prime struct {
 // PrimeDebt is a single on-chain debt snapshot for a prime agent.
 type PrimeDebt struct {
 	PrimeID int64
-	IlkName string
+	// ProtocolID is the protocol row of the Vat this reading came from. It is hashed into the
+	// position_id, so a snapshot without it cannot be projected (VEC-406).
+	ProtocolID int64
+	IlkName    string
 	// DebtWad is the exact debt in wad units (art * rate / 1e27).
 	// The value is an integer scaled by 1e18 (wad precision).
 	DebtWad      *big.Int

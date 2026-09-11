@@ -74,8 +74,8 @@ type cliConfig struct {
 	chainID           int64
 }
 
-// The MCD Vat. position_sky_prime_debt (20260819_140000) keys every snapshot under this address on chain 1
-// and prime_debt records neither, so overriding -vat or CHAIN_ID needs that projection to carry them first.
+// The MCD Vat. 20260819_140000 seeds the protocol row for this address and backfills every pre-existing
+// snapshot to it, so the two must agree or legacy rows carry a Vat this indexer never read.
 const defaultVatAddress = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
 
 func parseConfig(args []string) (cliConfig, error) {
@@ -262,11 +262,20 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	}
 	primeDebtRepo := postgres.NewPrimeDebtRepository(pool, txm, logger, buildReg.BuildID(), runID)
 
+	// The Vat's protocol row, seeded by 20260819_140000. Resolved once, and a hard failure if it is
+	// missing: every snapshot carries it, and the Sky projection refuses a run for one row without it.
+	protocolID, err := primeDebtRepo.ProtocolIDByAddress(ctx, cfg.chainID, common.HexToAddress(cfg.vatAddr))
+	if err != nil {
+		return fmt.Errorf("resolving the Vat's protocol row: %w", err)
+	}
+	logger.Info("vat protocol row resolved", "vatAddress", cfg.vatAddr, "protocolID", protocolID)
+
 	// Vault debt service
 	svc, err := prime_debt.NewVaultDebtService(
 		prime_debt.Config{
 			SweepEveryNBlocks: cfg.sweepBlocks,
 			ChainID:           cfg.chainID,
+			ProtocolID:        protocolID,
 			MaxMessages:       1,
 			PollInterval:      100 * time.Millisecond,
 			Logger:            logger,
