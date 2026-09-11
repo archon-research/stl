@@ -3254,3 +3254,120 @@ async def seed_receipt_position_latest_rows(db_url: str) -> None:
             await _rtl_seed_positions(conn, prime_id=prime_id, tokens=tokens)
     finally:
         await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# processing_version dedup regression (VEC-758)
+#
+# One identity, reprocessed once (build_id 0 then 1, same created_at), feeds
+# the four allocation_position reads VEC-758 collapsed to newest-version-only:
+# the activity feed, the activity buckets, the exposure buckets, and the
+# total-capital buckets. The corrected amount differs enough from the
+# original that a missing dedup, or one sorted the wrong way, surfaces as a
+# wrong number rather than an accidental pass.
+# ---------------------------------------------------------------------------
+
+PVD_VAULT_HEX = "70" * 20
+PVD_ALM_PROXY_HEX = "71" * 20
+PVD_PROTOCOL_HEX = "72" * 20
+PVD_ORACLE_HEX = "73" * 20
+PVD_UNDERLYING_HEX = "74" * 20
+PVD_RECEIPT_HEX = "75" * 20
+
+PVD_TX = "76" * 32
+PVD_BLOCK = 900_000
+PVD_CREATED_AT = dt.datetime(2026, 3, 1, 12, 0, tzinfo=dt.UTC)
+
+PVD_ORIGINAL_AMOUNT = Decimal("1000")
+PVD_CORRECTED_AMOUNT = Decimal("1234")
+PVD_UNDERLYING_PRICE = Decimal("2")
+
+# Real mainnet USDS address (matches the repository's hardcoded _USDS_ADDRESS_HEX;
+# the total-capital read filters on it directly, so a fixture value would never match).
+PVD_USDS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
+PVD_TOTAL_CAPITAL_TX = "77" * 32
+PVD_TOTAL_CAPITAL_BLOCK = 900_100
+PVD_TOTAL_CAPITAL_CREATED_AT = dt.datetime(2026, 3, 1, 12, 0, tzinfo=dt.UTC)
+PVD_TOTAL_CAPITAL_ORIGINAL = Decimal("500000")
+PVD_TOTAL_CAPITAL_CORRECTED = Decimal("777777")
+
+
+async def seed_processing_version_dedup_scenarios(db_url: str) -> None:
+    """Seed the reprocessing scenarios for the four VEC-758 dedup reads."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('pv_dedup', $1) RETURNING id",
+                bytes.fromhex(PVD_VAULT_HEX),
+            )
+            await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=PVD_ALM_PROXY_HEX)
+
+            protocol_id = await conn.fetchval(
+                "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+                "VALUES (1, $1, 'pvDedupLike', 'lending') RETURNING id",
+                bytes.fromhex(PVD_PROTOCOL_HEX),
+            )
+            oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('pv_dedup', 'PV dedup test oracle', 1, $1) RETURNING id",
+                bytes.fromhex(PVD_ORACLE_HEX),
+            )
+            await conn.execute(
+                "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+                protocol_id,
+                oracle_id,
+            )
+
+            underlying_id = await insert_token(conn, "pvdUnderlying", 18, bytes.fromhex(PVD_UNDERLYING_HEX))
+            await _insert_price(conn, underlying_id, oracle_id, PVD_UNDERLYING_PRICE)
+            receipt_token_id = await insert_token(conn, "pvdReceipt", 18, bytes.fromhex(PVD_RECEIPT_HEX))
+            await insert_receipt_token_row(
+                conn,
+                protocol_id=protocol_id,
+                underlying_token_id=underlying_id,
+                address=bytes.fromhex(PVD_RECEIPT_HEX),
+                symbol="pvdReceipt",
+            )
+
+            # Feeds the activity feed, the activity buckets, and the exposure
+            # buckets: one identity, reprocessed once. underlying_value travels
+            # with balance/tx_amount so exposure_buckets' LOCF sees the same
+            # correction the other two see.
+            for build_id, amount in ((0, PVD_ORIGINAL_AMOUNT), (1, PVD_CORRECTED_AMOUNT)):
+                await insert_allocation_position(
+                    conn,
+                    token_id=receipt_token_id,
+                    prime_id=prime_id,
+                    proxy_hex=PVD_ALM_PROXY_HEX,
+                    balance=amount,
+                    tx_amount=amount,
+                    underlying_value=amount,
+                    underlying_token_id=underlying_id,
+                    block=PVD_BLOCK,
+                    tx=PVD_TX,
+                    direction="in",
+                    created_at=PVD_CREATED_AT,
+                    build_id=build_id,
+                )
+
+            # Feeds list_total_capital_buckets: a real SubProxy holding USDS,
+            # sharing prime_id with the ALM proxy above (any SubProxy address
+            # serves -- the read filters on the whole registry set).
+            subproxy_hex = sorted(subproxy_addresses())[0][2:]
+            usds_id = await insert_token(conn, "pvdUSDS", 18, bytes.fromhex(PVD_USDS_HEX))
+            for build_id, amount in ((0, PVD_TOTAL_CAPITAL_ORIGINAL), (1, PVD_TOTAL_CAPITAL_CORRECTED)):
+                await insert_allocation_position(
+                    conn,
+                    token_id=usds_id,
+                    prime_id=prime_id,
+                    proxy_hex=subproxy_hex,
+                    balance=amount,
+                    block=PVD_TOTAL_CAPITAL_BLOCK,
+                    tx=PVD_TOTAL_CAPITAL_TX,
+                    direction="in",
+                    created_at=PVD_TOTAL_CAPITAL_CREATED_AT,
+                    build_id=build_id,
+                )
+    finally:
+        await conn.close()
