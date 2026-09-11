@@ -53,8 +53,17 @@ export default defineConfig({
   staticCss: {
     recipes: {
       badge: designSystemStaticCssRecipes.badge,
+      // Code/CodeBlock, in the curation entry's append previews.
+      code: designSystemStaticCssRecipes.code,
       dataTable: designSystemStaticCssRecipes.dataTable,
       emptyState: designSystemStaticCssRecipes.emptyState,
+      // TextInput and Textarea, which the curation entry's generated forms are
+      // built from. Without this the field root stays `display: block` and its
+      // label, control and helper text run together on one line — styled
+      // enough to look deliberate, which is how it survived a round of
+      // accessibility-snapshot checks before a screenshot caught it.
+      input: designSystemStaticCssRecipes.input,
+      keyValueTable: designSystemStaticCssRecipes.keyValueTable,
       pageShell: designSystemStaticCssRecipes.pageShell,
       panel: designSystemStaticCssRecipes.panel,
       // Column-filter popover inside DataTable.
@@ -65,6 +74,8 @@ export default defineConfig({
       select: designSystemStaticCssRecipes.select,
       sidebarLayout: designSystemStaticCssRecipes.sidebarLayout,
       statTile: designSystemStaticCssRecipes.statTile,
+      // StatusPill, on the curation entry's node detail header.
+      statusPill: designSystemStaticCssRecipes.statusPill,
       surfaceMessage: designSystemStaticCssRecipes.surfaceMessage,
       themeToggle: designSystemStaticCssRecipes.themeToggle,
       toggleSwitch: designSystemStaticCssRecipes.toggleSwitch,
