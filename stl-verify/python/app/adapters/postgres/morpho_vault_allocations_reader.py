@@ -22,9 +22,11 @@ from app.ports.morpho_vault_allocations_reader import (
 _VAULT_SQL = text("""
     SELECT v.id AS vault_id,
            t.decimals AS loan_decimals,
-           vs.total_assets
+           vs.total_assets,
+           u.id AS user_id
     FROM morpho_vault v
     JOIN token t ON t.id = v.asset_token_id
+    LEFT JOIN "user" u ON u.address = v.address AND u.chain_id = v.chain_id
     LEFT JOIN LATERAL (
         SELECT total_assets
         FROM morpho_vault_state
@@ -38,17 +40,11 @@ _VAULT_SQL = text("""
 # A market the vault fully exited keeps a latest row with supply_assets = 0;
 # it carries no weight, so it is dropped after the latest-row selection.
 _ALLOCATIONS_SQL = text("""
-    WITH vault_user AS (
-        SELECT u.id AS user_id
-        FROM morpho_vault v
-        JOIN "user" u ON u.address = v.address AND u.chain_id = v.chain_id
-        WHERE v.id = :vault_id
-    ),
-    latest_positions AS (
+    WITH latest_positions AS (
         SELECT DISTINCT ON (mp.morpho_market_id)
                mp.morpho_market_id, mp.supply_assets
         FROM morpho_market_position mp
-        JOIN vault_user vu ON vu.user_id = mp.user_id
+        WHERE mp.user_id = :user_id
         ORDER BY mp.morpho_market_id,
                  mp.block_number DESC, mp.block_version DESC, mp.processing_version DESC
     )
@@ -82,8 +78,8 @@ class PostgresMorphoVaultAllocationsReader:
             ).fetchone()
             rows = (
                 []
-                if vault_row is None
-                else (await conn.execute(_ALLOCATIONS_SQL, {"vault_id": vault_row.vault_id})).fetchall()
+                if vault_row is None or vault_row.user_id is None
+                else (await conn.execute(_ALLOCATIONS_SQL, {"user_id": vault_row.user_id})).fetchall()
             )
 
         if vault_row is None:
