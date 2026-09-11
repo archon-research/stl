@@ -327,6 +327,8 @@ erDiagram
     }
     RelTypeVocabulary {
         text rel_type PK
+        date valid_from PK
+        int processing_version PK
         text family
         text_array src_kinds
         text_array dst_kinds
@@ -336,37 +338,84 @@ erDiagram
         boolean derived_only
         text maturity
         text description
+        bigint record_id
+        xid8 ingest_xid
+        text actor
+        text change_reason_code
+        bytea content_hash
     }
     NodeStatusVocabulary {
         text record_type PK
         text status PK
+        date valid_from PK
+        int processing_version PK
         boolean is_terminal
         text pairs_with "soft FK RelTypeVocabulary"
         text description
+        bigint record_id
+        xid8 ingest_xid
+        text actor
+        text change_reason_code
+        bytea content_hash
     }
     WeightBasisVocabulary {
         text basis PK
+        date valid_from PK
+        int processing_version PK
         text description
+        bigint record_id
+        xid8 ingest_xid
+        text actor
+        text change_reason_code
+        bytea content_hash
     }
     ChangeReasonVocabulary {
         text code PK
+        date valid_from PK
+        int processing_version PK
         boolean requires_approval
         text description
+        bigint record_id
+        xid8 ingest_xid
+        text actor
+        text change_reason_code
+        bytea content_hash
     }
     ConceptClassVocabulary {
         text concept_class PK
+        date valid_from PK
+        int processing_version PK
         text maturity
         text seed_source
+        bigint record_id
+        xid8 ingest_xid
+        text actor
+        text change_reason_code
+        bytea content_hash
     }
     KeyNamespaceVocabulary {
         text key_namespace PK
+        date valid_from PK
+        int processing_version PK
         text description
+        bigint record_id
+        xid8 ingest_xid
+        text actor
+        text change_reason_code
+        bytea content_hash
     }
     IdSchemeVocabulary {
         text id_scheme PK
+        date valid_from PK
+        int processing_version PK
         text_array applies_to
         text value_form
         boolean unique_current
+        bigint record_id
+        xid8 ingest_xid
+        text actor
+        text change_reason_code
+        bytea content_hash
     }
 
     RelTypeVocabulary ||--o{ SecEdge : "rel_type"
@@ -384,8 +433,9 @@ erDiagram
 
 ### 4. Provenance and corrections (both stores)
 
-Every append — node version, edge row, alias row, shape version — carries the same immutable
-provenance block, per the Auditability & Reproducibility PRD §5.2–5.3 and ADR-0002:
+Every append — node version, edge row, alias row, shape version, **and governed vocabulary row**
+— carries the same immutable provenance block, per the Auditability & Reproducibility PRD
+§5.2–5.3 and ADR-0002:
 
 | field | meaning | PRD |
 |---|---|---|
@@ -430,6 +480,22 @@ Every consumer that pins a number references the graph by snapshot, effective ti
 ids, so the exact input state is reconstructable (RP-4.2, RP-4.6).
 
 ### 5. The governed relationship vocabulary
+
+**The governed vocabularies are versioned reference tables.** All seven carry `valid_from` and
+`processing_version` in the primary key plus the §4 provenance block, which is what ADR-0006
+§1/§4 asks of a `config` table and what `oracle_asset` (VEC-597) already does. Seed-once was the
+alternative and is rejected: three columns already name transitions an unversioned table cannot
+represent — `maturity`, `IdSchemeVocabulary.unique_current`, and `rel_type_vocabulary.cluster_key`
+— and the append-only trigger blocks the `UPDATE` each would need while a successor row collides
+on the natural key. The observed cost of leaving it unversioned is six `concept_class` values
+permanently stuck at `draft`. The price of versioning is named rather than discovered: the
+natural key stops being unique, so `rel_type`, `weight_basis`, `change_reason_code` and
+`(record_type, status)` can no longer be engine foreign keys. They become soft references
+resolved through each vocabulary's current view — which is what §3 already prescribes for SCD2
+ids between the stores — and GQ-01 and GQ-03 move from the engine to the validator, joining
+GQ-05. A writer pinned to `writer_run.reference_effective_at` can now replay against the
+vocabulary as it stood, which it could not before. The read side (`_current` / `_versions` /
+`_as_of`) is VEC-687's.
 
 The `rel_type` vocabulary is **itself reference data**, governed to the same bar as the `ref_*`
 lists: a single authoritative, versioned artifact (seeded from the table below), anchored where
@@ -729,9 +795,9 @@ adding or changing a rule is a reviewed change, and rule ids are stable referenc
 
 | id | rule | layer | outcome |
 |---|---|---|---|
-| GQ-01 | `rel_type` exists in the governed vocabulary | engine (FK) | reject |
+| GQ-01 | `rel_type` exists in the governed vocabulary | validator (was engine FK; the vocabulary's natural key stopped being unique when it became versioned) | reject |
 | GQ-02 | `rel_weight` requires `weight_basis` | engine (CHECK) | reject |
-| GQ-03 | `status` legal for the node's kind | engine (FK on record_type, status) | reject |
+| GQ-03 | `status` legal for the node's kind | validator (same reason as GQ-01) | reject |
 | GQ-04 | node id prefix matches its kind | engine (CHECK) | reject |
 | GQ-05 | address values are lowercase hex, no 0x | validator | reject |
 | GQ-06 | `valid_from < valid_to` | engine (CHECK) | reject |
