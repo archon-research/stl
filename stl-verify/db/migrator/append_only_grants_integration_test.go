@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -167,6 +168,9 @@ var triggerOnlyCacheTables = []string{
 	// VEC-409: written only by its SECURITY DEFINER trigger and rebuild_position_current().
 	"position_current",
 	"morpho_market_position_current",
+	// VEC-659: the two Morpho state caches the backed-breakdown read joins beside it.
+	"morpho_vault_state_current",
+	"morpho_market_state_current",
 }
 
 // TestTriggerOnlyCachesGrantTheAppRoleNoWrite asserts that the application role keeps SELECT and
@@ -309,6 +313,46 @@ func requireInsufficientPrivilege(t *testing.T, err error, statement string) {
 	}
 }
 
+// seedMorphoMarket inserts, as the owner, the protocol, loan and collateral tokens and Blue
+// market a Morpho history row references, with addresses derived from seed so two callers in
+// one database never collide. Returns (protocolID, loanTokenID, collateralTokenID, marketID).
+func seedMorphoMarket(ctx context.Context, t *testing.T, pool *pgxpool.Pool, seed byte, tag string) (int64, int64, int64, int64) {
+	t.Helper()
+	var protocolID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at)
+		VALUES (1, $1, $2, 'morpho_blue', 1, now()) RETURNING id`,
+		bytes.Repeat([]byte{seed}, 20), "Morpho Blue Grant Test "+tag,
+	).Scan(&protocolID); err != nil {
+		t.Fatalf("seed the protocol: %v", err)
+	}
+	var loanTokenID, collateralTokenID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO token (chain_id, address, symbol, decimals)
+		VALUES (1, $1, $2, 6) RETURNING id`, bytes.Repeat([]byte{seed + 1}, 20), tag+"LOAN",
+	).Scan(&loanTokenID); err != nil {
+		t.Fatalf("seed the loan token: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO token (chain_id, address, symbol, decimals)
+		VALUES (1, $1, $2, 8) RETURNING id`, bytes.Repeat([]byte{seed + 2}, 20), tag+"COLL",
+	).Scan(&collateralTokenID); err != nil {
+		t.Fatalf("seed the collateral token: %v", err)
+	}
+	var marketID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO morpho_market
+			(chain_id, protocol_id, market_id, loan_token_id, collateral_token_id,
+			 oracle_address, irm_address, lltv, created_at_block)
+		VALUES (1, $1, $2, $3, $4, $5, $5, 860000000000000000, 1) RETURNING id`,
+		protocolID, bytes.Repeat([]byte{seed + 3}, 32), loanTokenID, collateralTokenID,
+		bytes.Repeat([]byte{seed + 4}, 20),
+	).Scan(&marketID); err != nil {
+		t.Fatalf("seed the morpho market: %v", err)
+	}
+	return protocolID, loanTokenID, collateralTokenID, marketID
+}
+
 // TestMorphoMarketPositionCurrentIsWrittenOnlyByItsTrigger mirrors the allocation test above for
 // the morpho cache (VEC-753): direct writes as the login role are refused, while an append to the
 // morpho_market_position HISTORY still lands a cache row through the SECURITY DEFINER trigger.
@@ -322,38 +366,7 @@ func TestMorphoMarketPositionCurrentIsWrittenOnlyByItsTrigger(t *testing.T) {
 
 	// The FK rows the history row needs, seeded as the owner: this test is about the cache's
 	// grants, not the reference tables'.
-	var protocolID int64
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at)
-		VALUES (1, $1, 'Morpho Blue Grant Test', 'morpho_blue', 1, now()) RETURNING id`,
-		bytes.Repeat([]byte{0xc1}, 20),
-	).Scan(&protocolID); err != nil {
-		t.Fatalf("seed the protocol: %v", err)
-	}
-	var loanTokenID, collateralTokenID int64
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO token (chain_id, address, symbol, decimals)
-		VALUES (1, $1, 'MMPCLOAN', 6) RETURNING id`, bytes.Repeat([]byte{0xc2}, 20),
-	).Scan(&loanTokenID); err != nil {
-		t.Fatalf("seed the loan token: %v", err)
-	}
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO token (chain_id, address, symbol, decimals)
-		VALUES (1, $1, 'MMPCCOLL', 8) RETURNING id`, bytes.Repeat([]byte{0xc3}, 20),
-	).Scan(&collateralTokenID); err != nil {
-		t.Fatalf("seed the collateral token: %v", err)
-	}
-	var marketID int64
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO morpho_market
-			(chain_id, protocol_id, market_id, loan_token_id, collateral_token_id,
-			 oracle_address, irm_address, lltv, created_at_block)
-		VALUES (1, $1, $2, $3, $4, $5, $5, 860000000000000000, 1) RETURNING id`,
-		protocolID, bytes.Repeat([]byte{0xc4}, 32), loanTokenID, collateralTokenID,
-		bytes.Repeat([]byte{0xc5}, 20),
-	).Scan(&marketID); err != nil {
-		t.Fatalf("seed the morpho market: %v", err)
-	}
+	_, _, _, marketID := seedMorphoMarket(ctx, t, pool, 0xc1, "MMPC")
 	var userID int64
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO "user" (chain_id, address) VALUES (1, $1) RETURNING id`,
@@ -435,4 +448,135 @@ func TestMorphoMarketPositionCurrentIsWrittenOnlyByItsTrigger(t *testing.T) {
 			t.Errorf("cache regressed to block %d after an older append, want 21000000", blockNumber)
 		}
 	})
+}
+
+// TestMorphoStateCurrentCachesAreWrittenOnlyByTheirTriggers mirrors the position test above for
+// the two Morpho state caches (VEC-659): direct writes as the login role are refused, while an
+// append to the morpho_vault_state / morpho_market_state HISTORY still lands a cache row through
+// the SECURITY DEFINER trigger, and an older row arriving late does not regress it.
+func TestMorphoStateCurrentCachesAreWrittenOnlyByTheirTriggers(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupPostgres(ctx, t)
+	defer cleanup()
+	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
+		t.Fatalf("migrations failed: %v", err)
+	}
+
+	// The FK rows the history rows need, seeded as the owner: this test is about the caches'
+	// grants, not the reference tables'.
+	protocolID, loanTokenID, _, marketID := seedMorphoMarket(ctx, t, pool, 0xd1, "MSC")
+	var vaultID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO morpho_vault
+			(chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block)
+		VALUES (1, $1, $2, 'Morpho State Grant Vault', 'msgv', $3, 1, 1) RETURNING id`,
+		protocolID, bytes.Repeat([]byte{0xd6}, 20), loanTokenID,
+	).Scan(&vaultID); err != nil {
+		t.Fatalf("seed the morpho vault: %v", err)
+	}
+
+	appPool, err := pgxpool.New(ctx, loginRoleDSN(t, pool))
+	if err != nil {
+		t.Fatalf("connect as stl_read_write: %v", err)
+	}
+	defer appPool.Close()
+
+	const newerBlock, olderBlock = int64(21000000), int64(20999999)
+	newerAt := time.Now().UTC().Truncate(time.Second)
+	olderAt := newerAt.Add(-time.Hour)
+
+	caches := []struct {
+		cache       string
+		keyID       int64
+		insertCache string // a direct INSERT of the key into the cache; must be refused
+		updateCache string // a direct UPDATE matching nothing; must be refused at executor start
+		appendHist  string // ($1 key, $2 block, $3 timestamp, $4 value): an append to the history;
+		//                    the market row carries an in-bounds last_update epoch so the
+		//                    trigger's canonical cast runs rather than its NULL arm
+		readCache string // ($1 key): the value the append carried, and its block
+	}{
+		{
+			cache: "morpho_vault_state_current",
+			keyID: vaultID,
+			insertCache: `
+				INSERT INTO morpho_vault_state_current
+					(morpho_vault_id, total_assets, total_shares, block_timestamp,
+					 block_number, block_version, processing_version)
+				VALUES ($1, 0, 0, now(), 1, 0, 0)`,
+			updateCache: `UPDATE morpho_vault_state_current SET total_assets = total_assets WHERE morpho_vault_id = -1`,
+			appendHist: `
+				INSERT INTO morpho_vault_state
+					(morpho_vault_id, block_number, block_version, "timestamp", total_assets, total_shares, build_id)
+				VALUES ($1, $2, 0, $3, $4, $4, 0)`,
+			readCache: `
+				SELECT total_assets::bigint, block_number FROM morpho_vault_state_current
+				WHERE morpho_vault_id = $1`,
+		},
+		{
+			cache: "morpho_market_state_current",
+			keyID: marketID,
+			insertCache: `
+				INSERT INTO morpho_market_state_current
+					(morpho_market_id, total_supply_assets, total_supply_shares, total_borrow_assets,
+					 total_borrow_shares, last_update_at, fee, block_timestamp,
+					 block_number, block_version, processing_version)
+				VALUES ($1, 0, 0, 0, 0, now(), 0, now(), 1, 0, 0)`,
+			updateCache: `UPDATE morpho_market_state_current SET fee = fee WHERE morpho_market_id = -1`,
+			appendHist: `
+				INSERT INTO morpho_market_state
+					(morpho_market_id, block_number, block_version, "timestamp",
+					 total_supply_assets, total_supply_shares, total_borrow_assets, total_borrow_shares,
+					 last_update, fee, build_id)
+				VALUES ($1, $2, 0, $3, $4, $4, 0, 0, 1800000000, 0, 0)`,
+			readCache: `
+				SELECT total_supply_assets::bigint, block_number FROM morpho_market_state_current
+				WHERE morpho_market_id = $1`,
+		},
+	}
+
+	for _, tc := range caches {
+		t.Run(tc.cache, func(t *testing.T) {
+			t.Run("direct INSERT is refused", func(t *testing.T) {
+				_, err := appPool.Exec(ctx, tc.insertCache, tc.keyID)
+				requireInsufficientPrivilege(t, err, "INSERT INTO "+tc.cache)
+			})
+
+			t.Run("direct UPDATE is refused", func(t *testing.T) {
+				_, err := appPool.Exec(ctx, tc.updateCache)
+				requireInsufficientPrivilege(t, err, "UPDATE "+tc.cache)
+			})
+
+			// The sanctioned path: an append to the history, through the real BEFORE trigger
+			// (which assigns processing_version) and AFTER trigger (which writes the cache).
+			t.Run("an append to the history still fills the cache", func(t *testing.T) {
+				if _, err := appPool.Exec(ctx, tc.appendHist, tc.keyID, newerBlock, newerAt, int64(4200)); err != nil {
+					t.Fatalf("append to the history as stl_read_write: %v", err)
+				}
+				var value, blockNumber int64
+				if err := appPool.QueryRow(ctx, tc.readCache, tc.keyID).Scan(&value, &blockNumber); err != nil {
+					t.Fatalf("no cache row after the append — the SECURITY DEFINER trigger did not write it, or "+
+						"stl_read_write lost SELECT: %v", err)
+				}
+				if value != 4200 || blockNumber != newerBlock {
+					t.Errorf("cache row = (value %d, block %d), want (4200, %d)", value, blockNumber, newerBlock)
+				}
+			})
+
+			// An older row must not regress the cache: the newer-wins guard is what makes the cache
+			// a function of history rather than of arrival order.
+			t.Run("an older history row does not regress the cache", func(t *testing.T) {
+				if _, err := appPool.Exec(ctx, tc.appendHist, tc.keyID, olderBlock, olderAt, int64(1)); err != nil {
+					t.Fatalf("append the older row: %v", err)
+				}
+				var value, blockNumber int64
+				if err := appPool.QueryRow(ctx, tc.readCache, tc.keyID).Scan(&value, &blockNumber); err != nil {
+					t.Fatalf("read the cache row back: %v", err)
+				}
+				if value != 4200 || blockNumber != newerBlock {
+					t.Errorf("cache regressed to (value %d, block %d) after an older append, want (4200, %d)",
+						value, blockNumber, newerBlock)
+				}
+			})
+		})
+	}
 }

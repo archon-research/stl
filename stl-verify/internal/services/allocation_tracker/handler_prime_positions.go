@@ -95,7 +95,11 @@ func (h *PrimePositionHandler) HandleBatch(
 			}
 			continue
 		}
-		addrs = append(addrs, metadataAddress(s))
+		tokenAddr, err := positionTokenAddress(s)
+		if err != nil {
+			return fmt.Errorf("position token for metadata: %w", err)
+		}
+		addrs = append(addrs, tokenAddr)
 		if s.Entry.AssetAddress != nil {
 			addrs = append(addrs, *s.Entry.AssetAddress)
 		}
@@ -136,16 +140,19 @@ func (h *PrimePositionHandler) HandleBatch(
 	})
 }
 
-// metadataAddress is the address a position's row metadata (decimals/symbol) is
-// read from. For ERC-7540 centrifuge entries the contract_address is a vault
-// with no decimals/symbol, so ERC7540Source resolves the share token and sets
-// ShareToken (equal to the entry address for a direct share); metadata comes
-// from there. Every other entry reads metadata from its own contract_address.
-func metadataAddress(s *PositionSnapshot) common.Address {
+// positionTokenAddress is the token the row keys on and reads metadata from: an
+// ERC-7540 vault is not a token — the wallet holds the share, and so do prices.
+func positionTokenAddress(s *PositionSnapshot) (common.Address, error) {
 	if s.ShareToken != nil {
-		return *s.ShareToken
+		return *s.ShareToken, nil
 	}
-	return s.Entry.ContractAddress
+	if s.Entry.TokenType == TokenTypeCentrifuge {
+		// Keying the vault would write an unpriceable key and hide the failed
+		// share resolution.
+		return common.Address{}, fmt.Errorf("centrifuge snapshot %s/%s carries no share token",
+			s.Entry.ContractAddress.Hex(), s.Entry.WalletAddress.Hex())
+	}
+	return s.Entry.ContractAddress, nil
 }
 
 func (h *PrimePositionHandler) buildPositions(
@@ -155,6 +162,11 @@ func (h *PrimePositionHandler) buildPositions(
 ) ([]*entity.AllocationPosition, error) {
 	positions := make([]*entity.AllocationPosition, 0, len(snapshots))
 	for _, s := range snapshots {
+		tokenAddr, err := positionTokenAddress(s)
+		if err != nil {
+			return nil, fmt.Errorf("position token: %w", err)
+		}
+
 		var meta tokenMeta
 		if nonERC20Types[s.Entry.TokenType] {
 			m, err := h.univ3RowMeta(s)
@@ -163,12 +175,11 @@ func (h *PrimePositionHandler) buildPositions(
 			}
 			meta = m
 		} else {
-			metaAddr := metadataAddress(s)
-			m, ok := h.metadata.get(metaAddr)
+			m, ok := h.metadata.get(tokenAddr)
 			if !ok {
 				return nil, fmt.Errorf(
 					"metadata missing for token %s",
-					metaAddr.Hex(),
+					tokenAddr.Hex(),
 				)
 			}
 			meta = m
@@ -190,6 +201,8 @@ func (h *PrimePositionHandler) buildPositions(
 		if s.Entry.CreatedAtBlock != nil && *s.Entry.CreatedAtBlock > 0 {
 			createdAtBlock = *s.Entry.CreatedAtBlock
 		} else {
+			// The entry contract, not the row's token: knownCreatedAtBlocks is keyed
+			// by it, and its guardrail rejects any key that is not an entry address.
 			h.noteEstimatedCreatedAtBlock(s.Entry.ContractAddress, s.BlockNumber)
 		}
 
@@ -206,7 +219,7 @@ func (h *PrimePositionHandler) buildPositions(
 
 		positions = append(positions, &entity.AllocationPosition{
 			ChainID:        s.ChainID,
-			TokenAddress:   s.Entry.ContractAddress,
+			TokenAddress:   tokenAddr,
 			TokenSymbol:    meta.symbol,
 			TokenDecimals:  meta.decimals,
 			PrimeID:        primeID,
