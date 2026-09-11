@@ -62,11 +62,9 @@ JOIN "user"        u ON u.id = l.user_id;
 
 COMMENT ON VIEW position_morpho_market IS '[Operational] VEC-402 projection: Morpho market positions as native per-instrument position rows (loan-token and collateral-token legs, composite market_id:token key). Emits the shared position_state column contract consumed by materialize_position_projection(); deal_type is LOAN or BORROW on the loan leg by the sign of supply minus borrow (a net-zero row inherits the direction it closes) and COLLATERAL on the collateral leg. A market whose collateral token is its loan token emits the loan leg only, netting the collateral in.';
 
--- Per-projection entry point; the view above holds all the Morpho-market logic. It refuses a negative
--- source amount first: netting means abs() would launder it, and a negative borrow makes the netted
--- sum MORE positive, so neither the view nor the spine's negative-quantity check would see it.
--- Dropped rather than replaced: keeping the old argument list beside the new one makes a
--- call that omits the run ambiguous, as it did for the spine.
+-- Refuses a negative source amount first: netting means abs() would launder it, and a negative
+-- borrow makes the netted sum MORE positive, so neither the view nor the spine's negative-quantity
+-- check would see it. Dropped, not replaced: a surviving old signature makes a run-less call ambiguous.
 DROP FUNCTION IF EXISTS materialize_morpho_market(integer);
 
 CREATE OR REPLACE FUNCTION materialize_morpho_market(p_build_id integer DEFAULT 0,
