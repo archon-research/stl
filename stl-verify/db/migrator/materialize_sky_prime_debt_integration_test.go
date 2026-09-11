@@ -250,8 +250,8 @@ func TestSkyPrimeDebtSameKeyEarlierSyncedAtWins(t *testing.T) {
 	  SELECT id INTO STRICT vat FROM protocol WHERE chain_id = 1 AND address = '\x35d1b3f3d7966a1dfe207aa4514c12a259a0492b';
 	  INSERT INTO prime (name, vault_address) VALUES ('tie', '\xdddddddddddddddddddddddddddddddddddddddd') RETURNING id INTO pid;
 	  INSERT INTO prime_debt (prime_id, protocol_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id) VALUES
-	    (pid, vat, 'TIE-A', 100, 500, 0, '2026-06-01T10:00:00Z', 0, 0),
-	    (pid, vat, 'TIE-A', 250, 500, 0, '2026-06-01T11:00:00Z', 0, 0);   -- same key, later sync, different debt
+	    (pid, vat, 'TIE-A', 250, 500, 0, '2026-06-01T11:00:00Z', 0, 0),   -- the LATER sync is inserted first, so
+	    (pid, vat, 'TIE-A', 100, 500, 0, '2026-06-01T10:00:00Z', 0, 0);   -- heap order cannot stand in for the ORDER BY
 	END $s$`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
