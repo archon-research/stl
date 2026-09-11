@@ -96,8 +96,7 @@ COMMENT ON VIEW position_aave_lending IS '[Operational] VEC-404 projection: Aave
 
 -- Records the reserves it cannot key, then refuses only what would key WRONGLY: an ambiguous mapping
 -- or a cross-chain ledger row would mint a colliding or wrong position_id, which the spine cannot undo.
--- Dropped rather than replaced: keeping the old argument list beside the new one makes a
--- call that omits the run ambiguous, as it did for the spine.
+-- Dropped, not replaced: a surviving old signature makes a run-less call ambiguous.
 DROP FUNCTION IF EXISTS materialize_aave_lending(integer);
 
 CREATE OR REPLACE FUNCTION materialize_aave_lending(p_build_id integer DEFAULT 0,
