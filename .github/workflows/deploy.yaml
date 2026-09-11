@@ -134,6 +134,67 @@ jobs:
           role-to-assume: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
           aws-region: eu-west-1
 
+      # ORB-366: measure, alongside the file-list logic in ci.yml, which images
+      # this deploy is about to roll for no reason. Every tag below is rewritten
+      # to the deploy SHA regardless of what this says — the step is a shadow
+      # run whose verdicts are collected and reconciled before any deploy
+      # behaviour changes.
+      #
+      # It must read the overlay before the render step below rewrites it:
+      # afterwards both sides name the same tag and every verdict is trivially
+      # unchanged (the script rejects that case rather than reporting it).
+      #
+      # continue-on-error because a measurement must never fail a deploy. It
+      # does more than that, though: it forces the step's *conclusion* to
+      # success, so the job stays green and neither the checks tab nor the run
+      # summary shows anything when the comparison breaks. Only the step's
+      # *outcome* still records the failure, and nothing surfaces that by
+      # default. The warning step below is therefore the only thing separating
+      # "compared, nothing changed" from "could not compare at all".
+      #
+      - name: Compare built layers against the running images (log only)
+        id: compare
+        continue-on-error: true
+        env:
+          SHA: ${{ inputs.sha || github.sha }}
+          KUSTOMIZATION: k8s/overlays/staging/kustomization.yaml
+        run: |
+          # Read the same overlay the render step below rewrites: main can move
+          # under this job, which is why that step re-fetches rather than trusting
+          # the initial checkout.
+          git fetch -q origin main
+          git checkout -q FETCH_HEAD -- "$KUSTOMIZATION"
+          scripts/deploy/compare-image-layers.sh \
+            --kustomization "$KUSTOMIZATION" \
+            --tag "$SHA" \
+            --json "${RUNNER_TEMP}/layer-verdicts.json"
+
+      # continue-on-error keeps the job green even when the step above did not
+      # complete, so this is the only thing that makes that visible: a warning
+      # annotation (shows up on the run and the PR checks) plus a summary line,
+      # so a reconciler sees "missing" rather than mistaking silence for a clean
+      # week.
+      - name: Warn if the layer comparison did not complete
+        if: always() && steps.compare.outcome != 'success'
+        env:
+          COMPARE_OUTCOME: ${{ steps.compare.outcome }}
+        run: |
+          echo "::warning::Layer comparison did not complete (outcome: ${COMPARE_OUTCOME}). This deploy's verdicts are missing, not clean."
+          echo "**Layer comparison did not complete** (outcome: \`${COMPARE_OUTCOME}\`). This deploy's verdicts are missing, not clean." >> "$GITHUB_STEP_SUMMARY"
+
+      # continue-on-error and the run_attempt suffix are both load-bearing:
+      # upload-artifact@v4 rejects a name that already exists in the run,
+      # including on a re-run, and this step sits before the render/commit below.
+      - name: Upload layer verdicts
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: layer-verdicts-${{ inputs.sha || github.sha }}-attempt${{ github.run_attempt }}
+          path: ${{ runner.temp }}/layer-verdicts.json
+          if-no-files-found: warn
+          retention-days: 30
+
       # ORB-362: the images block is rendered wholesale from the roster at the
       # exact main commit the bump is parented on (FETCH_HEAD), so the committed
       # block is always "what the roster at this revision renders" — the same
