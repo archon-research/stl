@@ -5,3 +5,6 @@
 **/.venv/**
 **/.pytest_cache
 **/__pycache__
+# Local-only GOPATH (~300M): absent in CI, so shipping it into the build
+# context makes a local build's stages differ from the ones CI reproduces.
+.gopath

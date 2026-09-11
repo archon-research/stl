@@ -8,13 +8,24 @@
 #   BIN       output binary name. Kept per-service on purpose: the k8s liveness
 #             probes match the process with `pgrep -f <BIN>`, so the running
 #             process name must stay the service-specific binary name.
-# None of the build args have defaults: callers must pass GO_VERSION, CMD_PATH
-# and BIN (the Makefile targets that build from this file do). A missing arg
-# fails the build instead of silently defaulting to a particular service.
+# The target args have no defaults: callers must pass GO_VERSION, CMD_PATH and
+# BIN (the Makefile targets that build from this file do). A missing arg fails
+# the build instead of silently defaulting to a particular service. Only the
+# versioning args below default, and only to "unknown".
 #
-# IMPORTANT: the versioning args (GIT_COMMIT/GIT_BRANCH/BUILD_TIME) and the
-# target args (CMD_PATH/BIN) are declared AFTER `go mod download`, so a changing
-# BUILD_TIME never invalidates the cached dependency layers. Do not move them up.
+# IMPORTANT: the versioning args (GIT_COMMIT/GIT_BRANCH/BUILD_TIME) never enter
+# the build stage, and the target args (CMD_PATH/BIN) are declared AFTER `go mod
+# download` so they cannot invalidate the cached dependency layers. Do not move
+# them up.
+#
+# The versioning args reach the image only as ENV at the very end of the runtime
+# stage (ORB-366). They used to be linked into the binary with -ldflags -X, which
+# made the binary — and therefore the image layer holding it — different on every
+# build of the same source: BUILD_TIME alone guaranteed it. That is why deploying
+# an unchanged service still rolled its pods. ENV is image *config*, not a layer,
+# so the layers now depend on the source alone and a deploy can recognise an
+# unchanged service by its layer digests. Do not stamp a build value into the
+# binary, and do not move these args above the last COPY.
 
 # -----------------------------------------------------------------------------
 # Build Stage
@@ -38,13 +49,11 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Target + versioning args declared here, after the cached dependency layers, so
-# they only invalidate the build step below.
+# Target args declared here, after the cached dependency layers, so they only
+# invalidate the build step below. No versioning args: the build step must be a
+# function of the source only.
 ARG CMD_PATH
 ARG BIN
-ARG GIT_COMMIT
-ARG GIT_BRANCH
-ARG BUILD_TIME
 
 # Build the binary for the target architecture (ARM64 for Graviton). The
 # --mount cache persists Go's compiled-package cache (GOCACHE) on the builder
@@ -52,10 +61,17 @@ ARG BUILD_TIME
 # internal packages compile once and are reused instead of recompiled for every
 # service. Modules still come from the cached `go mod download` layer above, so
 # /go/pkg/mod is intentionally not mounted (an empty mount would hide them).
+# -trimpath and -buildvcs=false keep the output a function of the source alone.
+# Neither changes anything today — the paths are already fixed at /app and the
+# build context (stl-verify/) carries no .git for Go to read — so both are there
+# to stop a future context or WORKDIR change from silently reintroducing a
+# per-commit difference in the binary, which is the one thing this build must
+# not have. buildinfo.Populate reports the commit from ENV instead.
 RUN --mount=type=cache,target=/root/.cache/go-build \
     : "${CMD_PATH:?CMD_PATH build-arg is required}" "${BIN:?BIN build-arg is required}" && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
-    -ldflags="-w -s -extldflags '-static' -X main.GitCommit=${GIT_COMMIT} -X main.GitBranch=${GIT_BRANCH} -X main.BuildTime=${BUILD_TIME} -X github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo.GitCommit=${GIT_COMMIT} -X github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo.BuildTime=${BUILD_TIME}" \
+    -trimpath -buildvcs=false \
+    -ldflags="-w -s -extldflags '-static'" \
     -o /${BIN} \
     ./${CMD_PATH}
 
@@ -85,6 +101,19 @@ COPY --from=builder /app/contracts /app/contracts
 ENV APP_BIN=/app/${BIN}
 
 USER appuser
+
+# Build provenance, last: every instruction below this point is config-only, so
+# these values cannot alter a layer digest (ORB-366 — see the header note).
+# GIT_COMMIT surfaces as BUILD_GIT_HASH because that is the name the runtime
+# already reads (buildinfo.Populate, `make run-*`, the integration tests).
+# The defaults keep a build that passes no versioning args honest rather than
+# claiming a commit it does not have.
+ARG GIT_COMMIT=unknown
+ARG GIT_BRANCH=unknown
+ARG BUILD_TIME=unknown
+ENV BUILD_GIT_HASH=${GIT_COMMIT} \
+    BUILD_GIT_BRANCH=${GIT_BRANCH} \
+    BUILD_TIME=${BUILD_TIME}
 
 # exec replaces the shell so the binary is PID 1 and receives signals directly;
 # "$@" forwards any args set by the k8s deployment. APP_BIN keeps the process

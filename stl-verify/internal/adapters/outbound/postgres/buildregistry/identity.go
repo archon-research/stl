@@ -27,8 +27,14 @@ func ResolveIdentity() (Identity, error) {
 }
 
 func resolveIdentity(gitHash, buildTime, argv0 string) (Identity, error) {
-	if gitHash == "" {
-		return Identity{}, fmt.Errorf("git hash not available: build with VCS info or set BUILD_GIT_HASH env var")
+	// "unknown" is rejected alongside "": Dockerfile.common defaults the
+	// versioning args to it (ORB-366), so an image built without them passes
+	// BUILD_GIT_HASH=unknown -- a non-empty string that would otherwise sail
+	// through this check and be inserted. build_registry is insert-only, so
+	// that row, and every governed row whose build_id references it, would be
+	// permanently attributed to an artefact nobody can identify.
+	if gitHash == "" || gitHash == "unknown" {
+		return Identity{}, fmt.Errorf("git hash not available (got %q): build with VCS info or set BUILD_GIT_HASH env var", gitHash)
 	}
 	service := filepath.Base(argv0)
 	if argv0 == "" || service == "." || service == string(filepath.Separator) {

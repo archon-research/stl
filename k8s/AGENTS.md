@@ -50,4 +50,7 @@ Root repo map and cross-cutting rules: [../AGENTS.md](../AGENTS.md).
   the prod promotion (ORB-313). A brand-new service lands its build + roster line in a separate PR first
   (CONTRIBUTING.md section 14).
 - Merging to `main` deploys to staging via ArgoCD, then prod after manual approval.
+- **OS patches come from a base-image bump, nothing else.** Images carry no per-commit value above the
+  OS-update layer (ORB-366), so a warm cache replays those layers until a `FROM` line changes. Base
+  images are not yet digest-pinned and no bot bumps them, so today nothing refreshes them: VEC-783.
 - AWS resources (SQS queues, SNS subscriptions, IAM, secrets) live in a separate private infrastructure repo and must land **before** the code that needs them.
