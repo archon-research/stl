@@ -16,6 +16,10 @@
 #   check-sql-comments.sh [file ...]     check exactly these files
 #   check-sql-comments.sh                check *.sql added vs BASE (default origin/main)
 #
+# Divider lines -- `--` alone, or `--` followed only by dashes -- are formatting,
+# not prose: they belong to the block but do not count toward its length, and they
+# cannot be used to split one.
+#
 # Exempt one block with `-- lint:allow-long-comment` on the line directly above it.
 set -euo pipefail
 
@@ -63,16 +67,22 @@ for f in "${files[@]}"; do
   done < <(awk -v max="$MAX" -v exempt="$EXEMPT" '
     function flush() {
       if (n > max && !exempted) printf "%d|%d|%s\n", start, n, first
-      n = 0; exempted = 0
+      n = 0; exempted = 0; in_block = 0
     }
     {
       line = $0
       sub(/^[ \t]+/, "", line)
       if (line ~ /^--/) {
-        if (n == 0) { start = NR; first = substr(line, 1, 90); exempted = (prev == exempt) }
+        # the exemption is read at the top of the run, dividers included, so a
+        # directive above a banner still applies to the prose inside it
+        if (!in_block) { in_block = 1; exempted = (prev == exempt) }
+        # the directive is not part of the block it exempts, and it exempts only
+        # what FOLLOWS: flush first, or a directive below a long block buries it
+        if (line == exempt) { flush(); prev = line; next }
+        # a divider stays in the block but is not prose: it neither counts nor splits
+        if (line ~ /^--[- \t]*$/) { prev = line; next }
+        if (n == 0) { start = NR; first = substr(line, 1, 90) }
         n++
-        # the directive itself is not part of the block it exempts
-        if (line == exempt) { n = 0; exempted = 0; prev = line; next }
       } else {
         flush()
       }

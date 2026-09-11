@@ -79,6 +79,9 @@ func run(t *testing.T, dir string, env []string, args ...string) (int, string) {
 	return code, string(out)
 }
 
+// rule is a divider line of the shape used as a section banner in the migrations.
+const rule = "-- ---------------------------------------------------------------------------"
+
 func block(n int) string {
 	lines := make([]string, 0, n+2)
 	for i := range n {
@@ -152,6 +155,73 @@ func TestExplicitFiles(t *testing.T) {
 			name:     "blank line resets the run",
 			body:     "-- a\n-- b\n\n-- c\n-- d\n",
 			wantCode: 0,
+		},
+		{
+			name:     "banner of dividers around two lines passes",
+			body:     rule + "\n-- Section heading\n-- second line of heading\n" + rule + "\nSELECT 1;\n",
+			wantCode: 0,
+		},
+		{
+			name:     "dividers do not count toward the cap",
+			body:     rule + "\n-- a\n--\n-- b\n-- c\n" + rule + "\nSELECT 1;\n",
+			wantCode: 0,
+		},
+		{
+			name:     "a divider cannot split a long block",
+			body:     "-- a\n-- b\n" + rule + "\n-- c\n-- d\nSELECT 1;\n",
+			wantCode: 1,
+			wantOut:  []string{"comment block of 4 lines exceeds 3"},
+		},
+		{
+			name:     "a bare -- cannot split a long block",
+			body:     "-- a\n-- b\n--\n-- c\n-- d\nSELECT 1;\n",
+			wantCode: 1,
+			wantOut:  []string{"comment block of 4 lines exceeds 3"},
+		},
+		{
+			name:     "a block of dividers alone is never reported",
+			body:     rule + "\n" + rule + "\n" + rule + "\n" + rule + "\n" + rule + "\nSELECT 1;\n",
+			wantCode: 0,
+		},
+		{
+			name:     "the reported location is the first prose line, not the divider",
+			body:     rule + "\n" + block(4),
+			wantCode: 1,
+			wantOut:  []string{"a.sql:2: comment block of 4 lines exceeds 3"},
+		},
+		{
+			name:     "exemption above a banner still applies to the prose inside it",
+			body:     "-- lint:allow-long-comment\n" + rule + "\n" + block(9),
+			wantCode: 0,
+		},
+		{
+			name:     "a divider does not carry the exemption forward to the next block",
+			body:     "-- lint:allow-long-comment\n" + block(9) + rule + "\n" + block(9),
+			wantCode: 1,
+		},
+		{
+			name:     "a directive BELOW a long block does not exempt it",
+			body:     "-- a\n-- b\n-- c\n-- d\n-- lint:allow-long-comment\n-- e\nSELECT 1;\n",
+			wantCode: 1,
+			wantOut:  []string{"a.sql:1: comment block of 4 lines exceeds 3"},
+		},
+		{
+			name:     "the second block in a file can be the exempted one",
+			body:     block(4) + "-- lint:allow-long-comment\n" + block(9),
+			wantCode: 1,
+			wantOut:  []string{"comment block of 4 lines exceeds 3"},
+		},
+		{
+			name:     "an exempted first block does not exempt a later one",
+			body:     "-- lint:allow-long-comment\n" + block(9) + block(5),
+			wantCode: 1,
+			wantOut:  []string{"comment block of 5 lines exceeds 3"},
+		},
+		{
+			name:     "each offending block is reported at its OWN line",
+			body:     block(4) + block(5),
+			wantCode: 1,
+			wantOut:  []string{"a.sql:1: comment block of 4 lines", "a.sql:6: comment block of 5 lines"},
 		},
 		{
 			name:     "every offending block in a file is reported",
