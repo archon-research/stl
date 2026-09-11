@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import * as z from 'zod';
 
+import { coerceAll } from './coerce.ts';
 import {
   type FieldPlan,
   initialValues,
@@ -83,65 +84,6 @@ export type SchemaForm<T> = {
   handleSubmit: () => Promise<void>;
   reset: () => void;
 };
-
-/**
- * Turns a control's raw value into what the schema expects.
- *
- * Every text control hands back a string, so a numeric field arrives as `'42'`
- * and an untouched one as `''`. Coercing by the *plan* rather than by inspecting
- * the value keeps the rules in one place and keeps them honest: an empty string
- * becomes `undefined` (absent) rather than `0` or `''`, which is what makes the
- * difference between "not filled in" and "explicitly zero" survive the round
- * trip.
- */
-function coerce(plan: FieldPlan, raw: unknown): unknown {
-  if (plan.widget === 'switch') {
-    return raw === true || raw === 'true';
-  }
-
-  if (typeof raw !== 'string') {
-    return raw;
-  }
-
-  const trimmed = raw.trim();
-  if (trimmed === '') {
-    return undefined;
-  }
-
-  if (plan.widget === 'number') {
-    const n = Number(trimmed);
-
-    return Number.isFinite(n) ? n : trimmed;
-  }
-
-  if (plan.widget === 'json') {
-    try {
-      return JSON.parse(trimmed);
-    } catch {
-      // Left as the string it is: the schema reports "expected object", which
-      // is a better error than a parse exception escaping the render.
-      return trimmed;
-    }
-  }
-
-  return trimmed;
-}
-
-function coerceAll(
-  plans: readonly FieldPlan[],
-  values: Readonly<Record<string, unknown>>,
-): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-
-  for (const plan of plans) {
-    const value = coerce(plan, values[plan.name]);
-    if (value !== undefined) {
-      out[plan.name] = value;
-    }
-  }
-
-  return out;
-}
 
 /**
  * Flattens zod issues to one message per path.
