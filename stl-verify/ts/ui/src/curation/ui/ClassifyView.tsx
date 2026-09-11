@@ -1,4 +1,4 @@
-import { Panel, SurfaceMessage } from '@archon-research/design-system';
+import { SurfaceMessage } from '@archon-research/design-system';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { createContext, useContext, useMemo, useState } from 'react';
 
@@ -16,6 +16,7 @@ import {
   type PlannableClassification,
   planClassification,
 } from '../schema/workflows.ts';
+import { PageFrame, PageSection } from './PageFrame.tsx';
 
 /**
  * Classify a security — the worksheet row as a screen.
@@ -94,23 +95,18 @@ export function ClassifyView() {
   const plan = planClassification(draft);
 
   return (
-    <div className={stack}>
-      <div>
-        <h1 className={heading}>Classify a security</h1>
-        <p className={subheading}>
-          One decision, several appends. The classification columns of the
-          worksheet are BELONGS_TO edges into the seeded taxonomy; the issuer is
-          an ISSUED_BY edge; the underlying is the look-through spine.
-        </p>
-      </div>
-
+    <PageFrame
+      crumbs={[{ label: 'Workflows' }, { label: 'Classify a security' }]}
+      title="Classify a security"
+      description="One decision, several appends. The classification columns of the worksheet are BELONGS_TO edges into the seeded taxonomy; the issuer is an ISSUED_BY edge; the underlying is the look-through spine."
+    >
       <NarrowScopeContext value={assetClass}>
         <SchemaForm
           form={form}
           gaps={gaps}
           overrides={{ security_type: NarrowedTypePicker }}
         >
-          <Panel title={`Planned appends (${plan.length})`} density="compact">
+          <PageSection title={`Planned appends (${plan.length})`}>
             {plan.length === 0 ? (
               <p className={hint}>
                 Nothing to append yet. A security plus at least an asset class
@@ -135,7 +131,7 @@ export function ClassifyView() {
               part way leaves the earlier appends in place. Each is
               independently valid.
             </p>
-          </Panel>
+          </PageSection>
 
           {applied.length > 0 && (
             <SurfaceMessage
@@ -148,7 +144,7 @@ export function ClassifyView() {
           <SchemaFormActions form={form} label="Apply classification" />
         </SchemaForm>
       </NarrowScopeContext>
-    </div>
+    </PageFrame>
   );
 }
 
@@ -262,18 +258,6 @@ function pickIds(
   };
 }
 
-const stack = css({
-  display: 'flex',
-  flexDirection: 'column',
-  gap: '5',
-  maxWidth: '6xl',
-});
-const heading = css({ fontSize: 'xl', fontWeight: 'semibold' });
-const subheading = css({
-  fontSize: 'sm',
-  color: 'text.muted',
-  maxWidth: '4xl',
-});
 const hint = css({ fontSize: 'xs', color: 'text.muted' });
 const planList = css({
   display: 'flex',

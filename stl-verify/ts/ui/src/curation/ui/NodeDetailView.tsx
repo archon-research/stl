@@ -1,17 +1,18 @@
 import {
   Badge,
   KeyValueTable,
-  Panel,
   StatusPill,
 } from '@archon-research/design-system';
 import { useQuery } from '@tanstack/react-query';
-import { Link } from '@tanstack/react-router';
 
 import { css } from '#styled-system/css';
 
 import { asCell } from '../form/text.ts';
 import { api } from '../lib/api.ts';
+import type { EdgeRow, NodeRow } from '../lib/contract.ts';
 import type { CurationResource } from '../schema/registry.ts';
+import { type Column, DataTable } from './DataTable.tsx';
+import { PageFrame, PageSection } from './PageFrame.tsx';
 
 /**
  * One node: its current row, its edges, and every append behind it.
@@ -65,43 +66,58 @@ export function NodeDetailView({
     ),
   );
 
+  const crumbs = [
+    { label: 'Curate' },
+    {
+      label: resource.label,
+      to: '/$resourceKey',
+      params: { resourceKey: resource.key },
+    },
+    { label: nodeId },
+  ];
+
   if (node.isPending) {
-    return <Panel title="Loading">Resolving the current row…</Panel>;
+    return (
+      <PageFrame crumbs={crumbs} title={nodeId}>
+        <PageSection>
+          <p className={mutedClassName}>Resolving the current row…</p>
+        </PageSection>
+      </PageFrame>
+    );
   }
 
   if (node.isError) {
     return (
-      <Panel title="Not found">
-        {nodeId} does not resolve to a current node. It may exist only as a
-        tombstoned window, which history would still show.
-      </Panel>
+      <PageFrame crumbs={crumbs} title={nodeId}>
+        <PageSection title="Not found">
+          <p className={mutedClassName}>
+            {nodeId} does not resolve to a current node. It may exist only as a
+            tombstoned window, which history would still show.
+          </p>
+        </PageSection>
+      </PageFrame>
     );
   }
 
   const row = node.data;
 
   return (
-    <div className={stack}>
-      <div className={headerRow}>
-        <div>
-          <h1 className={heading}>{nodeId}</h1>
-          <p className={subheading}>
-            {resource.singular} · valid from {row.valid_from} to {row.valid_to}
-          </p>
-        </div>
-        <div
-          className={css({ display: 'flex', gap: '2', alignItems: 'center' })}
-        >
+    <PageFrame
+      crumbs={crumbs}
+      title={<span className={monoTitleClassName}>{nodeId}</span>}
+      description={`${resource.singular} · valid from ${row.valid_from} to ${row.valid_to}`}
+      meta={
+        <>
           <StatusPill
             name="status"
             value={row.status}
             tone={row.status === 'ACTIVE' ? 'success' : 'neutral'}
           />
           <Badge>pv {row.processing_version}</Badge>
-        </div>
-      </div>
-
-      <Panel title="Attributes" density="compact">
+        </>
+      }
+    >
+      <PageSection title="Attributes">
         <KeyValueTable
           rows={Object.entries(row.attrs).map(([key, value]) => ({
             key,
@@ -110,184 +126,181 @@ export function NodeDetailView({
             mono: typeof value !== 'boolean',
           }))}
         />
-      </Panel>
+      </PageSection>
 
-      <Panel title="Relationships out" density="compact">
+      <PageSection title="Relationships out" bleed>
         <EdgeList
-          rows={(outbound.data ?? []).map((e) => ({
-            key: `${e.edge_id}:${e.record_id}`,
-            relType: e.rel_type,
-            other: e.dst_id,
-            weight: e.rel_weight,
-            basis: e.weight_basis,
-            from: e.valid_from,
-            to: e.valid_to,
-          }))}
-          emptyMessage="No edges out. For a security that means no classification, no issuer and no underlying."
+          rows={outbound.data ?? []}
+          otherId={(e) => e.dst_id}
+          label="Relationships out"
+          emptyMessage={outboundEmptyMessage(resource.recordType)}
         />
-      </Panel>
+      </PageSection>
 
-      <Panel title="Relationships in" density="compact">
+      <PageSection title="Relationships in" bleed>
         <EdgeList
-          rows={(inbound.data ?? []).map((e) => ({
-            key: `${e.edge_id}:${e.record_id}`,
-            relType: e.rel_type,
-            other: e.src_id,
-            weight: e.rel_weight,
-            basis: e.weight_basis,
-            from: e.valid_from,
-            to: e.valid_to,
-          }))}
+          rows={inbound.data ?? []}
+          otherId={(e) => e.src_id}
+          label="Relationships in"
           emptyMessage="Nothing points here."
         />
-      </Panel>
+      </PageSection>
 
-      <Panel title={`Appends (${history.data?.length ?? 0})`} density="compact">
-        <p className={note}>
-          Newest first. Within one valid window the winner is
-          <code> processing_version</code> then knowledge time — never a wall
-          clock.
-        </p>
-        <div className={tableWrap}>
-          <table className={table}>
-            <thead>
-              <tr>
-                {[
-                  'record_id',
-                  'pv',
-                  'valid',
-                  'ingested',
-                  'actor',
-                  'reason',
-                  'supersedes',
-                  'hash',
-                ].map((column) => (
-                  <th key={column} className={th}>
-                    {column}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {(history.data ?? []).map((append) => (
-                <tr key={append.record_id} className={tr}>
-                  <td className={`${td} ${mono}`}>{append.record_id}</td>
-                  <td className={td}>{append.processing_version}</td>
-                  <td className={td}>
-                    {append.valid_from} → {append.valid_to}
-                  </td>
-                  <td className={`${td} ${mono}`}>
-                    {append.ingested_at.slice(0, 19)}
-                  </td>
-                  <td className={`${td} ${mono}`}>{append.actor}</td>
-                  <td className={td}>
-                    {append.change_reason_code}
-                    {append.approved_by !== null &&
-                      ` · ok: ${append.approved_by}`}
-                  </td>
-                  <td className={`${td} ${mono}`}>
-                    {append.supersedes_record_id ?? '—'}
-                  </td>
-                  <td className={`${td} ${mono}`}>{append.content_hash}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Panel>
-
-      <Link
-        to="/$resourceKey"
-        params={{ resourceKey: resource.key }}
-        className={css({ fontSize: 'sm' })}
+      <PageSection
+        title={`Appends (${history.data?.length ?? 0})`}
+        description="Newest first. Within one valid window the winner is processing_version then knowledge time — never a wall clock."
+        bleed
       >
-        ← {resource.label}
-      </Link>
-    </div>
+        <DataTable
+          label="Appends"
+          rows={history.data ?? []}
+          rowKey={(a) => String(a.record_id)}
+          emptyMessage="No appends."
+          columns={HISTORY_COLUMNS}
+        />
+      </PageSection>
+    </PageFrame>
   );
+}
+
+const HISTORY_COLUMNS: Column<NodeRow>[] = [
+  {
+    key: 'record_id',
+    header: 'Record',
+    mono: true,
+    numeric: true,
+    render: (a) => a.record_id,
+    sortValue: (a) => a.record_id,
+  },
+  {
+    key: 'processing_version',
+    header: 'PV',
+    numeric: true,
+    render: (a) => a.processing_version,
+    sortValue: (a) => a.processing_version,
+  },
+  {
+    key: 'valid',
+    header: 'Valid',
+    render: (a) => `${a.valid_from} → ${a.valid_to}`,
+    sortValue: (a) => a.valid_from,
+  },
+  {
+    key: 'ingested_at',
+    header: 'Ingested',
+    mono: true,
+    render: (a) => a.ingested_at.slice(0, 19),
+    sortValue: (a) => a.ingested_at,
+  },
+  {
+    key: 'actor',
+    header: 'Actor',
+    mono: true,
+    render: (a) => a.actor,
+    sortValue: (a) => a.actor,
+  },
+  {
+    key: 'reason',
+    header: 'Reason',
+    render: (a) =>
+      a.approved_by === null
+        ? a.change_reason_code
+        : `${a.change_reason_code} · ok: ${a.approved_by}`,
+    sortValue: (a) => a.change_reason_code,
+  },
+  {
+    key: 'supersedes_record_id',
+    header: 'Supersedes',
+    mono: true,
+    numeric: true,
+    render: (a) => a.supersedes_record_id ?? '—',
+    sortValue: (a) => a.supersedes_record_id,
+  },
+  {
+    key: 'content_hash',
+    header: 'Hash',
+    mono: true,
+    render: (a) => a.content_hash,
+    sortValue: (a) => a.content_hash,
+  },
+];
+
+/**
+ * What "no edges out" means depends on the kind.
+ *
+ * The message named securities regardless, so an entity with no outbound edges
+ * was told it had no classification, issuer or underlying — three things an
+ * entity never has.
+ */
+function outboundEmptyMessage(recordType: string | undefined): string {
+  switch (recordType) {
+    case 'SECURITY':
+      return 'No edges out: no classification, no issuer and no underlying.';
+    case 'ENTITY':
+      return 'No edges out: no parent, no affiliates and no governing rule set.';
+    case 'CONCEPT':
+      return 'No edges out: this concept sits at the root of its taxonomy.';
+    default:
+      return 'No edges out.';
+  }
 }
 
 function EdgeList({
   rows,
+  otherId,
+  label,
   emptyMessage,
 }: {
-  rows: readonly {
-    key: string;
-    relType: string;
-    other: string;
-    weight: string | null;
-    basis: string | null;
-    from: string;
-    to: string;
-  }[];
+  rows: readonly EdgeRow[];
+  otherId: (edge: EdgeRow) => string;
+  label: string;
   emptyMessage: string;
 }) {
-  if (rows.length === 0) {
-    return <p className={note}>{emptyMessage}</p>;
-  }
+  const columns: Column<EdgeRow>[] = [
+    {
+      key: 'rel_type',
+      header: 'Type',
+      render: (e) => e.rel_type,
+      sortValue: (e) => e.rel_type,
+    },
+    {
+      key: 'other',
+      header: 'Node',
+      mono: true,
+      render: (e) => otherId(e),
+      sortValue: (e) => otherId(e),
+    },
+    {
+      key: 'weight',
+      header: 'Weight',
+      mono: true,
+      numeric: true,
+      render: (e) =>
+        e.rel_weight === null ? '—' : `${e.rel_weight} ${e.weight_basis ?? ''}`,
+      sortValue: (e) => (e.rel_weight === null ? null : Number(e.rel_weight)),
+    },
+    {
+      key: 'window',
+      header: 'Window',
+      render: (e) => `${e.valid_from} → ${e.valid_to}`,
+      sortValue: (e) => e.valid_from,
+    },
+  ];
 
   return (
-    <div className={tableWrap}>
-      <table className={table}>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.key} className={tr}>
-              <td className={td}>{row.relType}</td>
-              <td className={`${td} ${mono}`}>{row.other}</td>
-              <td className={`${td} ${mono}`}>
-                {row.weight === null ? '' : `${row.weight} ${row.basis ?? ''}`}
-              </td>
-              <td className={td}>
-                {row.from} → {row.to}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      label={label}
+      columns={columns}
+      rows={rows}
+      rowKey={(e) => `${e.edge_id}:${e.record_id}`}
+      emptyMessage={emptyMessage}
+    />
   );
 }
 
-const stack = css({
-  display: 'flex',
-  flexDirection: 'column',
-  gap: '4',
-  maxWidth: '7xl',
-});
-const headerRow = css({
-  display: 'flex',
-  alignItems: 'flex-start',
-  justifyContent: 'space-between',
-  gap: '4',
-});
-const heading = css({
-  fontSize: 'xl',
-  fontWeight: 'semibold',
-  fontFamily: 'mono',
-});
-const subheading = css({ fontSize: 'sm', color: 'text.muted' });
-const note = css({ fontSize: 'xs', color: 'text.muted' });
-const tableWrap = css({ overflowX: 'auto' });
-const table = css({
-  width: 'full',
-  borderCollapse: 'collapse',
+const monoTitleClassName = css({ fontFamily: 'mono', letterSpacing: 'normal' });
+const mutedClassName = css({
   fontSize: 'sm',
-});
-const th = css({
-  textAlign: 'left',
-  padding: '2',
-  fontSize: '2xs',
-  textTransform: 'uppercase',
   color: 'text.muted',
-  borderBottomWidth: '1px',
-  borderBottomStyle: 'solid',
-  borderColor: 'border.subtle',
+  margin: '0',
 });
-const tr = css({ _hover: { bg: 'surface.subtle' } });
-const td = css({
-  padding: '2',
-  borderBottomWidth: '1px',
-  borderBottomStyle: 'solid',
-  borderColor: 'border.subtle',
-});
-const mono = css({ fontFamily: 'mono', fontSize: 'xs' });

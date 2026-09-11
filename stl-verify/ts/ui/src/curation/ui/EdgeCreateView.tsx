@@ -1,4 +1,4 @@
-import { CodeBlock, Panel } from '@archon-research/design-system';
+import { CodeBlock } from '@archon-research/design-system';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { createContext, useContext, useEffect, useMemo } from 'react';
@@ -12,6 +12,7 @@ import { useSchemaForm } from '../form/useSchemaForm.ts';
 import { api } from '../lib/api.ts';
 import { edgeWrite } from '../schema/edges.ts';
 import { type RecordType, relTypeSpec } from '../schema/vocabularies.ts';
+import { PageFrame, PageSection } from './PageFrame.tsx';
 
 /**
  * The relationship form.
@@ -128,23 +129,26 @@ export function EdgeCreateView() {
   }, [declaredBasis, setFieldValue]);
 
   return (
-    <div className={stack}>
-      <div>
-        <h1 className={heading}>New relationship</h1>
-        <p className={subheading}>
-          One form for all 13 ratified types. Choosing a type narrows both
-          endpoint pickers to the kinds the vocabulary permits and fixes the
-          weight basis.
-        </p>
-      </div>
-
+    <PageFrame
+      crumbs={[
+        { label: 'Curate' },
+        {
+          label: 'Relationships',
+          to: '/$resourceKey',
+          params: { resourceKey: 'edges' },
+        },
+        { label: 'New relationship' },
+      ]}
+      title="New relationship"
+      description="One form for all 13 ratified types. Choosing a type narrows both endpoint pickers to the kinds the vocabulary permits and fixes the weight basis."
+    >
       <EndpointScopeContext value={scope}>
         <SchemaForm
           form={form}
           hidden={['edge_seq']}
           overrides={{ src_id: ScopedSource, dst_id: ScopedDestination }}
         >
-          <Panel title="The append" density="compact">
+          <PageSection title="The append">
             {spec !== undefined && (
               <p className={note}>
                 {spec.relType}: {spec.srcKinds.join('/')} →{' '}
@@ -162,26 +166,14 @@ export function EdgeCreateView() {
                 2,
               )}
             </CodeBlock>
-          </Panel>
+          </PageSection>
 
           <SchemaFormActions form={form} label="Append relationship" />
         </SchemaForm>
       </EndpointScopeContext>
-    </div>
+    </PageFrame>
   );
 }
 
-const stack = css({
-  display: 'flex',
-  flexDirection: 'column',
-  gap: '5',
-  maxWidth: '6xl',
-});
-const heading = css({ fontSize: 'xl', fontWeight: 'semibold' });
-const subheading = css({
-  fontSize: 'sm',
-  color: 'text.muted',
-  maxWidth: '4xl',
-});
 const note = css({ fontSize: 'xs', color: 'text.muted', marginBottom: '3' });
 const hint = css({ fontSize: 'xs', color: 'text.muted' });

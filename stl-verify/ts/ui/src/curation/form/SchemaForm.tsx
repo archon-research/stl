@@ -1,9 +1,10 @@
-import { Button, Panel, SurfaceMessage } from '@archon-research/design-system';
+import { Button, SurfaceMessage } from '@archon-research/design-system';
 import type { ReactNode } from 'react';
 
 import { css } from '#styled-system/css';
 
 import type { ShapeGap } from '../schema/shapes.ts';
+import { PageSection } from '../ui/PageFrame.tsx';
 import { type FieldComponent, fieldManifest } from './fields.tsx';
 import type { FieldPlan } from './introspect.ts';
 import type { SchemaForm as SchemaFormState } from './useSchemaForm.ts';
@@ -109,16 +110,16 @@ export function SchemaForm<T>({
         const custom = renderSection?.(section, renderField);
         if (custom !== undefined) {
           return (
-            <Panel key={section.group} title={section.group} density="compact">
+            <PageSection key={section.group} title={section.group}>
               {custom}
-            </Panel>
+            </PageSection>
           );
         }
 
         return (
-          <Panel key={section.group} title={section.group} density="compact">
+          <PageSection key={section.group} title={section.group}>
             <div className={grid}>{fields.map((f) => renderField(f.name))}</div>
-          </Panel>
+          </PageSection>
         );
       })}
 
@@ -170,25 +171,55 @@ export function SchemaFormActions<T>({
   /** A REQUIRED shape gap, which stops the write even though zod is satisfied. */
   blocked?: boolean;
 }) {
+  const errorCount = Object.keys(form.allErrors).length;
+
   return (
-    <div className={css({ display: 'flex', gap: '3', alignItems: 'center' })}>
-      <Button type="submit" disabled={form.isSubmitting || blocked === true}>
+    <div className={actionRowClassName}>
+      <Button
+        type="submit"
+        emphasis="solid"
+        colorPalette="blue"
+        disabled={form.isSubmitting || blocked === true}
+        className={actionButtonClassName}
+      >
         {form.isSubmitting ? 'Appending…' : label}
       </Button>
       <Button
         type="button"
-        variant="item"
         onClick={form.reset}
         disabled={!form.isDirty}
+        className={actionButtonClassName}
       >
         Reset
       </Button>
       {form.submitAttempted && !form.isValid && (
-        <span className={css({ fontSize: 'xs', color: 'text.critical' })}>
-          {Object.keys(form.allErrors).length} field
-          {Object.keys(form.allErrors).length === 1 ? '' : 's'} need attention
+        <span className={actionHintClassName}>
+          {errorCount} field{errorCount === 1 ? '' : 's'} need attention
         </span>
       )}
     </div>
   );
 }
+
+const actionRowClassName = css({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '3',
+  flexWrap: 'wrap',
+});
+
+/**
+ * Buttons size to their label rather than to the line.
+ *
+ * `variant="item"` was wrong for Reset — that variant is a full-width list row,
+ * so it stretched across the remaining space — and nothing stopped the submit
+ * label wrapping to two lines when the row got tight. Both are fixed here
+ * rather than at a call site, because every generated form ends in this row.
+ */
+const actionButtonClassName = css({
+  flex: 'none',
+  width: 'auto',
+  whiteSpace: 'nowrap',
+});
+
+const actionHintClassName = css({ fontSize: 'xs', color: 'text.critical' });

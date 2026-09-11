@@ -1,4 +1,4 @@
-import { CodeBlock, Panel } from '@archon-research/design-system';
+import { CodeBlock } from '@archon-research/design-system';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { useMemo } from 'react';
@@ -10,6 +10,7 @@ import { useSchemaForm } from '../form/useSchemaForm.ts';
 import { api } from '../lib/api.ts';
 import { ENGINE_ASSIGNED_COLUMNS } from '../schema/provenance.ts';
 import type { CurationResource } from '../schema/registry.ts';
+import { PageFrame, PageSection } from './PageFrame.tsx';
 
 /**
  * The generated create form, for any resource in the registry.
@@ -60,17 +61,24 @@ export function ResourceCreateView({
   });
 
   return (
-    <div className={stack}>
-      <div>
-        <h1 className={heading}>New {resource.singular}</h1>
-        <p className={subheading}>{resource.description}</p>
-      </div>
-
+    <PageFrame
+      crumbs={[
+        { label: 'Curate' },
+        {
+          label: resource.label,
+          to: '/$resourceKey',
+          params: { resourceKey: resource.key },
+        },
+        { label: `New ${resource.singular}` },
+      ]}
+      title={`New ${resource.singular}`}
+      description={resource.description}
+    >
       <SchemaForm
         form={form}
         {...(resource.hidden !== undefined && { hidden: resource.hidden })}
       >
-        <Panel title="The append" density="compact">
+        <PageSection title="The append">
           <p className={note}>
             Not an update: this posts one new row. `record_id`, `ingest_xid` and
             `content_hash` are the append guard&rsquo;s and are never sent.
@@ -84,11 +92,11 @@ export function ResourceCreateView({
               2,
             )}
           </CodeBlock>
-        </Panel>
+        </PageSection>
 
         <SchemaFormActions form={form} label={`Append ${resource.singular}`} />
       </SchemaForm>
-    </div>
+    </PageFrame>
   );
 }
 
@@ -143,12 +151,4 @@ function stripEngineAssigned(value: unknown): Record<string, unknown> {
   return out;
 }
 
-const stack = css({
-  display: 'flex',
-  flexDirection: 'column',
-  gap: '5',
-  maxWidth: '6xl',
-});
-const heading = css({ fontSize: 'xl', fontWeight: 'semibold' });
-const subheading = css({ fontSize: 'sm', color: 'text.muted' });
 const note = css({ fontSize: 'xs', color: 'text.muted', marginBottom: '3' });
