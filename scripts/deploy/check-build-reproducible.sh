@@ -14,7 +14,7 @@
 # Three builds per image, and all three verdicts matter:
 #   same        identical source, different build metadata  -> layers must MATCH
 #   docs-only   a markdown edit, as a new commit would be   -> layers must MATCH
-#               (python's build never reaches README.md — see ADR-0007 — so
+#               (python's build never reaches README.md — see ADR-0008 — so
 #               this leg is reported skipped-as-vacuous for --image python
 #               instead of run; a passing leg that lies is worse than one that
 #               says it was skipped)
@@ -93,7 +93,7 @@ done
 
 # The compiled file each build perturbs must be reachable from the service
 # being built, or the `code` case would prove nothing. The docs file is not
-# assumed reachable — python's isn't (ADR-0007) — so each image handles it on
+# assumed reachable — python's isn't (ADR-0008) — so each image handles it on
 # its own terms below rather than pretending the perturbation always lands.
 DOCS_FILE="${BUILD_DIR}/README.md"
 case "$IMAGE" in
@@ -189,7 +189,7 @@ build() {
   elif [ "$IMAGE" = "migrate" ]; then
     # Dockerfile.migrate takes only GO_VERSION -- no CMD_PATH/BIN (its build
     # target is hardcoded) and no versioning args (it stamps nothing, see
-    # ADR-0007), so commit/build_time are accepted for a uniform build()
+    # ADR-0008), so commit/build_time are accepted for a uniform build()
     # signature but unused here.
     go_version="$(cat "${REPO_ROOT}/.go-version")"
     run_build --platform linux/arm64 \
@@ -219,7 +219,7 @@ build() {
 # build from a "builder" stage) — their docs-only leg is only a real test if
 # the README.md edit actually reached that stage. If a future Dockerfile
 # change stopped `COPY . .` from seeing it, this leg would silently become as
-# vacuous as python's (ADR-0007) and still report "match". Confirm from the
+# vacuous as python's (ADR-0008) and still report "match". Confirm from the
 # build's own plain-progress log that the COPY step was not cache-hit — i.e.
 # that BuildKit saw different content this time than the baseline build.
 check_docs_reached_go_context() {
@@ -232,7 +232,7 @@ check_docs_reached_go_context() {
 }
 
 # check_ui_builder_rebuilt <build-log>: assert --no-cache-filter actually took
-# effect. ADR-0007 rejects --no-cache-filter for the weekly refresh precisely
+# effect. ADR-0008 rejects --no-cache-filter for the weekly refresh precisely
 # because "a filter that stops matching a renamed stage silently refreshes
 # nothing"; the same hazard applies here, so the filter is verified rather than
 # trusted. Renaming the stage in python/Dockerfile makes the filter match
@@ -245,7 +245,7 @@ check_ui_builder_rebuilt() {
   # script right here and skip the die() below, losing the message (the exact
   # rename case it exists to describe).
   steps="$(grep -oE '^#[0-9]+ \[ui-builder [0-9]+/[0-9]+\]' "$log" | awk '{print $1}' | sort -u)" || true
-  [ -n "$steps" ] || die "no 'ui-builder' stage appears in the build log: --no-cache-filter ui-builder matched nothing. The stage was probably renamed in python/Dockerfile — update the filter and this check together (ORB-366, ADR-0007)."
+  [ -n "$steps" ] || die "no 'ui-builder' stage appears in the build log: --no-cache-filter ui-builder matched nothing. The stage was probably renamed in python/Dockerfile — update the filter and this check together (ORB-366, ADR-0008)."
   total="$(printf '%s\n' "$steps" | grep -c .)"
   cached=0
   while IFS= read -r step; do
@@ -341,7 +341,7 @@ compare "same source, different build metadata" match "$LAYERS_A" "$LAYERS_SAME"
 
 echo "--> rebuild after a docs-only edit"
 if [ "$IMAGE" = "python" ]; then
-  echo "  skip: python/Dockerfile has no COPY reaching ${DOCS_FILE#"${REPO_ROOT}/"} (ADR-0007);"
+  echo "  skip: python/Dockerfile has no COPY reaching ${DOCS_FILE#"${REPO_ROOT}/"} (ADR-0008);"
   echo "        perturbing it would rebuild byte-identical instructions to the"
   echo "        same-source case above and prove nothing."
 else
