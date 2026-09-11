@@ -14,6 +14,7 @@ from app.auth.jwt import JwksUnavailable, Principal, TokenError
 from app.config import Settings, get_settings
 from app.domain.entities.allocation import EthAddress, as_address
 from app.logging import get_logger
+from app.ports.direct_asset_lookup import DirectAssetLookup
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.ports.reference_capital_repository import ReferenceCapitalRepository
 from app.risk_engine.suraf.result import SurafResult
@@ -404,6 +405,11 @@ def get_model_registry(request: Request) -> ModelRegistry:
 def get_receipt_token_lookup(request: Request) -> ReceiptTokenLookup:
     """Extract the receipt-token lookup built at startup."""
     return request.app.state.receipt_token_lookup
+
+
+def get_direct_asset_lookup(request: Request) -> DirectAssetLookup:
+    """Extract the direct-asset lookup built at startup."""
+    return request.app.state.direct_asset_lookup
 
 
 def get_reference_risk_capital_service_factory(

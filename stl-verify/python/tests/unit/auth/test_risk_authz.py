@@ -92,7 +92,11 @@ def _client(*, fga, principal: Principal | None, service=None) -> TestClient:
         service.get_risk_breakdown = AsyncMock(return_value=SimpleNamespace(items=[]))
         service.resolve_pool_prime = AsyncMock(return_value=None)
 
+    direct_lookup = AsyncMock()
+    direct_lookup.get_by_chain_and_address = AsyncMock(return_value=None)
+
     app.dependency_overrides[deps.get_receipt_token_lookup] = lambda: lookup
+    app.dependency_overrides[deps.get_direct_asset_lookup] = lambda: direct_lookup
     app.dependency_overrides[deps.get_model_registry] = lambda: ModelRegistry([_AlwaysApplies()])
     app.dependency_overrides[deps.get_crypto_lending_risk_service] = lambda: service
     if principal is not None:
