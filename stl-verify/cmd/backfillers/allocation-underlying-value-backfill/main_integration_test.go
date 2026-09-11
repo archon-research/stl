@@ -411,7 +411,7 @@ func TestRunIntegration_Idempotent(t *testing.T) {
 	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
-	t.Setenv("BUILD_GIT_HASH", "test")
+	t.Setenv("BUILD_GIT_HASH", "first-deploy")
 
 	seedChain(t, ctx, pool)
 	primeID := sparkPrimeID(t, ctx, pool)
@@ -434,6 +434,13 @@ func TestRunIntegration_Idempotent(t *testing.T) {
 	if err := run(ctx, args); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
+
+	// The second run comes from a different deploy, so assign_processing_version
+	// derives a fresh build_id and would hand the re-selected row
+	// processing_version 2 -- a genuine second correction that ON CONFLICT
+	// cannot absorb. The NOT EXISTS guard in the candidate query is the only
+	// thing standing between this and a stack of duplicate corrections.
+	t.Setenv("BUILD_GIT_HASH", "second-deploy")
 	if err := run(ctx, args); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
