@@ -65,6 +65,8 @@
 #                   Dockerfile, not covered by the go leg above
 #   --keep          leave the built images behind for inspection
 #
+# END-HELP (sentinel for the -h/--help case below; do not remove — moving it
+# changes what --help prints, which is the point).
 # Deliberately bash 3.2 + BSD awk compatible, like the other scripts here.
 set -euo pipefail
 
@@ -79,6 +81,10 @@ KEEP=0
 DOCS_BACKUP=""
 BUILD_EXTRA_ARGS=""
 BUILD_LOG=""
+# Set by use_isolated_builder() below; plain strings for the same reason as
+# BUILD_EXTRA_ARGS above.
+BUILDER_ARGS=""
+BUILDX_BUILDER=""
 
 die() { echo "::error::$*" >&2; exit 1; }
 
@@ -86,7 +92,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --image) IMAGE="${2:-}"; shift 2 ;;
     --keep)  KEEP=1; shift ;;
-    -h|--help) sed -n '/^# Usage:/,/^# Deliberately/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '/^# Usage:/,/^# END-HELP/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -138,22 +144,67 @@ cleanup() {
       docker rmi -f "${TAG_PREFIX}:${suffix}" >/dev/null 2>&1 || true
     done
   fi
+  # Only set when use_isolated_builder() created one of its own below; the
+  # common CI case reuses the caller's builder and never sets this.
+  if [ -n "$BUILDX_BUILDER" ]; then
+    docker buildx rm "$BUILDX_BUILDER" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
-# require_buildkit: verify a real buildx/BuildKit toolchain rather than assume
-# one just because a `docker buildx` subcommand exists. On this stack's dev
-# machines `docker` shims to podman, and podman's `buildx` stub does not fail —
-# it reports buildah's own version string instead — so a bare
-# command-exists check would pass while every comparison below is meaningless
-# (buildah reuses layers across different --build-arg values and reports
-# differing layers for identical content; see the header).
+# require_buildkit: positively assert a real buildx/BuildKit toolchain rather
+# than blocklist the one lookalike this stack happens to run into. On this
+# stack's dev machines `docker` shims to podman, and podman's `buildx` stub
+# does not fail — it reports buildah's own version string instead — but a
+# check that only rejects the literal substring "buildah" fails OPEN against
+# everything else that is not real BuildKit (nerdctl, Colima, a future podman
+# that rebrands its version string, ...). A wrong "identical" verdict from one
+# of those is far worse than this check being overly strict, so the accepted
+# shape is a positive match on real buildx's own version string
+# ("github.com/docker/buildx ..."), and anything that does not match it dies —
+# buildah included, called out separately only because it is the common local
+# case here and deserves a friendlier message.
+#
 require_buildkit() {
   local version
   version="$(docker buildx version 2>&1)" || die "docker buildx is unavailable, and BuildKit is required (see this script's header): ${version}"
   case "$version" in
-    *buildah*) die "docker buildx resolved to buildah/podman (\"${version}\"), not BuildKit. Layer-digest comparisons are meaningless under it (see header) — run this in CI (docker/setup-buildx-action) or against a real Docker/BuildKit daemon." ;;
+    *buildah*)
+      die "docker buildx resolved to buildah/podman (\"${version}\"), not BuildKit. Layer-digest comparisons are meaningless under it (see header) — run this in CI (docker/setup-buildx-action) or against a real Docker/BuildKit daemon." ;;
+    github.com/docker/buildx*)
+      ;;
+    *)
+      die "docker buildx did not report a real Docker buildx/BuildKit version (got: \"${version}\"); expected output beginning with \"github.com/docker/buildx\" (the real docker/buildx CLI plugin). Layer-digest comparisons are meaningless against anything else — buildah/podman, nerdctl, and other buildx-alikes do not reproduce BuildKit's layer-cache identity (see header). Run this in CI (docker/setup-buildx-action) or point docker at a real Docker Desktop / BuildKit daemon." ;;
   esac
+}
+
+# use_isolated_builder: pin every build in this run to a builder the script
+# itself controls, instead of inheriting whatever builder happens to be the
+# caller's default. CI (docker/setup-buildx-action) always leaves a
+# docker-container driver builder active, which is what BuildKit's layer-cache
+# reuse across builds depends on; locally, Docker Desktop's default builder
+# uses the `docker` driver, where `--platform linux/arm64 --load` behaves
+# differently, so a verdict would otherwise depend on ambient buildx config.
+# Reuses an active docker-container builder (CI) rather than creating a second.
+use_isolated_builder() {
+  local driver inspect_out status=0
+
+  # `|| status=$?`, never a bare capture: under errexit an unguarded assignment
+  # aborts the run with only a raw exit code. Keep stderr; it is the diagnostic.
+  inspect_out="$(docker buildx inspect 2>&1)" || status=$?
+  if [ "$status" -ne 0 ]; then
+    driver=""
+    printf '==> could not inspect the active buildx builder (exit %s), creating a private one\n%s\n' \
+      "$status" "$inspect_out" >&2
+  else
+    driver="$(printf '%s\n' "$inspect_out" | awk -F'[[:space:]]+' '/^Driver:/ { print $2; exit }')"
+  fi
+
+  [ "$driver" = "docker-container" ] && return
+  BUILDX_BUILDER="stl-repro-check-$$"
+  docker buildx create --name "$BUILDX_BUILDER" --driver docker-container >/dev/null \
+    || die "could not create a docker-container buildx builder (active driver: '${driver:-unknown}'); ORB-366's layer comparison requires one (see header)."
+  BUILDER_ARGS="--builder $BUILDX_BUILDER"
 }
 
 # run_build: wraps `docker buildx build`, optionally teeing its plain-progress
@@ -162,9 +213,9 @@ require_buildkit() {
 # noisier, and only that tripwire needs to parse it.
 run_build() {
   if [ -n "$BUILD_LOG" ]; then
-    docker buildx build --progress=plain "$@" 2>&1 | tee "$BUILD_LOG" >&2
+    docker buildx build $BUILDER_ARGS --progress=plain "$@" 2>&1 | tee "$BUILD_LOG" >&2
   else
-    docker buildx build "$@" >&2
+    docker buildx build $BUILDER_ARGS "$@" >&2
   fi
 }
 
@@ -267,27 +318,28 @@ compare() {
     echo "  BAD  ${name}: empty/missing layer list (a='${a}' b='${b}'); cannot be treated as identical"
     return
   fi
+
+  if [ "$a" = "$b" ] && [ "$expectation" = "match" ]; then
+    echo "  ok   ${name}: layers identical, as required"
+    return
+  fi
+  if [ "$a" != "$b" ] && [ "$expectation" = "differ" ]; then
+    echo "  ok   ${name}: layers differ, as required"
+    return
+  fi
+
+  FAILED=1
   if [ "$a" = "$b" ]; then
-    if [ "$expectation" = "match" ]; then
-      echo "  ok   ${name}: layers identical, as required"
-    else
-      FAILED=1
-      echo "  BAD  ${name}: layers identical, but this case changed compiled source"
-      echo "       Either the change did not reach the image, or the comparison is not sensitive"
-      echo "       to content — in both cases the matching verdicts above prove nothing."
-    fi
+    echo "  BAD  ${name}: layers identical, but this case changed compiled source"
+    echo "       Either the change did not reach the image, or the comparison is not sensitive"
+    echo "       to content — in both cases the matching verdicts above prove nothing."
   else
-    if [ "$expectation" = "differ" ]; then
-      echo "  ok   ${name}: layers differ, as required"
-    else
-      FAILED=1
-      echo "  BAD  ${name}: layers differ for source that should produce identical layers"
-      echo "       a: ${a}"
-      echo "       b: ${b}"
-      echo "       Something per-build is reaching a layer again. Check for a value that varies"
-      echo "       per build or per commit declared above the last COPY, or linked into the"
-      echo "       binary with -ldflags -X (ORB-366)."
-    fi
+    echo "  BAD  ${name}: layers differ for source that should produce identical layers"
+    echo "       a: ${a}"
+    echo "       b: ${b}"
+    echo "       Something per-build is reaching a layer again. Check for a value that varies"
+    echo "       per build or per commit declared above the last COPY, or linked into the"
+    echo "       binary with -ldflags -X (ORB-366)."
   fi
 }
 
@@ -311,6 +363,7 @@ self_test_compare() {
 self_test_compare
 
 require_buildkit
+use_isolated_builder
 
 COMMIT_A="1111111111111111111111111111111111111111"
 COMMIT_B="2222222222222222222222222222222222222222"

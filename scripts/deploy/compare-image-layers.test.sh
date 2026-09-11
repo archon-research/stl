@@ -137,59 +137,54 @@ check() {
   echo "  ok   ${name}"
 }
 
+# expect_verdict <name> <expected-exit> <expected-verdict-text> <pinned-manifest>
+# <candidate-manifest>: the verdict-assertion preamble repeated throughout this
+# suite — reset the stub's responses, program the pinned and candidate
+# manifests for the one repo most cases exercise
+# (stl-sentinelstaging-watcher), and check() the result. <pinned-manifest> and
+# <candidate-manifest> are anything respond()'s third argument accepts: a
+# manifest JSON string, or EMPTY/NONE/AWSFAIL. Cases needing more than one repo
+# or a non-default overlay still call rm -rf/respond/check directly below.
+expect_verdict() {
+  local name="$1" want_exit="$2" want_text="$3" pinned="$4" candidate="$5"
+  rm -rf "${WORK}/responses"
+  respond stl-sentinelstaging-watcher "$PINNED_SHA" "$pinned"
+  respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$candidate"
+  check "$name" "$want_exit" "$want_text" -- \
+    --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+}
+
 install_stub_aws
 echo "==> compare-image-layers.sh"
 
 # Identical layers is the verdict the whole ticket turns on.
-rm -rf "${WORK}/responses"
-respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one sha256:two)"
-respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one sha256:two)"
-check "identical layers report UNCHANGED" 0 "UNCHANGED   stl-sentinelstaging-watcher" -- \
-  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+expect_verdict "identical layers report UNCHANGED" 0 "UNCHANGED   stl-sentinelstaging-watcher" \
+  "$(manifest_with_layers sha256:one sha256:two)" "$(manifest_with_layers sha256:one sha256:two)"
 
 # Layer order is part of the identity: same digests, different order is a
 # different image, and treating it as unchanged would pin the wrong one.
-rm -rf "${WORK}/responses"
-respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one sha256:two)"
-respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:two sha256:one)"
-check "reordered layers report CHANGED" 0 "CHANGED     stl-sentinelstaging-watcher" -- \
-  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+expect_verdict "reordered layers report CHANGED" 0 "CHANGED     stl-sentinelstaging-watcher" \
+  "$(manifest_with_layers sha256:one sha256:two)" "$(manifest_with_layers sha256:two sha256:one)"
 
-rm -rf "${WORK}/responses"
-respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
-respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one sha256:two)"
-check "differing layers report CHANGED" 0 "CHANGED     stl-sentinelstaging-watcher" -- \
-  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+expect_verdict "differing layers report CHANGED" 0 "CHANGED     stl-sentinelstaging-watcher" \
+  "$(manifest_with_layers sha256:one)" "$(manifest_with_layers sha256:one sha256:two)"
 
 # The ARCT-436 failure: the running tag has been expired out of the registry.
-rm -rf "${WORK}/responses"
-respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one)"
-check "a pinned tag missing from ECR reports PINNED_GONE" 0 "PINNED_GONE" -- \
-  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+expect_verdict "a pinned tag missing from ECR reports PINNED_GONE" 0 "PINNED_GONE" \
+  NONE "$(manifest_with_layers sha256:one)"
 
-rm -rf "${WORK}/responses"
-respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
-check "an unbuilt candidate reports NOT_BUILT" 0 "NOT_BUILT" -- \
-  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+expect_verdict "an unbuilt candidate reports NOT_BUILT" 0 "NOT_BUILT" \
+  "$(manifest_with_layers sha256:one)" NONE
 
 # The failures that must never read as UNCHANGED.
-rm -rf "${WORK}/responses"
-respond stl-sentinelstaging-watcher "$PINNED_SHA" "not json at all"
-respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "not json at all"
-check "an unparseable manifest reports UNKNOWN, not UNCHANGED" 1 "UNKNOWN" -- \
-  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+expect_verdict "an unparseable manifest reports UNKNOWN, not UNCHANGED" 1 "UNKNOWN" \
+  "not json at all" "not json at all"
 
-rm -rf "${WORK}/responses"
-respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_list)"
-respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_list)"
-check "a manifest list reports UNKNOWN rather than guessing a platform" 1 "UNKNOWN" -- \
-  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+expect_verdict "a manifest list reports UNKNOWN rather than guessing a platform" 1 "UNKNOWN" \
+  "$(manifest_list)" "$(manifest_list)"
 
-rm -rf "${WORK}/responses"
-respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers)"
-respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers)"
-check "an empty layer list is UNKNOWN, not two images that match" 1 "UNKNOWN" -- \
-  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+expect_verdict "an empty layer list is UNKNOWN, not two images that match" 1 "UNKNOWN" \
+  "$(manifest_with_layers)" "$(manifest_with_layers)"
 
 # A total failure must not print a clean summary: it evaluated nothing.
 rm -rf "${WORK}/responses"
@@ -261,6 +256,13 @@ check "a short SHA is rejected" 2 "40-char lowercase git SHA" -- \
 check "a missing overlay is rejected" 2 "must point to an existing file" -- \
   --kustomization "${WORK}/nope.yaml" --tag "$DEPLOY_SHA"
 
+# --help is sliced out of the header comment between two marker lines
+# ("# Usage:" and "# End of --help output."). This guards against that
+# extraction silently breaking (truncating to nothing, or running past its
+# intended end) if either marker is ever edited without updating the other.
+check "--help produces non-empty output containing the usage line" 0 \
+  "compare-image-layers.sh --kustomization <file> --tag <40-hex-sha>" -- --help
+
 # The JSON output is what a week of shadow verdicts gets reconciled from.
 rm -rf "${WORK}/responses"
 respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
@@ -280,32 +282,20 @@ fi
 # the realistic failure — 2 calls per image, no retry config — and after the
 # cutover it is the one that inverts the required response: a throttle reading
 # as NOT_BUILT or PINNED_GONE at exit 0.
-rm -rf "${WORK}/responses"
-respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
-respond stl-sentinelstaging-watcher "$DEPLOY_SHA" AWSFAIL
-check "a throttled candidate call is UNKNOWN, not NOT_BUILT" 1 "an ECR call failed" -- \
-  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+expect_verdict "a throttled candidate call is UNKNOWN, not NOT_BUILT" 1 "an ECR call failed" \
+  "$(manifest_with_layers sha256:one)" AWSFAIL
 
-rm -rf "${WORK}/responses"
-respond stl-sentinelstaging-watcher "$PINNED_SHA" AWSFAIL
-respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one)"
-check "a throttled pinned call is UNKNOWN, not PINNED_GONE" 1 "an ECR call failed" -- \
-  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+expect_verdict "a throttled pinned call is UNKNOWN, not PINNED_GONE" 1 "an ECR call failed" \
+  AWSFAIL "$(manifest_with_layers sha256:one)"
 
 # The realistic missing-tag shape: the call succeeds and renders None.
-rm -rf "${WORK}/responses"
-respond stl-sentinelstaging-watcher "$PINNED_SHA" NONE
-respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one)"
-check "a pinned tag ECR reports as None is PINNED_GONE" 0 "PINNED_GONE" -- \
-  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+expect_verdict "a pinned tag ECR reports as None is PINNED_GONE" 0 "PINNED_GONE" \
+  NONE "$(manifest_with_layers sha256:one)"
 
 # Layers present but digest-less compared equal and reported "0 layer(s)
 # identical" — a self-contradictory line at exit 0.
-rm -rf "${WORK}/responses"
-respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_no_digest)"
-respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_no_digest)"
-check "digest-less layers are UNKNOWN, not 0-layers-identical" 1 "no usable layer digests" -- \
-  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+expect_verdict "digest-less layers are UNKNOWN, not 0-layers-identical" 1 "no usable layer digests" \
+  "$(manifest_no_digest)" "$(manifest_no_digest)"
 
 # The non-ECR parse branch was reachable, correct, and completely unpinned.
 rm -rf "${WORK}/responses"

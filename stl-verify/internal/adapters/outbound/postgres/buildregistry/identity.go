@@ -17,10 +17,19 @@ type Identity struct {
 }
 
 // ResolveIdentity reads the running process's artefact identity: the commit from
-// buildinfo.Resolve and the service from the binary name. ECR tag immutability
-// (VEC-701) makes the <git-sha> tag resolve to one image forever, so the pair names
-// the artefact on its own. Both parts are required — a row whose writer cannot be
-// named is unreproducible — so a missing part is an error.
+// buildinfo.Resolve and the service from the binary name. The pair is meant to name
+// the artefact on its own because the <git-sha> ECR tag resolves to one image
+// forever. Both parts are required — a row whose writer cannot be named is
+// unreproducible — so a missing part is an error.
+//
+// That "forever" is not yet enforced. ARCT-420 (formerly VEC-701) makes the SHA tags
+// immutable, and as of 2026-09-09 it is code-complete but NOT APPLIED: all 16
+// stl-sentinel* repositories still report MUTABLE (`aws ecr describe-repositories
+// --query 'repositories[].imageTagMutability'`), so a re-push of an existing SHA tag
+// currently succeeds and silently rebinds what a governed row points at. Note also
+// that the target state is IMMUTABLE_WITH_EXCLUSION, with the alias tags `latest` /
+// `*-latest` excluded — not blanket immutability. Until that lands, the guarantee
+// this identity rests on is a convention held by the deploy pipeline, not the registry.
 func ResolveIdentity() (Identity, error) {
 	gitHash, buildTime := buildinfo.Resolve()
 	return resolveIdentity(gitHash, buildTime, os.Args[0])
