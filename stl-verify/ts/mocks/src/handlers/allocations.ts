@@ -113,11 +113,14 @@ function activityBuckets(
     });
 
     if (series === 'balance') {
+      const coverage = coverageAt(rows, startMs + intervalMs, usdPerUnit);
       return {
         bucket_start: iso(startMs),
         balance_usd: usdString(
           balanceAt(rows, startMs + intervalMs, usdPerUnit),
         ),
+        entity_count: coverage.entityCount,
+        priced_entity_count: coverage.pricedEntityCount,
       };
     }
 
@@ -153,6 +156,31 @@ function balanceAt(
     rows.filter((row) => Date.parse(row.created_at) < endMs),
     (row) => signedFlowUsd(row, usdPerUnit),
   );
+}
+
+/**
+ * How many distinct token positions the bucket knows about by `endMs`, and how
+ * many of them price -- the same rows `balanceAt` sums, read for coverage
+ * instead of value. Pricing is real fixture data, not synthesized: tokens 9
+ * and 12 hold no `receipt_token_id` anywhere in `seedAllocations`, so they are
+ * unpriced the same way an oracle-less token is on the real endpoint, and any
+ * bucket whose window has seen one is a partial one.
+ */
+function coverageAt(
+  rows: readonly AllocationActivity[],
+  endMs: number,
+  usdPerUnit: ReadonlyMap<number, number>,
+): { entityCount: number; pricedEntityCount: number } {
+  const tokenIds = new Set(
+    rows
+      .filter((row) => Date.parse(row.created_at) < endMs)
+      .map((row) => row.token_id),
+  );
+  const pricedEntityCount = [...tokenIds].filter((id) =>
+    usdPerUnit.has(id),
+  ).length;
+
+  return { entityCount: tokenIds.size, pricedEntityCount };
 }
 
 function sumBy(

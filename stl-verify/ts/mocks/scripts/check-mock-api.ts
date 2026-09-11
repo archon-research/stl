@@ -546,6 +546,55 @@ async function checkAggregatedFlowsAreValued() {
   }
 }
 
+/**
+ * `series=balance` names how much of its own total it could price
+ * (VEC-760): every bucket's count pair has to be internally consistent, at
+ * least one has to be partial (tokens 9 and 12 carry no priced position in
+ * the fixture), and `series=flow` must carry neither field.
+ */
+async function checkBalanceSeriesReportsCoverage() {
+  const balance = await request(
+    '/v1/allocations/activity',
+    activity({
+      aggregation_method: 'end-period',
+      series: 'balance',
+      frequency: 'PT1H',
+      limit: 500,
+    }),
+    'activity (series=balance)',
+  );
+
+  const buckets = armWith(balance.data, 'entity_count', 'balance buckets');
+  for (const bucket of buckets) {
+    const priced = present(bucket.priced_entity_count, 'priced_entity_count');
+    const total = present(bucket.entity_count, 'entity_count');
+    assert.ok(
+      priced <= total,
+      `bucket ${bucket.bucket_start} prices more positions (${priced}) than it knows about (${total})`,
+    );
+  }
+  assert.ok(
+    buckets.some(
+      (bucket) =>
+        present(bucket.priced_entity_count, 'priced_entity_count') <
+        present(bucket.entity_count, 'entity_count'),
+    ),
+    'no bucket in the window is partial — tokens 9 and 12 should make one',
+  );
+
+  const flow = await request(
+    '/v1/allocations/activity',
+    activity({ aggregation_method: 'end-period', frequency: 'PT1H' }),
+    'activity (series=flow)',
+  );
+  for (const bucket of armWith(flow.data, 'event_count', 'flow buckets')) {
+    assert.ok(
+      !('entity_count' in bucket) && !('priced_entity_count' in bucket),
+      `flow bucket ${bucket.bucket_start} should carry neither coverage count`,
+    );
+  }
+}
+
 async function checkRawActivityHonoursLimit() {
   const feed = await request(
     '/v1/allocations/activity',
@@ -1547,6 +1596,10 @@ const checks: [string, () => Promise<void>][] = [
   ['raw and aggregated activity agree', checkRawAndAggregatedActivityAgree],
   ['the aggregated grid follows frequency', checkAggregatedRowShapeAndGrid],
   ['aggregated flows are valued in USD', checkAggregatedFlowsAreValued],
+  [
+    'series=balance reports pricing coverage',
+    checkBalanceSeriesReportsCoverage,
+  ],
   ['the raw feed honours limit', checkRawActivityHonoursLimit],
   ['debt raw snapshots', checkDebtRawSnapshots],
   ['provenance selection', checkProvenanceSelection],
