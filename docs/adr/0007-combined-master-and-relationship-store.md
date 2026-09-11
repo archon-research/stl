@@ -488,14 +488,16 @@ alternative and is rejected: three columns already name transitions an unversion
 represent — `maturity`, `IdSchemeVocabulary.unique_current`, and `rel_type_vocabulary.cluster_key`
 — and the append-only trigger blocks the `UPDATE` each would need while a successor row collides
 on the natural key. The observed cost of leaving it unversioned is six `concept_class` values
-permanently stuck at `draft`. The price of versioning is named rather than discovered: the
-natural key stops being unique, so `rel_type`, `weight_basis`, `change_reason_code` and
-`(record_type, status)` can no longer be engine foreign keys. They become soft references
-resolved through each vocabulary's current view — which is what §3 already prescribes for SCD2
-ids between the stores — and GQ-01 and GQ-03 move from the engine to the validator, joining
-GQ-05. A writer pinned to `writer_run.reference_effective_at` can now replay against the
-vocabulary as it stood, which it could not before. The read side (`_current` / `_versions` /
-`_as_of`) is VEC-687's.
+permanently stuck at `draft`. The price is named rather than discovered: the natural key
+stops being unique, so `rel_type`, `weight_basis`, `change_reason_code` and
+`(record_type, status)` can no longer be engine **foreign keys**. They stay engine-enforced all
+the same — the append guard already reads the vocabulary to derive `edge_disc`, so it checks each
+of them against the versions live as of the append, and GQ-01 and GQ-03 remain `reject` at the
+write boundary rather than moving to the validator. What is genuinely given up is the database's
+own referential integrity: the check is now code that a migration could remove, where an FK could
+not be dropped by accident. A writer pinned to `writer_run.reference_effective_at` can now replay
+against the vocabulary as it stood, which it could not before. The read side (`_current` /
+`_versions` / `_as_of`) is VEC-687's.
 
 The `rel_type` vocabulary is **itself reference data**, governed to the same bar as the `ref_*`
 lists: a single authoritative, versioned artifact (seeded from the table below), anchored where
@@ -795,9 +797,9 @@ adding or changing a rule is a reviewed change, and rule ids are stable referenc
 
 | id | rule | layer | outcome |
 |---|---|---|---|
-| GQ-01 | `rel_type` exists in the governed vocabulary | validator (was engine FK; the vocabulary's natural key stopped being unique when it became versioned) | reject |
+| GQ-01 | `rel_type` exists in the governed vocabulary | engine (append guard, not an FK: the versioned vocabulary's natural key repeats) | reject |
 | GQ-02 | `rel_weight` requires `weight_basis` | engine (CHECK) | reject |
-| GQ-03 | `status` legal for the node's kind | validator (same reason as GQ-01) | reject |
+| GQ-03 | `status` legal for the node's kind | engine (append guard, same reason as GQ-01) | reject |
 | GQ-04 | node id prefix matches its kind | engine (CHECK) | reject |
 | GQ-05 | address values are lowercase hex, no 0x | validator | reject |
 | GQ-06 | `valid_from < valid_to` | engine (CHECK) | reject |
