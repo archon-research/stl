@@ -47,7 +47,7 @@ var convertedAppendOnlyTables = []string{
 	"uniswap_v4_position",
 	// VEC-401: run records are append-only; SELECT+INSERT only for the app role.
 	"position_projection_run",
-	// VEC-491: block header times are immutable facts; a mis-parse is deleted and reloaded.
+	// VEC-491: block header dimension; a mis-parse is corrected at a higher processing_version.
 	"block_meta",
 	"position_projection_refusal",
 	// VEC-598: provenance tables. The owner keeps UPDATE for the FK integrity probe
