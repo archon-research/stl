@@ -1,9 +1,9 @@
 # ADR-0007: Combined Master (Entity, Security, Concept) and a Relationship Store
 
 **Status**: Accepted (data model) — storage representation and engine are follow-up decisions
-**Proposed**: @peter.simon, @yasanji.ratnaike
+**Proposed**: @vector
 **Date**: 2026-07-30 (proposed) · 2026-08-21 (accepted) · 2026-08-25 (model completed)
-**Deciders**: @yasanji.ratnaike, @peter.simon, @simon.bojeoutzen
+**Deciders**: @vector, @infrastructure
 
 > **What is decided here is the data model, and only the data model.** One combined master of
 > nodes and one relationship store of edges, with the contracts, vocabulary, shapes, and time
@@ -16,7 +16,7 @@
 > The model conforms to the **STL Auditability & Reproducibility PRD** (v0.2, 18 Aug 2026).
 > Requirement ids below (`AR-*`, `PR-*`, `CR-*`, `RP-*`, `DP-*`, `NFR-*`) reference that
 > document; ids of the form `DM-*`, `SE-*`, `IN-*`, `CH-*` reference the **SECstore PRD**
-> (v0.1, 18 Aug 2026). The Auditability conformance section maps the model to the former item
+> (v0.1, 18 Aug 2026, revised 21 Aug 2026). The Auditability conformance section maps the model to the former item
 > by item. Where this ADR and either PRD conflict, the PRD wins and this ADR is wrong.
 >
 > The model sits on the platform guarantees of **ADR-0006** (data reproducibility and
@@ -230,23 +230,26 @@ Semantics, independent of realization:
   it closes, so every curated edit would have to allocate a correction version, which ADR-0006 §3
   reserves for correction runs. A tombstone is a zero-length window, and it withdraws that
   **window** — a record closed and reopened takes one tombstone per window.
-- **Current state is a two-step read**: latest version per logical edge
-  (`src_id`, `rel_type`, `dst_id`, `edge_disc`) first, then the valid-time window. The order
-  matters — filtering on validity first resurrects superseded edges.
+- **Current state is a two-step read**: latest version per logical edge and window
+  (`src_id`, `rel_type`, `dst_id`, `edge_disc`, `valid_from`) first — `processing_version`,
+  then `ingest_xid`, then `record_id` as the tiebreak — and only then the valid-time window.
+  The order matters — filtering on validity first resurrects superseded edges.
 - **Cardinality is validated over current state, not at write** (a re-point always
   time-overlaps the edge it supersedes); single-valued types are checked by a data-quality
   rule over the resolved current state. Per D-5's separation, such data-quality validation
   rules live in OpenMetadata with pointers from the store (AU-4): schemata (§6) govern at the
   write boundary and live with the store; DQ rules observe the resolved state and live in
   OpenMetadata.
-- **Endpoint-kind and vocabulary rules are enforced on write** by the loader/validator, since
-  they are cross-row.
+- **Endpoint-kind legality is enforced on write by the append guard**: the vocabulary row it
+  already reads for `cluster_key` carries `src_kinds` and `dst_kinds`, so the
+  `(rel_type, src_kind, dst_kind)` triple is one predicate on that read (GQ-11). Endpoint
+  **existence** stays cross-row and with the validator (GQ-21).
 
 **The stores, as tables.** Both stores plus the registers, the shape table, and the seven
 governed vocabularies. Solid relationships are real foreign keys into the vocabularies. Dotted
 ones are **soft references**: an SCD2 id is non-unique by construction, so an endpoint resolves
-through the current view rather than a row-level foreign key — which is why endpoint-kind and
-cardinality are enforced by the validator above rather than by a constraint. Relationship
+through the current view rather than a row-level foreign key — which is why endpoint existence
+and cardinality are enforced by the validator and DQ rules rather than by a constraint. Relationship
 labels carry the referencing column. The provenance block of §4 is elided on `SecEdge`,
 so no relationship is drawn from it — it carries the same `change_reason_code` and lineage
 columns as `SecNode`.
@@ -255,7 +258,7 @@ columns as `SecNode`.
 erDiagram
     SecNode {
         text id PK "UK1"
-        text record_type PK "UK1"
+        text record_type
         int4 chain_id
         text status FK "NodeStatusVocabulary"
         jsonb attrs
@@ -452,7 +455,7 @@ have to read. A same-day change still burns a correction version under a date-gr
 owns the enforcement model, the write path, the grain, and how a value is retired.
 
 The `rel_type` vocabulary is **itself reference data**, governed to the same bar as the `ref_*`
-lists: a single authoritative, versioned artifact (seeded from the table below), anchored where
+lists: a single authoritative, append-only artifact (seeded from the table below), anchored where
 possible to external practice rather than house judgment, changed only by a reviewed migration
 (NFR-3). The ADR table is the ratification snapshot; the governed list is the source of truth.
 Each type carries endpoint kinds, cardinality, weight basis, a maturity tier — `ratified`
@@ -757,7 +760,7 @@ adding or changing a rule is a reviewed change, and rule ids are stable referenc
 | GQ-06 | `valid_from <= valid_to` (`=` is the zero-length tombstone window, §3) | engine (CHECK) | reject |
 | GQ-07 | spine completeness: actor, reason code + text, source_system present | engine (NOT NULL) | reject |
 | GQ-10 | structural identity per kind (a token has address + chain) | validator, REQUIRED | reject write |
-| GQ-11 | endpoint existence and kind: each endpoint names a current node and its kind matches the stored src/dst_kind and the rel_type triple | engine (guard) | reject write |
+| GQ-11 | endpoint kind: `(rel_type, src_kind, dst_kind)` is legal per `rel_type_vocabulary.src_kinds`/`dst_kinds`, and each `*_kind` agrees with its id prefix | engine (guard; CHECK for the prefix) | reject |
 | GQ-12 | edge targets within the shape's permitted set (subtree lookup against `dim_cluster`) | validator, REQUIRED | reject write |
 | GQ-13 | exactly one `BELONGS_TO` per concept class per node | validator, EXPECTED | flag + block metrics |
 | GQ-14 | required edges per effective shape (`ISSUED_BY`, `PEGGED_TO`, `HAS_UNDERLYING` by subtype) | validator, EXPECTED | flag + block metrics |
@@ -765,9 +768,9 @@ adding or changing a rule is a reviewed change, and rule ids are stable referenc
 | GQ-16 | concept carries a definition | validator, EXPECTED | flag |
 | GQ-17 | rule-class concept's `external_ref` present and well-formed | validator, REQUIRED | reject write |
 | GQ-18 | shape-closure contradictions (resolved min > max) | authoring-time closure report | reject the shape version |
-| GQ-19 | duplicate-edge discipline: two edges sharing a triple AND an identical payload are an accidental duplicate, not DM-6 multi-typing | validator, write-time | reject write |
+| GQ-19 | duplicate-edge discipline: two edges sharing a triple AND the same cluster-key values are one logical edge, not a DM-6 twin — the derived `edge_disc` makes the second collide on the primary key | engine (PK) | reject |
 | GQ-20 | single-valued cardinality over current state (one current `ISSUED_BY` per security, one register mapping per key) | OpenMetadata | alert |
-| GQ-21 | dangling soft references: edge endpoints, `instrument_register.security_id`, `alias_register.node_id` with no current node | OpenMetadata | alert |
+| GQ-21 | endpoint existence and dangling soft references: edge endpoints, `instrument_register.security_id`, `alias_register.node_id` must name a current node (cross-row, so never a constraint) | validator, REQUIRED at write; OpenMetadata sweep | reject write; alert |
 | GQ-22 | taxonomy orphans: non-root taxonomy concepts without a `NARROWER_THAN` parent | OpenMetadata | alert |
 | GQ-23 | cycles in `NARROWER_THAN` / `HAS_UNDERLYING` (post-hoc sweep behind the write guard) | OpenMetadata | alert |
 | GQ-24 | coverage: held instruments without a register mapping; position holders without an alias resolution; `entity_type = UNKNOWN` count | OpenMetadata | alert |
@@ -784,7 +787,7 @@ adding or changing a rule is a reviewed change, and rule ids are stable referenc
 
 The reference-graph proposal's validity-and-quality suite is fully absorbed into this set
 (shape conformance → GQ-10..18; weight closure/basis → GQ-02/GQ-28; look-through coverage →
-GQ-31; peg vs backing → GQ-32; endpoint existence/kind → GQ-11; cycles → GQ-23; duplicate-edge
+GQ-31; peg vs backing → GQ-32; endpoint kind → GQ-11, existence → GQ-21; cycles → GQ-23; duplicate-edge
 discipline → GQ-19; approval coverage → GQ-33; drift → GQ-34; reproducibility replay →
 ADR-0006's assurance job). Platform-level integrity checks — the xid monotonicity guard,
 content-hash verification, the assurance replay sample — are ADR-0006's and are referenced,
@@ -1272,7 +1275,7 @@ the second clock and the hash chain are free to add.
   shape version; a corporate action is rows.
 
 **Negative / trade-offs (accepted):**
-- Cross-row rules (endpoint kinds, single-valued cardinality) are validator- and DQ-enforced,
+- Cross-row rules (endpoint existence, single-valued cardinality) are validator- and DQ-enforced,
   not database-enforced; the shape mechanism narrows but does not eliminate the
   loader-discipline surface, and shapes must exist before loading at scale.
 - The provenance block is wide (actor, build, lineage, reason code, hash): every loader pays
