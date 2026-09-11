@@ -1375,6 +1375,10 @@
       "type": "dimension",
       "owner": "infra"
     },
+    "block_meta_worklist": {
+      "type": "infrastructure",
+      "owner": "infra"
+    },
     "borrower": {
       "type": "raw_pipeline",
       "owner": "lending",

@@ -24,6 +24,7 @@ import (
 // and named, the rest of the schema is still being converted table by table, and an
 // enumeration would either pass vacuously or fail on every legacy table.
 var convertedAppendOnlyTables = []string{
+	"block_meta",
 	"morpho_adapter",
 	"morpho_adapter_membership",
 	"morpho_adapter_state",

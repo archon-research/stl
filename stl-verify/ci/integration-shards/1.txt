@@ -59,4 +59,7 @@
 ./cmd/backfillers/block-republisher
 ./internal/services/uniswapv4indexer
 ./internal/pkg/tickbitmap
+./internal/pkg/blockheader
+./internal/services/block_meta_loader
+./cmd/backfillers/block-meta-loader
 ./internal/pkg/blockversion

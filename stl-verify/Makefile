@@ -13,6 +13,7 @@ include lint.mk
 		docker-build-reference-capital-backfill docker-release-reference-capital-backfill _docker-release-reference-capital-backfill-internal \
 		docker-build-morpho-vault-backfill docker-release-morpho-vault-backfill _docker-release-morpho-vault-backfill-internal \
 		docker-build-block-republisher docker-release-block-republisher _docker-release-block-republisher-internal \
+		docker-build-block-meta-loader docker-release-block-meta-loader _docker-release-block-meta-loader-internal \
 		build-backfiller-% run-backfiller-% \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
@@ -1432,6 +1433,7 @@ docker-release-all:
 	@$(MAKE) _docker-release-reference-capital-backfill-internal ENV=$(ENV)
 	@$(MAKE) _docker-release-morpho-vault-backfill-internal ENV=$(ENV)
 	@$(MAKE) _docker-release-block-republisher-internal ENV=$(ENV)
+	@$(MAKE) _docker-release-block-meta-loader-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
 		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
@@ -2403,6 +2405,15 @@ docker-release-morpho-vault-backfill: ecr-login _docker-release-morpho-vault-bac
 
 _docker-release-morpho-vault-backfill-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Morpho Vault Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/morpho-vault-backfill GO_BIN=morpho-vault-backfill GO_CACHE_KEY="cronjob-morpho-vault-backfill" GO_TAG="morpho-vault-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="morpho-vault-backfill-latest"
+# block-meta-loader: a run-to-completion per-chain Job that fills the block_meta dimension from a
+# chain's S3 raw-block archive. Ships in the shared cronjob ECR repo with a name-prefixed tag.
+docker-build-block-meta-loader:
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/block-meta-loader --build-arg BIN=block-meta-loader -t stl-block-meta-loader:$(LOCAL_TAG) -f Dockerfile.common .
+
+docker-release-block-meta-loader: ecr-login _docker-release-block-meta-loader-internal
+
+_docker-release-block-meta-loader-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Block Meta Loader" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/block-meta-loader GO_BIN=block-meta-loader GO_CACHE_KEY="cronjob-block-meta-loader" GO_TAG="block-meta-loader-$(IMAGE_TAG)" GO_LATEST_TAG="block-meta-loader-latest"
 
 # block-republisher (ARCT-383): the on-demand repair that re-publishes a block
 # under a new version. Same lifecycle as the two backfillers above — a
