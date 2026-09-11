@@ -51,10 +51,8 @@ END;
 $tier$;
 
 -- Compression at 30 days, past the window the trigger keeps rewriting: a bulk upsert into a compressed
--- chunk exceeds max_tuples_decompressed_per_dml_transaction (measured: fails at 100,001 on 150k rows),
--- so both writers lift that limit for their own statement rather than the table forgoing compression.
--- created_at is deliberately not a segmentby or orderby key: it changes on every overwrite, where the
--- columnstore key must be the stable identity a chunk is grouped and sorted by.
+-- chunk dies at max_tuples_decompressed_per_dml_transaction, so both writers lift that limit for their
+-- own statement. created_at is deliberately no columnstore key: it changes on every overwrite.
 ALTER TABLE position_daily SET (
     timescaledb.compress,
     timescaledb.compress_segmentby = 'position_id',
