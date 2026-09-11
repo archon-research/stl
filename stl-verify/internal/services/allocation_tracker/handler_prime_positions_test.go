@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,14 +173,10 @@ func TestHandleBatch_ThreadsTransferPartiesOntoPosition(t *testing.T) {
 	}
 }
 
-// TestHandleBatch_Centrifuge_MetadataFromShareToken proves the VEC-337-part-2
-// row-metadata fix: an ERC-7540 centrifuge position takes its decimals/symbol
-// from the resolved share token (surfaced as ShareToken), not from its vault
-// contract_address, which reverts on decimals(). The vault address is left out
-// of the seeded metadata cache, so any attempt to read metadata from it would
-// fail the batch (nil multicaller) — the test passes only if the share token is
-// used. The persisted row still keys on the vault address.
-func TestHandleBatch_Centrifuge_MetadataFromShareToken(t *testing.T) {
+// TestHandleBatch_Centrifuge_RowKeysOnShareToken: an ERC-7540 vault has no
+// decimals/symbol, so the row keys on the share and reads its metadata there. The
+// vault is left out of the seeded cache, so a read from it fails the batch.
+func TestHandleBatch_Centrifuge_RowKeysOnShareToken(t *testing.T) {
 	vault := common.HexToAddress("0x4880799ee5200fc58da299e965df644fbf46780b")
 	share := common.HexToAddress("0x1234000000000000000000000000000000005678")
 	wallet := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
@@ -187,10 +184,7 @@ func TestHandleBatch_Centrifuge_MetadataFromShareToken(t *testing.T) {
 	repo := &fakeAllocRepo{}
 	handler := newTestHandler(repo, &fakeSupplyRepo{},
 		map[string]int64{"grove": 2},
-		map[common.Address]tokenMeta{
-			// Only the share token is known; the vault is intentionally absent.
-			share: {symbol: "JAAA", decimals: 6},
-		},
+		map[common.Address]tokenMeta{share: {symbol: "JAAA", decimals: 6}},
 	)
 
 	err := handler.HandleBatch(context.Background(), &SnapshotBatch{
@@ -202,12 +196,13 @@ func TestHandleBatch_Centrifuge_MetadataFromShareToken(t *testing.T) {
 					Star:            "grove",
 					Chain:           "mainnet",
 					Protocol:        "centrifuge",
-					TokenType:       "centrifuge",
+					TokenType:       TokenTypeCentrifuge,
 				},
 				Balance:     big.NewInt(500),
 				ShareToken:  &share,
 				ChainID:     1,
 				BlockNumber: 100,
+				TxAmount:    big.NewInt(0),
 				Direction:   DirectionSweep,
 			},
 		},
@@ -220,11 +215,74 @@ func TestHandleBatch_Centrifuge_MetadataFromShareToken(t *testing.T) {
 		t.Fatalf("expected 1 saved position, got %d", len(repo.saved))
 	}
 	pos := repo.saved[0]
-	if pos.TokenAddress != vault {
-		t.Errorf("token_address = %s, want the vault %s", pos.TokenAddress.Hex(), vault.Hex())
+	if pos.TokenAddress != share {
+		t.Errorf("token_address = %s, want the share %s", pos.TokenAddress.Hex(), share.Hex())
 	}
 	if pos.TokenSymbol != "JAAA" || pos.TokenDecimals != 6 {
 		t.Errorf("metadata = (%q, %d), want (JAAA, 6) from the share token", pos.TokenSymbol, pos.TokenDecimals)
+	}
+	if pos.Balance == nil || pos.Balance.Cmp(big.NewInt(500)) != 0 {
+		t.Errorf("balance = %v, want 500", pos.Balance)
+	}
+}
+
+// TestCentrifugeSnapshotWithoutShareToken_IsRefused: a row with no share has no
+// metadata to read and no key to trust, so both places that name the row token
+// fail the batch instead — the metadata preflight and buildPositions itself.
+func TestCentrifugeSnapshotWithoutShareToken_IsRefused(t *testing.T) {
+	vault := common.HexToAddress("0x4880799ee5200fc58da299e965df644fbf46780b")
+	wallet := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+	snapshot := func() *PositionSnapshot {
+		return &PositionSnapshot{
+			Entry: &TokenEntry{
+				ContractAddress: vault,
+				WalletAddress:   wallet,
+				Star:            "grove",
+				Chain:           "mainnet",
+				Protocol:        "centrifuge",
+				TokenType:       TokenTypeCentrifuge,
+			},
+			Balance:     big.NewInt(500),
+			ChainID:     1,
+			BlockNumber: 100,
+			Direction:   DirectionSweep,
+		}
+	}
+	preflight := func(t *testing.T, snap *PositionSnapshot) error {
+		repo := &fakeAllocRepo{}
+		handler := newTestHandler(repo, &fakeSupplyRepo{},
+			map[string]int64{"grove": 2},
+			map[common.Address]tokenMeta{vault: {symbol: "VAULT", decimals: 6}},
+		)
+		err := handler.HandleBatch(context.Background(), &SnapshotBatch{Snapshots: []*PositionSnapshot{snap}})
+		if len(repo.saved) != 0 {
+			t.Errorf("saved %d positions, want none", len(repo.saved))
+		}
+		return err
+	}
+	buildPositions := func(t *testing.T, snap *PositionSnapshot) error {
+		h := newPolicyTestHandler(t, nil)
+		_, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap}, map[string]bool{})
+		return err
+	}
+
+	tests := []struct {
+		name string
+		run  func(t *testing.T, snap *PositionSnapshot) error
+	}{
+		{"HandleBatch preflight", preflight},
+		{"buildPositions", buildPositions},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run(t, snapshot())
+			if err == nil {
+				t.Fatal("expected a centrifuge snapshot without a share token to be refused")
+			}
+			if !strings.Contains(err.Error(), "carries no share token") {
+				t.Errorf("error = %q, want it to name the missing share token", err)
+			}
+		})
 	}
 }
 
@@ -1200,6 +1258,11 @@ func TestBuildPositions_UnderlyingValuationPolicy(t *testing.T) {
 				BlockNumber:     100,
 				Direction:       DirectionSweep,
 				BlockTimestamp:  time.Unix(1750000000, 0).UTC(),
+			}
+			if tc.tokenType == TokenTypeCentrifuge {
+				// The direct-share shape: a centrifuge row always names the token it
+				// keys on, and buildPositions refuses one that does not.
+				snap.ShareToken = &policyVault
 			}
 			positions, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap}, map[string]bool{})
 			if err != nil {
