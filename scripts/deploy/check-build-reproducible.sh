@@ -232,10 +232,9 @@ check_docs_reached_go_context() {
 }
 
 # check_ui_builder_rebuilt <build-log>: assert --no-cache-filter actually took
-# effect. ADR-0008 rejects --no-cache-filter for the weekly refresh precisely
-# because "a filter that stops matching a renamed stage silently refreshes
-# nothing"; the same hazard applies here, so the filter is verified rather than
-# trusted. Renaming the stage in python/Dockerfile makes the filter match
+# effect. A filter that stops matching a renamed stage silently does nothing, so
+# it is verified rather than trusted. Renaming the stage in python/Dockerfile
+# makes the filter match
 # nothing, ui-builder goes back to being cache-hit, the only real coverage of
 # its reproducibility disappears -- and without this the leg still reports ok.
 check_ui_builder_rebuilt() {
