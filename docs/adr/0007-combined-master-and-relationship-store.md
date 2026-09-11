@@ -32,8 +32,9 @@
   **The instrument is a key with a register, not a node.** Node ids are opaque and stable;
   native keys and public identifiers are lookups, never ids.
 - A separate **relationship store** holds every link as a typed, directed, weighted edge with
-  its own validity window, version, and provenance. Edge identity includes an `edge_seq` so
-  deliberate twins coexist. Weights carry a mandatory basis and are exact decimals.
+  its own validity window, version, and provenance. Edge identity includes an `edge_disc`
+  derived from the payload keys its type declares, so deliberate twins coexist and identity
+  stays reproducible. Weights carry a mandatory basis and are exact decimals.
 - The **relationship vocabulary** is itself governed reference data: a closed set in six
   families, each type with endpoint kinds, cardinality, and a maturity tier.
 - **Concepts carry shapes**: per-type schemas (required fields, required edges, permitted
@@ -189,8 +190,8 @@ live as columns on a node — the earlier `issuer_entity_id`, `parent_entity_id`
 
 | field | meaning |
 |---|---|
-| `id` | deterministic composite `rel:rel_type:src_id:dst_id:edge_seq` — the logical edge |
-| `edge_seq` | discriminator (default 1) so deliberately duplicated edges — DM-6 multi-typing and per-edge attribute clusters — **coexist** instead of silently superseding their twin |
+| `id` | deterministic composite `rel:rel_type:src_id:dst_id:edge_disc` — the logical edge. Deterministic in every part: see `edge_disc` |
+| `edge_disc` | discriminator so deliberately duplicated edges — DM-6 multi-typing and per-edge attribute clusters — **coexist** instead of silently superseding their twin. **Derived, not allocated**: a hash of the payload keys the type declares as its `cluster_key` (§5), or a `base` sentinel where it declares none. A counter would need an allocator, a lock over `(rel_type, src, dst)`, and a value carried through every replay, and would put a value that differs run to run inside both the id and the hash chain. The cluster key is the **immutable** subset of payload: derived from all of payload, a corrected attribute would hash to a new edge and leave the superseded row current beside its replacement |
 | `record_id` | unique, stable id of this stored row (this version of the edge) — what corrections and manifests reference (PR-2.1) |
 | `src_id`, `dst_id` | the two node ids the edge joins (soft references: SCD2 ids are non-unique, so resolution goes through the current view, not a row-level FK) |
 | `src_kind`, `dst_kind` | the endpoint kinds, so vocabulary rules are checkable |
@@ -223,7 +224,7 @@ Semantics, independent of realization:
   new one; a re-point, a type change, an ended link, and a backdated late-learned link are all
   data changes. A retraction is a tombstone append that supersedes the retracted row.
 - **Current state is a two-step read**: latest version per logical edge
-  (`src_id`, `rel_type`, `dst_id`, `edge_seq`) first, then the valid-time window. The order
+  (`src_id`, `rel_type`, `dst_id`, `edge_disc`) first, then the valid-time window. The order
   matters — filtering on validity first resurrects superseded edges.
 - **Cardinality is validated over current state, not at write** (a re-point always
   time-overlaps the edge it supersedes); single-valued types are checked by a data-quality
@@ -268,7 +269,7 @@ erDiagram
     }
     SecEdge {
         text edge_id "generated"
-        int edge_seq PK
+        text edge_disc PK
         text src_id PK "soft FK SecNode"
         text src_kind
         text dst_id PK "soft FK SecNode"
@@ -323,6 +324,7 @@ erDiagram
         text_array src_kinds
         text_array dst_kinds
         text cardinality
+        text_array cluster_key
         text weight_basis FK
         boolean derived_only
         text maturity
@@ -426,8 +428,13 @@ The `rel_type` vocabulary is **itself reference data**, governed to the same bar
 lists: a single authoritative, versioned artifact (seeded from the table below), anchored where
 possible to external practice rather than house judgment, changed only by a reviewed migration
 (NFR-3). The ADR table is the ratification snapshot; the governed list is the source of truth.
-Each type carries endpoint kinds, cardinality, weight basis, and a maturity tier — `ratified`
-(enforced now) or `draft` (named, awaiting its first consumer). Types are `SCREAMING_SNAKE`;
+Each type carries endpoint kinds, cardinality, weight basis, a maturity tier — `ratified`
+(enforced now) or `draft` (named, awaiting its first consumer) — and a `cluster_key`: the
+payload keys that distinguish a deliberate twin of that type, from which `edge_disc` is derived
+(§3). The keys must be immutable over the edge's life, and a type that declares one requires it
+on every edge; a type declaring none admits one logical edge per `(rel_type, src, dst)`, so a
+same-pair duplicate is refused rather than becoming an unintended twin. A declared key cannot be
+amended in place — the vocabulary is append-only — so it is chosen when the type ratifies. Types are `SCREAMING_SNAKE`;
 concept ids are `snake_case` with display labels as attributes, so near-duplicates cannot creep
 into a governed set.
 
@@ -494,7 +501,7 @@ into a governed set.
 | rel_type | src → dst | payload | card. | maturity | meaning |
 |---|---|---|---|---|---|
 | `SUCCEEDED_BY` | SEC → SEC | ratio, event_date | 1 | ratified | merger, redenomination (MKR → SKY at 1 : 24000); the old node's status goes to MERGED and the instrument register re-points |
-| `SPLIT_FROM` | SEC → SEC | ratio, ex_date | 1 | ratified | split / reverse split; historical unit series need the ratio to stay comparable |
+| `SPLIT_FROM` | SEC → SEC | ratio, **ex_date** (cluster key) | 1 | ratified | split / reverse split; historical unit series need the ratio to stay comparable |
 | `SPUN_OFF_FROM` | SEC → SEC | ratio, event_date | 1 | draft | new security retaining provenance to its origin |
 | `DISTRIBUTED_FROM` | SEC → SEC | ratio, event_date | n | draft | rights issue, airdrop |
 | `CONVERTS_TO` | SEC → SEC | ratio, conversion_date | n | draft | convertibles, and redemption into an underlying |
@@ -1187,7 +1194,7 @@ derived from one breaks with it. Identifiers are lookups (§1.3), ids are opaque
 
 **Edge identity as the bare triple (`rel_type`, `src`, `dst`).** Set aside: DM-6 handles
 multi-attribute and multi-typing by duplicating the edge, and under a bare-triple identity a
-deliberate twin silently supersedes its sibling in the versioned store. `edge_seq` makes twins
+deliberate twin silently supersedes its sibling in the versioned store. `edge_disc` makes twins
 first-class.
 
 **Promoting the instrument to a node kind.** Considered — the promotion test rewards it: the
