@@ -2,11 +2,6 @@
 -- prime's debt in an ilk, held by the prime's vault address; instrument_key = ilk_name (unique within
 -- the single Vat); protocol_id = the Vat row the indexer stamps on each prime_debt row.
 
--- prime_debt carries the Vat the indexer read. A bare nullable column on a compressed hypertable (the
--- 20260410_110000 retrofit shape); the writer sets it and materialize_sky_prime_debt() refuses NULLs.
-ALTER TABLE prime_debt ADD COLUMN IF NOT EXISTS protocol_id bigint;
-COMMENT ON COLUMN prime_debt.protocol_id IS 'protocol.id of the Vat contract this snapshot was read from; set by the prime-debt indexer. Rows written before the column existed were backfilled to the MCD Vat row.';
-
 -- The MCD Vat, the indexer's VAT_ADDRESS default: the row every pre-existing snapshot was read from.
 -- Named for the contract, not for Sky, and protocol_type is left NULL: the column is free text with
 -- no vocabulary behind it, and Sky is not a lending protocol.
@@ -14,14 +9,21 @@ INSERT INTO protocol (chain_id, address, name, protocol_type)
 VALUES (1, '\x35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'mcd-vat', NULL)
 ON CONFLICT (chain_id, address) DO NOTHING;
 
--- prime_debt is compressed with a 2-day policy, and this backfill decompresses every chunk inside the
--- migrator's single transaction. Measured on 2.29.2-pg18: 99,072 rows pass, 101,088 raise SQLSTATE 53400
--- at the 100000 default. 0 lifts the cap for this transaction only; prod is ~55-60k rows and growing.
-SET LOCAL timescaledb.max_tuples_decompressed_per_dml_transaction = 0;
+-- ADD COLUMN with a constant DEFAULT is catalogue-only: it stamps every pre-existing row without
+-- decompressing a chunk (measured at a decompression cap of 1 -- no chunk takes the partial bit and the
+-- row-store heap does not grow), where ADD COLUMN plus a backfill UPDATE decompresses the whole table.
+-- The DEFAULT stays: the migrate Job is an ArgoCD PreSync hook, so it completes before the indexer rolls,
+-- and without it every row the old pod writes in that window is NULL forever and refuses each later run.
+DO $mig$
+DECLARE v_vat bigint;
+BEGIN
+    SELECT id INTO STRICT v_vat FROM protocol
+     WHERE chain_id = 1 AND address = '\x35d1b3f3d7966a1dfe207aa4514c12a259a0492b';
+    EXECUTE format('ALTER TABLE prime_debt ADD COLUMN IF NOT EXISTS protocol_id bigint DEFAULT %s', v_vat);
+END
+$mig$;
 
-UPDATE prime_debt
-   SET protocol_id = (SELECT id FROM protocol WHERE chain_id = 1 AND address = '\x35d1b3f3d7966a1dfe207aa4514c12a259a0492b')
- WHERE protocol_id IS NULL;
+COMMENT ON COLUMN prime_debt.protocol_id IS 'protocol.id of the Vat contract this snapshot was read from; set by the prime-debt indexer. Rows written before the column existed, and any written by a pre-rollout pod that does not name it, take the MCD Vat row from the column DEFAULT.';
 
 CREATE OR REPLACE VIEW position_sky_prime_debt AS
 WITH obs AS (
@@ -47,7 +49,7 @@ FROM obs o
 JOIN protocol p  ON p.id  = o.protocol_id
 JOIN prime    pr ON pr.id = o.prime_id;
 
-COMMENT ON VIEW position_sky_prime_debt IS '[Operational] VEC-406 projection: Sky prime debt as native position rows, one per (prime, Vat, ilk); instrument_key = native ilk_name, holder_id = the prime vault address, protocol_id = the Vat row stamped on the snapshot, deal_type BORROW. Emits the shared position_state column contract consumed by materialize_position_projection(); closure is applied there.';
+COMMENT ON VIEW position_sky_prime_debt IS '[Operational] VEC-406 projection: Sky prime debt as native position rows, one position per (prime, Vat, ilk) and one row per observation; instrument_key = native ilk_name, holder_id = the prime vault address, protocol_id = the Vat row stamped on the snapshot, deal_type BORROW. block_timestamp is prime_debt.synced_at, the indexer''s receipt time, since prime_debt carries no block time. GRAIN LIMIT: this view keys finer than prime_debt can store — its unique constraint is (prime_id, block_number, block_version, processing_version, synced_at), with neither protocol_id nor ilk_name, so a second Vat or a second ilk per prime at one block and synced_at is dropped at INSERT by ON CONFLICT DO NOTHING and never reaches this view. Single-Vat, single-ilk-per-prime is an assumption here, not an invariant the table enforces; widening that constraint is the fix when either arrives. Emits the shared position_state column contract consumed by materialize_position_projection(); closure is applied there.';
 
 -- Names every snapshot the view cannot resolve, then delegates to the shared materializer.
 -- Dropped rather than replaced: keeping the old argument list beside the new one makes a

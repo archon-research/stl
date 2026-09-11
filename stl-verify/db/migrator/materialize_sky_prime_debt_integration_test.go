@@ -346,23 +346,20 @@ func TestSkyPrimeDebtBackfillStampsLegacyRowsInCompressedChunks(t *testing.T) {
 	}
 }
 
-// The backfill decompresses every prime_debt chunk inside the migrator's single transaction, so it is
-// capped by timescaledb.max_tuples_decompressed_per_dml_transaction (100000 by default; prod is ~55-60k
-// rows and grows ~288/day). The migration lifts the cap with SET LOCAL. Pinned here by lowering the cap
-// to 5 at database scope and backfilling 12 rows that all sit in compressed chunks: without the SET LOCAL
-// the migration fails with SQLSTATE 53400, which is the same failure prod reaches by row count alone.
-func TestSkyBackfillLiftsTheDecompressionCap(t *testing.T) {
+// The column carries a constant DEFAULT, so stamping pre-existing rows is catalogue-only: no chunk is
+// decompressed, which an ADD COLUMN plus a backfill UPDATE cannot manage. Pinned by lowering the
+// decompression cap to 1 at database scope with every chunk compressed, so any decompression at all
+// fails the migration, and by asserting no chunk takes the partial bit and the row-store heap is
+// unchanged. Also covers the ArgoCD rollout window: a row written without naming the column, as the
+// pre-rollout pod does, takes the DEFAULT rather than a NULL that would refuse every later run.
+func TestSkyStampsLegacyRowsWithoutDecompressing(t *testing.T) {
 	ctx := context.Background()
 	dsn, dropDB := createTestDatabase(t)
 	defer dropDB()
 
-	// Database scope, so the migrator's own connection inherits it; SET LOCAL in the migration must win.
 	admin := testutil.ConnectPool(t, dsn)
-	if _, err := admin.Exec(ctx, `SELECT format('ALTER DATABASE %I SET timescaledb.max_tuples_decompressed_per_dml_transaction = 5', current_database())`); err != nil {
-		t.Fatalf("build the ALTER DATABASE: %v", err)
-	}
 	var alter string
-	if err := admin.QueryRow(ctx, `SELECT format('ALTER DATABASE %I SET timescaledb.max_tuples_decompressed_per_dml_transaction = 5', current_database())`).Scan(&alter); err != nil {
+	if err := admin.QueryRow(ctx, `SELECT format('ALTER DATABASE %I SET timescaledb.max_tuples_decompressed_per_dml_transaction = 1', current_database())`).Scan(&alter); err != nil {
 		t.Fatalf("build the ALTER DATABASE: %v", err)
 	}
 	if _, err := admin.Exec(ctx, alter); err != nil {
@@ -370,7 +367,6 @@ func TestSkyBackfillLiftsTheDecompressionCap(t *testing.T) {
 	}
 	admin.Close()
 
-	// A fresh pool, so every session picks the lowered cap up.
 	pool := testutil.ConnectPool(t, dsn)
 	defer pool.Close()
 
@@ -398,45 +394,72 @@ func TestSkyBackfillLiftsTheDecompressionCap(t *testing.T) {
 	if err := testutil.DisableScheduledJobs(ctx, pool); err != nil {
 		t.Fatalf("disable policy jobs: %v", err)
 	}
-	var cap int
-	if err := pool.QueryRow(ctx, `SELECT current_setting('timescaledb.max_tuples_decompressed_per_dml_transaction')::int`).Scan(&cap); err != nil {
-		t.Fatalf("read the cap: %v", err)
-	}
-	if cap != 5 {
-		t.Fatalf("cap is %d, want 5; the test would not exercise the limit", cap)
-	}
 	if _, err := pool.Exec(ctx, `
 	DO $s$ DECLARE pid bigint; BEGIN
-	  INSERT INTO prime (name, vault_address) VALUES ('capped', '\x2222222222222222222222222222222222222222') RETURNING id INTO pid;
+	  INSERT INTO prime (name, vault_address) VALUES ('legacy', '\x1111111111111111111111111111111111111111') RETURNING id INTO pid;
 	  INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id)
-	  SELECT pid, 'ILK-C', 10 + g, 100 + g, 0, TIMESTAMPTZ '2026-01-01' + (g * interval '1 hour'), 0, 0
+	  SELECT pid, 'ILK-L', 10 + g, 100 + g, 0, TIMESTAMPTZ '2026-01-01' + (g * interval '1 day'), 0, 0
 	  FROM generate_series(0, 11) g;
 	END $s$`); err != nil {
-		t.Fatalf("seed rows to backfill: %v", err)
+		t.Fatalf("seed legacy rows: %v", err)
 	}
-	var compressed, toBackfill int
+	var compressed, legacyRows int
 	if err := pool.QueryRow(ctx, `SELECT count(compress_chunk(c)) FROM show_chunks('prime_debt') c`).Scan(&compressed); err != nil {
 		t.Fatalf("compress prime_debt chunks: %v", err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM prime_debt`).Scan(&toBackfill); err != nil {
-		t.Fatalf("count rows to backfill: %v", err)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM prime_debt`).Scan(&legacyRows); err != nil {
+		t.Fatalf("count legacy rows: %v", err)
 	}
-	if compressed == 0 || toBackfill <= cap {
-		t.Fatalf("compressed=%d rows=%d cap=%d; the backfill must exceed the cap inside compressed chunks", compressed, toBackfill, cap)
+	if compressed == 0 || legacyRows <= 1 {
+		t.Fatalf("compressed=%d rows=%d; the stamp must exceed the cap of 1 inside compressed chunks", compressed, legacyRows)
+	}
+	const chunkStateSQL = `
+		SELECT count(*) FILTER (WHERE (c.status & 8) <> 0), coalesce(sum(pg_relation_size(c.relid)), 0)
+		FROM _timescaledb_catalog.chunk c
+		JOIN _timescaledb_catalog.hypertable h ON h.id = c.hypertable_id
+		WHERE h.table_name = 'prime_debt'`
+	var partialBefore int
+	var heapBefore int64
+	if err := pool.QueryRow(ctx, chunkStateSQL).Scan(&partialBefore, &heapBefore); err != nil {
+		t.Fatalf("chunk state before: %v", err)
 	}
 
 	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("the Sky migration must lift the cap for its own transaction, got: %v", err)
+		t.Fatalf("the Sky migration must stamp without decompressing, got: %v", err)
 	}
+
+	var partialAfter int
+	var heapAfter int64
 	var stamped int
+	if err := pool.QueryRow(ctx, chunkStateSQL).Scan(&partialAfter, &heapAfter); err != nil {
+		t.Fatalf("chunk state after: %v", err)
+	}
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM prime_debt
 		 WHERE protocol_id = (SELECT id FROM protocol WHERE chain_id = 1 AND address = decode($1, 'hex'))`,
 		strings.TrimPrefix(skyVatAddress, "0x")).Scan(&stamped); err != nil {
 		t.Fatalf("count stamped rows: %v", err)
 	}
-	if stamped != toBackfill {
-		t.Errorf("backfill stamped %d of %d rows", stamped, toBackfill)
+	if stamped != legacyRows {
+		t.Errorf("stamped %d of %d legacy rows", stamped, legacyRows)
+	}
+	if partialAfter != partialBefore || heapAfter != heapBefore {
+		t.Errorf("the migration decompressed: partial chunks %d -> %d, row-store heap %d -> %d bytes; the DEFAULT must be catalogue-only",
+			partialBefore, partialAfter, heapBefore, heapAfter)
+	}
+
+	// The ArgoCD rollout window: the pre-rollout pod inserts without naming the column.
+	var rolloutProtocol *int64
+	if err := pool.QueryRow(ctx, `
+		WITH ins AS (
+		  INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id)
+		  SELECT (SELECT min(id) FROM prime), 'ILK-L', 999, 9999, 0, TIMESTAMPTZ '2026-02-01', 0, 0
+		  RETURNING protocol_id)
+		SELECT protocol_id FROM ins`).Scan(&rolloutProtocol); err != nil {
+		t.Fatalf("insert a rollout-window row: %v", err)
+	}
+	if rolloutProtocol == nil {
+		t.Error("a row written without naming protocol_id took a NULL; it would refuse every later run of the projection")
 	}
 }
 
