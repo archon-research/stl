@@ -7,13 +7,9 @@ types live here too, since they are an HTTP-contract concern.
 """
 
 from datetime import UTC, datetime
-from inspect import cleandoc
-from typing import Any
 
 from fastapi import HTTPException, Query, Response
-from pydantic import BaseModel, Field, GetJsonSchemaHandler, SerializerFunctionWrapHandler, model_serializer
-from pydantic.json_schema import JsonSchemaValue
-from pydantic_core import CoreSchema
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 
 from app.domain.time_series import (
     AggregationMethod,
@@ -140,26 +136,15 @@ class BucketPoint(BaseModel):
         ),
     )
 
+    # Deliberately unannotated: pydantic derives a subclass' published
+    # serialization schema from this return type, and any annotation it can read
+    # replaces the fields with a bare object.
     @model_serializer(mode="wrap")
-    def _drop_unfilled_marker(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+    def _drop_unfilled_marker(self, handler: SerializerFunctionWrapHandler):
         serialized = handler(self)
         if not self.filled:
             serialized.pop("filled", None)
         return serialized
-
-    @classmethod
-    def __get_pydantic_json_schema__(cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
-        # Pydantic derives a serialization schema from the wrap serializer's
-        # return annotation, which would publish every subclass as a bare
-        # object. Schema comes from the fields under it, with the name and
-        # docstring the model node carries put back on top.
-        if core_schema["type"] != "model":
-            return handler(core_schema)
-        schema = handler.resolve_ref_schema(handler(core_schema["schema"]))
-        schema.setdefault("title", core_schema.get("config", {}).get("title") or cls.__name__)
-        if cls.__doc__:
-            schema.setdefault("description", cleandoc(cls.__doc__))
-        return schema
 
 
 class TimeSeriesWindow(BaseModel):
