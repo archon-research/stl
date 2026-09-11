@@ -31,18 +31,30 @@ class Backtester:
         return returns, log_returns
 
     @staticmethod
+    def _bernoulli_log_likelihood(n_zero: int, n_one: int, prob: float) -> float:
+        """Log-likelihood of Bernoulli counts, with zero-count terms dropped (0·log 0 = 0)."""
+        ll = 0.0
+        if n_zero > 0:
+            ll += n_zero * np.log(1 - prob)
+        if n_one > 0:
+            ll += n_one * np.log(prob)
+        return ll
+
+    @staticmethod
     def kupiec_test(hits, alpha):
         n = len(hits)
         x = sum(hits)
         pi_hat = x / n
-        if pi_hat == 0 or pi_hat == 1:
-            LR_pof = 0
-            p_value = 1.0
-        else:
-            LR_pof = -2 * (
-                (n - x) * np.log(1 - alpha) + x * np.log(alpha) - (n - x) * np.log(1 - pi_hat) - x * np.log(pi_hat)
-            )
-            p_value = 1 - chi2.cdf(LR_pof, df=1)
+        # pi_hat is the MLE, so the LR is ≥ 0 up to float rounding.
+        LR_pof = max(
+            -2
+            * (
+                Backtester._bernoulli_log_likelihood(n - x, x, alpha)
+                - Backtester._bernoulli_log_likelihood(n - x, x, pi_hat)
+            ),
+            0.0,
+        )
+        p_value = 1 - chi2.cdf(LR_pof, df=1)
         return LR_pof, p_value
 
     @staticmethod
@@ -63,20 +75,16 @@ class Backtester:
         pi1 = n11 / (n10 + n11) if (n10 + n11) > 0 else 0
         pi = (n01 + n11) / (n - 1)
 
-        # Avoid log(0)
-        pi0 = max(min(pi0, 1 - 1e-10), 1e-10)
-        pi1 = max(min(pi1, 1 - 1e-10), 1e-10)
-        pi = max(min(pi, 1 - 1e-10), 1e-10)
-
-        # Likelihood ratio for independence
-        L0 = ((1 - pi) ** (n00 + n10)) * (pi ** (n01 + n11))
-        L1 = ((1 - pi0) ** n00) * (pi0**n01) * ((1 - pi1) ** n10) * (pi1**n11)
-        epsilon = 1e-10  # small number to avoid log(0)
-        LR_ind = -2 * np.log(np.clip(L0, epsilon, None) / np.clip(L1, epsilon, None))
+        # Each probability is the MLE of the counts it multiplies, so a nonzero
+        # count always has a strictly interior probability: no clipping needed.
+        log_L0 = Backtester._bernoulli_log_likelihood(n00 + n10, n01 + n11, pi)
+        log_L1 = Backtester._bernoulli_log_likelihood(n00, n01, pi0) + Backtester._bernoulli_log_likelihood(
+            n10, n11, pi1
+        )
+        LR_ind = max(-2 * (log_L0 - log_L1), 0.0)
         p_value_ind = 1 - chi2.cdf(LR_ind, df=1)
 
         # Conditional coverage = LR POF + LR_ind
-        # LR_cc = LR_ind + Backtester.kupiec_test(hits, pi)[0]
         LR_pof, _ = Backtester.kupiec_test(hits, alpha)
         LR_cc = LR_ind + LR_pof
         p_value_cc = 1 - chi2.cdf(LR_cc, df=2)
@@ -91,12 +99,12 @@ class Backtester:
         else:
             return "normal"
 
-    # TODO(bug#3): hit_backtest defaults use_log_returns=False but production runs
-    # USE_LOG_RETURNS=True, causing Kupiec/Christoffersen model selection to evaluate
-    # the wrong return type. Fix: default should match the caller's USE_LOG_RETURNS.
-    def hit_backtest(self, i: int, use_log_returns: bool = True, alpha: float = 0.95) -> np.ndarray:
+    def hit_backtest(self, i: int, use_log_returns: bool, alpha: float) -> np.ndarray:
         """
         Computes hits for rolling window i.
+        `alpha` is the VaR tail probability (e.g. 0.05), matching the Kupiec/Christoffersen alpha.
+        Both arguments are required so the caller's return-type and tail conventions
+        cannot silently diverge from the ones the hits are tested against.
         Returns an array of 0/1 hits for each forecasted step.
         """
 
@@ -150,16 +158,16 @@ class Backtester:
 
         try:
             if dist_name == "t":
-                z_alpha = garch_fitted.model.distribution.ppf(1 - alpha, params[-1:])
+                z_alpha = garch_fitted.model.distribution.ppf(alpha, params[-1:])
             elif dist_name == "skewt":
-                z_alpha = garch_fitted.model.distribution.ppf(1 - alpha, params[-2:])
+                z_alpha = garch_fitted.model.distribution.ppf(alpha, params[-2:])
             else:
-                z_alpha = garch_fitted.model.distribution.ppf(1 - alpha)
+                z_alpha = garch_fitted.model.distribution.ppf(alpha)
         except ValueError:
             # Fallback: normal quantile
             from scipy.stats import norm
 
-            z_alpha = norm.ppf(1 - alpha)
+            z_alpha = norm.ppf(alpha)
 
         # VaR Forecast
         var_forecast = z_alpha * sigma_forecast
