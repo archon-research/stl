@@ -17,6 +17,16 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 import pytest
+from fastapi import APIRouter, FastAPI
+
+# The route walk goes through iter_route_contexts because on FastAPI 0.141.x
+# include_router stores whole routers as _IncludedRouter entries in app.routes
+# without flattening APIRoute copies — iterating app.routes directly sees zero
+# /v1 routes and asserts nothing. iter_route_contexts is what get_openapi
+# itself walks, and its contexts merge router-level and route-level
+# dependencies. Imported at module level so a FastAPI upgrade that removes it
+# breaks collection loudly instead of letting the walk go vacuous.
+from fastapi.routing import APIRoute, iter_route_contexts
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
@@ -210,3 +220,76 @@ def test_the_same_blanks_are_fine_while_auth_is_dark() -> None:
     dark = _settings(auth_enabled=False).model_copy(update={"oidc_issuer": "", "oidc_audience": "", "openfga_url": ""})
 
     assert create_app(dark) is not None
+
+
+# The two kubelet-reached probes are the ONLY /v1 routes allowed to ship
+# without a role gate (see the include_router comment in create_app). Named
+# explicitly rather than pattern-matched so an addition here is a reviewed,
+# deliberate act.
+PROBE_PATHS = {"/v1/status", "/v1/ready"}
+
+
+def _walk_v1_routes(app: FastAPI) -> list[tuple[str, set[str]]]:
+    """Every /v1 APIRoute in the app, with the role-gate markers it carries."""
+    walked = []
+    for rc in iter_route_contexts(app.routes):
+        if not isinstance(rc.original_route, APIRoute):
+            continue
+        if not (rc.path or "").startswith("/v1"):
+            continue
+        marks: set[str] = set()
+        for d in rc.dependencies:
+            role = getattr(d.dependency, "required_role", None)
+            if role is None:
+                continue
+            # The marker is only honest on the require_role factory's closure;
+            # stamped on anything else it would satisfy this walk without
+            # actually gating.
+            assert d.dependency.__qualname__ == "require_role.<locals>._dep"
+            assert isinstance(role, str) and role
+            marks.add(role)
+        walked.append((rc.path, marks))
+    return walked
+
+
+def test_every_v1_route_carries_a_role_gate() -> None:
+    """ADR-015: an unclassified /v1 path fails closed — a router mounted
+    without dependencies= never authenticates at all, and the named-path tests
+    above cannot see a route they do not know about."""
+    walked = _walk_v1_routes(create_app(_settings(auth_enabled=True)))
+
+    ungated = sorted({path for path, marks in walked if not marks} - PROBE_PATHS)
+    assert not ungated, f"/v1 routes shipped without a role gate: {ungated}"
+
+
+def test_the_probe_allow_list_matches_real_routes() -> None:
+    """An allow-list entry matching no route is rot — it would silently excuse
+    a future route of the same name."""
+    walked = _walk_v1_routes(create_app(_settings(auth_enabled=True)))
+
+    missing = PROBE_PATHS - {path for path, _ in walked}
+    assert not missing, f"allow-listed probe paths match no route: {sorted(missing)}"
+
+
+def test_the_probes_carry_no_role_gate() -> None:
+    """The inverse regression: gating the status router 401s the kubelet's
+    direct probe requests and CrashLoops the pod."""
+    walked = _walk_v1_routes(create_app(_settings(auth_enabled=True)))
+
+    gated = sorted(path for path, marks in walked if path in PROBE_PATHS and marks)
+    assert not gated, f"kubelet probe routes grew a role gate: {gated}"
+
+
+def test_the_route_walk_catches_a_bare_router() -> None:
+    """Self-test of the walk itself: a router mounted with no dependencies=
+    must surface as ungated, or every assertion above is vacuous."""
+    app = FastAPI()
+    router = APIRouter()
+
+    @router.get("/naked")
+    async def naked() -> dict:  # pragma: no cover — never called
+        return {}
+
+    app.include_router(router, prefix="/v1")
+
+    assert _walk_v1_routes(app) == [("/v1/naked", set())]

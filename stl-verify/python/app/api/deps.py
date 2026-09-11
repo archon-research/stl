@@ -151,6 +151,11 @@ def require_role(role: str) -> Callable:
             )
             raise HTTPException(status_code=403, detail=f"requires role {role}")
 
+    # Route-walk contract (tests/unit/auth/test_app_factory_enforcement.py):
+    # the no-unclassified-route test recognises a role gate by this attribute.
+    # Set at the factory so every Depends site inherits it.
+    _dep.required_role = role  # ty: ignore[unresolved-attribute]
+
     return _dep
 
 
