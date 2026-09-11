@@ -267,3 +267,79 @@ func TestSaveEvent_Rollback(t *testing.T) {
 		t.Errorf("expected 0 records after rollback, got %d", count)
 	}
 }
+
+// assertBlockTimestamp fails unless the single row at blockNumber was dated with
+// want in both columns.
+func assertBlockTimestamp(t *testing.T, ctx context.Context, blockNumber int64, want time.Time) {
+	t.Helper()
+	var blockTimestamp, createdAt *time.Time
+	err := eventPool.QueryRow(ctx,
+		`SELECT block_timestamp, created_at FROM protocol_event WHERE block_number = $1`, blockNumber).
+		Scan(&blockTimestamp, &createdAt)
+	if err != nil {
+		t.Fatalf("failed to query stored event: %v", err)
+	}
+	if blockTimestamp == nil {
+		t.Fatalf("block_timestamp is NULL, want %v", want)
+	}
+	if !blockTimestamp.Equal(want) {
+		t.Errorf("block_timestamp = %v, want %v", *blockTimestamp, want)
+	}
+	if !blockTimestamp.Equal(*createdAt) {
+		t.Errorf("block_timestamp = %v, want it to match created_at = %v", *blockTimestamp, *createdAt)
+	}
+}
+
+func TestSaveEvent_WritesBlockTimestamp(t *testing.T) {
+	fixture := setupEventTest(t)
+
+	ctx := context.Background()
+	blockTime := time.Unix(1700000000, 0).UTC()
+
+	event, err := entity.NewProtocolEvent(1, fixture.protocolID, 5000, 0, []byte{0x01}, 0, []byte{0xaa}, "Supply", json.RawMessage(`{"user":"0xabc"}`), blockTime)
+	if err != nil {
+		t.Fatalf("failed to create event: %v", err)
+	}
+
+	tx, err := eventPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if err := fixture.repo.SaveEvent(ctx, tx, event); err != nil {
+		t.Fatalf("SaveEvent failed: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	assertBlockTimestamp(t, ctx, 5000, blockTime)
+}
+
+func TestSaveBatch_WritesBlockTimestamp(t *testing.T) {
+	fixture := setupEventTest(t)
+
+	ctx := context.Background()
+	blockTime := time.Unix(1700000000, 0).UTC()
+
+	event, err := entity.NewProtocolEvent(1, fixture.protocolID, 6000, 0, []byte{0x01}, 0, []byte{0xaa}, "Supply", json.RawMessage(`{"user":"0xabc"}`), blockTime)
+	if err != nil {
+		t.Fatalf("failed to create event: %v", err)
+	}
+
+	tx, err := eventPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if err := fixture.repo.SaveBatch(ctx, tx, []*entity.ProtocolEvent{event}); err != nil {
+		t.Fatalf("SaveBatch failed: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	assertBlockTimestamp(t, ctx, 6000, blockTime)
+}

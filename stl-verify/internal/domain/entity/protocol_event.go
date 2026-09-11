@@ -17,7 +17,7 @@ type ProtocolEvent struct {
 	ContractAddress []byte
 	EventName       string
 	EventData       json.RawMessage
-	CreatedAt       time.Time // block timestamp — deterministic for hypertable dedup
+	CreatedAt       time.Time // block timestamp — deterministic for hypertable dedup; stored in both created_at (partition key) and block_timestamp
 }
 
 // NewProtocolEvent creates a new ProtocolEvent with validation.

@@ -1595,7 +1595,7 @@
     "protocol_event": {
       "type": "raw_pipeline",
       "owner": "infra",
-      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
+      "transform_defer": "VEC-711: block_timestamp is native, but NULL until the backfill in docs/runbooks/protocol-event-block-timestamp-backfill.md completes"
     },
     "protocol_oracle": {
       "type": "config",
@@ -2180,11 +2180,6 @@
     },
     {
       "table": "allocation_position",
-      "column": "block_timestamp",
-      "block_time": true
-    },
-    {
-      "table": "protocol_event",
       "column": "block_timestamp",
       "block_time": true
     },
