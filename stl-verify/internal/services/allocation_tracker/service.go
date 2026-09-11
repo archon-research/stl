@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/big"
 	"sync"
 	"time"
@@ -29,15 +30,19 @@ type TransactionReceipt struct {
 }
 
 type Service struct {
-	config           Config
-	sqsConsumer      outbound.SQSConsumer
-	cache            outbound.BlockCacheReader
-	extractor        *TransferExtractor
-	registry         *SourceRegistry
-	entryLookup      map[EntryKey]*TokenEntry
-	entries          []*TokenEntry
+	config      Config
+	sqsConsumer outbound.SQSConsumer
+	cache       outbound.BlockCacheReader
+	extractor   *TransferExtractor
+	registry    *SourceRegistry
+	entryLookup map[EntryKey]*TokenEntry
+	entries     []*TokenEntry
+	// transferAliases routes a Transfer log to the entry it belongs to. Written and
+	// read only from processBlock, which the SQS loop runs one block at a time.
+	transferAliases  map[transferRouteKey]common.Address
 	handler          AllocationHandler
 	metrics          outbound.BackupMetricsRecorder
+	telemetry        *Telemetry
 	ctx              context.Context
 	cancel           context.CancelFunc
 	wg               sync.WaitGroup // tracks the SQS run loop so Stop can drain it
@@ -84,16 +89,18 @@ func NewService(
 	}
 
 	return &Service{
-		config:      config,
-		sqsConsumer: sqsConsumer,
-		cache:       cache,
-		extractor:   NewTransferExtractor(proxies),
-		registry:    registry,
-		entryLookup: BuildEntryLookup(entries),
-		entries:     entries,
-		handler:     handler,
-		metrics:     config.Metrics,
-		logger:      config.Logger.With("component", "allocation-tracker"),
+		config:          config,
+		sqsConsumer:     sqsConsumer,
+		cache:           cache,
+		extractor:       NewTransferExtractor(proxies),
+		registry:        registry,
+		entryLookup:     BuildEntryLookup(entries),
+		entries:         entries,
+		transferAliases: make(map[transferRouteKey]common.Address),
+		handler:         handler,
+		metrics:         config.Metrics,
+		telemetry:       config.Telemetry,
+		logger:          config.Logger.With("component", "allocation-tracker"),
 	}, nil
 }
 
@@ -209,37 +216,9 @@ func (s *Service) processBlock(
 
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
 
-	// Process transfers if any matched.
-	// VEC-188 invariant: a partial FetchAll failure here must propagate so
-	// SQS NACKs the message — see TestProcessBlock_PartialFetchFailure_*.
 	if len(transfers) > 0 {
-		affected := s.matchTransfers(transfers)
-		if len(affected) > 0 {
-			blockHash, err := event.ParsedBlockHash()
-			if err != nil {
-				return fmt.Errorf("parse block hash: %w", err)
-			}
-			fetch, err := s.registry.FetchAll(ctx, affected, blockHash)
-			if err != nil {
-				return fmt.Errorf("fetch observations for block %d: %w", event.BlockNumber, err)
-			}
-
-			snapshots := s.buildSnapshots(affected, fetch.Balances, transfers, event, blockTimestamp)
-			supplies := buildSupplySnapshots(fetch.Supplies, event.ChainID, event.BlockNumber, event.Version, blockTimestamp, "event")
-			batch := &SnapshotBatch{Snapshots: snapshots, Supplies: supplies}
-			if len(snapshots) > 0 || len(supplies) > 0 {
-				if err := s.handler.HandleBatch(ctx, batch); err != nil {
-					return fmt.Errorf("handler: %w", err)
-				}
-			}
-
-			s.logger.Debug("block processed",
-				"block", event.BlockNumber,
-				"chain", event.ChainID,
-				"transfers", len(transfers),
-				"snapshots", len(snapshots),
-				"supplies", len(supplies),
-				"duration", time.Since(start))
+		if err := s.processTransfers(ctx, event, transfers, blockTimestamp, start); err != nil {
+			return err
 		}
 	}
 
@@ -278,16 +257,259 @@ func (s *Service) recordBlockMetrics(ctx context.Context, start time.Time, err e
 	s.metrics.RecordProcessingLatency(ctx, time.Since(start), status)
 }
 
+// processTransfers snapshots the entries this block's Transfer logs touched.
+// VEC-188 invariant: every failure here propagates so SQS NACKs the message —
+// see TestProcessBlock_PartialFetchFailure_*.
+func (s *Service) processTransfers(
+	ctx context.Context,
+	event outbound.BlockEvent,
+	transfers []*TransferEvent,
+	blockTimestamp time.Time,
+	start time.Time,
+) error {
+	blockHash, err := event.ParsedBlockHash()
+	if err != nil {
+		return fmt.Errorf("parse block hash: %w", err)
+	}
+	if err := s.resolveMissingTransferAliases(ctx, blockHash, event.BlockNumber); err != nil {
+		return fmt.Errorf("resolve transfer aliases for block %d: %w", event.BlockNumber, err)
+	}
+
+	affected := s.matchTransfers(transfers)
+	if len(affected) == 0 {
+		return nil
+	}
+
+	fetch, err := s.registry.FetchAll(ctx, affected, blockHash)
+	if err != nil {
+		return fmt.Errorf("fetch observations for block %d: %w", event.BlockNumber, err)
+	}
+	named, err := namedEmittersFromBalances(affected, fetch.Balances)
+	if err != nil {
+		return fmt.Errorf("read the share tokens of block %d: %w", event.BlockNumber, err)
+	}
+	routes, err := s.nextTransferRoutes(ctx, named, event.BlockNumber)
+	if err != nil {
+		return fmt.Errorf("route transfers for block %d: %w", event.BlockNumber, err)
+	}
+
+	snapshots := s.buildSnapshots(affected, fetch.Balances, transfers, event, blockTimestamp)
+	supplies := buildSupplySnapshots(fetch.Supplies, event.ChainID, event.BlockNumber, event.Version, blockTimestamp, "event")
+	if len(snapshots) > 0 || len(supplies) > 0 {
+		if err := s.handler.HandleBatch(ctx, &SnapshotBatch{Snapshots: snapshots, Supplies: supplies}); err != nil {
+			return fmt.Errorf("handler: %w", err)
+		}
+	}
+	// Swapped only now: buildSnapshots keys its transfer lookup the same way
+	// matchTransfers did, and a redelivery must repeat this block, not a later one.
+	s.transferAliases = routes
+
+	s.logger.Debug("block processed",
+		"block", event.BlockNumber,
+		"chain", event.ChainID,
+		"transfers", len(transfers),
+		"snapshots", len(snapshots),
+		"supplies", len(supplies),
+		"duration", time.Since(start))
+	return nil
+}
+
+// entryKeyFor is the ONE place a transfer becomes an entry key, so a route can
+// never be applied by one caller and forgotten by the other.
+func (s *Service) entryKeyFor(t *TransferEvent) EntryKey {
+	route := transferRouteKey{Emitter: t.TokenAddress, Wallet: t.ProxyAddress}
+	if contract, ok := s.transferAliases[route]; ok {
+		return EntryKey{ContractAddress: contract, WalletAddress: t.ProxyAddress}
+	}
+	return EntryKey{ContractAddress: t.TokenAddress, WalletAddress: t.ProxyAddress}
+}
+
+// namedEmitter pairs an entry with the token that emits its Transfer logs.
+type namedEmitter struct {
+	entry   *TokenEntry
+	emitter common.Address
+}
+
+// resolveMissingTransferAliases names the emitting token of every entry that has
+// no route yet, so its transfers stop going unmatched.
+func (s *Service) resolveMissingTransferAliases(ctx context.Context, blockHash common.Hash, blockNumber int64) error {
+	pending := s.entriesAwaitingTransferAlias()
+	if len(pending) == 0 {
+		return nil
+	}
+	grouped, err := s.registry.shareResolvers(pending)
+	if err != nil {
+		return fmt.Errorf("group %d entries by share resolver: %w", len(pending), err)
+	}
+
+	var named []namedEmitter
+	for source, sourceEntries := range grouped {
+		shares, err := source.shareTokens(ctx, sourceEntries, blockHash)
+		if err != nil {
+			return fmt.Errorf("%s naming the share tokens of %d entries: %w", source.Name(), len(sourceEntries), err)
+		}
+		batch, err := namedEmittersFromShares(sourceEntries, shares)
+		if err != nil {
+			return fmt.Errorf("%s answered for its entries: %w", source.Name(), err)
+		}
+		named = append(named, batch...)
+	}
+
+	next, err := s.nextTransferRoutes(ctx, named, blockNumber)
+	if err != nil {
+		return fmt.Errorf("route the newly named entries: %w", err)
+	}
+	s.transferAliases = next
+	return nil
+}
+
+// entriesAwaitingTransferAlias reverse-scans transferAliases: an entry is named
+// once some emitter routes to its own (contract, wallet), identity included.
+func (s *Service) entriesAwaitingTransferAlias() []*TokenEntry {
+	named := make(map[EntryKey]struct{}, len(s.transferAliases))
+	for route, contract := range s.transferAliases {
+		named[EntryKey{ContractAddress: contract, WalletAddress: route.Wallet}] = struct{}{}
+	}
+
+	var pending []*TokenEntry
+	for _, entry := range s.entries {
+		if entry.TokenType != TokenTypeCentrifuge {
+			continue
+		}
+		if _, ok := named[entry.Key()]; ok {
+			continue
+		}
+		pending = append(pending, entry)
+	}
+	return pending
+}
+
+// namedEmittersFromShares reads a resolver's answer. An entry it left out is a
+// hard error: unnamed, it would be resolved again on every block and its
+// transfers would never match.
+func namedEmittersFromShares(entries []*TokenEntry, shares map[common.Address]common.Address) ([]namedEmitter, error) {
+	named := make([]namedEmitter, 0, len(entries))
+	for _, entry := range entries {
+		share, ok := shares[entry.ContractAddress]
+		if !ok {
+			return nil, fmt.Errorf("no share token named for entry %s/%s",
+				entry.ContractAddress.Hex(), entry.WalletAddress.Hex())
+		}
+		named = append(named, namedEmitter{entry: entry, emitter: share})
+	}
+	return named, nil
+}
+
+// namedEmittersFromBalances reads the shares a fetch already resolved, so a
+// re-pointed share is current at no extra RPC cost.
+func namedEmittersFromBalances(entries []*TokenEntry, balances map[EntryKey]*PositionBalance) ([]namedEmitter, error) {
+	var named []namedEmitter
+	for _, entry := range entries {
+		bal, ok := balances[entry.Key()]
+		if !ok || bal == nil || bal.ShareToken == nil {
+			// Structural for every other type — they hold the token they are keyed
+			// on — but a centrifuge entry with no share leaves its routes frozen at
+			// whatever the last good fetch said, which is how a stale route persists.
+			if entry.TokenType == TokenTypeCentrifuge {
+				return nil, fmt.Errorf("centrifuge entry %s/%s came back with no share token",
+					entry.ContractAddress.Hex(), entry.WalletAddress.Hex())
+			}
+			continue
+		}
+		named = append(named, namedEmitter{entry: entry, emitter: *bal.ShareToken})
+	}
+	return named, nil
+}
+
+// nextTransferRoutes returns the route set that replaces transferAliases once
+// these entries have named their emitter. Built fresh rather than mutated so a
+// reader mid-block keeps one consistent view (see processTransfers), and so two
+// entries swapping shares in one batch release before either claims — mutating
+// in place makes that swap fail or succeed on entry order.
+func (s *Service) nextTransferRoutes(ctx context.Context, named []namedEmitter, blockNumber int64) (map[transferRouteKey]common.Address, error) {
+	if err := s.checkShareRatchets(named, blockNumber); err != nil {
+		return nil, err
+	}
+	next := maps.Clone(s.transferAliases)
+	if next == nil {
+		next = make(map[transferRouteKey]common.Address, len(named))
+	}
+	s.pruneDisplacedRoutes(ctx, next, named, blockNumber)
+	if err := claimRoutes(next, named); err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
+func (s *Service) checkShareRatchets(named []namedEmitter, blockNumber int64) error {
+	for _, n := range named {
+		if err := s.checkShareRatchet(n, blockNumber); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pruneDisplacedRoutes drops every route that still points an entry at an emitter
+// it no longer names, so a transfer of the retired token stops counting as this
+// position's activity.
+func (s *Service) pruneDisplacedRoutes(ctx context.Context, next map[transferRouteKey]common.Address, named []namedEmitter, blockNumber int64) {
+	for _, n := range named {
+		maps.DeleteFunc(next, func(route transferRouteKey, contract common.Address) bool {
+			displaced := route.Wallet == n.entry.WalletAddress &&
+				contract == n.entry.ContractAddress &&
+				route.Emitter != n.emitter
+			if displaced {
+				s.logger.Warn("share token re-pointed; event rows for this position stop until the next sweep",
+					"entry", n.entry.ContractAddress.Hex(),
+					"wallet", n.entry.WalletAddress.Hex(),
+					"previousEmitter", route.Emitter.Hex(),
+					"emitter", n.emitter.Hex(),
+					"block", blockNumber)
+				s.telemetry.RecordShareRepoint(ctx, n.entry.ContractAddress, n.entry.WalletAddress)
+			}
+			return displaced
+		})
+	}
+}
+
+// claimRoutes points each named emitter at its entry, refusing a second entry
+// that claims the same emitter for the same wallet.
+func claimRoutes(next map[transferRouteKey]common.Address, named []namedEmitter) error {
+	for _, n := range named {
+		route := transferRouteKey{Emitter: n.emitter, Wallet: n.entry.WalletAddress}
+		if prev, ok := next[route]; ok && prev != n.entry.ContractAddress {
+			return fmt.Errorf("%s and %s both claim transfers of %s into %s; tracking both would double count",
+				prev.Hex(), n.entry.ContractAddress.Hex(), n.emitter.Hex(), n.entry.WalletAddress.Hex())
+		}
+		next[route] = n.entry.ContractAddress
+	}
+	return nil
+}
+
+// checkShareRatchet refuses an entry that named a share and now reports itself: a node
+// wrong twice re-keys it onto its vault, where no price attaches and all looks well.
+func (s *Service) checkShareRatchet(n namedEmitter, blockNumber int64) error {
+	if n.emitter != n.entry.ContractAddress {
+		return nil
+	}
+	for route, contract := range s.transferAliases {
+		if route.Wallet == n.entry.WalletAddress && contract == n.entry.ContractAddress && route.Emitter != n.emitter {
+			return fmt.Errorf(
+				"entry %s/%s named share %s before and now reports itself at block %d; a vault cannot become its own share",
+				n.entry.ContractAddress.Hex(), n.entry.WalletAddress.Hex(), route.Emitter.Hex(), blockNumber)
+		}
+	}
+	return nil
+}
+
 func (s *Service) matchTransfers(
 	transfers []*TransferEvent,
 ) []*TokenEntry {
 	seen := make(map[EntryKey]bool)
 	var matched []*TokenEntry
 	for _, t := range transfers {
-		key := EntryKey{
-			ContractAddress: t.TokenAddress,
-			WalletAddress:   t.ProxyAddress,
-		}
+		key := s.entryKeyFor(t)
 		if seen[key] {
 			continue
 		}
@@ -308,10 +530,7 @@ func (s *Service) buildSnapshots(
 ) []*PositionSnapshot {
 	tLookup := make(map[EntryKey]*TransferEvent)
 	for _, t := range transfers {
-		key := EntryKey{
-			ContractAddress: t.TokenAddress,
-			WalletAddress:   t.ProxyAddress,
-		}
+		key := s.entryKeyFor(t)
 		if _, exists := tLookup[key]; !exists {
 			tLookup[key] = t
 		}
@@ -324,19 +543,7 @@ func (s *Service) buildSnapshots(
 			continue
 		}
 
-		snap := &PositionSnapshot{
-			Entry:           entry,
-			Balance:         bal.Balance,
-			ScaledBalance:   bal.ScaledBalance,
-			UnderlyingValue: bal.UnderlyingValue,
-			PoolToken0:      bal.PoolToken0,
-			PoolToken1:      bal.PoolToken1,
-			ShareToken:      bal.ShareToken,
-			ChainID:         event.ChainID,
-			BlockNumber:     event.BlockNumber,
-			BlockVersion:    event.Version,
-			BlockTimestamp:  blockTimestamp,
-		}
+		snap := snapshotOf(entry, bal, event.ChainID, event.BlockNumber, event.Version, blockTimestamp)
 		if t, ok := tLookup[entry.Key()]; ok {
 			snap.TxHash = t.TxHash
 			snap.LogIndex = t.LogIndex
@@ -393,39 +600,24 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockHash common
 	if err != nil {
 		return fmt.Errorf("fetch sweep observations for block %d: %w", blockNumber, err)
 	}
-
-	var snapshots []*PositionSnapshot
-	for _, entry := range s.entries {
-		bal, ok := fetch.Balances[entry.Key()]
-		if !ok {
-			continue
-		}
-		snapshots = append(snapshots, &PositionSnapshot{
-			Entry:           entry,
-			Balance:         bal.Balance,
-			ScaledBalance:   bal.ScaledBalance,
-			UnderlyingValue: bal.UnderlyingValue,
-			PoolToken0:      bal.PoolToken0,
-			PoolToken1:      bal.PoolToken1,
-			ShareToken:      bal.ShareToken,
-			ChainID:         s.config.ChainID,
-			BlockNumber:     blockNumber,
-			BlockVersion:    blockVersion,
-			TxAmount:        big.NewInt(0),
-			Direction:       DirectionSweep,
-			BlockTimestamp:  blockTimestamp,
-		})
+	named, err := namedEmittersFromBalances(s.entries, fetch.Balances)
+	if err != nil {
+		return fmt.Errorf("read the sweep share tokens of block %d: %w", blockNumber, err)
+	}
+	routes, err := s.nextTransferRoutes(ctx, named, blockNumber)
+	if err != nil {
+		return fmt.Errorf("route transfers for sweep block %d: %w", blockNumber, err)
 	}
 
+	snapshots := s.sweepSnapshots(fetch.Balances, blockNumber, blockVersion, blockTimestamp)
 	supplies := buildSupplySnapshots(fetch.Supplies, s.config.ChainID, blockNumber, blockVersion, blockTimestamp, "sweep")
 
-	if len(snapshots) == 0 && len(supplies) == 0 {
-		return nil
+	if len(snapshots) > 0 || len(supplies) > 0 {
+		if err := s.handler.HandleBatch(ctx, &SnapshotBatch{Snapshots: snapshots, Supplies: supplies}); err != nil {
+			return fmt.Errorf("sweep handler: %w", err)
+		}
 	}
-
-	if err := s.handler.HandleBatch(ctx, &SnapshotBatch{Snapshots: snapshots, Supplies: supplies}); err != nil {
-		return fmt.Errorf("sweep handler: %w", err)
-	}
+	s.transferAliases = routes
 
 	s.logger.Info("sweep complete",
 		"block", blockNumber,
@@ -433,4 +625,49 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockHash common
 		"supplies", len(supplies),
 		"duration", time.Since(start))
 	return nil
+}
+
+// sweepSnapshots is the reconciled state of every entry the fetch answered for.
+func (s *Service) sweepSnapshots(
+	balances map[EntryKey]*PositionBalance,
+	blockNumber int64,
+	blockVersion int,
+	blockTimestamp time.Time,
+) []*PositionSnapshot {
+	var snapshots []*PositionSnapshot
+	for _, entry := range s.entries {
+		bal, ok := balances[entry.Key()]
+		if !ok {
+			continue
+		}
+		snap := snapshotOf(entry, bal, s.config.ChainID, blockNumber, blockVersion, blockTimestamp)
+		snap.TxAmount = big.NewInt(0)
+		snap.Direction = DirectionSweep
+		snapshots = append(snapshots, snap)
+	}
+	return snapshots
+}
+
+// snapshotOf is the observed state of one entry; the caller adds the fields that
+// say what triggered the row.
+func snapshotOf(
+	entry *TokenEntry,
+	bal *PositionBalance,
+	chainID, blockNumber int64,
+	blockVersion int,
+	blockTimestamp time.Time,
+) *PositionSnapshot {
+	return &PositionSnapshot{
+		Entry:           entry,
+		Balance:         bal.Balance,
+		ScaledBalance:   bal.ScaledBalance,
+		UnderlyingValue: bal.UnderlyingValue,
+		PoolToken0:      bal.PoolToken0,
+		PoolToken1:      bal.PoolToken1,
+		ShareToken:      bal.ShareToken,
+		ChainID:         chainID,
+		BlockNumber:     blockNumber,
+		BlockVersion:    blockVersion,
+		BlockTimestamp:  blockTimestamp,
+	}
 }

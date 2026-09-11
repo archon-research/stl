@@ -1054,8 +1054,8 @@ class AllocationRepository:
         ``_RECEIPT_TOKEN_POSITIONS_SQL``) is carried forward and valued at the
         *latest* underlying oracle price (via the protocol-bound oracle), then
         summed across positions. The position size is the historical driver;
-        the price is held at its latest value because ``onchain_token_price``
-        is change-only, so a bucketed price-LOCF would drop stable assets whose
+        the price is held at its latest value because the price history is
+        change-only, so a bucketed price-LOCF would drop stable assets whose
         last price change predates the window. This is exact for the
         dollar-pegged positions that dominate the book; for volatile
         underlyings (e.g. WETH) historical buckets use the current price (a
@@ -1068,83 +1068,6 @@ class AllocationRepository:
         balance, later ones the redeemable value, which is frozen at the last
         position event until the next one.
         """
-        query = text(
-            f"""
-            WITH position_buckets AS (
-                SELECT
-                    rt.id AS receipt_token_id,
-                    rt.underlying_token_id,
-                    rt.protocol_id,
-                    time_bucket_gapfill(
-                        make_interval(secs => :bucket_seconds),
-                        ap.created_at,
-                        CAST(:from_timestamp AS TIMESTAMPTZ),
-                        CAST(:to_timestamp AS TIMESTAMPTZ)
-                    ) AS bucket,
-                    locf(last(
-                        CASE
-                            WHEN ap.underlying_token_id IS NOT NULL
-                             AND ap.underlying_token_id <> rt.underlying_token_id
-                            THEN NULL
-                            ELSE COALESCE(ap.underlying_value, ap.balance)
-                        END,
-                        ap.created_at)) AS valuation_units
-                FROM allocation_position ap
-                JOIN token t ON t.id = ap.token_id
-                JOIN receipt_token rt
-                    ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
-                -- Prime-wide, like the headline figure beside it: a prime holds
-                -- receipt tokens through one proxy per chain, so scoping to one
-                -- address prices a single chain against a prime-wide total.
-                WHERE ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[]))
-                  AND ap.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
-                  AND ap.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
-                GROUP BY rt.id, rt.underlying_token_id, rt.protocol_id, bucket
-            ),
-            -- The latest price is bucket-independent, so it is resolved once per
-            -- (underlying, protocol) pair instead of inside the per-bucket join:
-            -- the lateral would otherwise re-scan onchain_token_price per bucket
-            -- per token (~1,600x on a 24h/PT15M window; ~17s per request).
-            price_keys AS (
-                SELECT DISTINCT underlying_token_id, protocol_id
-                FROM position_buckets
-            ),
-            latest_price AS (
-                SELECT pk.underlying_token_id, pk.protocol_id, px.price_usd
-                FROM price_keys pk
-                LEFT JOIN LATERAL (
-                    SELECT otp.price_usd
-                    FROM onchain_token_price otp
-                    JOIN protocol_oracle po
-                        ON po.oracle_id = otp.oracle_id AND po.protocol_id = pk.protocol_id
-                    WHERE otp.token_id = pk.underlying_token_id
-                    -- enabled-mapping filter (rationale on _DIRECT_ASSET_HOLDINGS_SQL):
-                    -- a retired source's tail must not serve any bucket after
-                    -- retirement (nor, given the one-instant-per-query tradeoff
-                    -- recorded there, before).
-                      AND EXISTS (
-                          SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
-                          WHERE oa.oracle_id = otp.oracle_id
-                            AND oa.token_id = otp.token_id
-                            AND oa.enabled
-                      )
-                    ORDER BY otp.block_number DESC, otp.block_version DESC,
-                             otp.processing_version DESC, otp.oracle_id DESC
-                    LIMIT 1
-                ) px ON TRUE
-            )
-            SELECT
-                b.bucket AS bucket_start,
-                SUM(b.valuation_units * COALESCE(lp.price_usd, 0)) AS exposure_usd
-            FROM position_buckets b
-            LEFT JOIN latest_price lp
-                ON lp.underlying_token_id = b.underlying_token_id
-               AND lp.protocol_id = b.protocol_id
-            GROUP BY b.bucket
-            ORDER BY b.bucket DESC
-            LIMIT :limit
-            """
-        )
         params = {
             "proxy_addrs": [a.to_bytes() for a in proxy_addresses],
             "from_timestamp": from_timestamp,
@@ -1155,7 +1078,7 @@ class AllocationRepository:
 
         try:
             async with self._engine.connect() as conn:
-                result = await conn.execute(query, self._reference.params(**params))
+                result = await conn.execute(_EXPOSURE_BUCKETS_SQL, self._reference.params(**params))
                 rows = result.fetchall()
         except asyncio.CancelledError:
             raise
@@ -1919,5 +1842,87 @@ WHERE
          LIKE '%' || LOWER(CAST(:protocol_name AS TEXT)) || '%' ESCAPE '\\')
 GROUP BY bucket_start
 ORDER BY bucket_start DESC
+LIMIT :limit
+""")
+
+
+# Priced receipt-token exposure per time bucket; semantics on
+# ``AllocationRepository.list_exposure_buckets``.
+_EXPOSURE_BUCKETS_SQL = text(f"""
+WITH position_buckets AS (
+    SELECT
+        rt.id AS receipt_token_id,
+        rt.underlying_token_id,
+        rt.protocol_id,
+        time_bucket_gapfill(
+            make_interval(secs => :bucket_seconds),
+            ap.created_at,
+            CAST(:from_timestamp AS TIMESTAMPTZ),
+            CAST(:to_timestamp AS TIMESTAMPTZ)
+        ) AS bucket,
+        locf(last(
+            CASE
+                WHEN ap.underlying_token_id IS NOT NULL
+                 AND ap.underlying_token_id <> rt.underlying_token_id
+                THEN NULL
+                ELSE COALESCE(ap.underlying_value, ap.balance)
+            END,
+            ap.created_at)) AS valuation_units
+    FROM allocation_position ap
+    JOIN token t ON t.id = ap.token_id
+    JOIN receipt_token rt
+        ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
+    -- Prime-wide, like the headline figure beside it: a prime holds
+    -- receipt tokens through one proxy per chain, so scoping to one
+    -- address prices a single chain against a prime-wide total.
+    WHERE ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[]))
+      AND ap.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
+      AND ap.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
+    GROUP BY rt.id, rt.underlying_token_id, rt.protocol_id, bucket
+),
+-- The latest price does not vary by bucket, so it is resolved once per
+-- (underlying, protocol) pair instead of inside the per-bucket join.
+price_keys AS (
+    SELECT DISTINCT underlying_token_id, protocol_id
+    FROM position_buckets
+),
+latest_price AS (
+    SELECT pk.underlying_token_id, pk.protocol_id, px.price_usd
+    FROM price_keys pk
+    LEFT JOIN LATERAL (
+        -- Reads the trigger-maintained cache, not the onchain_token_price
+        -- hypertable behind it: the cache keeps the per-(oracle, token) winner
+        -- under the same newer-wins tuple, so the ORDER BY below only picks
+        -- between oracles. Same rows the other latest-price reads in this file
+        -- resolve (VEC-712).
+        SELECT tpc.price_usd
+        FROM token_price_current tpc
+        JOIN protocol_oracle po
+            ON po.oracle_id = tpc.oracle_id AND po.protocol_id = pk.protocol_id
+        WHERE tpc.token_id = pk.underlying_token_id
+        -- enabled-mapping filter (rationale on _DIRECT_ASSET_HOLDINGS_SQL):
+        -- a retired source's tail must not serve any bucket after
+        -- retirement (nor, given the one-instant-per-query tradeoff
+        -- recorded there, before).
+          AND EXISTS (
+              SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
+              WHERE oa.oracle_id = tpc.oracle_id
+                AND oa.token_id = tpc.token_id
+                AND oa.enabled
+          )
+        ORDER BY tpc.block_number DESC, tpc.block_version DESC,
+                 tpc.processing_version DESC, tpc.oracle_id DESC
+        LIMIT 1
+    ) px ON TRUE
+)
+SELECT
+    b.bucket AS bucket_start,
+    SUM(b.valuation_units * COALESCE(lp.price_usd, 0)) AS exposure_usd
+FROM position_buckets b
+LEFT JOIN latest_price lp
+    ON lp.underlying_token_id = b.underlying_token_id
+   AND lp.protocol_id = b.protocol_id
+GROUP BY b.bucket
+ORDER BY b.bucket DESC
 LIMIT :limit
 """)

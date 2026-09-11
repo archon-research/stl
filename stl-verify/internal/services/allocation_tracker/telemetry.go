@@ -28,6 +28,7 @@ const (
 // Telemetry provides OpenTelemetry metrics for the allocation tracker.
 type Telemetry struct {
 	underlyingValueFailures metric.Int64Counter
+	shareRepoints           metric.Int64Counter
 
 	// chainAttr is fixed at construction: one indexer process serves one chain.
 	chainAttr attribute.KeyValue
@@ -53,6 +54,13 @@ func NewTelemetryWithProvider(mp metric.MeterProvider, chain string) (*Telemetry
 		return nil, fmt.Errorf("creating underlyingValueFailures counter: %w", err)
 	}
 
+	if t.shareRepoints, err = meter.Int64Counter(
+		"allocation.share_repoints.total",
+		metric.WithDescription("Share token re-points observed per entry; event rows for the position stop until the next sweep"),
+	); err != nil {
+		return nil, fmt.Errorf("creating shareRepoints counter: %w", err)
+	}
+
 	return t, nil
 }
 
@@ -71,5 +79,19 @@ func (t *Telemetry) RecordUnderlyingValueFailure(ctx context.Context, tokenType 
 		attribute.String("token_type", tokenType),
 		attribute.String("token", token.Hex()),
 		attribute.String("reason", string(reason)),
+	))
+}
+
+// RecordShareRepoint counts one entry whose share token changed, displacing its
+// transfer route. Nil-safe; entry/wallet are address hex, cardinality bounded by
+// the axis-synome registry. Unseeded: read with increase() > 0, not an absence shape.
+func (t *Telemetry) RecordShareRepoint(ctx context.Context, entry, wallet common.Address) {
+	if t == nil {
+		return
+	}
+	t.shareRepoints.Add(ctx, 1, metric.WithAttributes(
+		t.chainAttr,
+		attribute.String("entry", entry.Hex()),
+		attribute.String("wallet", wallet.Hex()),
 	))
 }

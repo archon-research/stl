@@ -277,11 +277,10 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 		"chainID", cfg.chainID,
 		"commit", buildReg.GitHash())
 
-	mcTel, err := multicall.NewTelemetry(chainName)
-	if err != nil {
-		return fmt.Errorf("multicall telemetry: %w", err)
-	}
-	mc, err := multicall.NewClient(rawClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
+	// Narrowing, because a Success:false from gas starvation inside aggregate3 is
+	// indistinguishable from an ERC-7540 share() revert, which is how this worker
+	// detects a direct share — it would re-key the position onto its vault.
+	mc, err := multicall.NewNarrowingClient(rawClient, blockchain.Multicall3, chainName, logger)
 	if err != nil {
 		return fmt.Errorf("multicall client: %w", err)
 	}
@@ -369,6 +368,7 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 			ChainID:           cfg.chainID,
 			Logger:            logger,
 			Metrics:           metrics,
+			Telemetry:         atTel,
 		},
 		sqsConsumer,
 		cacheReader,
