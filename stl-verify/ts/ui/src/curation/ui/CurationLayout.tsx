@@ -94,6 +94,13 @@ function CurationSidebar() {
           Classify a security
         </Link>
         <Link
+          to="/workflow/import-prices"
+          className={navLinkClassName}
+          activeProps={{ 'data-selected': 'true' }}
+        >
+          Import prices
+        </Link>
+        <Link
           to="/worklist"
           className={navLinkClassName}
           activeProps={{ 'data-selected': 'true' }}

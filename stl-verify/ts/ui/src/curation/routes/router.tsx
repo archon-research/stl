@@ -11,6 +11,7 @@ import { resourceByKey } from '../schema/registry.ts';
 import { ClassifyView } from '../ui/ClassifyView.tsx';
 import { CurationLayout } from '../ui/CurationLayout.tsx';
 import { EdgeCreateView } from '../ui/EdgeCreateView.tsx';
+import { IngestView } from '../ui/IngestView.tsx';
 import { NodeDetailView } from '../ui/NodeDetailView.tsx';
 import { ResourceCreateView } from '../ui/ResourceCreateView.tsx';
 import { ResourceListView } from '../ui/ResourceListView.tsx';
@@ -39,6 +40,12 @@ const indexRoute = createRoute({
   component: () => (
     <Navigate to="/$resourceKey" params={{ resourceKey: 'securities' }} />
   ),
+});
+
+const ingestRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/workflow/import-prices',
+  component: IngestView,
 });
 
 const worklistRoute = createRoute({
@@ -114,6 +121,7 @@ const routeTree = rootRoute.addChildren([
   indexRoute,
   worklistRoute,
   classifyRoute,
+  ingestRoute,
   // `/new` before `/$nodeId`: both match a two-segment path, and the literal has
   // to be tried first or "new" is read as a node id.
   resourceCreateRoute,

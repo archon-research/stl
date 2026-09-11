@@ -114,6 +114,32 @@ type RepointReceipt = {
   closed_valid_to: string;
 };
 
+/** A stored price observation. */
+export type PriceRow = {
+  chain_id: number;
+  token_address: string;
+  observed_at: string;
+  price_usd: string;
+  source_name: string;
+  record_id: number;
+  ingested_at: string;
+  actor: string;
+  change_reason_code: string;
+};
+
+/**
+ * What a price batch returns.
+ *
+ * Per-row outcomes rather than a single status: the rows were validated
+ * independently on the way in, so collapsing them to one verdict here would
+ * throw away the only information a curator can act on.
+ */
+type PriceBatchReceipt = {
+  accepted: number;
+  rejected: { line: number; message: string }[];
+  first_record_id: number | null;
+};
+
 /** FastAPI's error envelope, which the existing client already understands. */
 export type Problem = {
   detail: string | { loc: (string | number)[]; msg: string; type: string }[];
@@ -320,6 +346,45 @@ export interface paths {
       };
     };
     get?: never;
+    put?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+
+  /**
+   * Dated price observations in TigerData.
+   *
+   * A different store from everything above it, and the path says so: prices are
+   * fast-moving observations, not curated graph facts, and ADR-0007 keeps them
+   * out of the node and edge stores entirely. The write is a batch because that
+   * is how a file arrives — but the batch is a transport convenience, not a
+   * transaction: each row is validated and accepted on its own, and the response
+   * reports per-row outcomes rather than one verdict.
+   */
+  '/v1/prices': {
+    parameters: NoParams;
+    post: {
+      parameters: NoParams;
+      requestBody: { content: { 'application/json': WriteBody } };
+      responses: {
+        201: Json<PriceBatchReceipt>;
+        403: Json<Problem>;
+        422: Json<Problem>;
+      };
+    };
+    get: {
+      parameters: {
+        query?: { chain_id?: number; token_address?: string; limit?: number };
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: { 200: Json<PriceRow[]>; 422: Json<Problem> };
+    };
     put?: never;
     delete?: never;
     options?: never;

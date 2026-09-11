@@ -140,7 +140,18 @@ export const validToDate = z.union([z.iso.date(), z.literal('infinity')]);
  * and the arithmetic stays in the database.
  */
 export const exactDecimal = z
-  .string()
+  .string({
+    // A JSON file quoting its prices is the difference between storing the
+    // number and storing a rounding of it: `JSON.parse` turns
+    // 0.999812345678901234 into 0.9998123456789012 before any of our code sees
+    // it, so by the time a number arrives the precision is already gone. The
+    // default "expected string, received number" is true but sends the reader
+    // looking for a type bug rather than a quoting one.
+    error: (issue) =>
+      typeof issue.input === 'number'
+        ? 'quote this as a string — a JSON number has already lost precision by the time it is parsed'
+        : undefined,
+  })
   .trim()
   .regex(
     /^-?\d{1,12}(\.\d{1,18})?$/,

@@ -75,6 +75,27 @@ There is no backend and no `VITE_API_MOCKS` switch: msw is the only mode. See
    in the same resolution group. `lib/contract.ts` carries why both halves stay
    at `processing_version` 0.
 
+8. **For a file of prices, the unit of validation is a row.** Ingest parses the
+   file, checks every row against `schema/timeseries.ts` on its own, and lets
+   the curator send the ones that pass. There is no whole-file verdict, no
+   window check and no cross-row rule, so three bad lines are three problems
+   rather than a rejected file. The checking is client-side against the same
+   zod schema the API would use — a 400-row file gives its verdict without a
+   round trip — and the one thing the client cannot know, whether an
+   observation already exists for that instant and source, stays the server's.
+   CSV and JSON share the path: `lib/parse-rows.ts` normalises both to rows,
+   and `form/coerce.ts` holds the string→number coercion the forms already did,
+   because a CSV cell arrives as a string exactly like an input's value does.
+
+9. **Prices are quoted as strings, and a JSON number is an error with its own
+   message.** `numeric(30,18)` does not survive a float round trip:
+   `JSON.parse` has already turned `0.999812345678901234` into
+   `0.9998123456789012` before any of our code runs, so the loss is not
+   recoverable at validation time — only detectable. `schema/primitives.ts`
+   gives `exactDecimal` a custom error saying so, since the default "expected
+   string, received number" sends the reader hunting for a type bug rather than
+   a quoting one.
+
 ## Open, and worth deciding before this becomes real
 
 - **No transactional endpoint.** The classify workflow issues its appends in

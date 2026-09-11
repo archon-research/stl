@@ -5,6 +5,7 @@ import type { paths } from '../lib/contract.ts';
 import { kindOf } from '../schema/edges.ts';
 import { evaluateShapes } from '../schema/shapes.ts';
 import type { RecordType } from '../schema/vocabularies.ts';
+import { appendPrices, listPrices, resetPrices } from './price-store.ts';
 import {
   appendEdge,
   appendNode,
@@ -331,6 +332,40 @@ export const curationMocks = setupMocks(
       });
     }),
 
+    mock.get('/v1/prices', ({ query, response }) => {
+      const chainId = query.get('chain_id');
+      const tokenAddress = query.get('token_address');
+      const limit = query.get('limit');
+
+      return response(200).json(
+        listPrices({
+          ...(chainId !== null && { chainId: Number(chainId) }),
+          ...(tokenAddress !== null && { tokenAddress }),
+          ...(limit !== null && { limit: Number(limit) }),
+        }),
+      );
+    }),
+
+    mock.post('/v1/prices', async ({ request, response }) => {
+      const body = await request.json();
+      // The body is `Record<string, unknown>` at the wire, so the row list is
+      // narrowed here rather than asserted.
+      const raw = body['rows'];
+      const rows = Array.isArray(raw)
+        ? raw.filter(
+            (row): row is Record<string, unknown> =>
+              typeof row === 'object' && row !== null && !Array.isArray(row),
+          )
+        : [];
+      const result = appendPrices(rows);
+
+      return response(201).json({
+        accepted: result.accepted,
+        rejected: result.rejected,
+        first_record_id: result.firstRecordId,
+      });
+    }),
+
     mock.get('/v1/secstore/node-validity', ({ query, response }) => {
       const recordType = query.get('record_type');
       const severity = query.get('severity');
@@ -494,5 +529,5 @@ export const curationMocks = setupMocks(
       });
     }),
   ],
-  { onReset: [resetStore, resetRegisters] },
+  { onReset: [resetStore, resetRegisters, resetPrices] },
 );
