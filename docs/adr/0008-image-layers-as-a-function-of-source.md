@@ -1,4 +1,4 @@
-# ADR-0007: Image Layers as a Function of Source
+# ADR-0008: Image Layers as a Function of Source
 
 - **Status**: Proposed
 - **Proposed**: @r0hitsharma
