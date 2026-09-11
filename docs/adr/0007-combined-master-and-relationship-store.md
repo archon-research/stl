@@ -845,6 +845,16 @@ reference. They meet at three seams, and only these:
    requires "what we knew then". A read that resolves the graph at `now()` while scanning last
    quarter's positions applies today's issuer to yesterday's holding, silently.
 
+**A position is not an edge endpoint either.** The three seams are joins: a position references
+node ids, and nothing about a position is stored as a `sec_edge` row. So a holding's custodian,
+counterparty and operator stay position-layer rows rather than edges, and `position_entity_link`
+is frozen rather than superseded by an edge type. The cost is real and accepted — an append-only
+edge would keep role history that a position-keyed table does not — and it is what the store
+shipped: `sec_edge` is a plain table sized for governance-rate writes, and `ALLOCATES`, the
+block-stamped projection type, is deliberately absent from the vocabulary and would need its own
+hypertable store if it ever ratified. Taking endpoints at position volume is therefore a new
+store, not a new row.
+
 ### 10. The pivot: the consumer read contract
 
 Consumers read the pivot, not the graph — **reading** meaning attributes, classification and
