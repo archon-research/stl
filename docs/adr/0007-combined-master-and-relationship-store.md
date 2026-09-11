@@ -243,10 +243,11 @@ Semantics, independent of realization:
   they are cross-row.
 
 **The stores, as tables.** Both stores plus the registers, the shape table, and the seven
-governed vocabularies. Solid relationships are real foreign keys into the vocabularies. Dotted
-ones are **soft references**: an SCD2 id is non-unique by construction, so an endpoint resolves
-through the current view rather than a row-level foreign key — which is why endpoint-kind and
-cardinality are enforced by the validator above rather than by a constraint. Relationship
+governed vocabularies. Every relationship drawn here is **soft**: a versioned row's natural key
+repeats by construction, in the stores and in the vocabularies alike, so a reference resolves
+against the current version rather than through a row-level foreign key. Soft does not mean
+unchecked — the vocabulary references are enforced by the append guard at the write boundary
+(§4), while endpoint-kind and cardinality are cross-row and stay with the validator. Relationship
 labels carry the referencing column. The provenance block of §4 is elided on `SecEdge`,
 so no relationship is drawn from it — it carries the same `change_reason_code` and lineage
 columns as `SecNode`.
@@ -257,7 +258,7 @@ erDiagram
         text id PK "UK1"
         text record_type PK "UK1"
         int4 chain_id
-        text status FK "NodeStatusVocabulary"
+        text status "soft FK NodeStatusVocabulary"
         jsonb attrs
         date valid_from PK "UK1"
         date valid_to PK "UK1"
@@ -267,7 +268,7 @@ erDiagram
         timestamptz ingested_at
         bigint run_id
         text actor
-        text change_reason_code FK
+        text change_reason_code "soft FK ChangeReasonVocabulary"
         text change_reason
         text approved_by
         bigint supersedes_record_id
@@ -281,9 +282,9 @@ erDiagram
         text src_kind
         text dst_id PK "soft FK SecNode"
         text dst_kind
-        text rel_type PK "FK RelTypeVocabulary"
+        text rel_type PK "soft FK RelTypeVocabulary"
         numeric rel_weight "30,18 exact"
-        text weight_basis FK "WeightBasisVocabulary"
+        text weight_basis "soft FK WeightBasisVocabulary"
         bigint weight_asof_block
         jsonb payload
         date valid_from PK
@@ -334,7 +335,7 @@ erDiagram
         text_array dst_kinds
         text cardinality
         text_array cluster_key
-        text weight_basis FK
+        text weight_basis "soft FK WeightBasisVocabulary"
         boolean derived_only
         text maturity
         text description
@@ -418,13 +419,13 @@ erDiagram
         bytea content_hash
     }
 
-    RelTypeVocabulary ||--o{ SecEdge : "rel_type"
-    WeightBasisVocabulary ||--o{ SecEdge : "weight_basis"
-    WeightBasisVocabulary ||--o{ RelTypeVocabulary : "declared basis"
-    ChangeReasonVocabulary ||--o{ SecNode : "change_reason_code"
-    NodeStatusVocabulary ||--o{ SecNode : "record_type + status"
-    KeyNamespaceVocabulary ||--o{ InstrumentRegister : "key_namespace"
-    IdSchemeVocabulary ||--o{ AliasRegister : "id_scheme"
+    RelTypeVocabulary ||..o{ SecEdge : "rel_type"
+    WeightBasisVocabulary ||..o{ SecEdge : "weight_basis"
+    WeightBasisVocabulary ||..o{ RelTypeVocabulary : "declared basis"
+    ChangeReasonVocabulary ||..o{ SecNode : "change_reason_code"
+    NodeStatusVocabulary ||..o{ SecNode : "record_type + status"
+    KeyNamespaceVocabulary ||..o{ InstrumentRegister : "key_namespace"
+    IdSchemeVocabulary ||..o{ AliasRegister : "id_scheme"
     SecNode ||..o{ SecEdge : "src / dst, soft"
     SecNode ||..o{ InstrumentRegister : "security_id, soft"
     SecNode ||..o{ AliasRegister : "node_id, soft"
