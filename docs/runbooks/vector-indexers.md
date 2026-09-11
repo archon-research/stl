@@ -1685,6 +1685,76 @@ touches is roughly 30x the worst observed quiet gap. It is not a lull.
 
 `rate(uniswap_v3_pools_touched_total[6h]) > 0` for the affected chain.
 
+## VectorUniswapV3AppendOnChangeGrowthHigh
+
+**Severity:** warning · **For:** 6h
+
+**Nothing is broken.** The `uniswap_v3_tick` twin of
+[VectorUniswapV4AppendOnChangeGrowthHigh](#vectoruniswapv4appendonchangegrowthhigh):
+same plain-table rationale, same threshold derivation (250k rows/day sustained =
+2.9 rows/s, about a year of runway against a ~100M-row budget), same 6h window
+and `for:`, same table-wide `sum by (cluster)`. Read that section for the why;
+this one carries only what differs for V3. Treat it as a planning ticket, not an
+incident.
+
+### First checks
+
+1. **Actual row count and size.**
+
+   ```sql
+   SELECT relname, n_live_tup,
+          pg_size_pretty(pg_total_relation_size(relid)) AS total_size
+   FROM pg_stat_user_tables
+   WHERE relname = 'uniswap_v3_tick';
+   ```
+
+2. **Growth over time**, to tell a step change from a one-off:
+
+   ```sql
+   SELECT date_trunc('day', block_timestamp) AS day, count(*) AS row_count
+   FROM uniswap_v3_tick
+   WHERE block_timestamp > now() - INTERVAL '30 days'
+   GROUP BY 1 ORDER BY 1;
+   ```
+
+3. **What changed.** More pools, not more traffic per pool, almost always
+   (`uniswap_v3_pool` is unversioned, so a plain count is the registry size):
+
+   ```sql
+   SELECT count(*) AS pools FROM uniswap_v3_pool;
+   ```
+
+   A pool's first touch also enumerates every initialized tick once
+   (`BaselineTicks`, O(10³) rows in one block); a batch of newly seeded pools
+   shows up as a step that the 6h window is meant to absorb.
+
+### Common causes
+
+The V4 section's list applies — registry expansion, a new chain's indexer
+writing into the same table, a backfill longer than 6h — plus the V3-specific
+regression: rows appended on every touch instead of on change (a field dropped
+from `uniswapTickWriter.unchanged`, or `initialized` no longer compared). Same
+symptom and the same probe as the V4 section, on `uniswap_v3_tick` with
+`(pool_id, tick)` as the key and `(liquidity_gross, liquidity_net,
+fee_growth_outside0_x128, fee_growth_outside1_x128, initialized)` as the values.
+
+### Remediation
+
+The in-place conversion in the V4 section applies with `uniswap_v3_tick` for
+`uniswap_v4_position` and `(pool_id, tick)` for the natural key — including all
+four "re-solve the fan-out" items (30-day chunks, `block_timestamp` pinned in
+the trigger lookups, a bounded lookback only if the `COMMENT` states it, and no
+tiering policy).
+
+### Verify recovery
+
+```promql
+sum(rate(uniswap_v3_tick_rows_written_total[6h])) <= 2.9
+```
+
+After an actual conversion the rule no longer describes reality — delete or
+re-scope it in the same PR (`alerts/AGENTS.md`, alert ownership).
+
 ---
 
 ## uniswap-v4-indexer (VEC-475)
@@ -1729,13 +1799,14 @@ block, derives the touched pool set via `dexconsumer.DueSet`, and snapshots only
 those pools before the transaction commit.
 
 **Snapshots are a curated per-pool gate.** `uniswap_v4_pool.snapshot_supported`
-decides whether a pool's state and ticks are read at all; a `false` pool is still
-decoded, and its swaps, liquidity events and pool events are still indexed —
-only the `uniswap_v4_pool_state` / `uniswap_v4_tick` half is dropped, and the
-worker issues no chain read for it. The one exception is a reorg redelivery at a height
-where the pool already holds a state row from before its gate was flipped: that
-row is re-read at the new block version so the orphaned fork's row does not stay
-latest. The gate exists for the dynamic LP fee
+decides whether a pool's state, ticks and positions are read at all; a `false`
+pool is still decoded, and its swaps, liquidity events and pool events are still
+indexed — only the `uniswap_v4_pool_state` / `uniswap_v4_tick` /
+`uniswap_v4_position` half is dropped, and the worker issues no chain read for
+it. The one exception is a reorg redelivery at a height where the pool already
+holds a state row from before its gate was flipped: that row is re-read at the
+new block version so the orphaned fork's row does not stay latest. The gate
+exists for the dynamic LP fee
 (`PoolKey.fee == 0x800000`): `updateDynamicLPFee` rewrites `slot0.lpFee` and
 emits nothing, so with no sweep to fall back on the snapshotted `lp_fee` would
 silently go stale between touches. Such a pool is **not** refused at boot — the
@@ -1769,7 +1840,8 @@ the persisted rows). A block with no Uniswap V4 activity legitimately writes
 zero state rows.
 
 **Tables:** `uniswap_v4_pool_state`, `uniswap_v4_swap`,
-`uniswap_v4_liquidity_event`, `uniswap_v4_tick`, `uniswap_v4_pool_event`.
+`uniswap_v4_liquidity_event`, `uniswap_v4_tick`, `uniswap_v4_pool_event`,
+`uniswap_v4_position`.
 **Registry:** `uniswap_v4_pool`, keyed by `chain_id` + the 32-byte `pool_id`,
 plus `uniswap_v4_pool_manager`, which holds that chain's StateView address
 directly and its **PoolManager address only through `protocol_id`** — the
@@ -2086,7 +2158,6 @@ not an alert.
   block number.
 - Transient RPC timeout on the StateView multicall -> usually self-clears;
   investigate if sustained.
-
 ### How to spot a decoder gap (no alert covers this)
 
 An **unknown `topics[0]` raises no error and moves no counter.** `captureRaw`
@@ -2687,6 +2758,220 @@ block that touches the corrected pool before it clears.
 
 ---
 
+## VectorUniswapV4AppendOnChangeGrowthHigh
+
+**Severity:** warning · **For:** 6h
+
+**Nothing is broken.** This is a tripwire on a *design decision*, not a fault.
+It fires when the append-on-change tables have grown fast enough, for long
+enough, that the choice to keep them un-partitioned should be revisited. Treat it
+as a planning ticket, not an incident: there is roughly a year of runway from the
+moment it fires (derivation below).
+
+### What it means
+
+`uniswap_v4_tick` and `uniswap_v4_position` are deliberately **plain tables, not
+hypertables** — the only two `uniswap_v4_*` fact tables that are. The reason is
+their write path, not their size.
+
+Both are *append-on-change*. Every write first reads the latest row per natural
+key (`(pool_id, tick)` / `(pool_id, owner, tick_lower, tick_upper, salt)`) to
+decide whether anything changed, and that read can only be bounded by
+`block_number <= N`: there is no lower bound the planner could use, because the
+previous observation of a position may be arbitrarily old. On a plain table that
+is one bounded index descent. On a hypertable it becomes a descent *per chunk* —
+with 1-day chunks and a year of retention, ~365 probes per key per block, and
+worse once chunks compress (locate a segment, then decompress it). That is the
+fan-out profile VEC-541 measured for the `processing_version` triggers (4,410 ms
+vs 148 ms for one 721-row batch at ~2,000 chunks). Every other `uniswap_v4_*`
+fact table is written once per touched block and read by time range, so
+partitioning suits them; these two are not, and it does not.
+
+The trade is only right while the tables stay small. This alert guards that
+premise.
+
+**Threshold derivation** (mirrored in the rule comment):
+
+| | |
+|---|---|
+| Plain-table comfort ceiling | ~100M rows (index depth, autovacuum, bloat on rewrite) |
+| Observed rate today | ~10–100 rows/day, both tables combined |
+| Alert threshold | 250k rows/day sustained = **2.9 rows/s** (`250000 / 86400 = 2.894`) |
+| Implied growth | ~90M rows/year — about a year of runway |
+
+The threshold sits 3–4 orders of magnitude above today's rate, so it cannot fire
+on ordinary growth. Reaching it means a registry expansion (many more pools) or a
+traffic regime change — something that genuinely invalidates the premise.
+
+The 6h rate window *and* `for: 6h` both exist because the signal is a sustained
+regime change. A backfill, or a pool's first-touch baseline tick enumeration
+(O(10³) ticks read in one block), spikes the instantaneous rate by design and
+must not wake anyone.
+
+> The counters count the rows the append-on-change writers **persisted** — the
+> unchanged ones they drop are never counted — so the rate is real table growth
+> and the row counts below should match its integral.
+
+### First checks
+
+1. **Actual row counts.** These are the truth the metric approximates.
+
+   ```sql
+   SELECT 'uniswap_v4_tick' AS table_name, count(*) AS row_count FROM uniswap_v4_tick
+   UNION ALL
+   SELECT 'uniswap_v4_position', count(*) FROM uniswap_v4_position;
+   ```
+
+   On a large table `count(*)` is slow; the planner's estimate is enough to
+   decide, and instant:
+
+   ```sql
+   SELECT relname, n_live_tup,
+          pg_size_pretty(pg_total_relation_size(relid)) AS total_size
+   FROM pg_stat_user_tables
+   WHERE relname IN ('uniswap_v4_tick', 'uniswap_v4_position');
+   ```
+
+2. **Growth over time**, to tell a step change from a one-off:
+
+   ```sql
+   SELECT date_trunc('day', block_timestamp) AS day, count(*) AS row_count
+   FROM uniswap_v4_position
+   WHERE block_timestamp > now() - INTERVAL '30 days'
+   GROUP BY 1 ORDER BY 1;
+   ```
+
+3. **What changed.** A jump almost always traces to more pools, not more traffic
+   per pool:
+
+   ```sql
+   SELECT count(*) AS current_pools
+   FROM (SELECT DISTINCT ON (chain_id, pool_id) id
+         FROM uniswap_v4_pool
+         ORDER BY chain_id, pool_id, processing_version DESC) cur;
+   ```
+
+   Then check whether a migration recently seeded a batch of pools, or whether a
+   new chain's indexer was deployed.
+
+### Common causes
+
+- **Registry expansion** — a migration seeded many more pools. Legitimate; the
+  only question is whether the new steady-state rate justifies converting.
+- **A new chain** — another `uniswap-v4-indexer` instance now writes into the
+  same two tables (they key on the `uniswap_v4_pool` surrogate, which spans
+  chains — which is why this rule sums across `chain`).
+- **A backfill running longer than 6h** — legitimate and transient. Confirm it is
+  a backfill, let it finish, expect the alert to clear itself.
+- **An append-on-change regression** — rows appended on every touch instead of
+  only on change (a field dropped from `uniswapTickWriter.unchanged` / `v4PositionUnchanged`,
+  or a `block_version` that always differs). This one *is* a bug. Symptom:
+  consecutive rows for one natural key at *different heights* carrying identical
+  values. Same-height pairs are healthy by design — a reorg re-observation
+  stores identical values at `block_version` 0 and 1, and a rebuild may at
+  `processing_version` 1 — so the probe compares each row with the previous row
+  of its key at another height. An out-of-order backfill row (written with no
+  prior row at or below its height) can show up here too; check the
+  `created_at` order before reading a hit as the regression.
+
+  ```sql
+  -- Rows repeating the previous height's values for the same key: should return nothing.
+  WITH ordered AS (
+    SELECT pool_id, owner, tick_lower, tick_upper, salt, block_number, block_version,
+           liquidity, fee_growth_inside0_last_x128, fee_growth_inside1_last_x128,
+           lag(block_number)                  OVER w AS prev_block,
+           lag(liquidity)                     OVER w AS prev_liquidity,
+           lag(fee_growth_inside0_last_x128)  OVER w AS prev_fee0,
+           lag(fee_growth_inside1_last_x128)  OVER w AS prev_fee1
+    FROM uniswap_v4_position
+    WINDOW w AS (PARTITION BY pool_id, owner, tick_lower, tick_upper, salt
+                 ORDER BY block_number, block_version, processing_version)
+  )
+  SELECT pool_id, owner, tick_lower, tick_upper, salt, block_number, block_version
+  FROM ordered
+  WHERE prev_block IS NOT NULL AND prev_block <> block_number
+    AND liquidity = prev_liquidity
+    AND fee_growth_inside0_last_x128 = prev_fee0
+    AND fee_growth_inside1_last_x128 = prev_fee1
+  LIMIT 20;
+  ```
+
+### Remediation — converting to a hypertable
+
+Only once the rate is confirmed to be the new normal. This is a **new** migration,
+never an edit to the creating one.
+
+The conversion is in place: `create_hypertable(..., migrate_data => true)`
+partitions a populated table and keeps every dependent object — the FK, the
+secondary indexes, the `processing_version` trigger and the grants (so the
+`REVOKE` still holds) — at the price of an exclusive lock for the duration of
+the row migration, which is why it needs a maintenance window rather than a
+copy/swap dance. The one schema change it forces: `block_timestamp` must join the
+PK, because TimescaleDB requires the partition column in every unique index on a
+hypertable. The append-only rule does not block any of this: it forbids
+`UPDATE`/`DELETE` on ingest paths, and this migration changes only the schema.
+
+```sql
+-- 1. block_timestamp joins the PK (functionally determined by
+--    (block_number, block_version), so the uniqueness it guards is unchanged).
+ALTER TABLE uniswap_v4_position
+    DROP CONSTRAINT uniswap_v4_position_pkey,
+    ADD PRIMARY KEY (pool_id, owner, tick_lower, tick_upper, salt,
+                     block_timestamp, block_number, block_version, processing_version);
+
+-- 2. Partition in place. No compression or tiering policy -- see below.
+SELECT create_hypertable('uniswap_v4_position', 'block_timestamp',
+                         chunk_time_interval => INTERVAL '30 days',
+                         migrate_data => true);
+```
+
+**Re-solve the fan-out before shipping it.** Partitioning is what this alert asks
+you to consider; it is not free, and the append-on-change read is exactly the
+query it penalises. The conversion is only finished when that read prunes chunks:
+
+1. **A wide `chunk_time_interval`** (30 days, not 1 day) — cuts the chunk count
+   ~30x at no correctness cost. It interacts with compression: a chunk only
+   compresses once the *whole* chunk is older than the threshold, so widen the
+   compression interval to match.
+2. **Pin `block_timestamp` in the `processing_version` trigger's two lookups.**
+   It is functionally determined by `(block_number, block_version)` — one height
+   on one fork is one block — so the equality is exact, and it prunes the
+   per-inserted-row lookup to a single chunk. This is the hottest path.
+3. **A bounded lookback in the read-latest query** (`readLatestPositionsV4` /
+   `readLatestTicks`). Safe but semantically weakening: a key untouched for
+   longer than the window is re-appended with identical values rather than
+   skipped. Not wrong data — readers take `ORDER BY block_number DESC … LIMIT 1`
+   — but it turns "append-on-change" into "append-on-change within N days" and
+   must be stated in the table COMMENT if adopted.
+
+4. **No S3 tiering policy on the converted table** — or a lookback in the
+   read-latest query shorter than the tiering horizon. `timescaledb.enable_tiered_reads`
+   is off, so a prior row past the horizon is invisible to `readLatestPositionsV4`
+   and the writer appends a change that never happened: the wrong-data failure
+   `db/migrations/AGENTS.md` describes. Its rule that every hypertable gets
+   compression and tiering in its creating migration does not apply here; the
+   table `COMMENT` records the exception, keep it that way.
+
+Do **not** pin `block_timestamp` by equality in `PositionsForPoolAtBlock` /
+`TicksForPoolAtBlock`: a reorged block at the same height carries a *different*
+timestamp, so equality would miss exactly the prior-version rows those queries
+exist to find.
+
+### Verify recovery
+
+If the spike was a backfill, recovery is just the rate falling back:
+
+```promql
+sum(rate(uniswap_v4_tick_rows_written_total[6h]))
+  + sum(rate(uniswap_v4_position_rows_written_total[6h])) <= 2.9
+```
+
+After an actual conversion the rule no longer describes reality for the converted
+table — delete or re-scope it in the same PR rather than leaving it firing
+(`alerts/AGENTS.md`, alert ownership).
+
+---
+
 ## allocation-tracker (VEC-499)
 
 `prime-allocation-indexer` (Deployment / pod `app` label `allocation-tracker`,
@@ -2891,6 +3176,54 @@ fire, but its error ratio is 100% and trips this alert.
   sustained.
 - DB write error (constraint, pool exhaustion) -> inspect the failing block.
 - Per-chain queue outage — the chain's SQS/SNS wiring broke; check upstream.
+- **Wedged on share-token resolution** — see below.
+
+### Wedged on share-token resolution (100% error ratio, one chain)
+
+A `centrifuge` entry is keyed on an ERC-7540 vault, and the tracker must learn
+which token emits that entry's `Transfer` logs before it can match them. That
+resolution is a hard failure by design (VEC-535): skipping it would leave the
+position silently moving only on the 75-block sweep, which is exactly the class
+of bug the ticket fixed. So the block NACKs, SQS redelivers it, and it fails
+again — **every block on that chain stops, not just blocks touching the entry**,
+because the resolution runs on any block carrying a tracked transfer.
+
+Log lines. grep for the inner text, not the wrapper: an entry's first resolution
+wraps them in `resolve transfer aliases for block <N>`, every later fetch in
+`route transfers for block <N>` / `route transfers for sweep block <N>`, and the
+last line below in `read the [sweep] share tokens of block <N>`.
+
+- `erc7540 naming the share tokens of <n> entries: ...` — the `share()` multicall
+  failed or returned something undecodable. One variant is deliberate:
+  `share() reverted and decimals() did not answer, neither a vault nor a token: <A>`
+  — a reverting `share()` is only accepted as a direct share when `decimals()`
+  answers on the same address; a node answering wrongly self-clears on redelivery,
+  a genuinely dead address does not.
+- `... needs a share alias but its source cannot name one` — an entry routes to a
+  source that cannot resolve shares; a registry/entry misconfiguration.
+- `no share token named for entry <contract>/<wallet>` — the resolver answered
+  but omitted an entry.
+- `entry <contract>/<wallet> named share <S> before and now reports itself` — the
+  ratchet: a `share()` revert on an entry that already named a share would re-key
+  the position onto its vault, where no price ever attaches, while every health
+  signal stays green.
+- `<A> and <B> both claim transfers of <S> into <W>` — two vaults front one share
+  for one wallet; tracking both would double count.
+- `centrifuge entry <contract>/<wallet> came back with no share token` — the
+  source returned a balance without naming the share; the routes would otherwise
+  freeze at their last good value.
+- `share token re-pointed; event rows for this position stop until the next sweep`
+  — a Warn, not an error: the entry's `share()` now names a different token, so its
+  old route is dropped and the position moves again on the next sweep. The same
+  event increments `allocation.share_repoints.total` (labels `chain`, `entry`,
+  `wallet`); no alert reads it yet.
+
+**There is no per-entry discard.** The only sanctioned remedy today is to fix the
+underlying entry: correct or remove it in the axis-synome contract, regenerate,
+and redeploy. Do not "unblock" the chain by deleting the SQS message — that
+drops a block for every other position on it. If the cause is a transient RPC
+failure the worker recovers on its own once the node answers; the ratchet line
+specifically should not self-clear, and means the read is wrong rather than slow.
 
 ### Verify recovery
 

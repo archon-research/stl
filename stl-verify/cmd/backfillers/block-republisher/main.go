@@ -43,7 +43,6 @@ func main() {
 	}
 }
 
-// Build metadata, populated from VCS in init() (GitBranch is set at link time).
 var (
 	GitCommit string
 	GitBranch string
@@ -51,7 +50,7 @@ var (
 )
 
 func init() {
-	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
+	buildinfo.Populate(&GitCommit, &GitBranch, &BuildTime)
 }
 
 // workflowTypeName is what an operator types into the Temporal UI's "Workflow

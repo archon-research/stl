@@ -9,7 +9,7 @@ types live here too, since they are an HTTP-contract concern.
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 
 from app.domain.time_series import (
     AggregationMethod,
@@ -117,6 +117,34 @@ def _resolve_or_422(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class BucketPoint(BaseModel):
+    """Base for one point of a bucketed series, carrying the filled marker.
+
+    The wire form of the marker ``app.domain.gap_policy`` sets: serialized only
+    where it is true, so a response pays one extra field per filled point
+    rather than one per point.
+    """
+
+    filled: bool = Field(
+        default=False,
+        description=(
+            "Present and `true` only when the value was carried into an empty bucket rather "
+            "than observed in it. Absent means it was not carried: the bucket was either "
+            "observed, or it precedes the series' first observation and its value is `null`."
+        ),
+    )
+
+    # Deliberately unannotated: pydantic derives a subclass' published
+    # serialization schema from this return type, and any annotation it can read
+    # replaces the fields with a bare object.
+    @model_serializer(mode="wrap")
+    def _drop_unfilled_marker(self, handler: SerializerFunctionWrapHandler):
+        serialized = handler(self)
+        if not self.filled:
+            serialized.pop("filled", None)
+        return serialized
 
 
 class TimeSeriesWindow(BaseModel):

@@ -40,6 +40,7 @@
     "uniswap_v4_pool_event",
     "uniswap_v4_pool_manager",
     "uniswap_v4_pool_state",
+    "uniswap_v4_position",
     "uniswap_v4_swap",
     "uniswap_v4_tick"
   ],
@@ -1488,6 +1489,10 @@
       "type": "raw_pipeline",
       "owner": "morpho"
     },
+    "morpho_market_state_current": {
+      "type": "derived",
+      "owner": "morpho"
+    },
     "morpho_vault": {
       "type": "config",
       "owner": "morpho"
@@ -1508,6 +1513,10 @@
     },
     "morpho_vault_state": {
       "type": "raw_pipeline",
+      "owner": "morpho"
+    },
+    "morpho_vault_state_current": {
+      "type": "derived",
       "owner": "morpho"
     },
     "offchain_price_asset": {

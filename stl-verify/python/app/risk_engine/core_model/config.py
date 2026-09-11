@@ -70,6 +70,59 @@ DEFAULTS: dict[str, Any] = _flatten(SCHEMA)
 """Flat {param_name: default_value} dict — the primary import target."""
 
 
+# The closed set of value kinds a param may declare (schema 'type') or infer
+# (the default's Python type). _build_expected_kinds rejects anything else at
+# import time, so a schema typo cannot silently reroute validation.
+_KNOWN_KINDS = frozenset({"bool", "int", "float", "str", "float | None"})
+
+
+def _build_expected_kinds(schema: dict, defaults: dict[str, Any]) -> dict[str, str]:
+    kinds: dict[str, str] = {}
+    for name in defaults:
+        kind = schema[name].get("type") or type(defaults[name]).__name__
+        if kind not in _KNOWN_KINDS:
+            raise ValueError(f"parameter {name!r} has unknown kind {kind!r}; known kinds: {sorted(_KNOWN_KINDS)}")
+        kinds[name] = kind
+    return kinds
+
+
+EXPECTED_KINDS: dict[str, str] = _build_expected_kinds(SCHEMA, DEFAULTS)
+"""Per-param value kind — the single source for load_params validation and the
+runner's env-var coercion (_coerce)."""
+
+
+def _value_matches(kind: str, value: Any) -> bool:
+    # bool is a subclass of int, so numeric kinds must exclude it explicitly.
+    if kind == "bool":
+        return isinstance(value, bool)
+    if kind == "int":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if kind == "float":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if kind == "float | None":
+        return value is None or (isinstance(value, (int, float)) and not isinstance(value, bool))
+    if kind == "str":
+        return isinstance(value, str)
+    raise ValueError(f"unknown parameter kind {kind!r}")
+
+
+def _validate_types(params: dict[str, Any]) -> None:
+    """Reject values of the wrong type instead of letting them reach simulation.
+
+    A JSON or dict override like '"WORST_CASE": "false"' is a non-empty string
+    and would activate the truthy branch in the runner (audit T-01). Only the
+    types are enforced: the schema's min/max/choices stay advisory, matching
+    upstream's convention (documented in default_params.json).
+    """
+    bad = {
+        k: f"expected {EXPECTED_KINDS[k]}, got {type(v).__name__} {v!r}"
+        for k, v in params.items()
+        if not _value_matches(EXPECTED_KINDS[k], v)
+    }
+    if bad:
+        raise ValueError(f"invalid CORE parameter types: {bad}")
+
+
 # ── Helper ─────────────────────────────────────────────────────────────────────
 
 
@@ -114,4 +167,5 @@ def load_params(
             if k in params:
                 params[k] = v
 
+    _validate_types(params)
     return params

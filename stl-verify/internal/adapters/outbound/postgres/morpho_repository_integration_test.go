@@ -40,6 +40,10 @@ func truncateMorpho(t *testing.T, ctx context.Context) {
 	// morpho_adapter_membership FK morpho_adapter; morpho_vault_cap /
 	// morpho_vault_fee and morpho_adapter FK morpho_vault.
 	tables := []string{
+		// The trigger-fed caches carry no FK, so nothing below reaches them.
+		`morpho_market_state_current`,
+		`morpho_market_position_current`,
+		`morpho_vault_state_current`,
 		`morpho_market_state`,
 		`morpho_market_position`,
 		`morpho_vault_state`,
