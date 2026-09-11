@@ -39,18 +39,13 @@ JOIN prime pr ON pr.id = o.prime_id;
 
 COMMENT ON VIEW position_prime_allocation IS '[Operational] VEC-407 projection: Prime ALM allocations as native position rows, one per (prime, proxy, token, block). instrument_key = proxy address '':'' token address, because a prime holds the same token at several proxies and each is a distinct holding; holder_id = the prime''s vault address; quantity = allocation_position.balance, the post-transaction balanceOf reading, decimals-normalised by the writer rather than raw. protocol_id is NULL with chain_id set: a token at the prime''s own proxy has no protocol contract in between. deal_type is ALLOCATION; direction and tx_amount are cash-flow detail and are not read. The last event in a block supplies that block''s balance -- balanceOf at that block''s hash. A block read while only partly indexed stores a partial balance; the balance stops drifting once the writer replays with a higher processing_version, and until then materialize_position_projection records the observation_drift on the next run rather than correcting the stored row (the tie between the block''s log-index-0 sweep and log-index-0 event does not correct it either: both read balanceOf at the same block hash and carry the same balance). Emits the shared position_state column contract; closure is applied by materialize_position_projection().';
 
--- Thin per-projection entry point for the runner's POSITION_PROJECTIONS list; the view above holds all
--- the allocation logic. No pre-check: token_id and prime_id are FK-enforced and both token.address and
--- prime.vault_address are NOT NULL, so the view's joins cannot drop a row.
--- Ordered after the spine's own migration on purpose: this wrapper is LANGUAGE sql, so its body is
--- parsed when it is created, and the three-argument materialize_position_projection has to exist by
--- then.
+-- No pre-check: token_id and prime_id are FK-enforced and both token.address and prime.vault_address
+-- are NOT NULL, so the view's joins cannot drop a row. Ordered after the spine's own migration on
+-- purpose: LANGUAGE sql parses the body at creation, so the three-argument materializer must exist.
 
 -- An empty search_path, not FROM CURRENT: that captures '"$user", public', which still resolves per
--- role at call time and so keeps the shadowing hazard it looks like it removes. Both references are
--- schema-qualified and regclass resolves through implicit pg_catalog, so nothing needs a path.
--- Dropped rather than replaced: keeping the old argument list beside the new one makes a
--- call that omits the run ambiguous, as it did for the spine.
+-- role at call time, keeping the shadowing hazard it looks like it removes; both references are
+-- schema-qualified. Dropped, not replaced: a surviving old signature makes a run-less call ambiguous.
 DROP FUNCTION IF EXISTS materialize_prime_allocation(integer);
 
 CREATE OR REPLACE FUNCTION materialize_prime_allocation(p_build_id integer DEFAULT 0,
