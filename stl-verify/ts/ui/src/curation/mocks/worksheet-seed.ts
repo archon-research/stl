@@ -56,7 +56,6 @@ export const SECURITY_SEED: readonly SecuritySeed[] = [
       token_standard: ERC20,
     },
     belongsTo: [
-      'concept-ac-digital_asset',
       'concept-st-digital_asset-stablecoin',
       'concept-sst-fiat_backed',
     ],
@@ -73,7 +72,6 @@ export const SECURITY_SEED: readonly SecuritySeed[] = [
       token_standard: ERC20,
     },
     belongsTo: [
-      'concept-ac-digital_asset',
       'concept-st-digital_asset-stablecoin',
       'concept-sst-fiat_backed',
     ],
@@ -90,7 +88,6 @@ export const SECURITY_SEED: readonly SecuritySeed[] = [
       token_standard: ERC20,
     },
     belongsTo: [
-      'concept-ac-digital_asset',
       'concept-st-digital_asset-stablecoin',
       'concept-sst-fiat_backed',
     ],
@@ -107,7 +104,6 @@ export const SECURITY_SEED: readonly SecuritySeed[] = [
       token_standard: ERC20,
     },
     belongsTo: [
-      'concept-ac-digital_asset',
       'concept-st-digital_asset-stablecoin',
       'concept-sst-fiat_backed',
     ],
@@ -124,7 +120,6 @@ export const SECURITY_SEED: readonly SecuritySeed[] = [
       token_standard: ERC20,
     },
     belongsTo: [
-      'concept-ac-digital_asset',
       'concept-st-digital_asset-stablecoin',
       'concept-sst-fiat_backed',
     ],
@@ -141,7 +136,6 @@ export const SECURITY_SEED: readonly SecuritySeed[] = [
       token_standard: ERC20,
     },
     belongsTo: [
-      'concept-ac-digital_asset',
       'concept-st-digital_asset-stablecoin',
       'concept-sst-crypto_backed',
     ],
@@ -158,7 +152,6 @@ export const SECURITY_SEED: readonly SecuritySeed[] = [
       token_standard: ERC20,
     },
     belongsTo: [
-      'concept-ac-digital_asset',
       'concept-st-digital_asset-stablecoin',
       'concept-sst-crypto_backed',
     ],
@@ -176,10 +169,7 @@ export const SECURITY_SEED: readonly SecuritySeed[] = [
       is_tokenised: true,
       token_standard: ERC20,
     },
-    belongsTo: [
-      'concept-ac-digital_asset',
-      'concept-st-digital_asset-stablecoin',
-    ],
+    belongsTo: ['concept-st-digital_asset-stablecoin'],
     issuerEntityId: 'em-issuer-ethena',
   },
   {
@@ -192,10 +182,7 @@ export const SECURITY_SEED: readonly SecuritySeed[] = [
       is_tokenised: true,
       token_standard: ERC4626,
     },
-    belongsTo: [
-      'concept-ac-digital_asset',
-      'concept-st-digital_asset-yield_bearing_token',
-    ],
+    belongsTo: ['concept-st-digital_asset-yield_bearing_token'],
     issuerEntityId: 'em-issuer-sky',
     underlying: 'sec-usds',
   },
@@ -209,10 +196,7 @@ export const SECURITY_SEED: readonly SecuritySeed[] = [
       is_tokenised: true,
       token_standard: ERC4626,
     },
-    belongsTo: [
-      'concept-ac-digital_asset',
-      'concept-st-digital_asset-yield_bearing_token',
-    ],
+    belongsTo: ['concept-st-digital_asset-yield_bearing_token'],
     issuerEntityId: 'em-issuer-ethena',
     underlying: 'sec-usde',
   },
@@ -227,10 +211,7 @@ export const SECURITY_SEED: readonly SecuritySeed[] = [
       is_tokenised: true,
       token_standard: ERC20,
     },
-    belongsTo: [
-      'concept-ac-money_market',
-      'concept-st-money_market-tokenised_fund',
-    ],
+    belongsTo: ['concept-st-money_market-tokenised_fund'],
     issuerEntityId: 'em-issuer-blackrock-buidl',
   },
   {
@@ -246,10 +227,7 @@ export const SECURITY_SEED: readonly SecuritySeed[] = [
       token_standard: ERC20,
       credit_tranche: 'AAA',
     },
-    belongsTo: [
-      'concept-ac-structured_credit',
-      'concept-st-structured_credit-clo',
-    ],
+    belongsTo: ['concept-st-structured_credit-clo'],
   },
   {
     id: 'sec-stac',
@@ -262,10 +240,7 @@ export const SECURITY_SEED: readonly SecuritySeed[] = [
       token_standard: ERC20,
       credit_tranche: 'AAA',
     },
-    belongsTo: [
-      'concept-ac-structured_credit',
-      'concept-st-structured_credit-clo',
-    ],
+    belongsTo: ['concept-st-structured_credit-clo'],
     issuerEntityId: 'em-issuer-securitize-aaa-clo',
   },
   {
@@ -279,10 +254,7 @@ export const SECURITY_SEED: readonly SecuritySeed[] = [
       is_tokenised: true,
       token_standard: ERC20,
     },
-    belongsTo: [
-      'concept-ac-digital_asset',
-      'concept-st-digital_asset-wrapped_token',
-    ],
+    belongsTo: ['concept-st-digital_asset-wrapped_token'],
   },
 ];
 

@@ -63,15 +63,20 @@ There is no backend and no `VITE_API_MOCKS` switch: msw is the only mode. See
    TanStack Form deliberately. Move to it when nested field arrays with their own
    validation arrive; `form/useSchemaForm.ts` records that trigger.
 
+7. **Re-pointing an edge is the server's job, not the client's.** Replacing a
+   classification is two appends — the prior edge re-appended with a shorter
+   `valid_to`, the new target opened from the same date — and the pair has to be
+   atomic. Issued separately it can leave a node unclassified (close lands, open
+   fails) or classified twice (open lands, close fails), and the engine catches
+   neither: single-valued cardinality is a DQ check over current state, never a
+   write trigger, because an open edge always time-overlaps its replacement.
+   Hence `POST /v1/secstore/edges/repoint`, which also spares the client a read
+   for the predecessor's `valid_from` — the close append has to reuse it to land
+   in the same resolution group. `lib/contract.ts` carries why both halves stay
+   at `processing_version` 0.
+
 ## Open, and worth deciding before this becomes real
 
-- **A re-classification only opens; it does not close.** The classify workflow
-  appends a new `BELONGS_TO` without closing the prior window, so two open
-  windows for one logical edge coexist and both resolve as current. The database
-  accepts this too — cardinality is a DQ check over current state, not a write
-  trigger — so it is a genuine gap, not a mock artefact. Close-and-open needs the
-  predecessor's window, which means either the client reads it first or the
-  endpoint does it. **Decide before any real write path ships.**
 - **No transactional endpoint.** The classify workflow issues its appends in
   sequence and stops at the first failure. Survivable (every append is
   independently valid, a half-classified node is just under-curated) but wrong

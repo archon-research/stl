@@ -586,8 +586,9 @@ export function appendEdge(body: Record<string, unknown>): AppendResult {
   const dstId = str(body['dst_id'], '');
   const relType = str(body['rel_type'], '');
 
-  // Endpoint existence: cross-row, and therefore the validator's rather than the
-  // engine's. It is the one rule the form genuinely cannot enforce, since the
+  // Endpoint existence and kind (GQ-11), which the append guard rejects — the
+  // ADR moved this from the validator to the engine on 2026-09-11. Either way it
+  // is the one rule the form genuinely cannot enforce, since the
   // client does not hold the node set.
   for (const [id, label] of [
     [srcId, 'src_id'],
@@ -716,4 +717,137 @@ function stripEdgeInternal(row: EdgeAppend & { id?: string }): EdgeRow {
   const { ingestSeq: _ignored, id: _alsoIgnored, ...rest } = row;
 
   return rest;
+}
+
+export type RepointResult =
+  | {
+      ok: true;
+      closed: { recordId: number; contentHash: string; ingestedAt: string };
+      opened: { recordId: number; contentHash: string; ingestedAt: string };
+      closedValidTo: string;
+    }
+  | { ok: false; status: 403 | 404 | 422; message: string };
+
+/**
+ * Closes the current window on an edge and opens a new one, as one operation.
+ *
+ * The close is an *append*, not an update: the prior edge is re-appended with
+ * the same logical key and the same `valid_from`, carrying a shorter
+ * `valid_to`. It therefore lands in the same resolution group as the row it
+ * supersedes — group by `(logical edge, valid_from)`, latest append wins — and
+ * the open row drops out of current reads with its history intact.
+ *
+ * Both halves stay at `processing_version` 0. A valid-time change is not a
+ * correction, and versioning it as one would make the next ordinary append for
+ * that window silently lose (resolution orders by processing_version first).
+ */
+export function repointEdge(body: Record<string, unknown>): RepointResult {
+  const relType = str(body['rel_type'], '');
+  const srcId = str(body['src_id'], '');
+  const currentDstId = str(body['dst_id'], '');
+  const newDstId = str(body['new_dst_id'], '');
+  const effectiveFrom = str(body['effective_from'], today());
+  const edgeSeq = typeof body['edge_seq'] === 'number' ? body['edge_seq'] : 1;
+  const reasonCode = str(body['change_reason_code'], '');
+
+  if (
+    REQUIRES_APPROVAL.has(reasonCode) &&
+    typeof body['approved_by'] !== 'string'
+  ) {
+    return {
+      ok: false,
+      status: 422,
+      message: `${reasonCode} requires approved_by`,
+    };
+  }
+
+  const current = listEdges({ srcId, relType }).find(
+    (e) => e.dst_id === currentDstId && e.edge_seq === edgeSeq,
+  );
+
+  if (current === undefined) {
+    return {
+      ok: false,
+      status: 404,
+      message: `no current ${relType} edge from ${srcId} to ${currentDstId}`,
+    };
+  }
+
+  // A window cannot end before it began, and ending it on its own start date
+  // would make it a tombstone rather than a closed window (GQ-06).
+  if (effectiveFrom <= current.valid_from) {
+    return {
+      ok: false,
+      status: 422,
+      message: `the new window must start after ${current.valid_from}, where the current one does`,
+    };
+  }
+
+  if (getNode(newDstId) === undefined) {
+    return {
+      ok: false,
+      status: 422,
+      message: `new_dst_id ${newDstId} is not a current node (GQ-11)`,
+    };
+  }
+
+  const provenance = {
+    change_reason_code: reasonCode,
+    change_reason: str(body['change_reason'], ''),
+    ...(typeof body['approved_by'] === 'string' && {
+      approved_by: body['approved_by'],
+    }),
+  };
+
+  const closed = appendEdge({
+    rel_type: relType,
+    src_id: srcId,
+    dst_id: currentDstId,
+    edge_seq: edgeSeq,
+    valid_from: current.valid_from,
+    valid_to: effectiveFrom,
+    rel_weight: current.rel_weight,
+    weight_basis: current.weight_basis,
+    payload: current.payload,
+    ...provenance,
+  });
+
+  const opened = appendEdge({
+    rel_type: relType,
+    src_id: srcId,
+    dst_id: newDstId,
+    edge_seq: edgeSeq,
+    valid_from: effectiveFrom,
+    valid_to: OPEN,
+    rel_weight: current.rel_weight,
+    weight_basis: current.weight_basis,
+    payload: current.payload,
+    ...provenance,
+  });
+
+  // Both are validated above, so a failure here is a bug rather than a user
+  // error — and a half-applied re-point is exactly what this endpoint exists to
+  // prevent, so it is reported rather than left in place.
+  if (!closed.ok) {
+    return { ok: false, status: 422, message: closed.message };
+  }
+
+  if (!opened.ok) {
+    return { ok: false, status: 422, message: opened.message };
+  }
+
+  return {
+    ok: true,
+    closed: {
+      recordId: closed.recordId,
+      contentHash: closed.contentHash,
+      ingestedAt: closed.ingestedAt,
+    },
+    opened: {
+      recordId: opened.recordId,
+      contentHash: opened.contentHash,
+      ingestedAt: opened.ingestedAt,
+    },
+    closedValidTo: effectiveFrom,
+  };
 }

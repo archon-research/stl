@@ -8,6 +8,7 @@ import type { RecordType } from '../schema/vocabularies.ts';
 import {
   appendEdge,
   appendNode,
+  repointEdge,
   conceptClosureFor,
   edgesOut,
   getNode,
@@ -295,6 +296,38 @@ export const curationMocks = setupMocks(
         processing_version: result.processingVersion,
         content_hash: result.contentHash,
         ingested_at: result.ingestedAt,
+      });
+    }),
+
+    mock.post('/v1/secstore/edges/repoint', async ({ request, response }) => {
+      const body = await request.json();
+      const result = repointEdge(body);
+
+      if (!result.ok) {
+        switch (result.status) {
+          case 403:
+            return response(403).json(problem(result.message));
+          case 404:
+            return response(404).json(problem(result.message));
+          default:
+            return response(422).json(problem(result.message));
+        }
+      }
+
+      return response(201).json({
+        closed: {
+          record_id: result.closed.recordId,
+          processing_version: 0,
+          content_hash: result.closed.contentHash,
+          ingested_at: result.closed.ingestedAt,
+        },
+        opened: {
+          record_id: result.opened.recordId,
+          processing_version: 0,
+          content_hash: result.opened.contentHash,
+          ingested_at: result.opened.ingestedAt,
+        },
+        closed_valid_to: result.closedValidTo,
       });
     }),
 

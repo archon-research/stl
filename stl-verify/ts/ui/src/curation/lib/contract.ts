@@ -101,6 +101,19 @@ type AppendReceipt = {
   ingested_at: string;
 };
 
+/**
+ * What a re-point returns: both halves of the pair.
+ *
+ * Two receipts rather than one, because two rows were written and a manifest
+ * may cite either — the closed window is as much a fact as the opened one.
+ */
+type RepointReceipt = {
+  closed: AppendReceipt;
+  opened: AppendReceipt;
+  /** The window the prior edge now ends at, echoed so the UI can show it. */
+  closed_valid_to: string;
+};
+
 /** FastAPI's error envelope, which the existing client already understands. */
 export type Problem = {
   detail: string | { loc: (string | number)[]; msg: string; type: string }[];
@@ -264,6 +277,49 @@ export interface paths {
         422: Json<Problem>;
       };
     };
+    put?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+
+  /**
+   * Re-point an edge: close the current window and open a new one, atomically.
+   *
+   * This exists because the pair is not safely a client's to compose. A
+   * re-classification is two appends — the prior edge re-appended with a
+   * shorter `valid_to`, and the new target opened from the same date — and
+   * issuing them separately can leave a node with no classification (close
+   * lands, open fails) or with two (open lands, close fails). The engine will
+   * not catch the second: single-valued cardinality is a DQ check over current
+   * state, never a write trigger, because an open edge always time-overlaps
+   * its own replacement.
+   *
+   * The server also already knows the thing the client would otherwise have to
+   * fetch first — the current row's `valid_from`, which the close append has to
+   * reuse to land in the same resolution group.
+   *
+   * Both appends stay at `processing_version` 0: a valid-time change is not a
+   * correction. Correcting a wrongly *recorded* classification is a different
+   * operation (a restatement at version N with `supersedes_record_id`), and
+   * withdrawing one that should never have existed is a third (a zero-length
+   * tombstone window).
+   */
+  '/v1/secstore/edges/repoint': {
+    parameters: NoParams;
+    post: {
+      parameters: NoParams;
+      requestBody: { content: { 'application/json': WriteBody } };
+      responses: {
+        201: Json<RepointReceipt>;
+        403: Json<Problem>;
+        404: Json<Problem>;
+        422: Json<Problem>;
+      };
+    };
+    get?: never;
     put?: never;
     delete?: never;
     options?: never;

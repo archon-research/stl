@@ -6,11 +6,13 @@ import { css } from '#styled-system/css';
 
 import { ReferencePicker } from '../form/ReferencePicker.tsx';
 import { SchemaForm, SchemaFormActions } from '../form/SchemaForm.tsx';
+import { asText } from '../form/text.ts';
 import type { FieldBinding } from '../form/useSchemaForm.ts';
 import { useSchemaForm } from '../form/useSchemaForm.ts';
 import { api } from '../lib/api.ts';
 import type { EdgeWrite } from '../schema/edges.ts';
 import { evaluateShapes, type ShapeGap } from '../schema/shapes.ts';
+import type { CurrentMembership } from '../schema/workflows.ts';
 import {
   classifySecurity,
   type PlannableClassification,
@@ -43,16 +45,48 @@ export function ClassifyView() {
     }),
   );
 
+  const repointEdge = useMutation(
+    api.mutationOptions('post', '/v1/secstore/edges/repoint', {
+      invalidates: ['edges', 'nodes', 'validity'],
+    }),
+  );
+
   const form = useSchemaForm({
     schema: classifySecurity,
     initial: { valid_from: today, change_reason_code: 'RECLASSIFICATION' },
     onSubmit: async (value) => {
-      const plan = planClassification(value);
+      const plan = planClassification(value, memberships);
       const done: string[] = [];
 
       // Sequential, and it stops at the first failure. `workflows.ts` carries
       // why that is acceptable here and what the real fix is.
       for (const step of plan) {
+        // Replacing a membership is a close-and-open pair, and the pair is the
+        // server's to compose: issued separately, a failure between them leaves
+        // the node either unclassified or classified twice, and the engine
+        // rejects neither.
+        if (step.replaces !== undefined) {
+          await repointEdge.mutateAsync({
+            body: {
+              rel_type: step.relType,
+              src_id: step.srcId,
+              dst_id: step.replaces,
+              new_dst_id: step.dstId,
+              effective_from: value.valid_from,
+              edge_seq: 1,
+              change_reason_code: value.change_reason_code,
+              change_reason: value.change_reason,
+              ...(value.approved_by !== undefined && {
+                approved_by: value.approved_by,
+              }),
+            },
+          });
+
+          done.push(step.label);
+          setApplied([...done]);
+          continue;
+        }
+
         const body: EdgeWrite = {
           rel_type: step.relType,
           src_id: step.srcId,
@@ -91,8 +125,12 @@ export function ClassifyView() {
     (): PlannableClassification => pickIds(values),
     [values],
   );
+  // Declared after the form but read inside its submit handler: the handler is
+  // recreated each render and only runs on click, so it closes over the
+  // initialised binding rather than the empty first-render one.
+  const memberships = useCurrentMemberships(draft.security_id);
   const gaps = useLiveShapeGaps(draft);
-  const plan = planClassification(draft);
+  const plan = planClassification(draft, memberships);
 
   return (
     <PageFrame
@@ -175,6 +213,61 @@ function NarrowedTypePicker({ binding }: { binding: FieldBinding }) {
       binding={{ ...binding, plan: { ...binding.plan, narrowerThan: scope } }}
     />
   );
+}
+
+/**
+ * What the security already belongs to, and in which concept class.
+ *
+ * The class is what decides whether a choice adds a membership or replaces one:
+ * `BELONGS_TO` is one-per-concept-class, so a new instrument-type choice
+ * supersedes the instrument-type membership the node already holds, while a
+ * subtype choice sits alongside it.
+ *
+ * The classes come from a single cached read of the concept nodes rather than a
+ * lookup per membership — the taxonomy is 352 rows that have not moved since the
+ * migration seeded them, and one request beats a variable number of hooks.
+ */
+function useCurrentMemberships(
+  securityId: string | undefined,
+): CurrentMembership[] {
+  const edges = useQuery({
+    ...api.queryOptions(
+      'get',
+      '/v1/secstore/edges',
+      {
+        params: { query: { src_id: securityId ?? '', rel_type: 'BELONGS_TO' } },
+      },
+      { tags: ['edges'] },
+    ),
+    enabled: securityId !== undefined && securityId !== '',
+  });
+
+  const concepts = useQuery(
+    api.queryOptions(
+      'get',
+      '/v1/secstore/nodes',
+      { params: { query: { record_type: 'CONCEPT', limit: 1000 } } },
+      { tags: ['nodes'], staleTime: 60_000 },
+    ),
+  );
+
+  return useMemo(() => {
+    if (edges.data === undefined || concepts.data === undefined) {
+      return [];
+    }
+
+    const classOf = new Map(
+      concepts.data.map((c) => [c.id, asText(c.attrs['concept_class'])]),
+    );
+
+    return edges.data.flatMap((edge) => {
+      const conceptClass = classOf.get(edge.dst_id);
+
+      return conceptClass === undefined || conceptClass === ''
+        ? []
+        : [{ conceptId: edge.dst_id, conceptClass }];
+    });
+  }, [edges.data, concepts.data]);
 }
 
 /**

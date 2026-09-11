@@ -9,20 +9,20 @@ import type { RelType, WeightBasis } from './vocabularies.ts';
  *
  * The generated forms cover "append a row to one store". Real curation does not
  * decompose that way, and the classification worksheet is the proof: one of its
- * rows is a SECURITY node plus a BELONGS_TO edge per classification level plus
- * an ISSUED_BY edge plus a HAS_UNDERLYING edge — five appends across two stores,
+ * rows is a SECURITY node plus its instrument-type membership plus a subtype
+ * plus an issuer plus a look-through leg — several writes across two stores,
  * which a curator thinks of as *one* decision about one instrument.
  *
  * So a workflow is its own schema over the *decision*, and it fans out to
  * appends on submit. Two consequences that matter:
  *
- * 1. **It is not atomic here.** The contract has no batch endpoint, so the
- *    workflow issues appends in sequence and reports which one failed. That is
- *    survivable because every append is independently valid and the store is
- *    append-only — a half-applied classification is an under-curated node, which
- *    `node_validity` already models, not a corrupt one. It is still the wrong
- *    long-run answer, and a transactional endpoint is the fix. Named here so it
- *    is a decision rather than an omission.
+ * 1. **Replacing a membership is one call; adding one is another.** A
+ *    classification landing where none existed is a bare append; one replacing
+ *    an existing membership is a re-point — close the old window, open the new —
+ *    which the server does atomically because the halves are unsafe to compose
+ *    client-side. The remaining fan-out is still sequential with no batch
+ *    endpoint, survivable only because each write is independently valid and a
+ *    half-classified node is under-curated rather than corrupt.
  * 2. **The narrowing is dynamic.** `security_type` is legal only under the
  *    chosen `asset_class`, so its picker's scope depends on a sibling field's
  *    value — something static `ui()` metadata cannot express. That is what
@@ -96,9 +96,9 @@ export const classifySecurity = z
     const v = ctx.value;
     checkProvenance(v, ctx);
 
-    // A subtype without a type is a level-3 membership hanging off nothing:
-    // BELONGS_TO is `1_per_class` and the taxonomy is a chain, so skipping a
-    // level leaves the closure unable to place the node.
+    // A subtype qualifies a type — FIAT_BACKED says what kind of STABLECOIN —
+    // so one without the other places the node in a class whose meaning depends
+    // on a membership it does not hold.
     if (v.security_subtype !== undefined && v.security_type === undefined) {
       ctx.issues.push({
         code: 'custom',
@@ -119,7 +119,13 @@ export const classifySecurity = z
     }
   });
 
-/** One append the workflow will issue, in order. */
+/**
+ * One write the workflow will issue, in order.
+ *
+ * `open` is a bare append; `repoint` closes an existing window and opens the new
+ * one in a single server call. Which of the two a classification becomes depends
+ * entirely on whether the node already has a membership in that concept class.
+ */
 export type PlannedAppend = {
   label: string;
   relType: RelType;
@@ -127,6 +133,8 @@ export type PlannedAppend = {
   dstId: string;
   weight?: string;
   weightBasis?: WeightBasis;
+  /** Present when this replaces a current edge: the target being closed. */
+  replaces?: string;
 };
 
 /**
@@ -148,43 +156,79 @@ export type PlannableClassification = {
   underlying_security_id?: string | undefined;
 };
 
+/** A membership the node already holds, with the class it occupies. */
+export type CurrentMembership = {
+  conceptId: string;
+  conceptClass: string;
+};
+
 /**
- * The appends a classification decision becomes.
+ * The writes a classification decision becomes.
  *
- * Kept as a pure function so the screen can *show* the plan before running it.
- * That preview is the mitigation for the non-atomicity above: a curator who can
- * see five appends listed understands what a partial failure would leave behind,
- * where a single "Save" button would imply a transaction that does not exist.
+ * **One `BELONGS_TO` into the instrument-type taxonomy, not one per level.**
+ * ADR-0007 is explicit: *"Asset class, type and subtype are not columns: they are
+ * walked from one `BELONGS_TO` through `NARROWER_THAN`"*, and GQ-13 flags a node
+ * holding more than one membership per concept class. So the asset-class picker
+ * is a *narrowing control* for choosing the type — it scopes the subtree — and
+ * only the most specific choice becomes an edge. The class above it is derived
+ * by walking up, and storing it too would be the second, staler answer the ADR
+ * warns about.
+ *
+ * The subtype is a separate concept class (`instrument_subtype`), so it is a
+ * second edge rather than a third level of the same one.
+ *
+ * Kept pure so the screen can *show* the plan before running it — which is what
+ * makes the difference between an open and a re-point visible before it happens.
  */
 export function planClassification(
   value: PlannableClassification,
+  current: readonly CurrentMembership[] = [],
 ): PlannedAppend[] {
   const planned: PlannedAppend[] = [];
 
-  if (value.security_id === undefined || value.security_id === '') {
+  // Bound once so the closure below keeps the narrowing.
+  const srcId = value.security_id;
+  if (srcId === undefined || srcId === '') {
     return planned;
   }
 
-  for (const [level, conceptId] of [
-    ['asset class', value.asset_class],
-    ['type', value.security_type],
-    ['subtype', value.security_subtype],
-  ] as const) {
-    if (conceptId !== undefined) {
-      planned.push({
-        label: `BELONGS_TO — ${level}`,
-        relType: 'BELONGS_TO',
-        srcId: value.security_id,
-        dstId: conceptId,
-      });
+  const membership = (
+    conceptClass: string,
+    chosen: string | undefined,
+    label: string,
+  ) => {
+    if (chosen === undefined) {
+      return;
     }
-  }
+
+    const held = current.find((m) => m.conceptClass === conceptClass);
+    if (held?.conceptId === chosen) {
+      return;
+    }
+
+    planned.push({
+      label: held === undefined ? `BELONGS_TO — ${label}` : `Re-point ${label}`,
+      relType: 'BELONGS_TO',
+      srcId,
+      dstId: chosen,
+      ...(held !== undefined && { replaces: held.conceptId }),
+    });
+  };
+
+  // The most specific instrument-type choice wins; the asset class only scoped
+  // the search that produced it.
+  membership(
+    'instrument_type',
+    value.security_type ?? value.asset_class,
+    'instrument type',
+  );
+  membership('instrument_subtype', value.security_subtype, 'subtype');
 
   if (value.issuer_entity_id !== undefined) {
     planned.push({
       label: 'ISSUED_BY — issuer',
       relType: 'ISSUED_BY',
-      srcId: value.security_id,
+      srcId,
       dstId: value.issuer_entity_id,
     });
   }
@@ -193,7 +237,7 @@ export function planClassification(
     planned.push({
       label: 'HAS_UNDERLYING — look-through',
       relType: 'HAS_UNDERLYING',
-      srcId: value.security_id,
+      srcId,
       dstId: value.underlying_security_id,
       // A single underlying takes the whole value. A basket would need one edge
       // per leg with weights summing to 1 under VALUE, which is a different
