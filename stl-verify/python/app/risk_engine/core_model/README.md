@@ -129,7 +129,7 @@ All parameters can be overridden via environment variables when running the cron
 The calibrator performs a grid search over GARCH-family specifications, each tested with Normal, Student-t, and Skewed-t innovations. The winning model is selected by **BIC** and must:
 
 1. Pass residual diagnostics: Ljung-Box on standardised residuals and squared residuals, plus ARCH-LM test
-2. Pass rolling VaR backtests: **Kupiec** (unconditional coverage) and **Christoffersen** (conditional coverage / independence) at a fixed `backtest_alpha = 0.05` tail (the upstream default, not derived from `PERC`; whether the gate should follow `PERC` instead is an open question — see the VEC-766 PR)
+2. Pass rolling VaR backtests: **Kupiec** (unconditional coverage) and **Christoffersen** (conditional coverage / independence) at a fixed `backtest_alpha = 0.05` tail, independent of `PERC` (the convention upstream always ran; its doc's `1 − PERC` claim was never implemented, and 5% gives the tests roughly twice the expected hits of 0.025)
 
 Models tested (in order of preference):
 
