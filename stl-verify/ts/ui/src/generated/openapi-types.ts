@@ -672,7 +672,7 @@ export interface components {
     AllocationActivityBucketResponse: {
       /**
        * Balance Usd
-       * @description Position value in USD read from each bucket's own recorded state, present only when `series=balance`. Unlike `net_flow_usd` this needs no client-side reconstruction and no anchor, so it is valid for a window that does not end at now. It is also a different measure: true mark-to-market rather than cost basis, so a share-price move on a receipt token appears here even in a bucket with no transaction, and yield accrual is included. Valued as COALESCE(underlying_value, balance) x the registry underlying's latest oracle price, refusing any row whose own underlying diverges from the registry's. Null on `series=flow`.
+       * @description Position value in USD read from each bucket's own recorded state, present only when `series=balance`. Unlike `net_flow_usd` this needs no client-side reconstruction and no anchor, so it is valid for a window that does not end at now. It is also a different measure: true mark-to-market rather than cost basis, so a share-price move on a receipt token appears here even in a bucket with no transaction, and yield accrual is included. Valued as COALESCE(underlying_value, balance) x the registry underlying's latest oracle price, refusing any row whose own underlying diverges from the registry's. Null on `series=flow`. Totals only the positions this bucket can price -- compare `priced_entity_count` with `entity_count` before treating it as complete.
        * @example 3280541138.58
        */
       balance_usd?: string | null;
@@ -682,6 +682,12 @@ export interface components {
        * @description Inclusive start of the time bucket (UTC).
        */
       bucket_start: string;
+      /**
+       * Entity Count
+       * @description How many positions the bucket knows about, present only when `series=balance`. Equal to `priced_entity_count` when the total is complete, and greater when some position could not be priced -- pricing is all-or-nothing per token, so one token without an enabled oracle makes every position in it unpriceable. Counts only positions observed at or before this bucket, so a leading bucket reports 0 rather than treating a position that does not exist yet as missing. Null on `series=flow`.
+       * @example 58
+       */
+      entity_count?: number | null;
       /**
        * Event Count
        * @description Number of activity events in the bucket. Null on `series=balance`, which does not compute it.
@@ -694,6 +700,12 @@ export interface components {
        * @example 1234567.89
        */
       net_flow_usd?: string | null;
+      /**
+       * Priced Entity Count
+       * @description How many of the bucket's positions `balance_usd` accounts for, present only when `series=balance`. A position counts when its most recent recorded state could be priced; one carrying only an older price, superseded by a newer state that cannot be priced, does not. Null on `series=flow`.
+       * @example 31
+       */
+      priced_entity_count?: number | null;
       /**
        * Total Tx Amount
        * @description Sum of `tx_amount` across the bucket's events, serialized as a JSON string. Null on `series=balance`, which does not compute it.
