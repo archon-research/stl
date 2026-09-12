@@ -15,8 +15,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.prime_debt_repository import PrimeDebtRepository
-from app.domain.entities.allocation import EthAddress
-from tests.integration.seed import insert_allocation_position, insert_token
+from app.adapters.postgres.prime_resolver_repository import PrimeResolverRepository
 
 _WINDOW_START = datetime(2026, 8, 19, 0, 0, tzinfo=timezone.utc)
 _OBSERVED = _WINDOW_START + timedelta(hours=2)
@@ -48,7 +47,7 @@ async def seeded(db_url: str):
         prime_id = cast(
             int,
             await conn.fetchval(
-                "INSERT INTO prime (name, vault_address) VALUES ($1, $2) RETURNING id",
+                "INSERT INTO prime (prime_key, name, vault_address) VALUES ('prm_t_' || $1, $1, $2) RETURNING id",
                 _PRIME_NAME,
                 _PRIME_ADDRESS,
             ),
@@ -64,7 +63,7 @@ async def seeded(db_url: str):
 async def _buckets(async_db_url: str, prime_id: int, *, hours: int = 6):
     engine = create_async_engine(async_db_url)
     try:
-        repository = PrimeDebtRepository(engine)
+        repository = PrimeDebtRepository(engine, PrimeResolverRepository(engine))
         return await repository.list_reference_debt_buckets(
             prime_id,
             from_timestamp=_WINDOW_START,
@@ -146,48 +145,3 @@ async def test_reads_the_prime_by_its_resolved_id(seeded, async_db_url: str):
     buckets = await _buckets(async_db_url, prime_id)
 
     assert any(b.debt_wad is not None for b in buckets)
-
-
-@pytest.mark.asyncio(loop_scope="module")
-async def test_resolve_prime_id_prefers_a_vault_address_over_a_matching_proxy(seeded, async_db_url: str):
-    conn, _ = seeded
-    address = bytes.fromhex("7b" * 20)
-    token_id = await insert_token(conn, "PRIME-DEBT-RESOLVE", 18, bytes.fromhex("7c" * 20))
-    vault_prime_id = cast(
-        int,
-        await conn.fetchval(
-            "INSERT INTO prime (name, vault_address) VALUES ('prime_debt_vault_match', $1) RETURNING id",
-            address,
-        ),
-    )
-    proxy_prime_id = cast(
-        int,
-        await conn.fetchval(
-            "INSERT INTO prime (name, vault_address) VALUES ('prime_debt_proxy_match', $1) RETURNING id",
-            bytes.fromhex("7d" * 20),
-        ),
-    )
-    try:
-        await insert_allocation_position(
-            conn,
-            token_id=token_id,
-            prime_id=proxy_prime_id,
-            proxy_hex=address.hex(),
-            balance=1,
-            block=1,
-            tx="7e" * 32,
-            direction="in",
-        )
-        engine = create_async_engine(async_db_url)
-        try:
-            resolved_id = await PrimeDebtRepository(engine).resolve_prime_id(EthAddress("0x" + address.hex()))
-        finally:
-            await engine.dispose()
-
-        assert resolved_id == vault_prime_id
-    finally:
-        await conn.execute("DELETE FROM allocation_position WHERE prime_id = $1", proxy_prime_id)
-        # prime_proxy FKs prime, so the identity rows go before the primes do.
-        await conn.execute("DELETE FROM prime_proxy WHERE prime_id = $1", proxy_prime_id)
-        await conn.execute("DELETE FROM prime WHERE id = ANY($1::bigint[])", [vault_prime_id, proxy_prime_id])
-        await conn.execute("DELETE FROM token WHERE id = $1", token_id)

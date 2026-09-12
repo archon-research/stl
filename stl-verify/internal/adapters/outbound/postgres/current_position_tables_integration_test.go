@@ -145,8 +145,8 @@ func (f *currentTablesFixture) seedRegistries(t *testing.T, ctx context.Context)
 	}
 
 	if err := currentTablesPool.QueryRow(ctx,
-		`INSERT INTO prime (name, vault_address)
-		 VALUES ('CurrentTablesTest', '\x5151515151515151515151515151515151515151'::bytea)
+		`INSERT INTO prime (prime_key, name, vault_address)
+		 VALUES ('prm_t_current_tables_test', 'current_tables_test', '\x5151515151515151515151515151515151515151'::bytea)
 		 ON CONFLICT (name) DO UPDATE SET vault_address = EXCLUDED.vault_address
 		 RETURNING id`).Scan(&f.primeID); err != nil {
 		t.Fatalf("seed prime: %v", err)

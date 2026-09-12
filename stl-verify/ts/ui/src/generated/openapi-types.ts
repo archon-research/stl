@@ -2704,7 +2704,7 @@ export interface operations {
       };
       header?: never;
       path: {
-        /** @description Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses — this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`. */
+        /** @description Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses — this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`. Results are whole-prime: passing a proxy address returns the entire prime, including the chains that proxy has nothing to do with. */
         prime_id: string;
       };
       cookie?: never;

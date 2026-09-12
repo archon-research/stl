@@ -236,7 +236,8 @@ async def _seed(db_url: str) -> None:
             # bucket — +100 in, -40 out, and a 1000 sweep that must net to zero.
             # aUSDC's underlying USDC is priced at 1 USD, so net_flow_usd == 60.
             flow_prime_id = await conn.fetchval(
-                "INSERT INTO prime (name, vault_address) VALUES ('flow_test', $1) RETURNING id",
+                "INSERT INTO prime (prime_key, name, vault_address) "
+                "VALUES ('prm_t_flow_test', 'flow_test', $1) RETURNING id",
                 bytes.fromhex(_FLOW_PRIME_VAULT_HEX),
             )
             for offset, (tx, direction, amount) in enumerate(
@@ -266,7 +267,8 @@ async def _seed(db_url: str) -> None:
             # wrapper, so the flow is excluded from net_flow_usd (== 0) even
             # though the events are still counted.
             direct_flow_prime_id = await conn.fetchval(
-                "INSERT INTO prime (name, vault_address) VALUES ('direct_flow_test', $1) RETURNING id",
+                "INSERT INTO prime (prime_key, name, vault_address) "
+                "VALUES ('prm_t_direct_flow_test', 'direct_flow_test', $1) RETURNING id",
                 bytes.fromhex(_DIRECT_FLOW_PRIME_VAULT_HEX),
             )
             for offset, (tx, direction, amount) in enumerate(

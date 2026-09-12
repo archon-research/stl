@@ -14,6 +14,7 @@ from app.auth.jwt import JwksUnavailable, Principal, TokenError
 from app.config import Settings, get_settings
 from app.domain.entities.allocation import EthAddress, as_address
 from app.logging import get_logger
+from app.ports.prime_resolver import PrimeResolver
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.ports.reference_capital_repository import ReferenceCapitalRepository
 from app.risk_engine.suraf.result import SurafResult
@@ -404,6 +405,15 @@ def get_model_registry(request: Request) -> ModelRegistry:
 def get_receipt_token_lookup(request: Request) -> ReceiptTokenLookup:
     """Extract the receipt-token lookup built at startup."""
     return request.app.state.receipt_token_lookup
+
+
+def get_prime_resolver(request: Request) -> PrimeResolver:
+    """Extract the prime resolver built at startup.
+
+    Routes take the port from here rather than constructing the adapter, so a
+    prime-scoped route never names a concrete infrastructure class.
+    """
+    return request.app.state.prime_resolver
 
 
 def get_reference_risk_capital_service_factory(

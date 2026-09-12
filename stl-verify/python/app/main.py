@@ -21,6 +21,7 @@ from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingRea
 from app.adapters.postgres.engine import create_db_engine
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.morpho_vault_allocations_reader import PostgresMorphoVaultAllocationsReader
+from app.adapters.postgres.prime_resolver_repository import PrimeResolverRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
 from app.adapters.postgres.reference_as_of import pinned_to
 from app.api.deps import require_analyst, require_viewer
@@ -276,6 +277,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             app.state.crypto_lending_risk_service = crypto_lending_risk_service
             app.state.model_registry = model_registry
             app.state.receipt_token_lookup = receipt_token_repo
+            app.state.prime_resolver = PrimeResolverRepository(engine)
 
             # Beside the engine so it is disposed in the same finally. Absent
             # from app.state when auth is off, which the gates read as anonymous.

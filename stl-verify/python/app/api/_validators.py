@@ -39,6 +39,13 @@ from app.domain.entities.allocation import EthAddress
 TX_HASH_PATTERN = r"^(?:0[xX])?[0-9a-fA-F]{64}$"
 """Ethereum transaction hash pattern. Accepts optional 0x/0X prefix followed by 64 hex chars."""
 
+PRIME_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,62}$"
+"""Prime name slug, mirrored by the `prime_name_is_a_slug` CHECK so an unaddressable name cannot exist.
+
+An address without its ``0x`` prefix is all-hex and so matches this, resolving as a name
+that exists nowhere; the published description asks for the prefix.
+"""
+
 
 def _validate_eth_address(value: str) -> str:
     """Validate ``value`` as an EVM address; raises ``ValueError`` -> 422.
@@ -47,6 +54,19 @@ def _validate_eth_address(value: str) -> str:
     an :class:`EthAddress` instance call ``EthAddress(value)`` themselves.
     """
     EthAddress(value)  # raises ValueError on malformed input
+    return value
+
+
+def _validate_prime_identifier(value: str) -> str:
+    """Validate a prime name or address; raises ``ValueError`` -> 422.
+
+    An ``0x`` prefix commits the value to being an address, so a malformed one is
+    rejected here rather than resolving to nothing and reporting 404.
+    """
+    if value.lower().startswith("0x"):
+        return _validate_eth_address(value)
+    if not re.fullmatch(PRIME_NAME_PATTERN, value):
+        raise ValueError(f"Invalid prime identifier: {value}")
     return value
 
 
@@ -98,11 +118,11 @@ ProxyAddressPathParam = Annotated[
         )
     ),
 ]
-"""Path-param type for the ``{prime_id}`` segment, which accepts a proxy address.
+"""Path-param type for a ``{prime_id}`` segment that accepts a proxy address only.
 
-The segment cannot be renamed without breaking every generated client, so the
-description carries the correction instead. Endpoints that resolve the prime and
-so accept either identity use ``PrimeOrProxyAddressPathParam``.
+The segment name is load-bearing: ``require_prime_view`` reads ``prime_id`` out of
+``request.path_params`` by literal name, so renaming it turns the per-resource authz
+check into a silent no-op. The description carries the correction instead.
 """
 
 PrimeOrProxyAddressPathParam = Annotated[
@@ -112,15 +132,38 @@ PrimeOrProxyAddressPathParam = Annotated[
         description=(
             "Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses — "
             "this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; "
-            "the vault address is their shared `prime_vault_address`."
+            "the vault address is their shared `prime_vault_address`. Results are whole-prime: "
+            "passing a proxy address returns the entire prime, including the chains that proxy "
+            "has nothing to do with."
         )
     ),
 ]
-"""Path-param type for a ``{prime_id}`` segment that resolves either identity.
+"""Path-param type for a ``{prime_id}`` segment that resolves either address.
 
-Validation is identical to ``ProxyAddressPathParam``; only the published
-description differs, so an endpoint matching on the prime rather than the proxy
-does not advertise the narrower contract.
+Validation is identical to ``ProxyAddressPathParam``; only the published description
+differs, so an endpoint matching on the prime does not advertise the narrower contract.
+"""
+
+
+PrimeIdentifierPathParam = Annotated[
+    str,
+    AfterValidator(_validate_prime_identifier),
+    Path(
+        description=(
+            "A prime, named by any of four forms: its **name** (preferred, e.g. `spark`), its "
+            "vault address, or any of its ALM proxy or SubProxy addresses. Addresses must carry "
+            "the `0x` prefix. All four resolve to the same prime, silently and with no redirect. "
+            "**Results are always whole-prime**: passing a proxy address returns the entire "
+            "prime, including the chains that proxy has nothing to do with."
+        ),
+        examples=["spark"],
+    ),
+]
+"""Path-param type for a ``{prime_id}`` segment resolved by ``resolve_prime``.
+
+Not yet adopted by any route, and adopting it takes more than swapping the annotation:
+``check_prime_view`` parses the segment as an address before the route validator runs, so
+a name reaches it as a 422. The gate has to resolve through ``PrimeResolver`` first.
 """
 
 OptionalEthAddressParam = Annotated[str | None, AfterValidator(_validate_optional_eth_address)]

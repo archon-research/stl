@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.prime_debt_repository import PrimeDebtRepository
 from app.api._validators import PrimeOrProxyAddressPathParam
-from app.api.deps import get_engine, require_prime_view
+from app.api.deps import get_engine, get_prime_resolver, require_prime_view
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
@@ -24,6 +24,7 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery
+from app.ports.prime_resolver import PrimeResolver
 from app.services.prime_debt_service import PrimeDebtService
 
 router = APIRouter(tags=["primes"])
@@ -127,8 +128,11 @@ class PrimeDebtEnvelope(
     """Prime debt response: raw snapshots or aggregated time buckets."""
 
 
-async def _get_prime_debt_service(engine: AsyncEngine = Depends(get_engine)) -> PrimeDebtService:
-    return PrimeDebtService(PrimeDebtRepository(engine))
+async def _get_prime_debt_service(
+    engine: AsyncEngine = Depends(get_engine),
+    primes: PrimeResolver = Depends(get_prime_resolver),
+) -> PrimeDebtService:
+    return PrimeDebtService(PrimeDebtRepository(engine, primes))
 
 
 @router.get(
