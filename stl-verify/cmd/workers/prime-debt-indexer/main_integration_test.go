@@ -198,6 +198,13 @@ func mockVatRPC(t *testing.T) *httptest.Server {
 // SQS helpers
 // ---------------------------------------------------------------------------
 
+// testBlockTime is the on-chain timestamp of the first enqueued block; later
+// blocks advance by one slot, as they do on chain. Snapshots are stamped with
+// it, so blocks sharing a wall-clock second must still land on distinct
+// synced_at values.
+const testBlockTime int64 = 1750000000
+const testSlotSeconds int64 = 12
+
 // enqueueBlockEvents sends block events to the mock SQS server.
 func enqueueBlockEvents(t *testing.T, sqsState *testutil.MockSQSServer, startBlock int64, count int, chainID int64) {
 	t.Helper()
@@ -208,7 +215,7 @@ func enqueueBlockEvents(t *testing.T, sqsState *testutil.MockSQSServer, startBlo
 			Version:        0,
 			BlockHash:      fmt.Sprintf("0x%064x", startBlock+int64(i)),
 			ParentHash:     fmt.Sprintf("0x%064x", startBlock+int64(i)-1),
-			BlockTimestamp: time.Now().Unix(),
+			BlockTimestamp: testBlockTime + int64(i)*testSlotSeconds,
 			ReceivedAt:     time.Now(),
 		}
 		body, err := json.Marshal(event)
