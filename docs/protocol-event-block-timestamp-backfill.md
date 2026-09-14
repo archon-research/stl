@@ -1,9 +1,20 @@
-# protocol_event.block_timestamp backfill (VEC-711)
+---
+title: Backfilling protocol_event.block_timestamp - Operator Guide
+audience: [developers, operators, ai-agents]
+repo: stl
+applies_to: stl-verify
+ticket: VEC-711
+related_docs:
+  - docs/adr/0005-time-series-api-surface.md   # why the series needs an event-time column
+---
 
-`protocol_event.block_timestamp` is added by
-`20260911_120000_add_block_timestamp_to_protocol_event.sql` as a nullable column. Population runs
-**out of band on staging, then prod** — a 14M-row `UPDATE` over compressed chunks does not belong in
-the migrator's single transaction, the same reason VEC-491 kept `block_meta` DDL-only.
+# Backfilling `protocol_event.block_timestamp`
+
+One-time repair. `protocol_event.block_timestamp` is added by
+`20260911_120000_add_block_timestamp_to_protocol_event.sql` as a nullable column; every row that
+predates the migration is NULL. Population runs **out of band on staging, then prod** — an
+`UPDATE` of that size over compressed chunks does not belong in the migrator's single transaction,
+the same reason VEC-491 kept `block_meta` DDL-only.
 
 Every step below is an in-place `UPDATE` on an ingest table, which `stl-verify/db/migrations/AGENTS.md`
 requires the team to sanction before it runs. It is a one-time operator repair of a column that
@@ -26,21 +37,35 @@ SET timescaledb.enable_tiered_reads = 'on';
 
 ## Where the two cohorts come from
 
-Every indexer sets `created_at` to the block-header timestamp, and has since 2026-04-14 — the
-watcher's SNS envelope carries the block time and all four writers (`aavelike_position_tracker`,
-`morpho_indexer`, `dexconsumer`, and anything else reaching `EventRepository`) pass it through. Rows
-written before that date were left to the column's `DEFAULT NOW()` and hold ingest time instead.
+Every indexer passes the block-header timestamp into `entity.NewProtocolEvent`, which rejects a zero
+value, so `created_at` on a row written today *is* event time. That has held since VEC-80 (#191,
+2026-04-14) made the field an explicit constructor argument; before it, `created_at` was left to its
+`DEFAULT NOW()` and holds ingest time.
 
 The two are told apart without a join: a block-header timestamp is whole-second, `NOW()` is not.
-Ingest-time rows are the ones where `created_at <> date_trunc('second', created_at)`. Confirm the
-boundary before relying on it, and use the date it reports (not the one above) in Step 1:
+Re-measure both cohorts before running anything — the numbers below are the prod measurement taken
+when this doc was written, not an invariant:
 
 ```sql
-SELECT max(created_at) FROM protocol_event
-WHERE created_at <> date_trunc('second', created_at);
+SELECT count(*) FILTER (WHERE created_at =  date_trunc('second', created_at)) AS whole_sec,
+       count(*) FILTER (WHERE created_at <> date_trunc('second', created_at)) AS sub_sec,
+       min(created_at) FILTER (WHERE created_at <> date_trunc('second', created_at)) AS first_subsec,
+       max(created_at) FILTER (WHERE created_at <> date_trunc('second', created_at)) AS last_subsec
+FROM protocol_event;
 ```
 
-## Step 1 — the rows created_at already dates (no external source needed)
+At the time of writing that reported 15.0M whole-second rows against 1.2M sub-second ones, the
+latter confined to `2026-02-18 14:23:15.93Z .. 2026-04-14 12:02:18.12Z`. Rows older than that
+window are whole-second too: they were written by backfillers that always supplied block time.
+
+Spot-checked against mainnet before relying on the split:
+
+| Row | Stored `created_at` | Block-header time | Verdict |
+| --- | --- | --- | --- |
+| block 24558876 (whole-second) | `2026-03-01 00:01:47Z` | `2026-03-01 00:01:47Z` | event time |
+| block 24659163 (sub-second) | `2026-03-14 23:59:59.xx`+2.4s and +2.6s, two rows | `2026-03-14 23:59:59Z` | ingest time — one block cannot have two header times |
+
+## Step 1 — the whole-second rows (no external source needed)
 
 For every row a writer set explicitly, `created_at` *is* the block timestamp, so the copy is local.
 Idempotent, and restartable: re-running it skips what it already wrote.
@@ -49,21 +74,22 @@ Run it one chunk-window at a time — a single statement over the whole table de
 chunk at once. Window on `created_at`, the partition key, and as a **literal**, never a bind
 parameter, or the planner builds paths for every chunk.
 
-The whole-second predicate is not redundant with the date window: it is what stops an operator who
-mis-set the boundary from stamping ingest time as event time. Step 3 counts only NULLs, so a row
-dated wrongly here is never surfaced again.
+The whole-second predicate is what carries the claim; the date window is only the chunk batching.
+A `NOW()` value that lands on an exact second passes it — at ~1e-6 of the sub-second cohort, under
+one row table-wide — so a stray ingest-time row surviving here is possible and will not be surfaced
+again: Step 3 counts only NULLs.
 
 ```sql
 UPDATE protocol_event
 SET block_timestamp = created_at
-WHERE created_at >= '2026-04-15' AND created_at < '2026-05-01'   -- advance one month per run
+WHERE created_at >= '2025-09-01' AND created_at < '2025-10-01'   -- advance one month per run
   AND created_at = date_trunc('second', created_at)
   AND block_timestamp IS NULL;
 ```
 
 Record wall-clock and chunk count per window; that is the cost the ticket asks for.
 
-## Step 2 — the pre-boundary rows (needs `block_meta`)
+## Step 2 — the sub-second rows (needs `block_meta`)
 
 These carry ingest time in `created_at`, so their event time has to come from
 `block_meta (chain_id, block_number, block_version) -> block_timestamp` (VEC-491). `block_meta` is
@@ -71,12 +97,13 @@ loaded out of band from the block headers in the S3 raw-block archive; covering 
 loader's work and a prerequisite of this step, not part of it. `block_states` alone cannot serve: it
 is a rolling ~1-month reorg window and holds none of these blocks.
 
-Size the residual first — it is the distinct-block count the `block_meta` load has to cover:
+Size the residual first — it is the distinct-block count the `block_meta` load has to cover, and at
+the time of writing it was ~242k mainnet and ~57k Avalanche blocks:
 
 ```sql
 SELECT chain_id, count(*) AS distinct_blocks
 FROM (SELECT DISTINCT chain_id, block_number, block_version FROM protocol_event
-      WHERE created_at < '2026-04-15'
+      WHERE created_at >= '2026-02-18' AND created_at < '2026-04-15'
         AND created_at <> date_trunc('second', created_at)) x
 GROUP BY 1 ORDER BY 1;
 ```
@@ -94,7 +121,7 @@ FROM (SELECT DISTINCT ON (chain_id, block_number, block_version)
       ORDER BY chain_id, block_number, block_version, processing_version DESC) bm
 WHERE bm.chain_id = pe.chain_id AND bm.block_number = pe.block_number
   AND bm.block_version = pe.block_version
-  AND pe.created_at >= '2026-02-01' AND pe.created_at < '2026-03-01'   -- advance one month per run
+  AND pe.created_at >= '2026-02-18' AND pe.created_at < '2026-03-01'   -- advance one month per run
   AND pe.block_timestamp IS NULL;
 ```
 
