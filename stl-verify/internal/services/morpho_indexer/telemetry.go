@@ -3,6 +3,7 @@ package morpho_indexer
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -49,6 +50,18 @@ func adapterTypeLabel(t *entity.MorphoAdapterType) string {
 	default:
 		return fmt.Sprintf("type_%d", int16(*t))
 	}
+}
+
+// discoveryBlockLabel renders the answer to
+// outbound.MorphoRepository.AdapterSetEnumeratedAt. Only the membership an Allocate
+// implies asks that question; every other source renders "not_applicable" rather than a
+// "false" that would read as a discovery gap, which
+// VectorMorphoV2LazyAdapterRegistrations counts exactly.
+func discoveryBlockLabel(atDiscoveryBlock *bool) string {
+	if atDiscoveryBlock == nil {
+		return "not_applicable"
+	}
+	return strconv.FormatBool(*atDiscoveryBlock)
 }
 
 // Telemetry provides OpenTelemetry metrics and tracing for the Morpho indexer.
@@ -257,7 +270,7 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 // redelivery repeats every visibility timeout while a block stays stuck — cannot
 // inflate it. observed_via mirrors the DB column of the same name; adapter.type
 // is "unprobed" when the observation carried no probe.
-func (t *Telemetry) RecordAdapterMembershipObservation(ctx context.Context, adapterType *entity.MorphoAdapterType, observedVia entity.MembershipSource) {
+func (t *Telemetry) RecordAdapterMembershipObservation(ctx context.Context, adapterType *entity.MorphoAdapterType, observedVia entity.MembershipSource, atDiscoveryBlock *bool) {
 	if t == nil {
 		return
 	}
@@ -265,6 +278,7 @@ func (t *Telemetry) RecordAdapterMembershipObservation(ctx context.Context, adap
 		t.chainAttr,
 		attribute.String("adapter.type", adapterTypeLabel(adapterType)),
 		attribute.String("observed_via", string(observedVia)),
+		attribute.String("at_discovery_block", discoveryBlockLabel(atDiscoveryBlock)),
 	))
 }
 

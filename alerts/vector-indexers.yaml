@@ -898,29 +898,29 @@ groups:
         # An Allocate / Deallocate proves its adapter is in the vault's set, so
         # when the membership log has no answer at that position we record the
         # membership it implies rather than poison the FIFO queue. That is
-        # correct — but it is also the tell for a discovery gap, because vault
-        # discovery enumerates the vault's CURRENT adapter set and records every
-        # entry. Once a vault is discovered the log already answers, and since
-        # the counter only counts observations that were actually APPENDED, the
-        # steady-state rate of observed_via="allocation_event" is zero rather
-        # than one per allocation.
+        # correct — but on its own it does not say whether the enumeration is
+        # broken, because ONE benign source appends too.
         #
-        # It also costs data quality: an adapter known only from an Allocate has
-        # no add_adapter_event observation at all, so MIN(block_number) FILTER
+        # That source is a vault discovered in the block it allocates in.
+        # Discovery records its enumeration at log_index=EndOfBlockLogIndex
+        # (MaxInt32) so it orders above every log in the discovery block, while
+        # the membership read is position-scoped ((block, version, log_index) <=
+        # …). A VaultV2 emits AccrueInterest — the discovery trigger — first in
+        # the very transaction that allocates, so every allocation in that same
+        # block reads strictly BELOW the seed, finds no answer and appends. One
+        # append per adapter allocated in the discovery block, deterministically,
+        # not a race.
+        #
+        # at_discovery_block splits the two apart at the source: the indexer asks
+        # whether an end-of-block enumeration for that adapter exists at that
+        # block and labels the append "true" or "false". This rule reads "false"
+        # only, which is why the comparison is >0 — the rate the runbook states
+        # steady state should be.
+        #
+        # A "false" append also costs data quality: the adapter has no
+        # add_adapter_event observation at all, so MIN(block_number) FILTER
         # (WHERE observed_via = 'add_adapter_event') is NULL for it until its
         # history is replayed.
-        #
-        # >3 per 6h absorbs the benign source without going blind on a real
-        # enumeration regression. That source is DETERMINISTIC, not a race:
-        # discovery records its enumeration at log_index=EndOfBlockLogIndex
-        # (MaxInt32) so it orders above every log in the discovery block, while the
-        # membership read is position-scoped ((block, version, log_index) <= …). A
-        # VaultV2 emits AccrueInterest — the discovery trigger — first in the very
-        # transaction that allocates, so every allocation in that same block reads
-        # strictly BELOW the seed, finds no answer and appends. One append per
-        # adapter allocated in the discovery block, every time; nothing has to have
-        # changed between two reads. Deliberately not >0: those appends are by
-        # design not an incident.
         #
         # THE REPLAY WORKERS ARE EXCLUDED — the group note above has the matcher
         # and why every rule here carries it.
@@ -933,9 +933,9 @@ groups:
         expr: |
           sum by (chain, cluster) (
             increase(morpho_v2_adapter_registrations_total{
-              observed_via="allocation_event", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
+              observed_via="allocation_event", at_discovery_block="false", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
             }[6h])
-          ) > 3
+          ) > 0
         for: 30m
         labels:
           team: vector
@@ -943,15 +943,16 @@ groups:
           component: morpho-indexer
           namespace: vector
         annotations:
-          summary: "Vector morpho VaultV2 lazily registering adapters on {{ $labels.chain }}"
+          summary: "Vector morpho VaultV2 enumeration missed adapters on {{ $labels.chain }}"
           description: |
             The live morpho indexer for chain `{{ $labels.chain }}` self-healed
-            `{{ $value | printf "%.0f" }}` VaultV2 adapters in 6h — each one was
-            named by a vault event but missing from the registry. Discovery seeds
-            a vault's whole adapter set, so a sustained rate here means the
-            enumeration is missing adapters or vaults are being discovered
-            incompletely. Affected adapters have no add block at all until their
-            history is replayed.
+            `{{ $value | printf "%.0f" }}` VaultV2 adapters in 6h that its vault's
+            set enumeration never covered — each was named by a vault event, was
+            missing from the registry, and was NOT in a vault being discovered in
+            that same block. Discovery seeds a vault's whole adapter set, so every
+            one of these means the enumeration missed an adapter or a vault was
+            discovered incompletely. Affected adapters have no add block at all
+            until their history is replayed.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphov2lazyadapterregistrations
 
       - alert: VectorMorphoV2ForceDeallocateSurge
