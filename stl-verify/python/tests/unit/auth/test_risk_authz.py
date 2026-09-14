@@ -353,3 +353,40 @@ def test_an_untracked_holder_and_a_caller_named_unknown_prime_answer_identically
 
     assert pool.status_code == named.status_code == 404
     assert pool.content == named.content
+
+
+@pytest.mark.parametrize("path", POOL_ROUTES)
+def test_the_two_denials_a_pool_caller_can_provoke_are_indistinguishable(monkeypatch, path):
+    """The pair that actually matters, and the one the test above does not
+    compare: on the SAME route, an untracked holder (denied with no OpenFGA
+    call at all) against a tracked holder the caller may not view (denied after
+    one). Different reasons, different work done, one response."""
+    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=None))
+    untracked_fga = _allow()
+    untracked_client, _ = _pool_client(fga=untracked_fga, principal=_principal())
+    untracked = untracked_client.get(path)
+
+    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=VAULT))
+    refused_fga = _deny()
+    refused_client, _ = _pool_client(fga=refused_fga, principal=_principal())
+    refused = refused_client.get(path)
+
+    untracked_fga.check.assert_not_awaited()
+    refused_fga.check.assert_awaited_once_with("user:u1", "can_view", f"prime:{VAULT}")
+    assert untracked.status_code == refused.status_code == 404
+    assert untracked.content == refused.content
+    assert untracked.headers.get("content-type") == refused.headers.get("content-type")
+
+
+@pytest.mark.parametrize("path", POOL_ROUTES)
+def test_a_pool_wide_share_still_leaves_a_decision_event(resolves_to_vault, caplog, path):
+    """The only allow this gate grants without a check. Unlogged it would be
+    the one /v1 read with no decision event at all, which is worse than the
+    unnamed deny this ticket set out to fix."""
+    client, _ = _pool_client(fga=_deny(), principal=_principal(), wallet=None)
+
+    with caplog.at_level(logging.INFO, logger="app.api.deps"):
+        assert client.get(path).status_code == 200
+
+    events = [r for r in caplog.records if getattr(r, "event", None) == deps.AUTHZ_EVENT]
+    assert [(r.decision, r.reason) for r in events] == [("allow", "pool_wide_share")]

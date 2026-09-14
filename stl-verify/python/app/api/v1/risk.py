@@ -18,6 +18,7 @@ from app.api.deps import (
     get_model_registry,
     get_principal,
     get_receipt_token_lookup,
+    log_auth_event,
     require_prime_view_body,
     require_prime_view_query,
 )
@@ -172,6 +173,13 @@ async def _authorized_pool_prime(
         # until holdings shift, and without its own reason that reads as an
         # outage (ORB-402). Response body unchanged — unknown ≡ unpermitted.
         await check_prime_view(request, principal, str(pool_prime), not_found_reason="holder_untracked")
+    elif principal is not None:
+        # The one path through this gate that allows without a check. Left
+        # silent it is the only /v1 read with no decision event at all, and the
+        # argument for naming the deny applies harder to an unlogged allow.
+        log_auth_event(
+            request, gate="prime", decision="allow", reason="pool_wide_share", status=200, principal=principal
+        )
     return pool_prime
 
 

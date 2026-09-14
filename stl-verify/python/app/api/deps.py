@@ -237,7 +237,17 @@ async def check_prime_view(
         )
         raise HTTPException(status_code=503, detail="prime lookup unavailable") from exc
     if vault is None:
-        log_auth_event(request, gate="prime", decision="deny", reason=not_found_reason, status=404, principal=principal)
+        # Name the prime: it parsed as an address above, and without it triage
+        # has to re-run the resolution to learn which holder was untracked.
+        log_auth_event(
+            request,
+            gate="prime",
+            decision="deny",
+            reason=not_found_reason,
+            status=404,
+            principal=principal,
+            resource=f"prime:{str(address).lower()}",
+        )
         raise HTTPException(status_code=404, detail=PRIME_DENIED_DETAIL)
     resource = f"prime:{vault.lower()}"
     try:
