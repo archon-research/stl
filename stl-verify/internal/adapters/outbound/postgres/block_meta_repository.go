@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -145,6 +144,32 @@ func (r *BlockMetaRepository) windowPredicates(ctx context.Context, table, partC
 	return out, nil
 }
 
+// enumerateWindow runs one arm over one window, in its own transaction, with tiered reads on.
+//
+// Four of the six source tables carry a one-year tiering policy. The chunk catalogue still lists a
+// tiered chunk, so a window would be built for it and then read with timescaledb.enable_tiered_reads
+// at its default of off — returning nothing, silently, for exactly the deep-tail blocks this loader
+// exists to cover. Nothing is a year old yet; this is set before that becomes true rather than after.
+// SET LOCAL, so it lasts the statement's transaction and no longer.
+func (r *BlockMetaRepository) enumerateWindow(ctx context.Context, arm workListArm, where string, chainID int64) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin enumeration of %s: %w", arm.table, err)
+	}
+	defer rollback(ctx, tx, r.logger)
+
+	if _, err := tx.Exec(ctx, `SET LOCAL timescaledb.enable_tiered_reads = on`); err != nil {
+		return fmt.Errorf("enabling tiered reads for %s: %w", arm.table, err)
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf(arm.sql, where), chainID); err != nil {
+		return fmt.Errorf("enumerating %s for chain %d: %w", arm.table, chainID, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing enumeration of %s: %w", arm.table, err)
+	}
+	return nil
+}
+
 // quoteTimestamp renders t as a literal PostgreSQL will read back exactly, in UTC.
 func quoteTimestamp(t time.Time) string {
 	return "'" + t.UTC().Format("2006-01-02 15:04:05.999999-07") + "'::timestamptz"
@@ -192,8 +217,8 @@ func (r *BlockMetaRepository) OpenWorkList(ctx context.Context, chainID int64, h
 			return nil, err
 		}
 		for _, where := range windows {
-			if _, err := r.pool.Exec(ctx, fmt.Sprintf(arm.sql, where), chainID); err != nil {
-				return nil, fmt.Errorf("enumerating %s for chain %d: %w", arm.table, chainID, err)
+			if err := r.enumerateWindow(ctx, arm, where, chainID); err != nil {
+				return nil, err
 			}
 		}
 		r.logger.Debug("work list arm enumerated", "table", arm.table, "chain", chainID, "windows", len(windows))
@@ -270,9 +295,6 @@ func (w *blockWorkList) Close(ctx context.Context) {
 	w.pool = nil
 }
 
-// blockMetaStageColumns are the block_meta columns the loader fills, in COPY/INSERT order.
-var blockMetaStageColumns = []string{"chain_id", "block_number", "block_version", "block_timestamp"}
-
 // Upsert COPYs the batch into a session-scoped TEMP table (dropped at commit) and then does a single
 // INSERT ... SELECT ... ON CONFLICT DO NOTHING. COPY is an order of magnitude faster than per-row
 // INSERTs at the millions-of-blocks scale of a full-history backfill, and folding the whole batch
@@ -287,44 +309,30 @@ func (r *BlockMetaRepository) Upsert(ctx context.Context, rows []outbound.BlockM
 		return 0, nil
 	}
 
-	// The three integer stage columns are bigint so pgx's CopyFrom binary encoding (which uses the
-	// destination column OIDs) matches the int64 row values exactly; block_timestamp is timestamptz.
-	// The INSERT below assignment-casts the integers down to block_meta's integer columns (chain_id,
-	// block_version).
-	copyRows := make([][]any, len(rows))
+	// One statement, no transaction and no temp table. A stage table per batch is ~2,000 creates and
+	// drops over chain 1's first pass, all of it catalogue churn, and the COPY it existed to enable
+	// buys nothing at 500 rows against S3 reads that dominate by three orders of magnitude.
+	numbers := make([]int64, len(rows))
+	versions := make([]int32, len(rows))
+	stamps := make([]time.Time, len(rows))
+	chainID := rows[0].ChainID
 	for i, row := range rows {
-		copyRows[i] = []any{row.ChainID, row.BlockNumber, int64(row.BlockVersion), row.BlockTimestamp}
+		if row.ChainID != chainID {
+			return 0, fmt.Errorf("batch mixes chains %d and %d; one run writes one chain", chainID, row.ChainID)
+		}
+		numbers[i] = row.BlockNumber
+		versions[i] = int32(row.BlockVersion)
+		stamps[i] = row.BlockTimestamp
 	}
 
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("begin tx: %w", err)
-	}
-	defer rollback(ctx, tx, r.logger)
-
-	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE block_meta_stage (
-		chain_id        bigint      NOT NULL,
-		block_number    bigint      NOT NULL,
-		block_version   bigint      NOT NULL,
-		block_timestamp timestamptz NOT NULL
-	) ON COMMIT DROP`); err != nil {
-		return 0, fmt.Errorf("create stage table: %w", err)
-	}
-
-	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"block_meta_stage"}, blockMetaStageColumns, pgx.CopyFromRows(copyRows)); err != nil {
-		return 0, fmt.Errorf("copy into stage: %w", err)
-	}
-
-	ct, err := tx.Exec(ctx, `
+	ct, err := r.pool.Exec(ctx, `
 INSERT INTO block_meta (chain_id, block_number, block_version, processing_version, block_timestamp, build_id, run_id)
-SELECT chain_id, block_number, block_version, 0, block_timestamp, $1, $2 FROM block_meta_stage
-ON CONFLICT (chain_id, block_number, block_version, processing_version) DO NOTHING`, int32(r.buildID), int64(r.runID))
+SELECT $1, s.n, s.v, 0, s.ts, $2, $3
+  FROM unnest($4::bigint[], $5::int[], $6::timestamptz[]) AS s(n, v, ts)
+ON CONFLICT (chain_id, block_number, block_version, processing_version) DO NOTHING`,
+		chainID, int32(r.buildID), int64(r.runID), numbers, versions, stamps)
 	if err != nil {
-		return 0, fmt.Errorf("insert from stage: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("commit: %w", err)
+		return 0, fmt.Errorf("insert block_meta batch: %w", err)
 	}
 	return ct.RowsAffected(), nil
 }

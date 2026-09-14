@@ -7,14 +7,15 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -87,88 +88,85 @@ func hexSeconds(t *testing.T, hexTimestamp string) int64 {
 // filled with the authoritative header timestamps. It also asserts resumability
 // (a block already in block_meta is not re-fetched from S3) and that a rerun is a
 // no-op.
-func TestRunIntegration_FillsBlockMetaFromS3(t *testing.T) {
-	ctx := context.Background()
+// loaderFixture is the seeded world every scenario below shares: one chain-1 deployment with
+// blocks referenced through each arm, one block already loaded, one block on another chain, and
+// one block at two reorg versions. Each test gets its own database and bucket, and asserts one
+// thing — a chain-filter regression used to fail as "expected 5 rows upserted" with five
+// candidate causes.
+type loaderFixture struct {
+	pool    *pgxpool.Pool
+	svc     *Service
+	runID   buildregistry.RunID
+	chainID int64
+}
 
+// Hex header times for the blocks the fixture uploads, and the instant block 300 is pre-seeded at.
+const (
+	b100Hex    = "0x67c00000" // referenced by protocol_event: the native chain_id arm
+	b200Hex    = "0x67c00e10" // referenced by borrower: the protocol.chain_id join arm
+	b500Hex    = "0x67c01c20" // referenced by prime_debt: the Sky arm, chain 1 by construction
+	b600v0Hex  = "0x67c02710"
+	b600v1Hex  = "0x67c03a98"
+	b300Seeded = int64(1_700_000_000)
+	fixtureChn = int64(1)
+)
+
+func newLoaderFixture(t *testing.T, ctx context.Context) loaderFixture {
+	t.Helper()
 	pool, _, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
-	defer dbCleanup()
+	t.Cleanup(dbCleanup)
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
 	bucket := testutil.S3TestBucketName(t, "blockmeta-")
 	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
 
-	const chainID = int64(1)
-
-	// The initial-schema migration seeds a SparkLend protocol on chain 1; reuse it
-	// for the FK-bearing observation rows.
-	var protocolID int64
-	if err := pool.QueryRow(ctx, `SELECT id FROM protocol WHERE chain_id = $1 ORDER BY id LIMIT 1`, chainID).Scan(&protocolID); err != nil {
+	// The initial-schema migration seeds a SparkLend protocol on chain 1; reuse it for the
+	// FK-bearing observation rows.
+	var protocolID, userID, tokenID int64
+	if err := pool.QueryRow(ctx, `SELECT id FROM protocol WHERE chain_id = $1 ORDER BY id LIMIT 1`, fixtureChn).Scan(&protocolID); err != nil {
 		t.Fatalf("load seeded protocol id: %v", err)
 	}
-
-	// A user and token for the borrower (protocol-join) arm.
-	var userID, tokenID int64
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO "user" (chain_id, address) VALUES ($1, '\xabc0'::bytea) RETURNING id`, chainID,
-	).Scan(&userID); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO "user" (chain_id, address) VALUES ($1, '\xabc0'::bytea) RETURNING id`, fixtureChn).Scan(&userID); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO token (chain_id, address, symbol, decimals) VALUES ($1, '\xdef0'::bytea, 'TKN', 18) RETURNING id`, chainID,
-	).Scan(&tokenID); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO token (chain_id, address, symbol, decimals) VALUES ($1, '\xdef0'::bytea, 'TKN', 18) RETURNING id`, fixtureChn).Scan(&tokenID); err != nil {
 		t.Fatalf("seed token: %v", err)
 	}
 
-	// Block 100 referenced by a protocol_event (native chain_id arm).
-	const b100Hex = "0x67c00000"
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO protocol_event
-			(chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data)
-		VALUES ($1, $2, 100, 0, '\x01'::bytea, 0, '\x02'::bytea, 'Borrow', '{}'::jsonb)`,
-		chainID, protocolID); err != nil {
-		t.Fatalf("seed protocol_event block 100: %v", err)
+	event := func(chain, proto, block int64, version int, tx, addr string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO protocol_event
+				(chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data)
+			VALUES ($1, $2, $3, $4, decode($5,'hex'), 0, decode($6,'hex'), 'Borrow', '{}'::jsonb)`,
+			chain, proto, block, version, tx, addr); err != nil {
+			t.Fatalf("seed protocol_event block %d/%d: %v", block, version, err)
+		}
 	}
+
+	event(fixtureChn, protocolID, 100, 0, "01", "02")
 	uploadBlock(t, ctx, s3Client, bucket, 100, 0, b100Hex)
 
-	// Block 200 referenced by a borrower row (protocol.chain_id join arm).
-	const b200Hex = "0x67c00e10"
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO borrower
-			(user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
-		VALUES ($1, $2, $3, 200, 0, 1, 1, 'Borrow', '\x03'::bytea)`,
-		userID, protocolID, tokenID); err != nil {
+		INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
+		VALUES ($1, $2, $3, 200, 0, 1, 1, 'Borrow', '\x03'::bytea)`, userID, protocolID, tokenID); err != nil {
 		t.Fatalf("seed borrower block 200: %v", err)
 	}
 	uploadBlock(t, ctx, s3Client, bucket, 200, 0, b200Hex)
 
-	// Block 300 is referenced by a protocol_event but already present in block_meta.
-	// Its S3 object is deliberately NOT uploaded: a correctly resumable loader must
-	// skip it. If it tried to fetch, blockTimestamp would fail hard on the missing
-	// object and Run would error.
-	const b300Seeded = int64(1_700_000_000)
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO protocol_event
-			(chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data)
-		VALUES ($1, $2, 300, 0, '\x04'::bytea, 0, '\x05'::bytea, 'Borrow', '{}'::jsonb)`,
-		chainID, protocolID); err != nil {
-		t.Fatalf("seed protocol_event block 300: %v", err)
-	}
-	// It is also present at processing_version 1 with a corrected time: the loader must neither
-	// re-fetch it nor touch either row, since the correction axis belongs to the operator.
+	// Block 300 is referenced but already loaded, at two processing_versions. Its object is
+	// deliberately absent: a loader that re-fetched it would fail hard on the missing key.
+	event(fixtureChn, protocolID, 300, 0, "04", "05")
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO block_meta (chain_id, block_number, block_version, processing_version, block_timestamp)
 		 VALUES ($1, 300, 0, 0, to_timestamp($2)), ($1, 300, 0, 1, to_timestamp($2 + 7))`,
-		chainID, b300Seeded); err != nil {
+		fixtureChn, b300Seeded); err != nil {
 		t.Fatalf("pre-seed block_meta block 300: %v", err)
 	}
 
-	// Block 500 referenced by a prime_debt row (Sky — no chain column, so the query maps it to the
-	// constant chain 1). Exercises the prime_debt arm of pendingBlocks.
-	const b500Hex = "0x67c01c20"
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at)
 		VALUES ((SELECT id FROM prime WHERE name = 'spark'), 'ETH-A', 0, 500, 0, now())`); err != nil {
@@ -176,37 +174,18 @@ func TestRunIntegration_FillsBlockMetaFromS3(t *testing.T) {
 	}
 	uploadBlock(t, ctx, s3Client, bucket, 500, 0, b500Hex)
 
-	// Block 400 is referenced only on a DIFFERENT chain (Base, 8453). The chain-1 loader must
-	// exclude it via WHERE chain_id = $1 — its S3 object is deliberately NOT uploaded, so a broken
-	// chain filter would try to fetch it and fail hard rather than pass silently.
+	// Block 400 is referenced only on Base. Its object is deliberately absent, so a broken chain
+	// filter fails hard rather than passing silently.
 	var baseProtocolID int64
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO protocol (chain_id, address, name, protocol_type) VALUES (8453, '\xbee5'::bytea, 'test-base', 'lending') RETURNING id`,
-	).Scan(&baseProtocolID); err != nil {
+		`INSERT INTO protocol (chain_id, address, name, protocol_type) VALUES (8453, '\xbee5'::bytea, 'test-base', 'lending') RETURNING id`).Scan(&baseProtocolID); err != nil {
 		t.Fatalf("seed base protocol: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO protocol_event
-			(chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data)
-		VALUES (8453, $1, 400, 0, '\x06'::bytea, 0, '\x07'::bytea, 'Borrow', '{}'::jsonb)`,
-		baseProtocolID); err != nil {
-		t.Fatalf("seed base protocol_event block 400: %v", err)
-	}
+	event(8453, baseProtocolID, 400, 0, "06", "07")
 
-	// Block 600 at two re-org versions (v0 and v1), same block number, via protocol_event. With the
-	// small BatchSize below the pending set spans multiple batches and the (600,0)/(600,1) pair
-	// straddles a batch boundary — this is what actually exercises the keyset cursor's
-	// `block_number = $3 AND block_version > $4` branch against real Postgres.
-	const b600v0Hex = "0x67c02710"
-	const b600v1Hex = "0x67c03a98"
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO protocol_event
-			(chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data)
-		VALUES ($1, $2, 600, 0, '\x08'::bytea, 0, '\x02'::bytea, 'Borrow', '{}'::jsonb),
-		       ($1, $2, 600, 1, '\x09'::bytea, 0, '\x02'::bytea, 'Borrow', '{}'::jsonb)`,
-		chainID, protocolID); err != nil {
-		t.Fatalf("seed protocol_event block 600 v0/v1: %v", err)
-	}
+	// Block 600 at two reorg versions, which with BatchSize 2 straddles a batch boundary.
+	event(fixtureChn, protocolID, 600, 0, "08", "02")
+	event(fixtureChn, protocolID, 600, 1, "09", "02")
 	uploadBlock(t, ctx, s3Client, bucket, 600, 0, b600v0Hex)
 	uploadBlock(t, ctx, s3Client, bucket, 600, 1, b600v1Hex)
 
@@ -215,88 +194,132 @@ func TestRunIntegration_FillsBlockMetaFromS3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBlockMetaRepository: %v", err)
 	}
-	// BatchSize 2 forces multiple batches over the pending set (100, 200, 500, 600/0, 600/1), so the
-	// keyset cursor advances across batch boundaries rather than filling everything in one shot.
-	svc, err := New(Config{ChainID: chainID, Bucket: bucket, BatchSize: 2}, repo, newLocalStackReader(t, ctx, logger), logger)
+	// BatchSize 2 forces several batches over the pending set, so the keyset cursor advances
+	// across boundaries rather than filling everything at once.
+	svc, err := New(Config{ChainID: fixtureChn, Bucket: bucket, BatchSize: 2}, repo, newLocalStackReader(t, ctx, logger), logger)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	return loaderFixture{pool: pool, svc: svc, runID: runID, chainID: fixtureChn}
+}
 
-	// First run: fills 100, 200 (native + protocol-join arms), 500 (prime_debt arm) and 600 at both
-	// versions, across multiple batches. 300 is already present and not re-fetched; 400 is on chain
-	// 8453 and excluded.
-	upserted, err := svc.Run(ctx)
-	if err != nil {
+// Each referencing arm reaches S3 and lands its header time.
+func TestRunIntegration_FillsEachArm(t *testing.T) {
+	ctx := context.Background()
+	f := newLoaderFixture(t, ctx)
+
+	if _, err := f.svc.Run(ctx); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if upserted != 5 {
-		t.Errorf("expected 5 rows upserted, got %d", upserted)
+	assertBlockTimestamp(t, ctx, f.pool, f.chainID, 100, hexSeconds(t, b100Hex)) // native chain_id
+	assertBlockTimestamp(t, ctx, f.pool, f.chainID, 200, hexSeconds(t, b200Hex)) // protocol join
+	assertBlockTimestamp(t, ctx, f.pool, f.chainID, 500, hexSeconds(t, b500Hex)) // prime_debt
+}
+
+// Two reorg versions of one block are distinct rows, filled across a batch boundary.
+func TestRunIntegration_FillsBothReorgVersions(t *testing.T) {
+	ctx := context.Background()
+	f := newLoaderFixture(t, ctx)
+
+	if _, err := f.svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
+	assertBlockTimestamp(t, ctx, f.pool, f.chainID, 600, hexSeconds(t, b600v0Hex))
 
-	assertBlockTimestamp(t, ctx, pool, chainID, 100, hexSeconds(t, b100Hex))
-	assertBlockTimestamp(t, ctx, pool, chainID, 200, hexSeconds(t, b200Hex))
-	assertBlockTimestamp(t, ctx, pool, chainID, 300, b300Seeded) // untouched
-	assertBlockTimestamp(t, ctx, pool, chainID, 500, hexSeconds(t, b500Hex))
-	assertBlockTimestamp(t, ctx, pool, chainID, 600, hexSeconds(t, b600v0Hex)) // v0
-
-	// Version 1 of block 600 is a distinct row filled in a later batch (the keyset version branch).
 	var ts600v1 time.Time
-	if err := pool.QueryRow(ctx,
+	if err := f.pool.QueryRow(ctx,
 		`SELECT block_timestamp FROM block_meta WHERE chain_id = $1 AND block_number = 600 AND block_version = 1`,
-		chainID,
-	).Scan(&ts600v1); err != nil {
+		f.chainID).Scan(&ts600v1); err != nil {
 		t.Fatalf("query block 600 v1: %v", err)
 	}
 	if ts600v1.Unix() != hexSeconds(t, b600v1Hex) {
 		t.Errorf("block 600 v1 timestamp = %d, want %d", ts600v1.Unix(), hexSeconds(t, b600v1Hex))
 	}
+}
 
-	// The other-chain block was excluded, not fetched: no block_meta row for it on any chain.
-	var block400Rows int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM block_meta WHERE block_number = 400`).Scan(&block400Rows); err != nil {
+// A block referenced only on another chain is excluded, not fetched.
+func TestRunIntegration_ExcludesAnotherChainsBlocks(t *testing.T) {
+	ctx := context.Background()
+	f := newLoaderFixture(t, ctx)
+
+	if _, err := f.svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var rows int
+	if err := f.pool.QueryRow(ctx, `SELECT COUNT(*) FROM block_meta WHERE block_number = 400`).Scan(&rows); err != nil {
 		t.Fatalf("count block 400 rows: %v", err)
 	}
-	if block400Rows != 0 {
-		t.Errorf("chain-8453 block 400 leaked into block_meta (%d rows); chain filter is broken", block400Rows)
+	if rows != 0 {
+		t.Errorf("chain-8453 block 400 leaked into block_meta (%d rows); the chain filter is broken", rows)
 	}
+}
 
-	if got := countBlockMeta(t, ctx, pool); got != 7 {
-		t.Errorf("expected 7 block_meta rows after first run, got %d", got)
-	}
+// An already-loaded block is neither re-fetched nor rewritten, on either processing_version — the
+// correction axis belongs to the operator.
+func TestRunIntegration_LeavesAlreadyLoadedBlocksAlone(t *testing.T) {
+	ctx := context.Background()
+	f := newLoaderFixture(t, ctx)
 
-	// Every row the loader wrote is processing_version 0 and carries this run's id; the two
-	// pre-seeded block 300 rows (no run_id, one of them a correction at processing_version 1)
-	// are exactly as seeded.
-	var loaded, seeded int
-	if err := pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM block_meta WHERE processing_version = 0 AND run_id = $1 AND block_number <> 300`,
-		int64(runID)).Scan(&loaded); err != nil {
-		t.Fatalf("count loader-stamped rows: %v", err)
+	if _, err := f.svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	if loaded != 5 {
-		t.Errorf("expected 5 rows stamped with run_id %d at processing_version 0, got %d", runID, loaded)
-	}
-	if err := pool.QueryRow(ctx, `
+	assertBlockTimestamp(t, ctx, f.pool, f.chainID, 300, b300Seeded)
+
+	var seeded int
+	if err := f.pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM block_meta
 		 WHERE chain_id = $1 AND block_number = 300 AND run_id IS NULL
 		   AND extract(epoch FROM block_timestamp) = $2 + 7 * processing_version`,
-		chainID, b300Seeded).Scan(&seeded); err != nil {
+		f.chainID, b300Seeded).Scan(&seeded); err != nil {
 		t.Fatalf("count seeded block 300 rows: %v", err)
 	}
 	if seeded != 2 {
 		t.Errorf("expected both seeded block 300 rows untouched, got %d matching", seeded)
 	}
+}
 
-	// Rerun: every referenced block on chain 1 is now present, so it is a no-op.
-	upserted2, err := svc.Run(ctx)
+// Every row the loader writes is processing_version 0 and carries the run that wrote it.
+func TestRunIntegration_StampsTheWriterRun(t *testing.T) {
+	ctx := context.Background()
+	f := newLoaderFixture(t, ctx)
+
+	upserted, err := f.svc.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if upserted != 5 {
+		t.Fatalf("upserted %d rows, want 5", upserted)
+	}
+	var loaded int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM block_meta WHERE processing_version = 0 AND run_id = $1 AND block_number <> 300`,
+		int64(f.runID)).Scan(&loaded); err != nil {
+		t.Fatalf("count loader-stamped rows: %v", err)
+	}
+	if loaded != 5 {
+		t.Errorf("%d rows stamped with run_id %d at processing_version 0, want 5", loaded, f.runID)
+	}
+}
+
+// A second run has nothing to do, and writes nothing.
+func TestRunIntegration_RerunIsANoOp(t *testing.T) {
+	ctx := context.Background()
+	f := newLoaderFixture(t, ctx)
+
+	if _, err := f.svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	before := countBlockMeta(t, ctx, f.pool)
+
+	upserted, err := f.svc.Run(ctx)
 	if err != nil {
 		t.Fatalf("rerun Run: %v", err)
 	}
-	if upserted2 != 0 {
-		t.Errorf("expected rerun to upsert 0 rows, got %d", upserted2)
+	if upserted != 0 {
+		t.Errorf("rerun upserted %d rows, want 0", upserted)
 	}
-	if got := countBlockMeta(t, ctx, pool); got != 7 {
-		t.Errorf("expected 7 block_meta rows after rerun, got %d", got)
+	if got := countBlockMeta(t, ctx, f.pool); got != before {
+		t.Errorf("block_meta holds %d rows after the rerun, want %d unchanged", got, before)
 	}
 }
 

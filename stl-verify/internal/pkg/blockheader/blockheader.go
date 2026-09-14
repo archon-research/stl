@@ -38,8 +38,24 @@ func ParseTimestamp(data []byte) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, fmt.Errorf("parse block timestamp %q: %w", hdr.Timestamp, err)
 	}
-	return time.Unix(sec, 0).UTC(), nil
+	ts := time.Unix(sec, 0).UTC()
+	// The same window block_meta_ts_sane_chk enforces, checked here so a corrupt object is
+	// refused by the block it came from. ParseInt64 accepts a leading sign, so a damaged
+	// payload can reach 0 or a negative; from a batched INSERT that surfaces as a CHECK
+	// violation whose DETAIL pgx does not carry, naming nothing and re-read on every retry.
+	if ts.Before(tsFloor) || !ts.Before(tsCeiling) {
+		return time.Time{}, fmt.Errorf("block timestamp %q is outside [%s, %s)",
+			hdr.Timestamp, tsFloor.Format(time.RFC3339), tsCeiling.Format(time.RFC3339))
+	}
+	return ts, nil
 }
+
+// tsFloor and tsCeiling mirror block_meta_ts_sane_chk (20260822_120000). The floor is the
+// Bitcoin genesis instant the schema uses as its "no chain predates this" bound.
+var (
+	tsFloor   = time.Date(2009, 1, 3, 0, 0, 0, 0, time.UTC)
+	tsCeiling = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+)
 
 // ReadTimestampFromS3 reads {partition}/{block}_{version}_block.json.gz from the given bucket and
 // returns the on-chain header timestamp. The S3Reader adapter auto-decompresses .gz keys, so the

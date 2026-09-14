@@ -415,3 +415,26 @@ func TestRun_ReadsWithinABatchOverlap(t *testing.T) {
 		t.Errorf("peak concurrent reads = %d, want %d", peak, batch)
 	}
 }
+
+// nextErr was declared and honoured by the mock but never set, so Run's "loading pending blocks"
+// branch was unexercised: a paging failure mid-run has to surface, not read as an empty page and
+// end the run reporting success.
+func TestRun_PagingFailureSurfaces(t *testing.T) {
+	repo := &mockBlockMetaRepo{
+		universe: []outbound.BlockRef{{Number: 10, Version: 0}},
+		nextErr:  fmt.Errorf("connection reset"),
+	}
+	reader := &mockS3Reader{streamFn: streamTimestampByBlock}
+	svc := newTestService(t, repo, reader, 2)
+
+	total, err := svc.Run(context.Background())
+	if err == nil {
+		t.Fatal("a paging failure ended the run cleanly; a partial pass would look complete")
+	}
+	if !strings.Contains(err.Error(), "loading pending blocks") {
+		t.Errorf("error %q does not name the paging step", err)
+	}
+	if total != 0 {
+		t.Errorf("reported %d rows loaded after a paging failure, want 0", total)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
 // config is the deployment's static configuration. One deployment serves one
@@ -65,11 +66,20 @@ func loadConfig() (config, error) {
 	if cfg.bucket == "" {
 		return cfg, fmt.Errorf("S3_BUCKET is required")
 	}
-	cfg.deployEnv = os.Getenv("DEPLOY_ENV")
+	// Required, not defaulted: it selects which environment's bucket names the guard
+	// below accepts, and empty surfaces from chainutil as a error naming neither.
+	if cfg.deployEnv, err = env.Require("DEPLOY_ENV"); err != nil {
+		return cfg, err
+	}
 
 	if v := os.Getenv("BATCH_SIZE"); v != "" {
 		if cfg.batchSize, err = strconv.Atoi(v); err != nil {
 			return cfg, fmt.Errorf("BATCH_SIZE: %w", err)
+		}
+		// A negative parses fine and then reads as "unset" downstream, running at the
+		// default while the operator believes they set something.
+		if cfg.batchSize <= 0 {
+			return cfg, fmt.Errorf("BATCH_SIZE must be positive, got %d", cfg.batchSize)
 		}
 	}
 

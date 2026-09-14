@@ -17,26 +17,26 @@
 //	  --input '{}'
 //
 // Env: DATABASE_URL (write role), CHAIN_ID, S3_BUCKET (that chain's raw-block
-// bucket), DEPLOY_ENV. Optional: AWS_REGION (default eu-west-1), AWS_ENDPOINT_URL
-// (LocalStack), BATCH_SIZE, LOG_LEVEL.
+// bucket), DEPLOY_ENV. Optional: AWS_REGION, AWS_S3_ENDPOINT (LocalStack),
+// BATCH_SIZE, LOG_LEVEL.
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
-	awssdkconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 )
 
@@ -45,7 +45,10 @@ func main() {
 
 	err := run(ctx)
 	cancel()
-	if err != nil {
+	// A SIGTERM is how a drain or a deliberate stop arrives, so it exits clean: counted as a
+	// failure it would consume a restart budget, and two node drains in a long run would leave
+	// one real attempt.
+	if err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("block-meta-loader exited with error", "error", err)
 		os.Exit(1)
 	}
@@ -104,28 +107,14 @@ func register(ctx context.Context, cfg config, deps temporal.Dependencies, r wor
 	return nil
 }
 
-// newS3Reader builds the raw-block archive reader from the environment. A custom
-// endpoint (LocalStack) needs path-style addressing; virtual-hosted URLs won't
-// resolve against it.
+// newS3Reader builds the raw-block archive reader. The endpoint override is
+// s3adapter's, so it honours AWS_S3_ENDPOINT like every other worker: the dev
+// overlay and the kind targets set that, and a local variable of our own would
+// resolve real S3 in kind and fail on credentials.
 func newS3Reader(ctx context.Context, logger *slog.Logger) (*s3adapter.Reader, error) {
-	awsRegion := os.Getenv("AWS_REGION")
-	if awsRegion == "" {
-		awsRegion = "eu-west-1"
-	}
-	awsOpts := []func(*awssdkconfig.LoadOptions) error{awssdkconfig.WithRegion(awsRegion)}
-	endpoint := os.Getenv("AWS_ENDPOINT_URL")
-	if endpoint != "" {
-		awsOpts = append(awsOpts, awssdkconfig.WithBaseEndpoint(endpoint))
-		logger.Info("using custom AWS endpoint", "url", endpoint)
-	}
-	awsCfg, err := awssdkconfig.LoadDefaultConfig(ctx, awsOpts...)
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{})
 	if err != nil {
 		return nil, fmt.Errorf("loading AWS config: %w", err)
 	}
-	if endpoint == "" {
-		return s3adapter.NewReader(awsCfg, logger), nil
-	}
-	return s3adapter.NewReaderWithOptions(awsCfg, logger, func(o *s3.Options) {
-		o.UsePathStyle = true
-	}), nil
+	return s3adapter.NewReaderFromEnv(awsCfg, logger), nil
 }
