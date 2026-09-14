@@ -15,7 +15,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const positionDailyMigration = "20260824_120000_create_position_daily.sql"
+const (
+	positionDailyMigration         = "20260824_120000_create_position_daily.sql"
+	positionDailyBackfillMigration = "20260824_120100_backfill_position_daily.sql"
+)
 
 // positionDailyFixture is one migrated database plus the seeding and reading each case needs.
 type positionDailyFixture struct {
@@ -577,13 +580,16 @@ func TestPositionDailyRebuildConvergesOverABulkSpine(t *testing.T) {
 func TestPositionDailyMigrationIsReRunnable(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	f.observe("d-rerun", dailyObs{qty: 5, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
-	raw, err := os.ReadFile(filepath.Join(getMigrationsPath(), positionDailyMigration))
-	if err != nil {
-		t.Fatalf("read the migration: %v", err)
-	}
-	src := string(raw)
-	if _, err := f.pool.Exec(f.ctx, src); err != nil {
-		t.Fatalf("re-applying the migration: %v", err)
+	// Both files, in the operator's order: the creating file, then the backfill that 20260819_150100's
+	// pattern splits off it so CREATE TRIGGER's lock is not held across the full-spine scan.
+	for _, name := range []string{positionDailyMigration, positionDailyBackfillMigration} {
+		raw, err := os.ReadFile(filepath.Join(getMigrationsPath(), name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if _, err := f.pool.Exec(f.ctx, string(raw)); err != nil {
+			t.Fatalf("re-applying %s: %v", name, err)
+		}
 	}
 	if got := f.dayQty("d-rerun", "2026-01-01"); got != 5 {
 		t.Errorf("the day holds %d after a re-apply, want 5", got)

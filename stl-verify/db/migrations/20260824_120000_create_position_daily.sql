@@ -168,16 +168,8 @@ EXECUTE FUNCTION upsert_position_daily();
 -- trigger, so this stays at ORIGIN and does not fire under session_replication_role = 'replica'
 -- (pg_restore --disable-triggers). CALL rebuild_position_daily() repairs what the bypass skipped.
 
-CALL rebuild_position_daily();
-
--- Built AFTER the backfill: created first, every backfilled row pays a random btree insert with its own
--- WAL instead of one bulk build. The holder index serves the filter the PK cannot, as_of_date trailing so
--- a holder's series is ordered by it; the date index answers the whole book on one date, which is the
--- query this grain exists for and the one the PK cannot serve -- chunk exclusion answered it while this
--- table was still a hypertable.
-CREATE INDEX IF NOT EXISTS position_daily_holder_idx ON public.position_daily (holder_id, as_of_date);
-CREATE INDEX IF NOT EXISTS position_daily_as_of_date_idx ON public.position_daily (as_of_date);
-
-ANALYZE public.position_daily;
+-- The backfill, both indexes and the ANALYZE are in 20260824_120100, as 20260819_150100 established:
+-- the migrator runs a file in one transaction, so here they would run under the lock CREATE TRIGGER
+-- takes on position_state -- ACCESS EXCLUSIVE on a re-run, when the DROP above finds a trigger.
 
 INSERT INTO public.migrations (filename) VALUES ('20260824_120000_create_position_daily.sql') ON CONFLICT (filename) DO NOTHING;

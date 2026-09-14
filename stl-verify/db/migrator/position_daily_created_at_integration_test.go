@@ -134,7 +134,7 @@ func TestPositionDailyMigrationAddsItsLaterColumnsInPlace(t *testing.T) {
 		if v, ok := f.dayRow("revised", "2026-01-02")["run_id"]; !ok || v == "NULL" {
 			t.Errorf("a day observed after the re-apply carries run_id=%q (present: %v); want it written", v, ok)
 		}
-		// The row that predates the ALTER keeps NULL, and neither writer can fill it: the file's own
+		// The row that predates the ALTER keeps NULL, and neither writer can fill it: the backfill's
 		// CALL rebuild_position_daily() is forward-only, and this row already sits at history's winning
 		// coordinate, so the guard never fires. Recovering it needs the row deleted or the day re-observed.
 		if v := f.dayRow("earlier", "2026-01-01")["run_id"]; v != "NULL" {
