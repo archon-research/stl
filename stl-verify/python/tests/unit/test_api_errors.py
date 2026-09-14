@@ -45,7 +45,8 @@ def _probe_app() -> FastAPI:
     ) -> dict:
         _require_known(identifier)
         apply_cache_control(response, query)
-        enforce_max_points(point_count or len(_in_window(query)), query=query)
+        if not query.is_bucketed:
+            enforce_max_points(point_count or len(_in_window(query)), query=query)
         return {"window": build_raw_window(query).model_dump(mode="json"), "data": _in_window(query)}
 
     @router.get("/probe/{identifier}/latest")
@@ -75,6 +76,12 @@ def _in_window(query: TimeWindow) -> list[str]:
 @pytest.fixture
 def client() -> TestClient:
     return TestClient(_probe_app())
+
+
+# A 24h window whose density is four times the ceiling: the rejection it draws
+# suggests a quarter of the window, or the floor frequency.
+_OVERSIZED_FROM = "2026-03-05T00:00:00Z"
+_OVERSIZED_TO = "2026-03-06T00:00:00Z"
 
 
 def _history(client: TestClient, **params):
@@ -142,10 +149,11 @@ def test_an_oversized_request_is_rejected_with_the_typed_body(client: TestClient
 
 def test_the_resampled_suggestion_merges_into_the_request_it_was_sent_for(client: TestClient) -> None:
     # What grouping the suggestions buys: the keys match the query parameters, so a
-    # retry is a merge. `aggregation_method` rides along because a frequency without
-    # one is itself a rejection.
-    sent = {"from_timestamp": "2026-03-05T00:00:00Z", "to_timestamp": "2026-03-06T00:00:00Z"}
-    rejection = _history(client, **sent, point_count=MAX_POINTS * 4).json()
+    # retry is a merge, carrying the density that was rejected. `aggregation_method`
+    # rides along because a frequency without one is itself a rejection, and it is
+    # what takes the retry off the arm the point ceiling governs.
+    sent = {"from_timestamp": _OVERSIZED_FROM, "to_timestamp": _OVERSIZED_TO, "point_count": MAX_POINTS * 4}
+    rejection = _history(client, **sent).json()
 
     retried = _history(client, **(sent | rejection["suggestions"]["resampled"]))
 
@@ -153,10 +161,12 @@ def test_the_resampled_suggestion_merges_into_the_request_it_was_sent_for(client
 
 
 def test_the_narrower_window_suggestion_merges_into_the_request_it_was_sent_for(client: TestClient) -> None:
-    sent = {"from_timestamp": "2026-03-05T00:00:00Z", "to_timestamp": "2026-03-06T00:00:00Z"}
-    rejection = _history(client, **sent, point_count=MAX_POINTS * 4).json()
+    # The suggested span is `max_points / point_count` of the one sent — here a
+    # quarter of 24h — so an evenly spaced series holds exactly the ceiling in it.
+    sent = {"from_timestamp": _OVERSIZED_FROM, "to_timestamp": _OVERSIZED_TO, "point_count": MAX_POINTS * 4}
+    rejection = _history(client, **sent).json()
 
-    retried = _history(client, **(sent | rejection["suggestions"]["narrower_window"]))
+    retried = _history(client, **(sent | rejection["suggestions"]["narrower_window"] | {"point_count": MAX_POINTS}))
 
     assert retried.status_code == 200
     assert retried.json()["window"]["from_timestamp"] == "2026-03-05T18:00:00Z"
