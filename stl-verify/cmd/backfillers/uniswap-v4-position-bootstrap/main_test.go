@@ -1,35 +1,32 @@
 package main
 
-import (
-	"errors"
-	"fmt"
-	"strings"
-	"testing"
+import "testing"
 
-	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4bootstrap"
-)
-
-func TestResumableError_NamesThePinOnlyWhenTheSnapshotCanBeResumed(t *testing.T) {
-	boom := errors.New("boom")
-	tests := []struct {
-		name     string
-		summary  uniswapv4bootstrap.Summary
-		err      error
-		wantHint bool
-	}{
-		{"failed before pinning", uniswapv4bootstrap.Summary{}, boom, false},
-		{"failed after pinning", uniswapv4bootstrap.Summary{PinnedBlock: 42}, boom, true},
-		{"pin moved", uniswapv4bootstrap.Summary{PinnedBlock: 42}, fmt.Errorf("reorged: %w", uniswapv4bootstrap.ErrPinMoved), false},
+// Both names are spelled out rather than compared to their constants, which
+// would rename together and pin nothing. The alert regexes in
+// alerts/vector-cronjobs.yaml, the Deployment and the runbook carry the same
+// two strings.
+func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
+	if taskQueueName != "uniswap-v4-position-bootstrap" {
+		t.Errorf("taskQueueName = %q, want %q", taskQueueName, "uniswap-v4-position-bootstrap")
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := resumableError(tt.summary, tt.err)
-			if !errors.Is(err, tt.err) {
-				t.Fatalf("error = %v, want it to wrap %v", err, tt.err)
-			}
-			if got := strings.Contains(err.Error(), "-pin 42"); got != tt.wantHint {
-				t.Errorf("error = %v, resume hint present = %v, want %v", err, got, tt.wantHint)
-			}
-		})
+	if workflowTypeName != "UniswapV4PositionBootstrap" {
+		t.Errorf("workflowTypeName = %q, want %q", workflowTypeName, "UniswapV4PositionBootstrap")
+	}
+}
+
+// Heartbeat details are readable only by a later attempt of the same activity,
+// so a single attempt would have nothing to resume into, and without a
+// heartbeat a killed worker goes unnoticed until StartToClose expires.
+func TestBootstrapActivityTimeouts_LeaveRoomToResume(t *testing.T) {
+	if bootstrapActivityTimeouts.MaximumAttempts < 2 {
+		t.Errorf("MaximumAttempts = %d, want at least 2", bootstrapActivityTimeouts.MaximumAttempts)
+	}
+	if bootstrapActivityTimeouts.Heartbeat <= 0 {
+		t.Error("Heartbeat is zero: a dead worker would only be noticed at StartToClose")
+	}
+	if bootstrapActivityTimeouts.ScheduleToClose < bootstrapActivityTimeouts.StartToClose {
+		t.Errorf("ScheduleToClose %s is below StartToClose %s: no attempt could use its full ceiling",
+			bootstrapActivityTimeouts.ScheduleToClose, bootstrapActivityTimeouts.StartToClose)
 	}
 }

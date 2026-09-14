@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,8 +20,13 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/converter"
+	"go.temporal.io/sdk/testsuite"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
+	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4bootstrap"
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4indexer"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -48,6 +54,7 @@ const (
 	pinnedBlockHash  = "0x2222222222222222222222222222222222222222222222222222222222222222"
 
 	// Above every seeded pool's deploy block, so the whole registry is in range.
+	// The mock's head sits the default finality depth above it, so a run pins here.
 	pinnedBlock       = int64(25_600_000)
 	positionLiquidity = int64(123_456)
 )
@@ -108,7 +115,7 @@ func (c *mockChain) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSONResult(c.t, w, req.ID, c.chainID)
 	case "eth_blockNumber":
-		writeJSONResult(c.t, w, req.ID, "0x"+strconv.FormatInt(pinnedBlock+64, 16))
+		writeJSONResult(c.t, w, req.ID, "0x"+strconv.FormatInt(pinnedBlock+uniswapv4bootstrap.DefaultFinalityDepth, 16))
 	case "eth_getBlockByNumber":
 		c.serveHeader(w, req)
 	case "eth_getLogs":
@@ -239,35 +246,56 @@ func modifyLiquidityLogJSON(t *testing.T) map[string]any {
 	}
 }
 
-// The pin is fixed so assertions do not depend on the mock's head.
-func runArgs(dbURL, rpcURL string) []string {
-	return []string{
-		"-db", dbURL,
-		"-rpc-url", rpcURL,
-		"-chain-id", "1",
-		"-pin", strconv.FormatInt(pinnedBlock, 10),
-		"-from", "21743144",
-		"-initial-window", "10000000",
-		"-max-window", "10000000",
-	}
-}
-
-func setupRun(t *testing.T, opts mockChainOptions) (*pgxpool.Pool, []string) {
+// setWorkerEnv installs the environment a deployed pod would have, so the tests
+// below exercise the real config loading rather than a hand-built config. One
+// window covers the whole seeded history, so a run is one GetLogs answer.
+func setWorkerEnv(t *testing.T, chainID, rpcURL string) {
 	t.Helper()
-	db, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
-	t.Cleanup(cleanup)
+	t.Setenv("CHAIN_ID", chainID)
+	t.Setenv("ALCHEMY_HTTP_URL", rpcURL)
+	t.Setenv("ALCHEMY_API_KEY", "test-key")
+	t.Setenv("INITIAL_WINDOW", "10000000")
+	t.Setenv("MAX_WINDOW", "10000000")
 	t.Setenv("BUILD_GIT_HASH", "test")
-	server := startMockChain(t, opts)
-	return db, runArgs(dbURL, server.URL)
 }
 
-func withChainID(args []string, chainID string) []string {
-	for i, arg := range args {
-		if arg == "-chain-id" {
-			args[i+1] = chainID
-		}
+// deployment is one registered worker against one database and one mock chain,
+// the way register wires it in production.
+type deployment struct {
+	db  *pgxpool.Pool
+	env *testsuite.TestWorkflowEnvironment
+}
+
+func newDeployment(t *testing.T, opts mockChainOptions) *deployment {
+	t.Helper()
+	db, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+	server := startMockChain(t, opts)
+	setWorkerEnv(t, "1", server.URL)
+
+	env, err := registerWorker(t, db)
+	if err != nil {
+		t.Fatalf("register: %v", err)
 	}
-	return args
+	return &deployment{db: db, env: env}
+}
+
+// registerWorker drives the deployed wiring — register, loadConfig, the real
+// Alchemy client and the real repository — into a test workflow environment,
+// so a run executes the real activity against the mock chain.
+func registerWorker(t *testing.T, db *pgxpool.Pool) (*testsuite.TestWorkflowEnvironment, error) {
+	t.Helper()
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	worker := &bootstrapWorker{}
+	t.Cleanup(worker.close)
+	err := worker.register(context.Background(), temporal.Dependencies{Pool: db, Logger: testutil.DiscardLogger()}, env)
+	return env, err
+}
+
+func (d *deployment) run(t *testing.T) error {
+	t.Helper()
+	d.env.ExecuteWorkflow(workflowTypeName)
+	return d.env.GetWorkflowError()
 }
 
 func countPositions(t *testing.T, db *pgxpool.Pool) int {
@@ -279,14 +307,14 @@ func countPositions(t *testing.T, db *pgxpool.Pool) int {
 	return n
 }
 
-func TestRunIntegration_PersistsTheDiscoveredPosition(t *testing.T) {
-	db, args := setupRun(t, mockChainOptions{})
+func TestRunIntegration_PersistsTheDiscoveredPositionAtTheDerivedPin(t *testing.T) {
+	d := newDeployment(t, mockChainOptions{})
 
-	if err := run(context.Background(), args); err != nil {
-		t.Fatalf("run: %v", err)
+	if err := d.run(t); err != nil {
+		t.Fatalf("workflow: %v", err)
 	}
 
-	if got := countPositions(t, db); got != 1 {
+	if got := countPositions(t, d.db); got != 1 {
 		t.Fatalf("uniswap_v4_position rows = %d, want 1", got)
 	}
 	var (
@@ -294,7 +322,7 @@ func TestRunIntegration_PersistsTheDiscoveredPosition(t *testing.T) {
 		blockNumber int64
 		liquidity   string
 	)
-	if err := db.QueryRow(context.Background(),
+	if err := d.db.QueryRow(context.Background(),
 		`SELECT owner, block_number, liquidity::text FROM uniswap_v4_position`).
 		Scan(&owner, &blockNumber, &liquidity); err != nil {
 		t.Fatalf("reading back the position: %v", err)
@@ -303,144 +331,187 @@ func TestRunIntegration_PersistsTheDiscoveredPosition(t *testing.T) {
 		t.Errorf("owner = %s, want %s", common.BytesToAddress(owner), positionOwner)
 	}
 	if blockNumber != pinnedBlock {
-		t.Errorf("block_number = %d, want the pinned block %d", blockNumber, pinnedBlock)
+		t.Errorf("block_number = %d, want head minus the finality depth, %d", blockNumber, pinnedBlock)
 	}
 	if liquidity != strconv.FormatInt(positionLiquidity, 10) {
 		t.Errorf("liquidity = %s, want %d", liquidity, positionLiquidity)
 	}
 }
 
-func TestRunIntegration_RerunWritesNoNewRows(t *testing.T) {
-	db, args := setupRun(t, mockChainOptions{})
-
-	if err := run(context.Background(), args); err != nil {
+func TestRunIntegration_ASecondRunWritesNoNewRows(t *testing.T) {
+	d := newDeployment(t, mockChainOptions{})
+	if err := d.run(t); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
-	first := countPositions(t, db)
+	first := countPositions(t, d.db)
 
-	if err := run(context.Background(), args); err != nil {
+	// A hand-started rerun is a new execution on a fresh registration.
+	again, err := registerWorker(t, d.db)
+	if err != nil {
+		t.Fatalf("register again: %v", err)
+	}
+	again.ExecuteWorkflow(workflowTypeName)
+	if err := again.GetWorkflowError(); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 
-	if got := countPositions(t, db); got != first {
+	if got := countPositions(t, d.db); got != first {
 		t.Errorf("rows after the rerun = %d, want %d: the run must be idempotent", got, first)
 	}
 }
 
 func TestRunIntegration_BisectsPastARangeRefusal(t *testing.T) {
-	db, args := setupRun(t, mockChainOptions{refusals: 2})
+	d := newDeployment(t, mockChainOptions{refusals: 2})
 
-	if err := run(context.Background(), args); err != nil {
-		t.Fatalf("run: %v", err)
+	if err := d.run(t); err != nil {
+		t.Fatalf("workflow: %v", err)
 	}
 
-	if got := countPositions(t, db); got != 1 {
+	if got := countPositions(t, d.db); got != 1 {
 		t.Errorf("uniswap_v4_position rows = %d, want 1: the scan must recover from the refusals", got)
 	}
 }
 
-func TestRunIntegration_RejectsAMissingDatabaseURL(t *testing.T) {
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("ALCHEMY_API_KEY", "key")
+// The record a retry would resume from is what the activity heartbeats: the
+// pin the rows were read at, and the pools finished so far. Seeing it arrive
+// through the test environment's heartbeat listener proves the store the runner
+// records into is the one the activity reports, not a second instance. The SDK
+// throttles heartbeats, so the listener sees the first record and some of the
+// later ones, never reliably the last.
+func TestRunIntegration_HeartbeatsThePinAndTheFinishedPools(t *testing.T) {
+	d := newDeployment(t, mockChainOptions{})
+	var records []uniswapv4bootstrap.Progress
+	d.env.SetOnActivityHeartbeatListener(func(_ *activity.Info, details converter.EncodedValues) {
+		var progress uniswapv4bootstrap.Progress
+		if err := details.Get(&progress); err != nil {
+			t.Errorf("decoding heartbeat details: %v", err)
+			return
+		}
+		records = append(records, progress)
+	})
 
-	err := run(context.Background(), []string{"-rpc-url", "http://127.0.0.1:1"})
-	if err == nil {
-		t.Fatal("expected an error for a missing database URL")
+	if err := d.run(t); err != nil {
+		t.Fatalf("workflow: %v", err)
 	}
-	if !strings.Contains(err.Error(), "database URL") {
-		t.Errorf("error = %v, want it to name the database URL", err)
+
+	if len(records) == 0 {
+		t.Fatal("no progress was heartbeated; a killed worker would restart from a fresh pin")
 	}
-}
-
-func TestRunIntegration_RejectsAnUnreachableDatabase(t *testing.T) {
-	t.Setenv("BUILD_GIT_HASH", "test")
-	server := startMockChain(t, mockChainOptions{})
-
-	err := run(context.Background(), runArgs("postgres://invalid:invalid@127.0.0.1:1/nonexistent?connect_timeout=1", server.URL))
-	if err == nil {
-		t.Fatal("expected an error for an unreachable database")
-	}
-}
-
-func TestRunIntegration_RejectsAChainIDMismatch(t *testing.T) {
-	_, args := setupRun(t, mockChainOptions{})
-
-	err := run(context.Background(), withChainID(args, "8453"))
-	if err == nil {
-		t.Fatal("expected an error: the endpoint serves another chain")
-	}
-	if !strings.Contains(err.Error(), "chain ID mismatch") {
-		t.Errorf("error = %v, want it to name the chain ID mismatch", err)
-	}
-}
-
-func TestRunIntegration_RejectsAnUnknownFlag(t *testing.T) {
-	if err := run(context.Background(), []string{"-nope"}); err == nil {
-		t.Fatal("expected an error for an unknown flag")
+	for i, record := range records {
+		if record.ChainID != 1 || record.PinnedBlock != pinnedBlock || record.PinnedHash != pinnedBlockHash {
+			t.Errorf("record %d = %+v, want chain 1 pinned at %d %s", i, record, pinnedBlock, pinnedBlockHash)
+		}
+		if len(record.PoolsDone) == 0 {
+			t.Errorf("record %d lists no finished pool", i)
+		}
+		if i > 0 && !slices.Equal(record.PoolsDone[:len(records[i-1].PoolsDone)], records[i-1].PoolsDone) {
+			t.Errorf("record %d %v does not extend record %d %v", i, record.PoolsDone, i-1, records[i-1].PoolsDone)
+		}
 	}
 }
 
-func TestRunIntegration_RejectsAnUnreadableChainID(t *testing.T) {
-	_, args := setupRun(t, mockChainOptions{chainID: chainIDFailSentinel})
-
-	err := run(context.Background(), args)
-	if err == nil {
-		t.Fatal("expected an error: the endpoint would not report its chain id")
+func countRegisteredPools(t *testing.T, db *pgxpool.Pool) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM (SELECT DISTINCT ON (chain_id, pool_id) snapshot_supported FROM uniswap_v4_pool WHERE chain_id = 1 ORDER BY chain_id, pool_id, processing_version DESC) p WHERE p.snapshot_supported`).
+		Scan(&n); err != nil {
+		t.Fatalf("counting registered pools: %v", err)
 	}
-	if !strings.Contains(err.Error(), "chain ID") {
-		t.Errorf("error = %v, want it to name the chain ID read", err)
-	}
+	return n
 }
 
-func TestRunIntegration_RejectsAChainWithNoRegisteredPools(t *testing.T) {
-	_, args := setupRun(t, mockChainOptions{chainID: "0x2105"})
+func TestRunIntegration_AFailedScanWritesNothingAndFailsTheRun(t *testing.T) {
+	d := newDeployment(t, mockChainOptions{getLogsFatal: true})
 
-	err := run(context.Background(), withChainID(args, "8453"))
-	if err == nil {
-		t.Fatal("expected an error: chain 8453 has no seeded uniswap v4 registry")
-	}
-	if !strings.Contains(err.Error(), "no uniswap v4 pools registered") {
-		t.Errorf("error = %v, want it to name the empty registry", err)
-	}
-}
+	err := d.run(t)
 
-func TestRunIntegration_PropagatesAScanFailure(t *testing.T) {
-	db, args := setupRun(t, mockChainOptions{getLogsFatal: true})
-
-	err := run(context.Background(), args)
 	if err == nil {
 		t.Fatal("expected an error: every log query failed")
 	}
-	if got := countPositions(t, db); got != 0 {
+	if got := countPositions(t, d.db); got != 0 {
 		t.Errorf("uniswap_v4_position rows = %d, want 0: a failed scan must write nothing", got)
 	}
 }
 
-func TestRunIntegration_AFailureAfterPinningNamesThePinToResumeWith(t *testing.T) {
-	_, args := setupRun(t, mockChainOptions{getLogsFatal: true})
+func TestRegisterIntegration_RefusesAChainIDMismatch(t *testing.T) {
+	db, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+	server := startMockChain(t, mockChainOptions{})
+	setWorkerEnv(t, "8453", server.URL)
 
-	err := run(context.Background(), args)
-	if err == nil {
-		t.Fatal("expected an error: every log query failed")
-	}
-	want := "-pin " + strconv.FormatInt(pinnedBlock, 10)
-	if !strings.Contains(err.Error(), want) {
-		t.Errorf("error = %v, want it to carry %q so the same snapshot can be resumed", err, want)
+	_, err := registerWorker(t, db)
+
+	if err == nil || !strings.Contains(err.Error(), "chain ID mismatch") {
+		t.Fatalf("register error = %v, want the chain ID mismatch: the endpoint serves another chain", err)
 	}
 }
 
-func TestRunIntegration_RejectsAnUndialableRPCEndpoint(t *testing.T) {
-	_, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
+func TestRegisterIntegration_RefusesAnUnreadableChainID(t *testing.T) {
+	db, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
-	t.Setenv("BUILD_GIT_HASH", "test")
+	server := startMockChain(t, mockChainOptions{chainID: chainIDFailSentinel})
+	setWorkerEnv(t, "1", server.URL)
 
-	err := run(context.Background(), []string{
-		"-db", dbURL,
-		"-rpc-url", "://not-a-url",
-		"-chain-id", "1",
-		"-pin", strconv.FormatInt(pinnedBlock, 10),
-	})
-	if err == nil {
-		t.Fatal("expected an error for an undialable RPC endpoint")
+	_, err := registerWorker(t, db)
+
+	if err == nil || !strings.Contains(err.Error(), "chain ID") {
+		t.Fatalf("register error = %v, want it to name the chain ID read", err)
+	}
+}
+
+func TestRegisterIntegration_RefusesAChainWithNoRegisteredPools(t *testing.T) {
+	db, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+	server := startMockChain(t, mockChainOptions{chainID: "0x2105"})
+	setWorkerEnv(t, "8453", server.URL)
+
+	_, err := registerWorker(t, db)
+
+	if err == nil || !strings.Contains(err.Error(), "no uniswap v4 pools registered") {
+		t.Fatalf("register error = %v, want it to name the empty registry", err)
+	}
+}
+
+func TestRegisterIntegration_RefusesAnIncompleteEnvironment(t *testing.T) {
+	db, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+	setWorkerEnv(t, "1", "http://127.0.0.1:1")
+	t.Setenv("ALCHEMY_API_KEY", "")
+
+	_, err := registerWorker(t, db)
+
+	if err == nil || !strings.Contains(err.Error(), "ALCHEMY_API_KEY") {
+		t.Fatalf("register error = %v, want it to name ALCHEMY_API_KEY", err)
+	}
+}
+
+func TestRunIntegration_RequiresADatabaseURL(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+
+	err := run(context.Background())
+
+	if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
+		t.Fatalf("run error = %v, want it to name DATABASE_URL", err)
+	}
+}
+
+// run() is the whole binary from main()'s point of view. Cancelling before it
+// reaches Temporal is the one path a test can drive without a server, and it is
+// what proves the signal context actually stops the worker. A SIGTERM during
+// startup — a pod rolled while it was still wiring itself up — is a shutdown,
+// not a failure: surfacing the cancelled context would exit 1 and make an
+// ordinary rollout read like a crash.
+func TestRunIntegration_StopsCleanlyWhenTheContextIsCancelled(t *testing.T) {
+	_, dsn, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+	t.Setenv("DATABASE_URL", dsn)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := run(ctx)
+
+	if err != nil {
+		t.Fatalf("run = %v, want a cancelled startup reported as a clean stop", err)
 	}
 }

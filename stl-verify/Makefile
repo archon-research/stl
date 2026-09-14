@@ -902,12 +902,16 @@ dev-env-files:
 		> cmd/backfillers/oracle-pricing-backfill/.env
 	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
 	printf '%s\n' \
+		"CHAIN_ID=1" \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:$(KIND_HOST_TEMPORAL_PORT)" \
+		"TEMPORAL_NAMESPACE=vector" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
-		"CHAIN_ID=1" \
+		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"BUILD_GIT_HASH=dev" \
-		"LOG_LEVEL=debug" \
+		"LOG_LEVEL=info" \
 		> cmd/backfillers/uniswap-v4-position-bootstrap/.env
 	@set -a; . ../.env.secrets; set +a; \
 	printf '%s\n' \
@@ -2391,8 +2395,8 @@ docker-release-reference-capital-backfill: ecr-login _docker-release-reference-c
 _docker-release-reference-capital-backfill-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Reference Capital Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/reference-capital-backfill GO_BIN=reference-capital-backfill GO_CACHE_KEY="cronjob-reference-capital-backfill" GO_TAG="reference-capital-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="reference-capital-backfill-latest"
 
-# uniswap-v4-position-bootstrap (VEC-639): not a cronjob (it registers no Temporal
-# schedule) so it is not auto-discovered; it only shares the cronjob ECR repo.
+# uniswap-v4-position-bootstrap (VEC-639): an on-demand Temporal worker with no
+# schedule, so it is not auto-discovered as a cronjob; it only shares the ECR repo.
 docker-build-uniswap-v4-position-bootstrap:
 	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/uniswap-v4-position-bootstrap --build-arg BIN=uniswap-v4-position-bootstrap -t stl-uniswap-v4-position-bootstrap:local -f Dockerfile.common .
 

@@ -1844,75 +1844,96 @@ to enumerate a pool's positions, so the live indexer only ever learns one from a
 `ModifyLiquidity` log. A position minted before the indexer went live and never
 touched since is therefore invisible to it forever — `uniswap_v4_position`
 coverage is event-driven, and nothing in the live path can close that hole.
-`cmd/backfillers/uniswap-v4-position-bootstrap` does: a one-shot binary that
-replays the PoolManager's whole `ModifyLiquidity` history for the registered
-snapshot-supported pools (adaptive-window `eth_getLogs`, bisecting on a provider
-range refusal), decodes the position keys with the indexer's own decoder, and
-reads each one through the same `StateView.getPositionInfo` getter and
-append-on-change write path the live indexer uses. A closed position reads back
-all zeros and is persisted as such — that erasure is what the row records.
+`cmd/backfillers/uniswap-v4-position-bootstrap` does: an on-demand Temporal
+worker (no schedule, started by hand) that replays the PoolManager's whole
+`ModifyLiquidity` history for the registered snapshot-supported pools
+(adaptive-window `eth_getLogs`, bisecting on a provider range refusal), decodes
+the position keys with the indexer's own decoder, and reads each one through the
+same `StateView.getPositionInfo` getter and append-on-change write path the live
+indexer uses. A closed position reads back all zeros and is persisted as such —
+that erasure is what the row records.
 
 Run it **after the indexer's first deploy on a chain**, and again **after any
 suspected gap**: a long outage, a DLQ'd stretch, or a newly registered pool
-whose history predates its registration. It is not scheduled and not in any
-synced overlay's `resources`; the pipeline builds and promotes its image on every
-deploy (roster line `uniswap-v4-position-bootstrap`, shared cronjob ECR repo, tag
-`uniswap-v4-position-bootstrap-<sha>`), and it is applied by hand through the
-manual-apply overlay, which pins that image and the `vector` namespace:
+whose history predates its registration. The worker is a synced Deployment
+(`k8s/base/uniswap-v4-position-bootstrap/`, one replica, `Recreate`) that idles
+on its task queue: deploying it never starts a run, and the pipeline keeps it on
+the current image like any other service (roster line
+`uniswap-v4-position-bootstrap`, shared cronjob ECR repo). Its availability and
+run failures are covered by `VectorOnDemandWorkerDown` and
+`VectorCronjobRunFailing` like the other on-demand workers
+([vector-cronjobs.md](vector-cronjobs.md#vectorondemandworkerdown)).
 
-```sh
-# 1. pin a built image (any main SHA since the merge)
-$EDITOR k8s/overlays/<env>/uniswap-v4-position-bootstrap/kustomization.yaml   # newTag
-# 2. run, follow, and delete afterwards (a Job spec is immutable, so a rerun needs the old one gone)
-kustomize build k8s/overlays/<env>/uniswap-v4-position-bootstrap | kubectl apply -f -
-kubectl -n vector logs -f job/uniswap-v4-position-bootstrap
-kubectl -n vector delete job uniswap-v4-position-bootstrap
+**How to start a run.** Temporal UI (namespace **`vector`**) → **Start Workflow**:
+
+| Field | Value |
+|---|---|
+| Task Queue | `uniswap-v4-position-bootstrap` |
+| Workflow Type | `UniswapV4PositionBootstrap` |
+| Workflow ID | descriptive and unique, e.g. `uniswap-v4-position-bootstrap-2026-09-14` |
+| Input | leave empty |
+
+There is nothing to supply: the run reads the chain from its ConfigMap, the pool
+set from the database, and pins its own finalized head. The equivalent CLI call:
+
+```bash
+temporal workflow start --namespace vector \
+  --task-queue uniswap-v4-position-bootstrap --type UniswapV4PositionBootstrap \
+  --workflow-id uniswap-v4-position-bootstrap-2026-09-14
 ```
 
-The Job reuses the indexer's ConfigMap, Secret and ServiceAccount, so
-`DATABASE_URL`, `ALCHEMY_API_KEY`, `ALCHEMY_HTTP_URL` and `CHAIN_ID` come from
-there. Every flag has an env twin for the Job's `env:`: `PIN_BLOCK`,
-`FROM_BLOCK`, `FINALITY_DEPTH`, `INITIAL_WINDOW`, `MIN_WINDOW`, `MAX_WINDOW`,
-`POSITION_BATCH` (a flag wins over its env var; `0` means "use the default").
+The Workflow ID is the concurrency guard: Temporal rejects a duplicate while a
+run with that ID is in flight. Follow a run with
+`kubectl -n vector logs -f deploy/uniswap-v4-position-bootstrap` or in the
+execution's history; it closes with one `uniswap-v4 position bootstrap finished`
+line carrying its counters, and a failed attempt logs the partial ones at Warn.
 
-- **Pin semantics.** The whole run snapshots one block: `head - 64` by default
-  (two epochs, comfortably past finalisation), overridable with `-pin`. One
-  block for the run is what makes the snapshot internally consistent, and being
-  past finality is what lets every row carry `block_version = 0`. A `-pin` above
-  `head - finality-depth` is **refused**, with an error naming the head and the
-  deepest safe block — a shallow pin would let a reorg redelivery of that height
-  make the live indexer re-read the pool's entire historical position set. The
-  pin is re-read after the scan, and the run fails rather than write if the
-  height now names a different hash.
-- **Rerun behaviour.** It keeps no progress state. Re-running is safe and
-  **idempotent except at a pinned height that carries a live `block_version > 0`
-  row** (the known edge below): the append-on-change writer inserts only where
-  the stored value for a slot differs, and its read of the current value is
-  height-bounded, so a row the live indexer already wrote *above* the pin is
-  never regressed. A run over already-covered history reports
-  `positionsWritten=0` — that, not the row count, is how you tell a no-op rerun
-  from one that closed a real gap.
+The scan knobs are the Deployment's ConfigMap, all optional and defaulted when
+unset: `FINALITY_DEPTH`, `INITIAL_WINDOW`, `MIN_WINDOW`, `MAX_WINDOW`,
+`POSITION_BATCH`. Changing one is a config change and a rollout, not a run
+input. The worker reuses nothing of the indexer's: it has its own ConfigMap, Secret
+(`DATABASE_URL`, `ALCHEMY_API_KEY`) and ServiceAccount.
+
+- **Pin semantics.** The whole run snapshots one block: `head - 64` (two epochs,
+  comfortably past finalisation). One block for the run is what makes the
+  snapshot internally consistent, and being past finality is what lets every
+  row carry `block_version = 0` — a shallow pin would let a reorg redelivery of
+  that height make the live indexer re-read the pool's entire historical
+  position set. The pin is re-read after the scan, and the run fails rather
+  than write if the height now names a different hash.
+- **Rerun behaviour.** Re-running is safe and **idempotent except at a pinned
+  height that carries a live `block_version > 0` row** (the known edge below):
+  the append-on-change writer inserts only where the stored value for a slot
+  differs, and its read of the current value is height-bounded, so a row the
+  live indexer already wrote *above* the pin is never regressed. A run over
+  already-covered history reports `positionsWritten=0` — that, not the row
+  count, is how you tell a no-op rerun from one that closed a real gap.
 - **Row volume.** Every key ever touched gets one row at the pin, closed
   positions included (their all-zero row is the record). Mainnet, 21 pools,
   2026-09: 4,451 rows, 138 open and 4,313 closed, in one run. The
   `VectorUniswapV4AppendOnChangeGrowthHigh` 6h rate spikes once after a first
   run by design; a rerun adds ~nothing.
-- **Resuming an interrupted run.** Resume with `-pin <P>` (`PIN_BLOCK=<P>` in the
-  Job), taking `P` from the failed run's error (`resume this snapshot with -pin …`)
-  or from its `starting uniswap-v4 position bootstrap` log line. A bare rerun re-derives a
-  fresh `head - 64` and would stitch one snapshot across two heights. Batches
-  already committed stay, and the resumed run re-reads them without appending.
-  A run that fails with `pinned block … is … now` does not carry the hint: the
-  height was reorged past the finality depth, and the answer is a fresh pin. In
-  the Job, `PIN_BLOCK` and the other knobs are the base's empty `env:` entries;
-  set them through the overlay's `patches:` (a commented example is in each).
+- **A killed attempt resumes on the same pin.** The run is one Temporal
+  activity (2h `StartToClose`, 6h `ScheduleToClose`, 3 attempts, 60 s
+  heartbeat, all compiled into the worker). It records the pin and every pool
+  it has finished in the activity's heartbeat details, so when a deploy rolls
+  the pod mid-run the next attempt reads the record back, holds the pinned
+  height to the recorded hash, re-discovers the keys (a few `eth_getLogs`
+  windows) and continues with the pools still to do — it never re-derives a
+  fresh `head - 64` and stitches one snapshot across two heights. An attempt
+  that fails with `pinned block … was … when this run's progress was recorded
+  and is … now` found its pin reorged past the finality depth: the run stays
+  red, and the answer is a new run, which pins afresh. Heartbeat details belong
+  to one activity execution, so a run started again by hand always starts from
+  the beginning — safe, because every write is idempotent. See "Resuming a long
+  run after a pod kill" in [docs/temporal_guide.md](../temporal_guide.md).
 - **Known edge: a pinned height the watcher saw reorged.** Rows carry
   `block_version = 0`. If the live indexer holds a `block_version = 1` row at
   the pinned height for a position touched in that block, the bootstrap's
   version-0 row (canonical values) is appended anyway, because the writer treats
-  a version difference at the same height as a change, and a rerun with the
-  same `-pin` appends it again. State-at-height answers are unaffected (the
-  canonical version ranks above); pick a fresh pin, the default, to avoid it.
+  a version difference at the same height as a change, and a rerun that lands
+  on the same pin appends it again. State-at-height answers are unaffected (the
+  canonical version ranks above); a later run pins higher and avoids it.
 
 **Tables:** `uniswap_v4_pool_state`, `uniswap_v4_swap`,
 `uniswap_v4_liquidity_event`, `uniswap_v4_tick`, `uniswap_v4_pool_event`,

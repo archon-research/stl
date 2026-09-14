@@ -90,17 +90,25 @@ func parsePinnedHeader(number int64, header *outbound.BlockHeader) (pinnedBlock,
 }
 
 func assertPinStable(ctx context.Context, client outbound.LogScanClient, pin pinnedBlock) error {
-	header, err := client.GetBlockHeaderByNumber(ctx, pin.number)
+	_, err := reReadPin(ctx, client, pin.number, pin.hash, "at the start of the scan")
+	return err
+}
+
+// reReadPin re-reads a pinned height and holds it to the hash it carried when it
+// was pinned. A mismatch is ErrPinMoved: the chain reorged past the finality
+// depth, and no run may continue on that pin.
+func reReadPin(ctx context.Context, client outbound.LogScanClient, number int64, hash common.Hash, pinnedWhen string) (pinnedBlock, error) {
+	header, err := client.GetBlockHeaderByNumber(ctx, number)
 	if err != nil {
-		return fmt.Errorf("re-reading pinned block %d to confirm it is stable: %w", pin.number, err)
+		return pinnedBlock{}, fmt.Errorf("re-reading pinned block %d to confirm it is stable: %w", number, err)
 	}
-	current, err := parsePinnedHeader(pin.number, header)
+	current, err := parsePinnedHeader(number, header)
 	if err != nil {
-		return err
+		return pinnedBlock{}, err
 	}
-	if current.hash != pin.hash {
-		return fmt.Errorf("pinned block %d was %s at the start of the scan and is %s now: the chain reorged past the finality depth, re-run against a fresh pin: %w",
-			pin.number, pin.hash, current.hash, ErrPinMoved)
+	if current.hash != hash {
+		return pinnedBlock{}, fmt.Errorf("pinned block %d was %s %s and is %s now: the chain reorged past the finality depth, re-run against a fresh pin: %w",
+			number, hash, pinnedWhen, current.hash, ErrPinMoved)
 	}
-	return nil
+	return current, nil
 }

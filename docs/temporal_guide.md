@@ -113,8 +113,10 @@ details, which live on the Temporal server:
 - resume must be alignment-safe: record a position only once the unit that reached it is
   fully done, and scope the record so a record computed for different inputs is refused.
 
-`morpho-v2-bootstrap` is the worked example. A job with nothing to resume leaves
-`Progress` nil and heartbeats exactly as before.
+`morpho-v2-bootstrap` is the worked example; `uniswap-v4-position-bootstrap` records
+the block it pinned and the pools it has finished, so a retry continues the same
+snapshot instead of pinning afresh. A job with nothing to resume leaves `Progress` nil
+and heartbeats exactly as before.
 
 ## Recipe: add a new cronjob
 
@@ -254,6 +256,7 @@ whatever input the job declares. Nothing here has a schedule or a button.
 | `cmd/backfillers/morpho-vault-backfill` | `morpho-vault-backfill` | `MorphoVaultBackfill` | `{"from":24765588,"to":24786366}` (or `{"to":24786366,"fromV2Deploy":true}` for the whole VaultV2 era) |
 | `cmd/cronjobs/morpho-v2-bootstrap` | `morpho-v2-bootstrap` | `MorphoV2Bootstrap` | none (`{}` is accepted and ignored) |
 | `cmd/backfillers/block-republisher` | `block-republisher` (ethereum), `<chain>-block-republisher` elsewhere | `BlockRepublish` | `{"blocks":[25395651,25087888]}` (the version is derived per height from the raw archive; naming one, or any other field, fails the run) |
+| `cmd/backfillers/uniswap-v4-position-bootstrap` | `uniswap-v4-position-bootstrap` | `UniswapV4PositionBootstrap` | none (`{}` is accepted and ignored); the run pins its own finalized head and resumes it across attempts from the activity's heartbeat details |
 
 ### Shape of an on-demand job
 

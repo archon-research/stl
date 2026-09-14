@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"slices"
 	"strings"
 	"testing"
 
@@ -26,11 +27,12 @@ const (
 )
 
 type bootstrapFixture struct {
-	svc    *Service
-	client *fakeLogScanClient
-	repo   *fakeUniswapV4Repository
-	mc     *testutil.MockMulticaller
-	txMgr  *testutil.MockTxManager
+	svc      *Service
+	client   *fakeLogScanClient
+	repo     *fakeUniswapV4Repository
+	mc       *testutil.MockMulticaller
+	txMgr    *testutil.MockTxManager
+	progress *fakeProgressStore
 }
 
 func newFixture(t *testing.T, mutate func(*Deps)) *bootstrapFixture {
@@ -42,6 +44,7 @@ func newFixture(t *testing.T, mutate func(*Deps)) *bootstrapFixture {
 	repo := &fakeUniswapV4Repository{}
 	mc := positionReturningMulticaller(t, 5000)
 	txMgr := &testutil.MockTxManager{}
+	progress := &fakeProgressStore{}
 
 	deps := Deps{
 		Pools:       testPools(),
@@ -49,6 +52,7 @@ func newFixture(t *testing.T, mutate func(*Deps)) *bootstrapFixture {
 		Multicaller: mc,
 		Repo:        repo,
 		TxManager:   txMgr,
+		Progress:    progress,
 		Logger:      testLogger(),
 		Config: Config{
 			ChainID:       testChainID,
@@ -64,7 +68,7 @@ func newFixture(t *testing.T, mutate func(*Deps)) *bootstrapFixture {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return &bootstrapFixture{svc: svc, client: client, repo: repo, mc: mc, txMgr: txMgr}
+	return &bootstrapFixture{svc: svc, client: client, repo: repo, mc: mc, txMgr: txMgr, progress: progress}
 }
 
 func TestNew_RejectsIncompleteDeps(t *testing.T) {
@@ -78,6 +82,7 @@ func TestNew_RejectsIncompleteDeps(t *testing.T) {
 		{"no multicaller", func(d *Deps) { d.Multicaller = nil }, "multicaller"},
 		{"no repo", func(d *Deps) { d.Repo = nil }, "repo"},
 		{"no tx manager", func(d *Deps) { d.TxManager = nil }, "txManager"},
+		{"no progress store", func(d *Deps) { d.Progress = nil }, "progress store"},
 		{"no logger", func(d *Deps) { d.Logger = nil }, "logger"},
 		{"bad config", func(d *Deps) { d.Config.ChainID = 0 }, "chainID"},
 		{
@@ -114,6 +119,7 @@ func TestNew_RejectsIncompleteDeps(t *testing.T) {
 				Multicaller: testutil.NewMockMulticaller(),
 				Repo:        &fakeUniswapV4Repository{},
 				TxManager:   &testutil.MockTxManager{},
+				Progress:    &fakeProgressStore{},
 				Logger:      testLogger(),
 				Config:      Config{ChainID: testChainID},
 			}
@@ -692,4 +698,158 @@ func TestRun_DecodedKeyMatchesTheLog(t *testing.T) {
 	if rows[0].Liquidity.Cmp(big.NewInt(5000)) != 0 {
 		t.Errorf("liquidity = %s, want 5000", rows[0].Liquidity)
 	}
+}
+
+// twoPoolLogsFn answers one ModifyLiquidity log per fixture pool, so both
+// pools have a key to snapshot.
+func twoPoolLogsFn(t *testing.T) func(outbound.LogFilter) ([]outbound.FilteredLog, error) {
+	return func(outbound.LogFilter) ([]outbound.FilteredLog, error) {
+		return []outbound.FilteredLog{
+			modifyLiquidityFilteredLog(t, poolAIDHash, ownerA, -100, 200, saltA, 21_800_000, 0),
+			modifyLiquidityFilteredLog(t, poolBIDHash, ownerB, -60, 60, saltB, 23_000_000, 1),
+		}, nil
+	}
+}
+
+func recordedProgress(poolsDone ...int64) Progress {
+	return Progress{ChainID: testChainID, PinnedBlock: testPinned, PinnedHash: pinHash, PoolsDone: poolsDone}
+}
+
+func TestRun_RecordsThePinAndEveryFinishedPool(t *testing.T) {
+	f := newFixture(t, nil)
+	f.client.GetLogsFn = twoPoolLogsFn(t)
+
+	if _, err := f.svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := []Progress{recordedProgress(poolAFixture.id), recordedProgress(poolAFixture.id, poolBFixture.id)}
+	if len(f.progress.Saves) != len(want) {
+		t.Fatalf("progress records = %d, want %d (one per pool, once its last batch committed)", len(f.progress.Saves), len(want))
+	}
+	for i := range want {
+		if got := f.progress.Saves[i]; got.ChainID != want[i].ChainID || got.PinnedBlock != want[i].PinnedBlock ||
+			got.PinnedHash != want[i].PinnedHash || !slices.Equal(got.PoolsDone, want[i].PoolsDone) {
+			t.Errorf("record %d = %+v, want %+v", i, got, want[i])
+		}
+	}
+}
+
+func TestRun_RecordsAPoolWithNoKeysAsDone(t *testing.T) {
+	f := newFixture(t, nil)
+
+	if _, err := f.svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := f.progress.Recorded.PoolsDone; !slices.Equal(got, []int64{poolAFixture.id, poolBFixture.id}) {
+		t.Errorf("pools done = %v, want both pools: a pool with nothing to write is still finished", got)
+	}
+}
+
+func TestRun_ResumesTheRecordedPinAndSkipsTheFinishedPools(t *testing.T) {
+	f := newFixture(t, nil)
+	f.client.GetLogsFn = twoPoolLogsFn(t)
+	// The head has moved on since the record was written; a fresh pin would land
+	// higher, and it must not.
+	f.client.Head = testHead + 1_000
+	f.progress.Recorded, f.progress.Found = recordedProgress(poolAFixture.id), true
+
+	summary, err := f.svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if summary.PinnedBlock != testPinned || summary.PinnedHash != common.HexToHash(pinHash) {
+		t.Errorf("pinned at %d %s, want the recorded pin %d %s", summary.PinnedBlock, summary.PinnedHash, testPinned, pinHash)
+	}
+	if f.client.HeadCalls != 0 {
+		t.Errorf("head reads = %d, want 0: a resumed attempt pins nothing afresh", f.client.HeadCalls)
+	}
+	if summary.PoolsResumed != 1 {
+		t.Errorf("PoolsResumed = %d, want 1", summary.PoolsResumed)
+	}
+	for _, row := range f.repo.savedPositions() {
+		if row.PoolID != poolBFixture.id {
+			t.Errorf("wrote a row for pool %d; only pool %d was left to do", row.PoolID, poolBFixture.id)
+		}
+	}
+	if len(f.repo.savedPositions()) != 1 {
+		t.Errorf("rows written = %d, want 1: pool B's single key", len(f.repo.savedPositions()))
+	}
+	if got := f.progress.Recorded.PoolsDone; !slices.Equal(got, []int64{poolAFixture.id, poolBFixture.id}) {
+		t.Errorf("pools done after the resumed attempt = %v, want both", got)
+	}
+}
+
+func TestRun_ARecordedPinThatMovedIsFatal(t *testing.T) {
+	f := newFixture(t, nil)
+	f.client.GetLogsFn = twoPoolLogsFn(t)
+	recorded := recordedProgress(poolAFixture.id)
+	recorded.PinnedHash = forkHash
+	f.progress.Recorded, f.progress.Found = recorded, true
+
+	_, err := f.svc.Run(context.Background())
+
+	if !errors.Is(err, ErrPinMoved) {
+		t.Fatalf("error = %v, want ErrPinMoved: the recorded snapshot cannot be continued on another block", err)
+	}
+	if len(f.repo.SavedBatches) != 0 {
+		t.Errorf("write batches = %d, want 0", len(f.repo.SavedBatches))
+	}
+	if f.client.HeadCalls != 0 {
+		t.Errorf("head reads = %d, want 0: a moved pin is not silently replaced by a fresh one", f.client.HeadCalls)
+	}
+}
+
+func TestRun_ARecordFromAnotherChainPinsAfresh(t *testing.T) {
+	f := newFixture(t, nil)
+	recorded := recordedProgress(poolAFixture.id)
+	recorded.ChainID = 8453
+	f.progress.Recorded, f.progress.Found = recorded, true
+
+	summary, err := f.svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if f.client.HeadCalls != 1 {
+		t.Errorf("head reads = %d, want 1: another chain's record licenses no resume", f.client.HeadCalls)
+	}
+	if summary.PoolsResumed != 0 {
+		t.Errorf("PoolsResumed = %d, want 0", summary.PoolsResumed)
+	}
+}
+
+func TestRun_ProgressStoreFailuresStopTheRun(t *testing.T) {
+	boom := errors.New("boom")
+
+	t.Run("load fails", func(t *testing.T) {
+		f := newFixture(t, nil)
+		f.progress.LoadErr = boom
+
+		_, err := f.svc.Run(context.Background())
+
+		if !errors.Is(err, boom) {
+			t.Fatalf("error = %v, want the load failure: an unreadable record is not an empty one", err)
+		}
+		if f.client.HeadCalls != 0 {
+			t.Errorf("head reads = %d, want 0", f.client.HeadCalls)
+		}
+	})
+
+	t.Run("save fails", func(t *testing.T) {
+		f := newFixture(t, nil)
+		f.client.GetLogsFn = twoPoolLogsFn(t)
+		f.progress.SaveErr = boom
+
+		_, err := f.svc.Run(context.Background())
+
+		if !errors.Is(err, boom) {
+			t.Fatalf("error = %v, want the save failure", err)
+		}
+		if got := len(f.repo.savedPositions()); got != 1 {
+			t.Errorf("rows written = %d, want 1: the first pool lands before its record fails, the second is never started", got)
+		}
+	})
 }

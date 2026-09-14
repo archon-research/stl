@@ -30,8 +30,11 @@ type Deps struct {
 	Multicaller outbound.Multicaller
 	Repo        outbound.UniswapV4PositionWriter
 	TxManager   outbound.TxManager
-	Logger      *slog.Logger
-	Config      Config
+	// Progress is where a run records the pin and the pools it has finished, so
+	// a later attempt of the same run continues that snapshot (see Run).
+	Progress ProgressStore
+	Logger   *slog.Logger
+	Config   Config
 }
 
 type Service struct {
@@ -43,16 +46,20 @@ type Service struct {
 	multicaller outbound.Multicaller
 	repo        outbound.UniswapV4PositionWriter
 	txMgr       outbound.TxManager
+	progress    ProgressStore
 	logger      *slog.Logger
 	cfg         Config
 }
 
 type Summary struct {
-	PinnedBlock      int64
-	PinnedHash       common.Hash
-	PinnedTimestamp  time.Time
-	FromBlock        int64
-	Pools            int
+	PinnedBlock     int64
+	PinnedHash      common.Hash
+	PinnedTimestamp time.Time
+	FromBlock       int64
+	Pools           int
+	// PoolsResumed counts the pools an earlier attempt of this run had already
+	// persisted at the pin, which this attempt therefore skipped.
+	PoolsResumed     int
 	ScanWindows      int
 	ScanNarrowings   int
 	ScanLogs         int
@@ -104,6 +111,7 @@ func New(deps Deps) (*Service, error) {
 		multicaller: deps.Multicaller,
 		repo:        deps.Repo,
 		txMgr:       deps.TxManager,
+		progress:    deps.Progress,
 		logger:      deps.Logger,
 		cfg:         cfg,
 	}, nil
@@ -121,6 +129,8 @@ func (d Deps) validate() error {
 		return fmt.Errorf("repo is required")
 	case d.TxManager == nil:
 		return fmt.Errorf("txManager is required")
+	case d.Progress == nil:
+		return fmt.Errorf("progress store is required")
 	case d.Logger == nil:
 		return fmt.Errorf("logger is required")
 	}
@@ -135,8 +145,18 @@ func snapshottablePoolsByID(all []uniswapv4indexer.RegisteredPool) []uniswapv4in
 	return pools
 }
 
+// Run snapshots every historical position key at one pinned block.
+//
+// A run that dies part-way (a pod kill, a deploy) resumes on a later attempt
+// through the ProgressStore: the pin and the pools already persisted are on
+// record, so the attempt continues the same snapshot instead of re-deriving a
+// fresh head-64 pin and stitching one snapshot across two heights. The key
+// discovery is redone every attempt — it is a handful of eth_getLogs windows —
+// and only the recorded pools are skipped. No correctness depends on the
+// record: a run that resumes from nothing simply does the work again, and the
+// append-on-change writer inserts nothing for a batch already stored.
 func (s *Service) Run(ctx context.Context) (Summary, error) {
-	pin, err := pinBlock(ctx, s.logScan, s.cfg.FinalityDepth, s.cfg.PinBlock)
+	pin, done, err := s.resumePoint(ctx)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -152,7 +172,7 @@ func (s *Service) Run(ctx context.Context) (Summary, error) {
 		return summary, err
 	}
 	summary.FromBlock = from
-	s.logStart(pin, from)
+	s.logStart(pin, from, done)
 
 	keysByPool, stats, err := s.discoverPositionKeys(ctx, from, pin.number)
 	summary.ScanWindows, summary.ScanNarrowings, summary.ScanLogs = stats.windows, stats.narrowings, stats.logs
@@ -165,19 +185,59 @@ func (s *Service) Run(ctx context.Context) (Summary, error) {
 	if err := assertPinStable(ctx, s.logScan, pin); err != nil {
 		return summary, err
 	}
-	if err := s.snapshotAndPersist(ctx, keysByPool, pin, &summary); err != nil {
+	if err := s.snapshotAndPersist(ctx, keysByPool, pin, done, &summary); err != nil {
 		return summary, err
 	}
 	return summary, nil
 }
 
-func (s *Service) logStart(pin pinnedBlock, from int64) {
+// resumePoint is the pin this attempt snapshots at and the pools it may skip:
+// what an earlier attempt of this run recorded, or a fresh pin and nothing.
+//
+// A record is usable only when it was written for this chain and its pinned
+// height still names the recorded hash. The hash check is the load-bearing
+// one: a recorded pin whose height has since been reorged cannot be continued
+// on any attempt, so it is ErrPinMoved rather than a silent fresh start — the
+// rows already persisted under it are the reason the operator has to know.
+func (s *Service) resumePoint(ctx context.Context) (pinnedBlock, Progress, error) {
+	recorded, found, err := s.progress.LoadProgress(ctx)
+	if err != nil {
+		return pinnedBlock{}, Progress{}, fmt.Errorf("loading bootstrap progress: %w", err)
+	}
+	if found && recorded.ChainID == s.cfg.ChainID {
+		pin, err := reReadPin(ctx, s.logScan, recorded.PinnedBlock, common.HexToHash(recorded.PinnedHash), "when this run's progress was recorded")
+		if err != nil {
+			return pinnedBlock{}, Progress{}, fmt.Errorf("resuming the recorded snapshot: %w", err)
+		}
+		s.logger.Info("resuming uniswap-v4 position bootstrap from recorded progress",
+			"chainId", s.cfg.ChainID, "pinnedBlock", pin.number, "pinnedHash", pin.hash, "poolsDone", len(recorded.PoolsDone))
+		return pin, recorded, nil
+	}
+	if found {
+		s.logger.Warn("recorded bootstrap progress belongs to another chain, pinning afresh",
+			"chainId", s.cfg.ChainID, "recordedChainId", recorded.ChainID)
+	}
+
+	pin, err := pinBlock(ctx, s.logScan, s.cfg.FinalityDepth, s.cfg.PinBlock)
+	if err != nil {
+		return pinnedBlock{}, Progress{}, err
+	}
+	return pin, s.progressAt(pin), nil
+}
+
+// progressAt stamps an empty record with the scope it is true for.
+func (s *Service) progressAt(pin pinnedBlock) Progress {
+	return Progress{ChainID: s.cfg.ChainID, PinnedBlock: pin.number, PinnedHash: pin.hash.Hex()}
+}
+
+func (s *Service) logStart(pin pinnedBlock, from int64, done Progress) {
 	poolIDs := make([]string, len(s.pools))
 	for i, pool := range s.pools {
 		poolIDs[i] = pool.PoolIDHash.Hex()
 	}
 	s.logger.Info("starting uniswap-v4 position bootstrap",
 		"chainId", s.cfg.ChainID, "poolManager", s.poolManager, "pools", len(s.pools), "poolIds", poolIDs,
+		"poolsDone", len(done.PoolsDone),
 		"fromBlock", from, "pinnedBlock", pin.number, "pinnedHash", pin.hash, "pinnedTimestamp", pin.ts,
 		"initialWindow", s.cfg.InitialWindow, "positionBatch", s.cfg.PositionBatch)
 }
@@ -259,21 +319,34 @@ func toSharedLogs(logs []outbound.FilteredLog) []shared.Log {
 	return out
 }
 
+// snapshotAndPersist reads and writes every pool's keys, recording each pool as
+// done once its last batch has committed. A pool the record already lists is
+// skipped: its rows are on disk at this pin, and re-reading them would only
+// re-confirm that.
 func (s *Service) snapshotAndPersist(
 	ctx context.Context,
 	keysByPool map[int64][]entity.UniswapV4PositionKey,
 	pin pinnedBlock,
+	done Progress,
 	summary *Summary,
 ) error {
 	for _, pool := range s.pools {
+		if done.poolDone(pool.ID) {
+			summary.PoolsResumed++
+			s.logger.Info("uniswap-v4 pool already persisted at this pin by an earlier attempt",
+				"chainId", s.cfg.ChainID, "poolRowId", pool.ID, "poolId", pool.PoolIDHash.Hex(), "pinnedBlock", pin.number)
+			continue
+		}
 		keys := keysByPool[pool.ID]
 		if len(keys) == 0 {
 			s.logger.Info("uniswap-v4 pool has no historical positions",
 				"chainId", s.cfg.ChainID, "poolRowId", pool.ID, "poolId", pool.PoolIDHash.Hex())
-			continue
-		}
-		if err := s.snapshotPool(ctx, pool, keys, pin, summary); err != nil {
+		} else if err := s.snapshotPool(ctx, pool, keys, pin, summary); err != nil {
 			return err
+		}
+		done.PoolsDone = append(slices.Clone(done.PoolsDone), pool.ID)
+		if err := s.progress.SaveProgress(ctx, done); err != nil {
+			return fmt.Errorf("recording bootstrap progress after pool %d: %w", pool.ID, err)
 		}
 	}
 	return nil

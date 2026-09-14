@@ -193,6 +193,37 @@ func header(blockNumber int64, hash string) *outbound.BlockHeader {
 	}
 }
 
+// fakeProgressStore is the in-memory ProgressStore: what the last SaveProgress
+// recorded, handed back by LoadProgress the way a later attempt would read it.
+type fakeProgressStore struct {
+	mu       sync.Mutex
+	Recorded Progress
+	Found    bool
+	Saves    []Progress
+	LoadErr  error
+	SaveErr  error
+}
+
+func (f *fakeProgressStore) SaveProgress(_ context.Context, progress Progress) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.SaveErr != nil {
+		return f.SaveErr
+	}
+	f.Saves = append(f.Saves, progress)
+	f.Recorded, f.Found = progress, true
+	return nil
+}
+
+func (f *fakeProgressStore) LoadProgress(_ context.Context) (Progress, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.LoadErr != nil {
+		return Progress{}, false, f.LoadErr
+	}
+	return f.Recorded, f.Found, nil
+}
+
 type fakeUniswapV4Repository struct {
 	SavePositionsFn func([]*entity.UniswapV4Position) (int64, error)
 	SavedBatches    [][]*entity.UniswapV4Position

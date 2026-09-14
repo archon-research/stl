@@ -63,6 +63,7 @@ func setupBootstrapIntegration(t *testing.T, liquidity int64) *v4BootstrapFixtur
 			Multicaller: mc,
 			Repo:        repo,
 			TxManager:   txMgr,
+			Progress:    &fakeProgressStore{},
 			Logger:      testLogger(),
 			Config: Config{
 				ChainID:  testChainID,
@@ -80,8 +81,11 @@ func setupBootstrapIntegration(t *testing.T, liquidity int64) *v4BootstrapFixtur
 	}
 }
 
+// run is one hand-started run: a new execution with no heartbeat history, so
+// it gets a fresh progress store and pins for itself.
 func (f *v4BootstrapFixture) run(t *testing.T) Summary {
 	t.Helper()
+	f.deps.Progress = &fakeProgressStore{}
 	svc, err := New(f.deps)
 	if err != nil {
 		t.Fatalf("New: %v", err)
