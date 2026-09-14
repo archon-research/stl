@@ -45,6 +45,7 @@ resources:
   - ../../base/robinhood-backup-worker
   - ../../base/robinhood-allocation-tracker
   - ../../base/prime-debt-indexer
+  - ../../base/position-materializer
   - ../../base/base-psm3-indexer
   - ../../base/optimism-psm3-indexer
   - ../../base/unichain-psm3-indexer
