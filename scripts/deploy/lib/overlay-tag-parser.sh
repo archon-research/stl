@@ -17,6 +17,7 @@
 # Embedded as text and concatenated onto each caller's own awk program
 # (rather than loaded via `awk -f`), so every caller stays a single
 # self-contained `awk '...'` invocation.
+# shellcheck disable=SC2034  # read by the scripts that source this file
 OVERLAY_SCALAR_AWK_FN="$(cat <<'AWK'
 function overlay_scalar_value(s) {
   sub(/^[^:]*:[[:space:]]*/, "", s)
