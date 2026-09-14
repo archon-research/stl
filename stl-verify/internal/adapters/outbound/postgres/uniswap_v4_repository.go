@@ -20,8 +20,9 @@ import (
 )
 
 var (
-	_ outbound.UniswapV4Repository     = (*UniswapV4Repository)(nil)
-	_ outbound.UniswapV4PositionWriter = (*UniswapV4Repository)(nil)
+	_ outbound.UniswapV4Repository        = (*UniswapV4Repository)(nil)
+	_ outbound.UniswapV4PositionWriter    = (*UniswapV4Repository)(nil)
+	_ outbound.UniswapV4NFTTransferWriter = (*UniswapV4Repository)(nil)
 )
 
 // address(0) is not usable as native ETH: the token registry already holds it
@@ -43,6 +44,7 @@ func NewUniswapV4Repository(pool *pgxpool.Pool, buildID buildregistry.BuildID) *
 const loadUniswapV4PoolsSQL = `
 	SELECT p.id, m.manager_id, m.protocol_id, m.pool_manager_address, m.state_view_address,
 	       pm.position_manager_id, pm.position_manager_protocol_id, pm.position_manager_address,
+	       pm.position_manager_deploy_block,
 	       p.pool_id, p.currency0, p.currency1,
 	       t0.address, t0.decimals, t1.address, t1.decimals,
 	       p.fee, p.tick_spacing, p.hooks, p.deploy_block, p.snapshot_supported
@@ -66,7 +68,7 @@ const loadUniswapV4PoolsSQL = `
 	) m ON TRUE
 	LEFT JOIN LATERAL (
 	    SELECT posm.id AS position_manager_id, posm.protocol_id AS position_manager_protocol_id,
-	           pr.address AS position_manager_address
+	           pr.address AS position_manager_address, posm.deploy_block AS position_manager_deploy_block
 	    FROM uniswap_v4_position_manager posm
 	    LEFT JOIN protocol pr ON pr.id = posm.protocol_id AND pr.chain_id = $1
 	    WHERE posm.chain_id = $1
@@ -100,25 +102,26 @@ func (r *UniswapV4Repository) LoadPools(ctx context.Context, chainID int64) ([]o
 
 func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolRow, error) {
 	var (
-		id                     int64
-		managerID              *int64
-		protocolID             *int64
-		poolManager, stateView []byte
-		positionManagerID      *int64
-		positionManagerProtoID *int64
-		positionManagerAddress []byte
-		onchainPoolID          []byte
-		currency0, currency1   []byte
-		token0, token1         []byte
-		decimals0, decimals1   *int
-		fee, tickSpacing       int
-		hooks                  []byte
-		deployBlock            int64
-		snapshotSupported      bool
-		row                    outbound.UniswapV4PoolRow
+		id                       int64
+		managerID                *int64
+		protocolID               *int64
+		poolManager, stateView   []byte
+		positionManagerID        *int64
+		positionManagerProtoID   *int64
+		positionManagerAddress   []byte
+		positionManagerDeployBlk *int64
+		onchainPoolID            []byte
+		currency0, currency1     []byte
+		token0, token1           []byte
+		decimals0, decimals1     *int
+		fee, tickSpacing         int
+		hooks                    []byte
+		deployBlock              int64
+		snapshotSupported        bool
+		row                      outbound.UniswapV4PoolRow
 	)
 	if err := rows.Scan(&id, &managerID, &protocolID, &poolManager, &stateView,
-		&positionManagerID, &positionManagerProtoID, &positionManagerAddress,
+		&positionManagerID, &positionManagerProtoID, &positionManagerAddress, &positionManagerDeployBlk,
 		&onchainPoolID, &currency0, &currency1,
 		&token0, &decimals0, &token1, &decimals1,
 		&fee, &tickSpacing, &hooks, &deployBlock, &snapshotSupported); err != nil {
@@ -147,22 +150,23 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 	}
 
 	return outbound.UniswapV4PoolRow{
-		ID:                id,
-		ProtocolID:        *protocolID,
-		PoolManager:       common.BytesToAddress(poolManager),
-		StateView:         common.BytesToAddress(stateView),
-		PositionManagerID: *positionManagerID,
-		PositionManager:   common.BytesToAddress(positionManagerAddress),
-		PoolIDHash:        common.BytesToHash(onchainPoolID),
-		Currency0:         common.BytesToAddress(currency0),
-		Currency1:         common.BytesToAddress(currency1),
-		Currency0Decimals: currency0Decimals,
-		Currency1Decimals: currency1Decimals,
-		Fee:               fee,
-		TickSpacing:       tickSpacing,
-		Hooks:             common.BytesToAddress(hooks),
-		DeployBlock:       deployBlock,
-		SnapshotSupported: snapshotSupported,
+		ID:                         id,
+		ProtocolID:                 *protocolID,
+		PoolManager:                common.BytesToAddress(poolManager),
+		StateView:                  common.BytesToAddress(stateView),
+		PositionManagerID:          *positionManagerID,
+		PositionManager:            common.BytesToAddress(positionManagerAddress),
+		PositionManagerDeployBlock: *positionManagerDeployBlk,
+		PoolIDHash:                 common.BytesToHash(onchainPoolID),
+		Currency0:                  common.BytesToAddress(currency0),
+		Currency1:                  common.BytesToAddress(currency1),
+		Currency0Decimals:          currency0Decimals,
+		Currency1Decimals:          currency1Decimals,
+		Fee:                        fee,
+		TickSpacing:                tickSpacing,
+		Hooks:                      common.BytesToAddress(hooks),
+		DeployBlock:                deployBlock,
+		SnapshotSupported:          snapshotSupported,
 	}, nil
 }
 
@@ -237,6 +241,72 @@ func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbou
 
 func (r *UniswapV4Repository) SavePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) (int64, error) {
 	return r.writePositions(ctx, tx, positions)
+}
+
+// The advisory lock is the same key, and the same hash, the table's
+// assign_processing_version trigger takes. It has to be held BEFORE the NOT
+// EXISTS is evaluated, not just inside the trigger: the trigger fires per row
+// after the row has been chosen, so two builds racing one site would both see it
+// empty and the loser's trigger would then assign it version 1. Re-entrant, so
+// the trigger's own acquisition inside the same transaction is free.
+const insertUniswapV4NFTTransferIfAbsentSQL = `
+	WITH site_lock AS (
+	    SELECT pg_advisory_xact_lock(hashtextextended(
+	        format('u4pnt|%s|%s|%s|%s', $1::bigint, $3::bigint, $4::int, $7::int), 0))
+	)
+	INSERT INTO uniswap_v4_position_nft_transfer
+	   (position_manager_id, token_id, block_number, block_version, block_timestamp,
+	    tx_hash, log_index, from_address, to_address, build_id)
+	SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+	FROM site_lock
+	WHERE NOT EXISTS (
+	    SELECT 1 FROM uniswap_v4_position_nft_transfer
+	    WHERE position_manager_id = $1
+	      AND block_number        = $3
+	      AND block_version       = $4
+	      AND log_index           = $7
+	)
+	ON CONFLICT (position_manager_id, block_number, block_version, log_index, processing_version) DO NOTHING`
+
+// SaveNFTTransfersIfAbsent appends only the log sites that hold no row yet, so
+// the transfer backfill can replay history the live indexer already covered
+// without appending a correction version to every site it revisits.
+func (r *UniswapV4Repository) SaveNFTTransfersIfAbsent(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) (int64, error) {
+	if len(transfers) == 0 {
+		return 0, nil
+	}
+	rows, err := convertV4NFTTransfers(transfers)
+	if err != nil {
+		return 0, err
+	}
+
+	batch := &pgx.Batch{}
+	for _, c := range rows {
+		t := c.t
+		batch.Queue(insertUniswapV4NFTTransferIfAbsentSQL,
+			t.PositionManagerID, c.tokenID, t.BlockNumber, t.BlockVersion, t.BlockTimestamp,
+			t.TxHash.Bytes(), t.LogIndex, t.From.Bytes(), t.To.Bytes(), int(r.buildID),
+		)
+	}
+	return sendNFTTransferIfAbsentBatch(ctx, tx, batch, len(rows))
+}
+
+func sendNFTTransferIfAbsentBatch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, count int) (inserted int64, err error) {
+	br := tx.SendBatch(ctx, batch)
+	defer func() {
+		if closeErr := br.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing the uniswap_v4 nft transfer backfill batch: %w", closeErr))
+		}
+	}()
+
+	for i := range count {
+		tag, execErr := br.Exec()
+		if execErr != nil {
+			return inserted, fmt.Errorf("inserting uniswap_v4 nft transfer %d of %d: %w", i+1, count, execErr)
+		}
+		inserted += tag.RowsAffected()
+	}
+	return inserted, nil
 }
 
 // currentUniswapV4PoolCTE maps a superseded registry surrogate forward to the

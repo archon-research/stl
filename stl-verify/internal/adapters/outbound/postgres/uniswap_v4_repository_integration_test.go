@@ -3209,3 +3209,123 @@ func TestUniswapV4Repository_NFTTransferHolderSurvivesAPositionManagerCorrection
 			got, uniswapV4MintFixtureTo)
 	}
 }
+
+// SaveNFTTransfersIfAbsent is the transfer backfill's writer. Its contract is the
+// mirror image of SaveBlock's above: where a new build's SaveBlock APPENDS a
+// correction version for a log site, this one leaves the site alone, because the
+// backfill replays the same immutable logs the live indexer already decoded. The
+// returned count is what the run reports as transfersWritten, and an operator
+// reads "0" as a no-op rerun rather than a closed gap.
+func TestUniswapV4Repository_SaveNFTTransfersIfAbsent_SkipsASiteAnotherBuildWrote(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x59)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	const blockNumber = int64(25002000)
+	transfer := &entity.UniswapV4PositionNFTTransfer{
+		PositionManagerID: managerID,
+		TokenID:           big.NewInt(8888),
+		BlockNumber:       blockNumber,
+		BlockTimestamp:    uniswapV4TestBlockTime(blockNumber),
+		TxHash:            uniswapV4MintFixtureTx,
+		LogIndex:          3,
+		From:              common.Address{},
+		To:                uniswapV4MintFixtureTo,
+	}
+	if err := transfer.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	transfers := []*entity.UniswapV4PositionNFTTransfer{transfer}
+
+	// The live indexer's build records the site first.
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		writes := outbound.UniswapV4BlockWrites{NFTTransfers: transfers}
+		if _, err := NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4BuildID).SaveBlock(ctx, tx, writes); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+
+	// A backfill on a different build then replays it.
+	var written int64
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		var err error
+		written, err = NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4RebuildID).
+			SaveNFTTransfersIfAbsent(ctx, tx, transfers)
+		if err != nil {
+			t.Fatalf("SaveNFTTransfersIfAbsent: %v", err)
+		}
+	})
+	if written != 0 {
+		t.Errorf("reported %d rows written, want 0: a rerun over covered history must report a no-op", written)
+	}
+
+	var rowCount, version, buildID int
+	err := uniswapV4TestPool.QueryRow(ctx, `
+		SELECT count(*), max(processing_version), max(build_id)
+		FROM uniswap_v4_position_nft_transfer
+		WHERE position_manager_id = $1 AND block_number = $2`, managerID, blockNumber).
+		Scan(&rowCount, &version, &buildID)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if rowCount != 1 || version != 0 || buildID != int(testUniswapV4BuildID) {
+		t.Errorf("site holds %d row(s) at processing_version %d / build %d, want the live indexer's single version-0 row",
+			rowCount, version, buildID)
+	}
+}
+
+func TestUniswapV4Repository_SaveNFTTransfersIfAbsent_WritesAndThenReportsTheRerunAsANoOp(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x5a)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	const blockNumber = int64(25003000)
+	transfers := make([]*entity.UniswapV4PositionNFTTransfer, 0, 3)
+	for i := range 3 {
+		transfer := &entity.UniswapV4PositionNFTTransfer{
+			PositionManagerID: managerID,
+			TokenID:           big.NewInt(int64(7000 + i)),
+			BlockNumber:       blockNumber,
+			BlockTimestamp:    uniswapV4TestBlockTime(blockNumber),
+			TxHash:            uniswapV4MintFixtureTx,
+			LogIndex:          i,
+			From:              common.Address{},
+			To:                uniswapV4MintFixtureTo,
+		}
+		if err := transfer.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		transfers = append(transfers, transfer)
+	}
+
+	repo := NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4BuildID)
+	var first, second int64
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		var err error
+		if first, err = repo.SaveNFTTransfersIfAbsent(ctx, tx, transfers); err != nil {
+			t.Fatalf("first write: %v", err)
+		}
+	})
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		var err error
+		if second, err = repo.SaveNFTTransfersIfAbsent(ctx, tx, transfers); err != nil {
+			t.Fatalf("second write: %v", err)
+		}
+	})
+
+	if first != 3 {
+		t.Errorf("first write reported %d rows, want 3", first)
+	}
+	if second != 0 {
+		t.Errorf("rerun reported %d rows, want 0", second)
+	}
+	var rowCount int
+	if err := uniswapV4TestPool.QueryRow(ctx, `
+		SELECT count(*) FROM uniswap_v4_position_nft_transfer
+		WHERE position_manager_id = $1 AND block_number = $2`, managerID, blockNumber).Scan(&rowCount); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if rowCount != 3 {
+		t.Errorf("site holds %d rows, want 3: one per log index, none duplicated", rowCount)
+	}
+}

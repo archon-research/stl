@@ -14,6 +14,10 @@ const (
 	// The getPositionInfo multicall cap, so the default batch is one round trip;
 	// a larger batch is one transaction over several multicalls.
 	DefaultPositionBatch = 500
+	// One transaction per 1,000 decoded transfers. A whole scan window's logs in
+	// one transaction would be up to the provider's ~10k-log response cap, and
+	// each row's insert takes an advisory lock the live indexer also wants.
+	DefaultTransferBatch = 1_000
 )
 
 type Config struct {
@@ -25,6 +29,9 @@ type Config struct {
 	MinWindow     int64
 	MaxWindow     int64
 	PositionBatch int
+	// TransferBatch sizes the posm transfer backfill's transactions; the position
+	// bootstrap does not read it, nor it PositionBatch.
+	TransferBatch int
 }
 
 func (c Config) withDefaults() Config {
@@ -42,6 +49,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.PositionBatch == 0 {
 		c.PositionBatch = DefaultPositionBatch
+	}
+	if c.TransferBatch == 0 {
+		c.TransferBatch = DefaultTransferBatch
 	}
 	return c
 }
@@ -72,6 +82,8 @@ func (c Config) validate() error {
 		return fmt.Errorf("initialWindow %d is outside [minWindow %d, maxWindow %d]", c.InitialWindow, c.MinWindow, c.MaxWindow)
 	case c.PositionBatch <= 0:
 		return fmt.Errorf("positionBatch must be positive, got %d", c.PositionBatch)
+	case c.TransferBatch <= 0:
+		return fmt.Errorf("transferBatch must be positive, got %d", c.TransferBatch)
 	}
 	return nil
 }

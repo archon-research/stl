@@ -1,0 +1,123 @@
+package uniswapv4indexer
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+)
+
+// Past finality a height has one canonical block, so a scanned row's version can
+// only be 0; the live indexer's reorg versioning has nothing to disagree with.
+const scannedBlockVersion = 0
+
+// ERC721TransferTopic0 is the topic0 the posm transfer scan filters on at the
+// node. It narrows nothing by itself — every ERC-20 transfer on the chain shares
+// it — so the filter's ADDRESS is what makes the result the posm's.
+func ERC721TransferTopic0() common.Hash {
+	return abis.TransferTopic0
+}
+
+// NFTTransfersFromLogs decodes a window of scanned posm logs into transfer rows.
+//
+// Unlike the live path, which meets these logs inside a receipt whose block
+// coordinates it already knows, a scanned log carries its own: the height and
+// the timestamp come from the log itself, which is what makes this backfill need
+// no chain read at all. A log the filter should not have returned — another
+// contract's, another event's — fails the window rather than being skipped: the
+// address filter is the only thing separating a posm transfer from any ERC-20
+// one, so a foreign log means the filter or the registry is wrong, and skipping
+// it would leave a hole no rerun would look for again.
+func NFTTransfersFromLogs(
+	logs []shared.Log,
+	positionManager RegisteredPositionManager,
+) ([]*entity.UniswapV4PositionNFTTransfer, error) {
+	ev, err := PositionManagerTransferEvent()
+	if err != nil {
+		return nil, fmt.Errorf("loading the PositionManager Transfer fragment: %w", err)
+	}
+
+	transfers := make([]*entity.UniswapV4PositionNFTTransfer, 0, len(logs))
+	for _, log := range logs {
+		transfer, err := decodeScannedNFTTransfer(*ev, log, positionManager)
+		if err != nil {
+			return nil, err
+		}
+		transfers = append(transfers, transfer)
+	}
+	return transfers, nil
+}
+
+func decodeScannedNFTTransfer(
+	ev abi.Event,
+	log shared.Log,
+	positionManager RegisteredPositionManager,
+) (*entity.UniswapV4PositionNFTTransfer, error) {
+	if err := assertScannedTransferSite(ev, log, positionManager.Address); err != nil {
+		return nil, err
+	}
+
+	blockNumber, err := shared.ParseHexUint(log.BlockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("parsing block number %q of PositionManager Transfer (tx %s, index %s): %w", log.BlockNumber, log.TransactionHash, log.LogIndex, err)
+	}
+	blockTimestamp, err := scannedBlockTimestamp(log)
+	if err != nil {
+		return nil, err
+	}
+	logIndex, err := shared.ParseHexUint(log.LogIndex)
+	if err != nil {
+		return nil, fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
+	}
+
+	transfer, err := newNFTTransferRow(ev, log, positionManager.ID, blockCoords{
+		number: int64(blockNumber), version: scannedBlockVersion, ts: blockTimestamp,
+	}, int(logIndex))
+	if err != nil {
+		return nil, fmt.Errorf("PositionManager Transfer (tx %s, index %s): %w", log.TransactionHash, log.LogIndex, err)
+	}
+	return transfer, nil
+}
+
+// eth_getLogs carries no timestamp in the JSON-RPC spec; Alchemy returns one per
+// log, which is the only reason this backfill needs no per-block header read. An
+// absent or zero one is refused rather than defaulted: it would land the row in
+// 1970, outside the block_timestamp band every sibling read prunes chunks with.
+func scannedBlockTimestamp(log shared.Log) (time.Time, error) {
+	if log.BlockTimestamp == "" {
+		return time.Time{}, fmt.Errorf("PositionManager Transfer (tx %s, index %s) carries no blockTimestamp: the provider must return it on eth_getLogs, or this scan needs a per-block header read", log.TransactionHash, log.LogIndex)
+	}
+	seconds, err := shared.ParseHexUint(log.BlockTimestamp)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parsing blockTimestamp %q of PositionManager Transfer (tx %s, index %s): %w", log.BlockTimestamp, log.TransactionHash, log.LogIndex, err)
+	}
+	if seconds == 0 {
+		return time.Time{}, fmt.Errorf("PositionManager Transfer (tx %s, index %s) has blockTimestamp 0", log.TransactionHash, log.LogIndex)
+	}
+	return time.Unix(int64(seconds), 0).UTC(), nil
+}
+
+func assertScannedTransferSite(ev abi.Event, log shared.Log, positionManager common.Address) error {
+	if !common.IsHexAddress(log.Address) {
+		return fmt.Errorf("scanned log (index %s) has invalid address %q", log.LogIndex, log.Address)
+	}
+	if addr := common.HexToAddress(log.Address); !shared.LogBelongsTo(addr, positionManager) {
+		return fmt.Errorf("scanned log (tx %s, index %s) was emitted by %s, not the PositionManager %s", log.TransactionHash, log.LogIndex, addr, positionManager)
+	}
+	if err := assertHexWords(log); err != nil {
+		return err
+	}
+	if len(log.Topics) == 0 || common.HexToHash(log.Topics[0]) != ev.ID {
+		return fmt.Errorf("scanned log (tx %s, index %s) topic0 is not %s", log.TransactionHash, log.LogIndex, ev.Name)
+	}
+	if len(log.Topics) != erc721TransferTopics {
+		return fmt.Errorf("scanned PositionManager Transfer (tx %s, index %s) carries %d topics, want %d: an ERC-20 Transfer shares this topic0, so the filter's address must be wrong",
+			log.TransactionHash, log.LogIndex, len(log.Topics), erc721TransferTopics)
+	}
+	return nil
+}

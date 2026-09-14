@@ -45,6 +45,23 @@ func (d *receiptDecoder) decodePositionManagerLog(log shared.Log) error {
 }
 
 func (d *receiptDecoder) buildNFTTransfer(ev abi.Event, log shared.Log, logIndex int) (*entity.UniswapV4PositionNFTTransfer, error) {
+	return newNFTTransferRow(ev, log, d.positionManager.ID, blockCoords{
+		number: d.blockNumber, version: d.version, ts: d.ts,
+	}, logIndex)
+}
+
+// newNFTTransferRow turns one Transfer log into a row. Shared by the live
+// indexer and the historical scan so a change to the field names, the entity or
+// the validation cannot reach one path without the other; coords is the only
+// thing they disagree about, the live path taking it from the receipt's block and
+// the scan from the log itself. coords.hash goes unread here.
+func newNFTTransferRow(
+	ev abi.Event,
+	log shared.Log,
+	positionManagerID int64,
+	coords blockCoords,
+	logIndex int,
+) (*entity.UniswapV4PositionNFTTransfer, error) {
 	data, err := shared.DecodeLog(ev, log)
 	if err != nil {
 		return nil, fmt.Errorf("decoding PositionManager Transfer log (index %s): %w", log.LogIndex, err)
@@ -63,11 +80,11 @@ func (d *receiptDecoder) buildNFTTransfer(ev abi.Event, log shared.Log, logIndex
 	}
 
 	transfer := &entity.UniswapV4PositionNFTTransfer{
-		PositionManagerID: d.positionManager.ID,
+		PositionManagerID: positionManagerID,
 		TokenID:           tokenID,
-		BlockNumber:       d.blockNumber,
-		BlockVersion:      d.version,
-		BlockTimestamp:    d.ts,
+		BlockNumber:       coords.number,
+		BlockVersion:      coords.version,
+		BlockTimestamp:    coords.ts,
 		TxHash:            common.HexToHash(log.TransactionHash),
 		LogIndex:          logIndex,
 		From:              from,

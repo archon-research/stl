@@ -19,6 +19,9 @@ type UniswapV4PoolRow struct {
 	// whole registry.
 	PositionManagerID int64
 	PositionManager   common.Address
+	// PositionManagerDeployBlock is where the posm transfer backfill starts its
+	// scan: no posm token exists below it.
+	PositionManagerDeployBlock int64
 	// PoolIDHash is the raw on-chain PoolId — keccak256 of the abi-encoded
 	// PoolKey — which every PoolManager log is indexed by, not the surrogate key
 	// in ID.
@@ -50,6 +53,21 @@ type UniswapV4BlockWrites struct {
 type UniswapV4PositionWriter interface {
 	// Returns how many rows it inserted — zero when every slot's stored state already matches.
 	SavePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) (insertedRows int64, err error)
+}
+
+// UniswapV4NFTTransferWriter is the posm transfer backfill's one write.
+//
+// Separate from SaveBlock's transfer phase because the two want different
+// answers to "this log site already has a row". SaveBlock corrects: a later
+// build re-deciding a site appends a new processing_version, which is the
+// ADR-0002 channel every fact table has. A backfill must not — it replays the
+// same immutable logs the live indexer already decoded, so on the stretch where
+// their coverage overlaps every site it revisits would gain a correction version
+// that corrects nothing.
+type UniswapV4NFTTransferWriter interface {
+	// Returns how many rows it inserted; a site that already holds a row under
+	// any build is left alone, so a rerun over covered history returns 0.
+	SaveNFTTransfersIfAbsent(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) (insertedRows int64, err error)
 }
 
 type UniswapV4Repository interface {

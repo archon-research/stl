@@ -258,10 +258,11 @@ func (s *Service) scanStart(pin pinnedBlock) (int64, error) {
 
 func (s *Service) discoverPositionKeys(ctx context.Context, from, to int64) (map[int64][]entity.UniswapV4PositionKey, scanStats, error) {
 	scanner := &logWindowScanner{
-		client: s.logScan,
-		filter: s.baseFilter(),
-		policy: windowPolicy{initial: s.cfg.InitialWindow, min: s.cfg.MinWindow, max: s.cfg.MaxWindow},
-		logger: s.logger,
+		client:  s.logScan,
+		filter:  s.baseFilter(),
+		policy:  windowPolicy{initial: s.cfg.InitialWindow, min: s.cfg.MinWindow, max: s.cfg.MaxWindow},
+		logger:  s.logger,
+		subject: "uniswap-v4 ModifyLiquidity logs",
 	}
 
 	found := make(map[int64][]entity.UniswapV4PositionKey)
@@ -310,6 +311,7 @@ func toSharedLogs(logs []outbound.FilteredLog) []shared.Log {
 			Data:             l.Data,
 			BlockHash:        l.BlockHash,
 			BlockNumber:      l.BlockNumber,
+			BlockTimestamp:   l.BlockTimestamp,
 			TransactionHash:  l.TransactionHash,
 			TransactionIndex: l.TransactionIndex,
 			LogIndex:         l.LogIndex,
