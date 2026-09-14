@@ -2115,7 +2115,7 @@ natural key is `(chain_id, pool_id)` and never `pool_id` alone).
    each from its own `Initialize` log. The seed tests in
    `uniswap_v4_migration_integration_test.go` are chain-1-only today
    (`uniswapV4ExpectedPool` has no chain field, the queries say `chain_id = 1`),
-   so a second chain needs chain-aware expectations, not a longer list. Re-derive the five hypertables'
+   so a second chain needs chain-aware expectations, not a longer list. Re-derive the four hypertables'
    `chunk_interval` for the combined ingest (VEC-663's rule: the active chunk plus
    its indexes within a quarter of `shared_buffers`, capped at 30 days; 30 days
    today at mainnet's few MB/day): `set_chunk_time_interval` affects new chunks
