@@ -45,6 +45,45 @@ func TestGetInt(t *testing.T) {
 	}
 }
 
+func TestGetInt64(t *testing.T) {
+	const key = "STL_TEST_GET_INT64"
+
+	tests := []struct {
+		name    string
+		value   string
+		def     int64
+		want    int64
+		wantErr bool
+	}{
+		{name: "unset returns default", def: 42, want: 42},
+		{name: "block number is parsed", value: "25946281", def: 0, want: 25946281},
+		{name: "negative is parsed", value: "-3", def: 0, want: -3},
+		{name: "non-numeric returns error", value: "abc", def: 10, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.value != "" {
+				t.Setenv(key, tc.value)
+			}
+
+			got, err := GetInt64(key, tc.def)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (got=%d)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("GetInt64 = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGetDuration(t *testing.T) {
 	const key = "STL_TEST_GET_DURATION"
 
