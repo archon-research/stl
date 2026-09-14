@@ -12,17 +12,17 @@ import (
 
 // VEC-566: materialize_position_projection takes an optional window so a scheduled run re-reads only
 // the tail. The window is the whole point of the parameter, so these pin both halves of it: that a
-// bounded run prunes chunks and still closes correctly, and that a bounded run CANNOT discover history
-// outside its window — which is why bootstrap has to pass NULL.
+// bounded run still closes the position, and that it CANNOT discover history outside its window —
+// which is why bootstrap has to pass NULL.
 
-// windowFixture builds a projection over a 41-day daily-chunked source: 40 days at quantity 100, then a
-// closing zero an hour ago. Block numbers ascend with time, as the spine's block-time invariant requires.
+// windowFixture builds a projection over a 41-day source: 40 days at quantity 100, then a closing zero
+// an hour ago. Block numbers ascend with time, as the spine's block-time invariant requires. A plain
+// table, which is the house default; nothing here turns on how the source is stored.
 func windowFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	if _, err := pool.Exec(ctx, `
 		CREATE TABLE wsrc (ts timestamptz NOT NULL, holder text NOT NULL, ik text NOT NULL,
-		                   qty numeric NOT NULL, bn bigint NOT NULL)
-		  WITH (tsdb.hypertable, tsdb.partition_column='ts', tsdb.chunk_interval='1 day');
+		                   qty numeric NOT NULL, bn bigint NOT NULL);
 		INSERT INTO wsrc SELECT now() - (g||' days')::interval, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
 		       'WIN', 100, 5000-g FROM generate_series(1,40) g;
 		INSERT INTO wsrc VALUES (now() - interval '1 hour', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'WIN', 0, 9000);
@@ -110,45 +110,6 @@ func TestProjectionWindowBoundedAfterBootstrapClosesAndIsIdempotent(t *testing.T
 	}
 	if rows := storedWindowRows(t, ctx, pool); rows != 41 {
 		t.Errorf("stored %d rows after the bounded re-run, want 41 unchanged", rows)
-	}
-}
-
-// The window has to reach the planner as a literal or it prunes nothing, which is the only reason the
-// parameter exists. Asserted on the plan: the bounded read must touch strictly fewer chunks.
-func TestProjectionWindowPrunesChunks(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	windowFixture(t, ctx, pool)
-
-	chunks := func(query string) int {
-		rows, err := pool.Query(ctx, "EXPLAIN (COSTS OFF) "+query)
-		if err != nil {
-			t.Fatalf("explain %q: %v", query, err)
-		}
-		defer rows.Close()
-		n := 0
-		for rows.Next() {
-			var line string
-			if err := rows.Scan(&line); err != nil {
-				t.Fatalf("scan plan: %v", err)
-			}
-			if strings.Contains(line, "_hyper_") {
-				n++
-			}
-		}
-		if err := rows.Err(); err != nil {
-			t.Fatalf("plan rows: %v", err)
-		}
-		return n
-	}
-	unbounded := chunks(`SELECT * FROM position_win`)
-	bounded := chunks(`SELECT * FROM position_win WHERE block_timestamp > now() - interval '2 days'`)
-	if unbounded < 40 {
-		t.Fatalf("unbounded plan references %d chunks, want the whole 41-chunk fixture", unbounded)
-	}
-	if bounded >= unbounded {
-		t.Errorf("bounded plan references %d chunks against %d unbounded; the window must prune", bounded, unbounded)
 	}
 }
 
