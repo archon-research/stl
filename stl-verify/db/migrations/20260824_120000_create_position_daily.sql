@@ -25,44 +25,23 @@ CREATE TABLE IF NOT EXISTS position_daily (
     created_at         timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT position_daily_pkey PRIMARY KEY (position_id, as_of_date),
     -- The one constraint that is not a copy of a position_state guard: it pins both writers' date
-    -- derivation together, and on a hypertable a wrong value would also seat the row in the wrong chunk.
+    -- derivation to one expression, so they cannot disagree about which day an observation belongs to.
     CONSTRAINT position_daily_as_of_date_chk CHECK (as_of_date = (block_timestamp AT TIME ZONE 'utc')::date)
 );
 
--- CREATE TABLE IF NOT EXISTS adds no column to a table an earlier revision of this file created, so run_id
--- gets an idempotent ALTER: the LANGUAGE sql procedure below reads it and must parse. created_at gets none --
--- once this table is a columnstore hypertable TimescaleDB rejects a DEFAULT now() column, so wipe instead.
+-- CREATE TABLE IF NOT EXISTS adds no column to a table an earlier revision of this file created, so both
+-- columns added after the first revision get an idempotent ALTER: the procedure below reads run_id and must
+-- parse, and created_at takes now() on rows written before it existed.
 ALTER TABLE position_daily ADD COLUMN IF NOT EXISTS run_id bigint;
+ALTER TABLE position_daily ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
 
--- Hypertable on as_of_date, converted while the table is still empty. 7-day chunks rather than
--- position_state's 1-day: chunk count drives planning and per-position fan-out. No default index --
--- chunk exclusion on as_of_date does that job.
-SELECT create_hypertable('position_daily', 'as_of_date', chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE, create_default_indexes => FALSE);
+-- A plain table, not a hypertable: reads are PK point lookups per (position, date) and holder series, and
+-- both writers upsert, so there is no time-ordered scan for chunk exclusion to prune and no append-only
+-- tail for compression to close behind. Indexes are built after the backfill, at the foot of this file.
 
--- Tier cold chunks to S3 after 1 year. Only the two absent-capability codes are tolerated;
--- everything else is fatal, because a swallowed error would ship an untiered table and the production
--- migrator installs no notice handler to surface it.
-DO $tier$
-BEGIN
-    PERFORM add_tiering_policy('position_daily', INTERVAL '1 year', if_not_exists => TRUE);
-EXCEPTION WHEN undefined_function OR feature_not_supported THEN
-    RAISE NOTICE 'add_tiering_policy unavailable (%), skipping tiering for position_daily', SQLERRM;
-END;
-$tier$;
-
--- Compression at 30 days, past the window the trigger keeps rewriting: a bulk upsert into a compressed
--- chunk dies at max_tuples_decompressed_per_dml_transaction, so both writers lift that limit for their
--- own statement. created_at is deliberately no columnstore key: it changes on every overwrite.
-ALTER TABLE position_daily SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = 'position_id',
-    timescaledb.compress_orderby = 'as_of_date DESC'
-);
-SELECT add_compression_policy('position_daily', INTERVAL '30 days', if_not_exists => TRUE);
-
-COMMENT ON TABLE position_daily IS '[Hypertable] Partition key: as_of_date, 7-day chunks. One row per (position, UTC date): the winning observation for that position on that day (VEC-636). Only OBSERVED dates get a row -- no carry-forward, so a query for one date may correctly return nothing. Rebuildable with CALL rebuild_position_daily(), a FORWARD-ONLY merge: it raises a row and never lowers or removes one. Compressed after 30 days; both writers lift max_tuples_decompressed_per_dml_transaction so an upsert into a compressed chunk is not capped. Point-in-time questions are answered from position_state.';
+COMMENT ON TABLE position_daily IS '[Operational] One row per (position, UTC date): the winning observation for that position on that day (VEC-636). Only OBSERVED dates get a row -- no carry-forward, so a query for one date may correctly return nothing. Rebuildable with CALL rebuild_position_daily(), a FORWARD-ONLY merge: it raises a row and never lowers or removes one. A plain table, not a hypertable, and carrying no compression or tiering policy: both writers upsert, so it has no append-only tail. Point-in-time questions are answered from position_state.';
 COMMENT ON COLUMN position_daily.position_id IS 'Roles: PK. The bytea(32) native position identity from position_id() (VEC-400).';
-COMMENT ON COLUMN position_daily.as_of_date IS 'Roles: PK, Partition. UTC date of the winning observation''s block_timestamp, pinned to it by a CHECK.';
+COMMENT ON COLUMN position_daily.as_of_date IS 'Roles: PK. UTC date of the winning observation''s block_timestamp, pinned to it by a CHECK.';
 COMMENT ON COLUMN position_daily.chain_id IS 'Roles: Derived (copy of position_state.chain_id). NULL is a materializer convention for an off-chain source, not missing data.';
 COMMENT ON COLUMN position_daily.protocol_id IS 'Roles: Derived (copy of position_state.protocol_id). NULL only for an off-chain source, which has no protocol row.';
 COMMENT ON COLUMN position_daily.instrument_key IS 'Roles: Derived (copy of position_state.instrument_key). The instrument''s native, globally-unique id.';
@@ -90,8 +69,6 @@ REVOKE INSERT, UPDATE, DELETE ON position_daily FROM stl_readwrite;
 CREATE OR REPLACE FUNCTION upsert_position_daily() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, public
-    -- A reprocess re-emits old observations, so one statement can rewrite rows in a compressed chunk.
-    SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0
 AS $fn$
 BEGIN
     INSERT INTO public.position_daily AS cur
@@ -131,14 +108,13 @@ $fn$;
 
 COMMENT ON FUNCTION upsert_position_daily() IS '[Operational] Keeps position_daily at the winning observation per (position, UTC date) (VEC-636). AFTER INSERT FOR EACH STATEMENT on position_state, one upsert over the transition table ordered by this table''s PK, guarded by (block_number, block_version, processing_version, block_timestamp). SECURITY DEFINER: the appending role holds no write grant on the cache.';
 
--- The rebuild an operator re-runs, as a procedure so its settings cannot be forgotten or stepped over
--- and there is no second call site to keep in step: enable_tiered_reads because newest-per-key over
--- local chunks alone reads a PARTIAL table, work_mem because the DISTINCT ON sorts the whole spine.
+-- The rebuild an operator re-runs, as a procedure so its settings cannot be forgotten or stepped over and
+-- there is no second call site to keep in step: enable_tiered_reads because newest-per-key over position_state's
+-- local chunks alone reads a PARTIAL spine, work_mem because the DISTINCT ON sorts the whole of it.
 CREATE OR REPLACE PROCEDURE rebuild_position_daily()
     LANGUAGE sql
     SET search_path = pg_catalog, public
     SET timescaledb.enable_tiered_reads = 'on'
-    SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0
     SET lock_timeout = '10s'
     SET work_mem = '64MB'
 AS $proc$
@@ -175,7 +151,7 @@ AS $proc$
         > (position_daily.block_number, position_daily.block_version, position_daily.processing_version, position_daily.block_timestamp);
 $proc$;
 
-COMMENT ON PROCEDURE rebuild_position_daily() IS '[Operational] Rebuilds position_daily from position_state (VEC-636): CALL rebuild_position_daily(). Forward-only, so it raises a stale row and never lowers or removes one; it cannot repair a row ahead of history or a row whose position has no history left. Pins enable_tiered_reads so newest-per-key is computed over the whole table, tiered chunks included. Requires a quiet window on position_state.';
+COMMENT ON PROCEDURE rebuild_position_daily() IS '[Operational] Rebuilds position_daily from position_state (VEC-636): CALL rebuild_position_daily(). Forward-only, so it raises a stale row and never lowers or removes one; it cannot repair a row ahead of history or a row whose position has no history left. Pins enable_tiered_reads so newest-per-key is computed over the whole spine, its tiered chunks included. Requires a quiet window on position_state.';
 
 -- Guarded like every other DDL statement here, so a re-run does not fail with "trigger already exists".
 DROP TRIGGER IF EXISTS trigger_upsert_position_daily ON position_state;
@@ -187,10 +163,11 @@ EXECUTE FUNCTION upsert_position_daily();
 
 CALL rebuild_position_daily();
 
--- Built AFTER the backfill: created first, every backfilled row pays a random btree insert with its own
--- WAL instead of one bulk build. Serves the holder filter the PK cannot; as_of_date trails so a
--- holder's series is ordered by the index too.
+-- Built AFTER the backfill: created first, every backfilled row pays a random btree insert with its own WAL
+-- instead of one bulk build. The holder index serves the filter the PK cannot, with as_of_date trailing so a
+-- holder's series is ordered by it too; the date index is what answers a cross-position query for one date.
 CREATE INDEX IF NOT EXISTS position_daily_holder_idx ON public.position_daily (holder_id, as_of_date);
+CREATE INDEX IF NOT EXISTS position_daily_as_of_date_idx ON public.position_daily (as_of_date);
 
 ANALYZE public.position_daily;
 

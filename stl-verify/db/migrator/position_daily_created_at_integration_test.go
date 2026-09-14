@@ -3,14 +3,10 @@
 package migrator_test
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // createdAt is when one day's cached row was last written.
@@ -110,11 +106,9 @@ func TestPositionDailyCreatedAtReadingIsWeakerAtThisGrain(t *testing.T) {
 	}
 }
 
-// A revised migration file re-applied over a table an earlier revision of it created. run_id is carried
-// onto it by an idempotent ALTER, which is why the file has one. created_at cannot be: TimescaleDB rejects
-// a DEFAULT now() column on a columnstore hypertable, so this pins the restriction the comment cites -- if
-// a later TimescaleDB lifts it, this test fails and the file can carry the second ALTER after all.
-func TestPositionDailyMigrationAddsRunIDButCannotAddCreatedAtInPlace(t *testing.T) {
+// A revised migration file re-applied over a table an earlier revision of it created. Both columns added
+// after the first revision are carried onto it by an idempotent ALTER, which is why the file has two.
+func TestPositionDailyMigrationAddsItsLaterColumnsInPlace(t *testing.T) {
 	src := func(t *testing.T) string {
 		t.Helper()
 		// Read inline, as the other re-apply test in this file does: #644 carries a readMigration helper for
@@ -148,47 +142,36 @@ func TestPositionDailyMigrationAddsRunIDButCannotAddCreatedAtInPlace(t *testing.
 		}
 	})
 
-	t.Run("created_at cannot be", func(t *testing.T) {
+	t.Run("created_at is added in place", func(t *testing.T) {
 		f := newPositionDailyFixture(t)
 		f.observe("earlier", dailyObs{qty: 1, block: 50, ts: "2026-01-01T10:00:00Z", dealType: "LOAN"})
 		if _, err := f.pool.Exec(f.ctx, `ALTER TABLE position_daily DROP COLUMN created_at`); err != nil {
-			t.Fatalf("drop created_at: %v", err)
+			t.Fatalf("shape the table as an earlier revision left it: %v", err)
 		}
-		_, err := f.pool.Exec(f.ctx, `ALTER TABLE position_daily ADD COLUMN created_at timestamptz NOT NULL DEFAULT now()`)
-		if err == nil {
-			t.Fatal("TimescaleDB accepted a DEFAULT now() column on a columnstore hypertable; the file can carry the ALTER after all")
+		// Read the marker from the database, not the host: the container's clock is its own, and the two
+		// differ by enough to make a host timestamp reject a value stamped moments after it.
+		var before time.Time
+		if err := f.pool.QueryRow(f.ctx, `SELECT clock_timestamp()`).Scan(&before); err != nil {
+			t.Fatalf("read the marker: %v", err)
 		}
-		var pgErr *pgconn.PgError
-		if !errors.As(err, &pgErr) || pgErr.Code != "0A000" {
-			t.Fatalf("adding created_at failed with %v; want SQLSTATE 0A000 (feature_not_supported)", err)
+		if _, err := f.pool.Exec(f.ctx, src(t)); err != nil {
+			t.Fatalf("re-applying the revised file over the earlier table: %v", err)
 		}
-		// The documented consequence: the file cannot upgrade such a table, so it does not try.
-		if strings.Contains(src(t), "ADD COLUMN IF NOT EXISTS created_at") {
-			t.Error("the migration carries a created_at ALTER that cannot run on this table")
+		// The row that predates the ALTER takes the column's default rather than blocking the migration,
+		// which is the whole reason created_at can carry one where run_id cannot.
+		if at := f.createdAt("earlier", "2026-01-01"); at.Before(before) {
+			t.Errorf("the pre-ALTER row carries created_at = %s, before the ALTER at %s; want the default stamped on it", at, before)
+		}
+		f.observe("revised", dailyObs{qty: 5, block: 100, ts: "2026-01-02T10:00:00Z", dealType: "LOAN"})
+		if at := f.createdAt("revised", "2026-01-02"); at.Before(before) {
+			t.Errorf("a day observed after the re-apply carries created_at = %s; want its own write time", at)
 		}
 	})
 }
 
-// The columnstore key is the stable identity a chunk is grouped and sorted by, so created_at -- which
-// changes on every overwrite -- is deliberately not in it. Read from TimescaleDB's own settings, so a
-// migration that adds it to either key is caught here rather than in a rewrite-heavy chunk.
-func TestPositionDailyColumnstoreKeyExcludesCreatedAt(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	var segmentby, orderby string
-	if err := f.pool.QueryRow(f.ctx, `
-		SELECT COALESCE(segmentby, ''), COALESCE(orderby, '')
-		FROM timescaledb_information.hypertable_compression_settings
-		WHERE hypertable = 'position_daily'::regclass`).Scan(&segmentby, &orderby); err != nil {
-		f.t.Fatalf("read the columnstore settings: %v", err)
-	}
-	if segmentby != "position_id" || orderby != "as_of_date DESC" {
-		t.Errorf("columnstore keys are segmentby %q, orderby %q; want \"position_id\" and \"as_of_date DESC\"", segmentby, orderby)
-	}
-}
-
 // A re-observation identical to what the day's row holds must not rewrite it: the guard is strict, so
 // created_at marks an advance rather than beating on every re-emission, and a reprocess does not rewrite
-// -- and on this table decompress -- every row it re-emits.
+// every row it re-emits.
 func TestPositionDailyTriggerDoesNotRewriteAnIdenticalRow(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	const id, day = "noop", "2026-01-01"

@@ -410,29 +410,29 @@ func TestPositionDailyRebuildResolvesUnderAShadowingSearchPath(t *testing.T) {
 	}
 }
 
-// Hypertable on as_of_date with 7-day chunks, and rows route to the chunk their date belongs to.
-func TestPositionDailyIsAHypertableOnAsOfDateWithSevenDayChunks(t *testing.T) {
+// A plain postgres table, which is the house default: no hypertable, and therefore no chunks, whatever
+// dates the rows carry. A migration that reaches for create_hypertable again fails here.
+func TestPositionDailyIsAPlainTable(t *testing.T) {
 	f := newPositionDailyFixture(t)
-	var column, interval string
+	f.observe("d-plain", dailyObs{qty: 1, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
+	f.observe("d-plain", dailyObs{qty: 2, block: 200, ts: "2026-01-20T00:00:00Z", dealType: "LOAN"})
+	var dimensions, chunks int
 	if err := f.pool.QueryRow(f.ctx, `
-		SELECT d.column_name, d.time_interval::text
-		  FROM timescaledb_information.dimensions d
-		 WHERE d.hypertable_name = 'position_daily'`).Scan(&column, &interval); err != nil {
-		t.Fatalf("position_daily is not a hypertable: %v", err)
-	}
-	if column != "as_of_date" || interval != "7 days" {
-		t.Errorf("partitioned on %s at interval %s; want as_of_date at 7 days", column, interval)
-	}
-	// Two dates a fortnight apart must land in different chunks, or the interval is not doing its job.
-	f.observe("d-chunk", dailyObs{qty: 1, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
-	f.observe("d-chunk", dailyObs{qty: 2, block: 200, ts: "2026-01-20T00:00:00Z", dealType: "LOAN"})
-	var chunks int
-	if err := f.pool.QueryRow(f.ctx,
-		`SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_name = 'position_daily'`).Scan(&chunks); err != nil {
+		SELECT (SELECT count(*) FROM timescaledb_information.dimensions WHERE hypertable_name = 'position_daily'),
+		       (SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_name = 'position_daily')`).
+		Scan(&dimensions, &chunks); err != nil {
 		t.Fatal(err)
 	}
-	if chunks < 2 {
-		t.Errorf("two dates 19 days apart landed in %d chunk(s); want at least 2", chunks)
+	if dimensions != 0 || chunks != 0 {
+		t.Errorf("position_daily has %d partitioning dimension(s) and %d chunk(s); a plain table has neither", dimensions, chunks)
+	}
+	// Negative control: the rows are really there, so the counts above are not zero for want of data.
+	var rows int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM position_daily`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 2 {
+		t.Errorf("the two dates stored %d row(s), want 2", rows)
 	}
 }
 
@@ -449,98 +449,35 @@ func TestPositionDailyAsOfDateIsPinnedToBlockTimestamp(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "check constraint") {
 		t.Errorf("rejected for the wrong reason: %v", err)
 	}
-	// And the CHECK is on the hypertable itself, so every present and future chunk inherits it.
+	// And it is declared on the table, so it holds for every row rather than for a subset.
 	var onParent int
 	if err := f.pool.QueryRow(f.ctx,
 		`SELECT count(*) FROM pg_constraint WHERE conrelid = 'position_daily'::regclass AND conname = 'position_daily_as_of_date_chk'`).Scan(&onParent); err != nil {
 		t.Fatal(err)
 	}
 	if onParent != 1 {
-		t.Errorf("position_daily_as_of_date_chk is not declared on the hypertable (%d), so a new chunk need not inherit it", onParent)
+		t.Errorf("position_daily_as_of_date_chk is not declared on position_daily (%d), so nothing pins as_of_date to block_timestamp", onParent)
 	}
 }
 
-// The house rule is a compression policy in the creating migration, and position_daily follows it:
-// compression at 30 days, with both writers lifting the decompression cap so an upsert into a
-// compressed chunk is not capped at 100,000 tuples.
-func TestPositionDailyIsCompressedAndBothWritersLiftTheDecompressionCap(t *testing.T) {
+// Two indexes the PK cannot serve: the holder filter, and a cross-position query for one date -- which on
+// a plain table has nothing else to read, where chunk exclusion once pruned it.
+func TestPositionDailyIndexesExist(t *testing.T) {
 	f := newPositionDailyFixture(t)
-	var jobs int
-	var interval string
-	if err := f.pool.QueryRow(f.ctx, `
-		SELECT count(*), coalesce(max(config->>'compress_after'), '')
-		  FROM timescaledb_information.jobs
-		 WHERE hypertable_name = 'position_daily' AND proc_name = 'policy_compression'`).Scan(&jobs, &interval); err != nil {
-		t.Fatal(err)
-	}
-	if jobs != 1 || interval != "30 days" {
-		t.Errorf("position_daily has %d compression policy job(s) at %q; want 1 at 30 days", jobs, interval)
-	}
-	for _, fn := range []string{"upsert_position_daily", "rebuild_position_daily"} {
-		var config []string
-		if err := f.pool.QueryRow(f.ctx, `SELECT coalesce(proconfig, '{}') FROM pg_proc WHERE proname = $1`, fn).Scan(&config); err != nil {
-			t.Fatalf("%s: %v", fn, err)
+	for _, want := range []struct{ name, leads, then string }{
+		{"position_daily_holder_idx", "holder_id", "as_of_date"},
+		{"position_daily_as_of_date_idx", "as_of_date", ""},
+	} {
+		var def string
+		if err := f.pool.QueryRow(f.ctx,
+			`SELECT indexdef FROM pg_indexes WHERE tablename = 'position_daily' AND indexname = $1`, want.name).Scan(&def); err != nil {
+			t.Errorf("%s is missing: %v", want.name, err)
+			continue
 		}
-		if !strings.Contains(strings.Join(config, " "), "max_tuples_decompressed_per_dml_transaction=0") {
-			t.Errorf("%s does not lift the decompression cap (proconfig = %v); a bulk upsert into a compressed chunk fails at 100,001 tuples", fn, config)
+		cols := def[strings.Index(def, "(")+1:]
+		if !strings.HasPrefix(cols, want.leads) || (want.then != "" && !strings.Contains(cols, want.then)) {
+			t.Errorf("%s is %q; want it to lead on %s", want.name, def, want.leads)
 		}
-	}
-}
-
-// The case the cap would have broken: a rebuild that rewrites more than 100,000 rows already sitting in
-// a compressed chunk. Without the lifted cap this errors with "tuple decompression limit exceeded".
-func TestPositionDailyRebuildConvergesOverACompressedChunk(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	// 120,001 observations on one date, one per position, so the rebuild's upsert must decompress past
-	// the 100,000 default. Inserted straight into the spine, then the day's chunk is compressed.
-	if _, err := f.pool.Exec(f.ctx, `
-		INSERT INTO position_state
-		    (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
-		     block_number, block_version, processing_version, block_timestamp, projection, build_id, deal_type)
-		SELECT sha256(g::text::bytea), 1, 1, 'inst-' || g, substr(md5(g::text) || md5(g::text), 1, 40), 5,
-		       100, 0, 0, '2026-03-02T00:00:00Z', 'public.proj-0', 0, 'LOAN'
-		  FROM generate_series(1, 120001) g`); err != nil {
-		t.Fatalf("seed the spine: %v", err)
-	}
-	var compressed int
-	if err := f.pool.QueryRow(f.ctx,
-		`SELECT count(compress_chunk(c)) FROM show_chunks('position_daily') c`).Scan(&compressed); err != nil {
-		t.Fatalf("compress position_daily: %v", err)
-	}
-	if compressed == 0 {
-		t.Fatal("no position_daily chunk was compressed, so this would not exercise the decompression path")
-	}
-	// A newer observation for every position, which the rebuild must carry into the compressed chunk.
-	if _, err := f.pool.Exec(f.ctx, `
-		INSERT INTO position_state
-		    (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
-		     block_number, block_version, processing_version, block_timestamp, projection, build_id, deal_type)
-		SELECT sha256(g::text::bytea), 1, 1, 'inst-' || g, substr(md5(g::text) || md5(g::text), 1, 40), 9,
-		       200, 0, 0, '2026-03-02T06:00:00Z', 'public.proj-0', 0, 'BORROW'
-		  FROM generate_series(1, 120001) g`); err != nil {
-		t.Fatalf("seed the newer observations: %v", err)
-	}
-	f.rebuild()
-	var converged, total int
-	if err := f.pool.QueryRow(f.ctx,
-		`SELECT count(*) FILTER (WHERE quantity = 9 AND deal_type = 'BORROW'), count(*) FROM position_daily`).Scan(&converged, &total); err != nil {
-		t.Fatal(err)
-	}
-	if converged != 120001 || total != 120001 {
-		t.Errorf("after the rebuild %d of %d rows carry the newer observation; want all 120001", converged, total)
-	}
-}
-
-// The holder index exists and leads on holder_id, which the PK cannot serve.
-func TestPositionDailyHolderIndexExists(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	var def string
-	if err := f.pool.QueryRow(f.ctx,
-		`SELECT indexdef FROM pg_indexes WHERE tablename = 'position_daily' AND indexname = 'position_daily_holder_idx'`).Scan(&def); err != nil {
-		t.Fatalf("position_daily_holder_idx is missing: %v", err)
-	}
-	if !strings.Contains(def, "holder_id") || !strings.Contains(def, "as_of_date") {
-		t.Errorf("index is %q; want (holder_id, as_of_date)", def)
 	}
 }
 
