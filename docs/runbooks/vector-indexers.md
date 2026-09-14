@@ -1839,6 +1839,102 @@ first-*ever* touch, a `getTickBitmap` baseline scan batched 500 words per call �
 the persisted rows). A block with no Uniswap V4 activity legitimately writes
 zero state rows.
 
+**Position coverage and the bootstrap backfiller (VEC-639).** V4 exposes no way
+to enumerate a pool's positions, so the live indexer only ever learns one from a
+`ModifyLiquidity` log. A position minted before the indexer went live and never
+touched since is therefore invisible to it forever — `uniswap_v4_position`
+coverage is event-driven, and nothing in the live path can close that hole.
+`cmd/backfillers/uniswap-v4-position-bootstrap` does: an on-demand Temporal
+worker (no schedule, started by hand) that replays the PoolManager's whole
+`ModifyLiquidity` history for the registered snapshot-supported pools
+(adaptive-window `eth_getLogs`, bisecting on a provider range refusal), decodes
+the position keys with the indexer's own decoder, and reads each one through the
+same `StateView.getPositionInfo` getter and append-on-change write path the live
+indexer uses. A closed position reads back all zeros and is persisted as such —
+that erasure is what the row records.
+
+Run it **after the indexer's first deploy on a chain**, and again **after any
+suspected gap**: a long outage, a DLQ'd stretch, or a newly registered pool
+whose history predates its registration. The worker is a synced Deployment
+(`k8s/base/uniswap-v4-position-bootstrap/`, one replica, `Recreate`) that idles
+on its task queue: deploying it never starts a run, and the pipeline keeps it on
+the current image like any other service (roster line
+`uniswap-v4-position-bootstrap`, shared cronjob ECR repo). Its availability and
+run failures are covered by `VectorOnDemandWorkerDown` and
+`VectorCronjobRunFailing` like the other on-demand workers
+([vector-cronjobs.md](vector-cronjobs.md#vectorondemandworkerdown)).
+
+**How to start a run.** Temporal UI (namespace **`vector`**) → **Start Workflow**:
+
+| Field | Value |
+|---|---|
+| Task Queue | `uniswap-v4-position-bootstrap` |
+| Workflow Type | `UniswapV4PositionBootstrap` |
+| Workflow ID | descriptive and unique, e.g. `uniswap-v4-position-bootstrap-2026-09-14` |
+| Input | leave empty |
+
+There is nothing to supply: the run reads the chain from its ConfigMap, the pool
+set from the database, and pins its own finalized head. The equivalent CLI call:
+
+```bash
+temporal workflow start --namespace vector \
+  --task-queue uniswap-v4-position-bootstrap --type UniswapV4PositionBootstrap \
+  --workflow-id uniswap-v4-position-bootstrap-2026-09-14
+```
+
+The Workflow ID is the concurrency guard: Temporal rejects a duplicate while a
+run with that ID is in flight. Follow a run with
+`kubectl -n vector logs -f deploy/uniswap-v4-position-bootstrap` or in the
+execution's history; it closes with one `uniswap-v4 position bootstrap finished`
+line carrying its counters, and a failed attempt logs the partial ones at Warn.
+
+The scan knobs are the Deployment's ConfigMap, all optional and defaulted when
+unset: `FINALITY_DEPTH`, `INITIAL_WINDOW`, `MIN_WINDOW`, `MAX_WINDOW`,
+`POSITION_BATCH`. Changing one is a config change and a rollout, not a run
+input. The worker reuses nothing of the indexer's: it has its own ConfigMap, Secret
+(`DATABASE_URL`, `ALCHEMY_API_KEY`) and ServiceAccount.
+
+- **Pin semantics.** The whole run snapshots one block: `head - 64` (two epochs,
+  comfortably past finalisation). One block for the run is what makes the
+  snapshot internally consistent, and being past finality is what lets every
+  row carry `block_version = 0` — a shallow pin would let a reorg redelivery of
+  that height make the live indexer re-read the pool's entire historical
+  position set. The pin is re-read after the scan, and the run fails rather
+  than write if the height now names a different hash.
+- **Rerun behaviour.** Re-running is safe and **idempotent except at a pinned
+  height that carries a live `block_version > 0` row** (the known edge below):
+  the append-on-change writer inserts only where the stored value for a slot
+  differs, and its read of the current value is height-bounded, so a row the
+  live indexer already wrote *above* the pin is never regressed. A run over
+  already-covered history reports `positionsWritten=0` — that, not the row
+  count, is how you tell a no-op rerun from one that closed a real gap.
+- **Row volume.** Every key ever touched gets one row at the pin, closed
+  positions included (their all-zero row is the record). Mainnet, 21 pools,
+  2026-09: 4,451 rows, 138 open and 4,313 closed, in one run. The
+  `VectorUniswapV4AppendOnChangeGrowthHigh` 6h rate spikes once after a first
+  run by design; a rerun adds ~nothing.
+- **A killed attempt resumes on the same pin.** The run is one Temporal
+  activity (2h `StartToClose`, 6h `ScheduleToClose`, 3 attempts, 60 s
+  heartbeat, all compiled into the worker). It records the pin and every pool
+  it has finished in the activity's heartbeat details, so when a deploy rolls
+  the pod mid-run the next attempt reads the record back, holds the pinned
+  height to the recorded hash, re-discovers the keys (a few `eth_getLogs`
+  windows) and continues with the pools still to do — it never re-derives a
+  fresh `head - 64` and stitches one snapshot across two heights. An attempt
+  that fails with `pinned block … was … when this run's progress was recorded
+  and is … now` found its pin reorged past the finality depth: the run stays
+  red, and the answer is a new run, which pins afresh. Heartbeat details belong
+  to one activity execution, so a run started again by hand always starts from
+  the beginning — safe, because every write is idempotent. See "Resuming a long
+  run after a pod kill" in [docs/temporal_guide.md](../temporal_guide.md).
+- **Known edge: a pinned height the watcher saw reorged.** Rows carry
+  `block_version = 0`. If the live indexer holds a `block_version = 1` row at
+  the pinned height for a position touched in that block, the bootstrap's
+  version-0 row (canonical values) is appended anyway, because the writer treats
+  a version difference at the same height as a change, and a rerun that lands
+  on the same pin appends it again. State-at-height answers are unaffected (the
+  canonical version ranks above); a later run pins higher and avoids it.
+
 **Tables:** `uniswap_v4_pool_state`, `uniswap_v4_swap`,
 `uniswap_v4_liquidity_event`, `uniswap_v4_tick`, `uniswap_v4_pool_event`,
 `uniswap_v4_position`.
@@ -2948,9 +3044,9 @@ query it penalises. The conversion is only finished when that read prunes chunks
    read-latest query shorter than the tiering horizon. `timescaledb.enable_tiered_reads`
    is off, so a prior row past the horizon is invisible to `readLatestPositionsV4`
    and the writer appends a change that never happened: the wrong-data failure
-   `db/migrations/AGENTS.md` describes. Its rule that every hypertable gets
-   compression and tiering in its creating migration does not apply here; the
-   table `COMMENT` records the exception, keep it that way.
+   `db/migrations/AGENTS.md` describes. Its rule that a conversion migration
+   lands with compression and tiering policies does not apply here; the table
+   `COMMENT` records the exception, keep it that way.
 
 Do **not** pin `block_timestamp` by equality in `PositionsForPoolAtBlock` /
 `TicksForPoolAtBlock`: a reorged block at the same height carries a *different*

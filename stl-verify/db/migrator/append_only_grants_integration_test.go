@@ -36,6 +36,19 @@ var convertedAppendOnlyTables = []string{
 	// VEC-402: SELECT+INSERT only, with the owner-side REVOKE too.
 	"position_state",
 	"oracle_asset",
+	// VEC-617 (#875): the combined master's two stores. Append-only from birth, with the owner's
+	// mutation privileges revoked as well — the position_state pattern, which does the same
+	// (20260818_130000), and which is safe on all three because nothing FKs them, so the
+	// owner-side revoke cannot break an RI probe. What differs is how the owner is found: these
+	// two derive it from pg_class.relowner instead of naming stl_migrator, so the revoke also
+	// fires in CI, where that role does not exist and position_state's owner-side revoke
+	// silently no-ops.
+	//
+	// This list is what answers "which tables are append-only" for the ACL-enforced set;
+	// TestSecStoreWave1IsAppendOnlyUnderTheRealRoles covers the vocabularies, which are FK
+	// parents and enforce append-only through reference_table_immutable() (20260714_160000, #574).
+	"sec_node",
+	"sec_edge",
 	// VEC-475 (#711): append-only from birth; the creating migration REVOKEs all seven.
 	"uniswap_v4_pool_manager",
 	"uniswap_v4_pool",
@@ -48,6 +61,8 @@ var convertedAppendOnlyTables = []string{
 	"uniswap_v4_position",
 	// VEC-401: run records are append-only; SELECT+INSERT only for the app role.
 	"position_projection_run",
+	// VEC-491: block header dimension; a mis-parse is corrected at a higher processing_version.
+	"block_meta",
 	"position_projection_refusal",
 	// VEC-598: provenance tables. The owner keeps UPDATE for the FK integrity probe
 	// (20260714_160000); a statement-level trigger raises on any real mutation.
@@ -165,6 +180,8 @@ func loginRoleDSN(t *testing.T, pool *pgxpool.Pool) string {
 // `GRANT INSERT, UPDATE` form; aligning them is a follow-up.
 var triggerOnlyCacheTables = []string{
 	"allocation_position_current",
+	// VEC-409: written only by its SECURITY DEFINER trigger and rebuild_position_current().
+	"position_current",
 	"morpho_market_position_current",
 	// VEC-659: the two Morpho state caches the backed-breakdown read joins beside it.
 	"morpho_vault_state_current",

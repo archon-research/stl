@@ -19,7 +19,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-var _ outbound.UniswapV4Repository = (*UniswapV4Repository)(nil)
+var (
+	_ outbound.UniswapV4Repository     = (*UniswapV4Repository)(nil)
+	_ outbound.UniswapV4PositionWriter = (*UniswapV4Repository)(nil)
+)
 
 // address(0) is not usable as native ETH: the token registry already holds it
 // as a "no token" sentinel with 0 decimals, so ETH amounts would scale by 10^0.
@@ -208,6 +211,10 @@ func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbou
 	}
 
 	return stateRows, nil
+}
+
+func (r *UniswapV4Repository) SavePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) (int64, error) {
+	return r.writePositions(ctx, tx, positions)
 }
 
 // currentUniswapV4PoolCTE maps a superseded registry surrogate forward to the
