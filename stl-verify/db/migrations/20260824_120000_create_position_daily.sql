@@ -170,9 +170,11 @@ EXECUTE FUNCTION upsert_position_daily();
 
 CALL rebuild_position_daily();
 
--- Built AFTER the backfill: created first, every backfilled row pays a random btree insert with its own WAL
--- instead of one bulk build. The holder index serves the filter the PK cannot, with as_of_date trailing so a
--- holder's series is ordered by it too; the date index is what answers a cross-position query for one date.
+-- Built AFTER the backfill: created first, every backfilled row pays a random btree insert with its own
+-- WAL instead of one bulk build. The holder index serves the filter the PK cannot, as_of_date trailing so
+-- a holder's series is ordered by it; the date index answers the whole book on one date, which is the
+-- query this grain exists for and the one the PK cannot serve -- chunk exclusion did it before VEC-636
+-- made the table plain.
 CREATE INDEX IF NOT EXISTS position_daily_holder_idx ON public.position_daily (holder_id, as_of_date);
 CREATE INDEX IF NOT EXISTS position_daily_as_of_date_idx ON public.position_daily (as_of_date);
 

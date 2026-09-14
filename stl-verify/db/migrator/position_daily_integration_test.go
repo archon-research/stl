@@ -489,8 +489,8 @@ func TestPositionDailyAsOfDateIsPinnedToBlockTimestamp(t *testing.T) {
 	}
 }
 
-// Two indexes the PK cannot serve: the holder filter, and a cross-position query for one date -- which
-// on a plain table has nothing else to read, where chunk exclusion once pruned it. Read from the
+// Two indexes the PK cannot serve: the holder filter, and the whole book on one date -- the query a
+// daily grain exists for, which chunk exclusion answered until this table became plain. Read from the
 // catalogue rather than the indexdef text, so a partial, expression or INCLUDE-only index fails.
 func TestPositionDailyIndexesCoverTheHolderAndDateReads(t *testing.T) {
 	f := newPositionDailyFixture(t)
