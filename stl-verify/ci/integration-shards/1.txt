@@ -63,3 +63,5 @@
 ./internal/services/block_meta_loader
 ./cmd/cronjobs/block-meta-loader
 ./internal/pkg/blockversion
+./internal/services/uniswapv4bootstrap
+./cmd/backfillers/uniswap-v4-position-bootstrap
