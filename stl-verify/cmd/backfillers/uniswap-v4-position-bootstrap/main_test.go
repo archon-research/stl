@@ -14,7 +14,7 @@ import (
 // strings, and an operator types the workflow types by hand.
 func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
 	names := map[string]string{
-		taskQueueName:            "uniswap-v4-position-bootstrap",
+		ethereumQueueName:        "uniswap-v4-position-bootstrap",
 		positionWorkflowTypeName: "UniswapV4PositionBootstrap",
 		transferWorkflowTypeName: "UniswapV4PosmTransferBackfill",
 		// uniswapV4Factory.MetricPrefix()'s value: the backfill's rows have to land
@@ -37,11 +37,22 @@ func TestWorkerConfig_NamesTheServiceTheAlertSelectorsMatch(t *testing.T) {
 	const selector = `(^|.*-)uniswap-v4-position-bootstrap`
 	matcher := regexp.MustCompile(`^(?:` + selector + `)$`)
 
-	cfg := (&bootstrapWorker{}).workerConfig("postgres://unused/unused")
+	// Both forms of the derived queue, since it is the name RunWorker exports.
+	for _, chainID := range []string{"1", "8453"} {
+		t.Run(chainID, func(t *testing.T) {
+			t.Setenv("CHAIN_ID", chainID)
+			taskQueue, err := taskQueueName()
+			if err != nil {
+				t.Fatalf("taskQueueName(): %v", err)
+			}
 
-	if !matcher.MatchString(cfg.Name) {
-		t.Errorf("WorkerConfig.Name = %q: the nft-transfer rules select this worker with service_name=~%q, which does not match it",
-			cfg.Name, selector)
+			cfg := (&bootstrapWorker{}).workerConfig(taskQueue, "postgres://unused/unused")
+
+			if !matcher.MatchString(cfg.Name) {
+				t.Errorf("WorkerConfig.Name = %q: the nft-transfer rules select this worker with service_name=~%q, which does not match it",
+					cfg.Name, selector)
+			}
+		})
 	}
 }
 

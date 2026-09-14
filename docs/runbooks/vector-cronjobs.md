@@ -924,7 +924,10 @@ under a version no canonical block was archived under.
 Another **on-demand** Temporal worker (`temporal.RunWorker`, parameterless via
 `RegisterRunner` like `morpho-v2-bootstrap`). Everything said about
 `offchain-price-backfill` above applies — nothing is missed while it is down, and
-it is excluded from `VectorCronjobAllRunsFailing` for the same reason.
+it is excluded from `VectorCronjobAllRunsFailing` for the same reason. One
+Deployment and one task queue per chain, named the way `block-republisher`'s are:
+`uniswap-v4-position-bootstrap` on mainnet, `<chain>-uniswap-v4-position-bootstrap`
+elsewhere (the worker derives the queue from its `CHAIN_ID`).
 
 **One queue, two workflow types, two tables.** Both are hand-started and either
 one runs on its own; the task queue keeps the older name:

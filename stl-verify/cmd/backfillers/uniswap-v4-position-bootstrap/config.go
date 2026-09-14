@@ -18,6 +18,32 @@ type config struct {
 	bootstrap uniswapv4bootstrap.Config
 }
 
+// ethereumQueueName is what an Ethereum deployment polls; every other chain
+// prefixes it with its own name, the way its Deployment is named. It is also
+// this component's archiving source, which is chain-independent because the
+// archive records the chain alongside it.
+const ethereumQueueName = "uniswap-v4-position-bootstrap"
+
+// taskQueueName is the Temporal task queue this deployment polls, which is also
+// its OTel service name and its Deployment name — the vector-cronjobs alerts and
+// the runbook select on all three. A run pins the worker's own chain, so each
+// chain has its own queue: on a shared one a run would land on whichever chain's
+// worker polled first.
+func taskQueueName() (string, error) {
+	chainID, err := chainutil.RequireChainID()
+	if err != nil {
+		return "", err
+	}
+	if int64(chainID) == chainutil.EthereumMainnetChainID {
+		return ethereumQueueName, nil
+	}
+	chain, err := chainutil.ChainSlug(int64(chainID))
+	if err != nil {
+		return "", err
+	}
+	return chain + "-" + ethereumQueueName, nil
+}
+
 // loadConfig reads the scan knobs from the environment; an unset knob is the
 // service's default (zero means "use the default" all the way down).
 func loadConfig() (config, error) {

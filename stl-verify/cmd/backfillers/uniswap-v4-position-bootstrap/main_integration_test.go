@@ -625,6 +625,7 @@ func TestRunIntegration_StopsCleanlyWhenTheContextIsCancelled(t *testing.T) {
 	_, dsn, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 	t.Setenv("DATABASE_URL", dsn)
+	t.Setenv("CHAIN_ID", "1")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 

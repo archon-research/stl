@@ -1877,7 +1877,7 @@ while the Temporal UI's execution list and the pod logs name the workflow type.
 
 | Field | Value |
 |---|---|
-| Task Queue | `uniswap-v4-position-bootstrap` |
+| Task Queue | `uniswap-v4-position-bootstrap` on mainnet; `<chain>-uniswap-v4-position-bootstrap` for any other chain's worker (derived from its `CHAIN_ID`) |
 | Workflow Type | `UniswapV4PositionBootstrap` or `UniswapV4PosmTransferBackfill` |
 | Workflow ID | descriptive and unique, e.g. `uniswap-v4-position-bootstrap-2026-09-14` |
 | Input | leave empty |
@@ -2143,16 +2143,17 @@ natural key is `(chain_id, pool_id)` and never `pool_id` alone).
    exists and that `uniswap_v4_blocks_processed_total{chain="<chain>"}` carries
    the same chain value; if they differ, the naming rule was not followed and
    `VectorUniswapV4IndexerStalled` will fire on a phantom chain.
-5. **Bootstrap** — a second chain needs its own `<chain>-uniswap-v4-position-bootstrap`
-   worker Deployment, the block-republisher shape: its own ConfigMap (`CHAIN_ID`,
+5. **Bootstrap** — a second chain needs its own worker Deployment, the
+   `block-republisher` shape: copy `k8s/base/uniswap-v4-position-bootstrap/` to
+   `k8s/base/<chain>-uniswap-v4-position-bootstrap/` changing only the names
+   (`<chain>` as in step 3), with its own ConfigMap (`CHAIN_ID`,
    `ALCHEMY_HTTP_URL`, and an explicit `FINALITY_DEPTH` chosen for that chain's
-   finality — see *Pin semantics* above), ExternalSecret, overlay `resources:`
-   entries and roster alias, polling its **own task queue**. The queue name is
-   the `taskQueueName` constant in the worker's `main.go`, and every worker that
-   polls a queue is a candidate for any run started on it, so suffix it per chain
-   (`<chain>-uniswap-v4-position-bootstrap`) before the second Deployment ships —
-   on a shared queue a run lands on whichever chain's worker polls first. Then
-   start a run from the Temporal UI on that queue, as for mainnet.
+   finality — see *Pin semantics* above), ExternalSecret and overlay
+   `resources:` entries; keep `image: uniswap-v4-position-bootstrap`, the roster
+   line already covers it. The worker derives its task queue from `CHAIN_ID` —
+   `<chain>-uniswap-v4-position-bootstrap` — so a run for that chain is started
+   on that queue and can land on no other chain's worker. Then start a run from
+   the Temporal UI as for mainnet.
 
 **Who holds a posm position NFT.** `uniswap_v4_position.owner` is the
 *PoolManager-level* owner, which for every PositionManager-managed position is
