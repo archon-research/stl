@@ -199,6 +199,29 @@ func SeedProtocol(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID
 	return id
 }
 
+// SeedReceiptToken inserts a receipt_token registration (a vault/aToken and
+// the underlying it resolves to) and returns its auto-generated ID.
+func SeedReceiptToken(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int, receiptAddress string, protocolID, underlyingTokenID int64, symbol string) int64 {
+	t.Helper()
+	addrBytes, err := HexToBytes(receiptAddress)
+	if err != nil {
+		t.Fatalf("failed to parse receipt token address %s: %v", receiptAddress, err)
+	}
+
+	var id int64
+	err = pool.QueryRow(ctx, `
+		INSERT INTO receipt_token (chain_id, protocol_id, underlying_token_id, receipt_token_address, symbol)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (chain_id, receipt_token_address)
+		DO UPDATE SET protocol_id = EXCLUDED.protocol_id, underlying_token_id = EXCLUDED.underlying_token_id
+		RETURNING id
+	`, chainID, protocolID, underlyingTokenID, addrBytes, symbol).Scan(&id)
+	if err != nil {
+		t.Fatalf("failed to insert receipt token %s: %v", symbol, err)
+	}
+	return id
+}
+
 // SeedProtocolOracle inserts a protocol-oracle binding and returns its auto-generated ID.
 func SeedProtocolOracle(t *testing.T, ctx context.Context, pool *pgxpool.Pool, protocolID, oracleID, fromBlock int64) int64 {
 	t.Helper()

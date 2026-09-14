@@ -1,0 +1,47 @@
+# On-demand allocation_position.underlying_value backfill worker (VEC-759).
+#
+# A long-running Deployment, not a k8s Job or CronJob: it polls the Temporal task
+# queue "allocation-underlying-value-backfill" and stays idle until someone starts
+# a run from the Temporal UI. The range and batch size are workflow input, which
+# a schedule cannot supply.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: allocation-underlying-value-backfill
+spec:
+  replicas: 1
+  # Recreate, because replicas: 1 is a correctness bound. Each pass resumes from
+  # the created_at cursor the previous one returned, so two pollers would take
+  # overlapping windows and redo each other's work. The default RollingUpdate
+  # rounds maxSurge up to 1, so every rollout — including the Reloader-triggered
+  # ones a ConfigMap or rotated secret causes — would briefly run two.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: allocation-underlying-value-backfill
+  template:
+    metadata:
+      labels:
+        app: allocation-underlying-value-backfill
+    spec:
+      serviceAccountName: allocation-underlying-value-backfill
+      containers:
+        - name: allocation-underlying-value-backfill
+          image: allocation-underlying-value-backfill
+          envFrom:
+            - configMapRef:
+                name: allocation-underlying-value-backfill
+            - secretRef:
+                name: allocation-underlying-value-backfill
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              # A pass holds one -limit sized batch of candidate rows plus the
+              # multicall responses for their erc4626 archive reads, batched per
+              # (chain_id, block_number).
+              cpu: "1000m"
+              memory: "1Gi"
+      terminationGracePeriodSeconds: 90
