@@ -24,4 +24,12 @@ type PositionMaterializer interface {
 	// observations conflict, so a projection can report success indefinitely while a position
 	// stays frozen at a stale value. This is the count that makes that visible.
 	RefusedByProjection(ctx context.Context) (map[string]int64, error)
+
+	// CacheRowEstimates returns the estimated row count of each trigger-fed cache derived from
+	// position_state, keyed by table name. db/migrations/AGENTS.md requires a row-growth tripwire
+	// on every plain table, and these caches are written by database triggers, so no process can
+	// count what they persisted — the level is the only signal available. Estimates, from the
+	// planner's statistics rather than a count, so reading them cannot cost a scan of a table the
+	// caller is watching precisely because it may be large.
+	CacheRowEstimates(ctx context.Context) (map[string]int64, error)
 }

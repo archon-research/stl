@@ -13,6 +13,8 @@ type mockMaterializer struct {
 	calls      []string
 	refused    map[string]int64
 	refusedErr error
+	cacheRows  map[string]int64
+	cacheErr   error
 }
 
 func (m *mockMaterializer) Materialize(ctx context.Context, view string, buildID int, runID int64) (int64, error) {
@@ -22,6 +24,10 @@ func (m *mockMaterializer) Materialize(ctx context.Context, view string, buildID
 
 func (m *mockMaterializer) RefusedByProjection(context.Context) (map[string]int64, error) {
 	return m.refused, m.refusedErr
+}
+
+func (m *mockMaterializer) CacheRowEstimates(context.Context) (map[string]int64, error) {
+	return m.cacheRows, m.cacheErr
 }
 
 func TestNewService_Validation(t *testing.T) {

@@ -105,6 +105,44 @@ func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context
 	return out, nil
 }
 
+// positionStateCaches are the trigger-fed caches derived from position_state. Named here rather
+// than discovered, so a table that stops being one has to be removed deliberately. A name whose
+// migration has not landed yet is simply absent from the result: position_daily (VEC-636) is in
+// this list ahead of its own migration, and a missing table must not fail the read for the rest.
+var positionStateCaches = []string{"position_current", "position_daily"}
+
+// CacheRowEstimates reads each cache's estimated row count from pg_class.
+//
+// reltuples, not count(*): these are the tables the tripwire watches for being large, so the read
+// must not scan them. The estimate is maintained by autovacuum's ANALYZE, and is -1 on a table
+// never analyzed since its creation, which is reported as 0 — the tripwire asks whether a table has
+// grown, and "not yet measured" is not evidence that it has.
+func (r *PositionMaterializerRepository) CacheRowEstimates(ctx context.Context) (map[string]int64, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT c.relname, GREATEST(c.reltuples, 0)::bigint
+		  FROM pg_class c
+		  JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = 'public' AND c.relname = ANY($1)`, positionStateCaches)
+	if err != nil {
+		return nil, fmt.Errorf("reading cache row estimates: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]int64{}
+	for rows.Next() {
+		var table string
+		var estimate int64
+		if err := rows.Scan(&table, &estimate); err != nil {
+			return nil, fmt.Errorf("scanning cache row estimate: %w", err)
+		}
+		out[table] = estimate
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating cache row estimates: %w", err)
+	}
+	return out, nil
+}
+
 // materializeOnce is a single materialization attempt. The SELECT is its own
 // transaction, honoring the one-projection-per-transaction contract documented on
 // the shared function (per-view advisory xact lock). The function name is quoted as

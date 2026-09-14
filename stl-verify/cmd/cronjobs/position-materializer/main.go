@@ -90,7 +90,7 @@ var (
 )
 
 func init() {
-	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
+	buildinfo.Populate(&GitCommit, &GitBranch, &BuildTime)
 }
 
 // parseProjections parses the comma-separated POSITION_PROJECTIONS value into

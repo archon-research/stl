@@ -18,6 +18,7 @@ type Telemetry struct {
 	projectionRuns   metric.Int64Counter
 	rowsChanged      metric.Int64Counter
 	positionsRefused metric.Int64Gauge
+	cacheRows        metric.Int64Gauge
 }
 
 // NewTelemetry creates a Telemetry using the global meter provider.
@@ -43,6 +44,12 @@ func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
 	); err != nil {
 		return nil, fmt.Errorf("building positionsRefused gauge: %w", err)
 	}
+	if t.cacheRows, err = meter.Int64Gauge(
+		"position_materializer.cache_rows",
+		metric.WithDescription("Estimated rows in each trigger-fed cache derived from position_state, by table"),
+	); err != nil {
+		return nil, fmt.Errorf("building cacheRows gauge: %w", err)
+	}
 	if t.rowsChanged, err = meter.Int64Counter(
 		"position_materializer.rows_changed.total",
 		metric.WithDescription("position_state rows inserted or changed per projection run (guarded upsert; a no-op rerun records 0)"),
@@ -65,6 +72,16 @@ func (t *Telemetry) RecordRun(ctx context.Context, view, status string, changed 
 	// Recorded even at zero: the series has to exist for a run that appended nothing,
 	// which is the case VectorPositionMaterializerSilentlyEmpty exists to catch.
 	t.rowsChanged.Add(ctx, changed, metric.WithAttributes(attribute.String("materializer", view)))
+}
+
+// RecordCacheRows publishes one cache's estimated row count. A gauge, not a counter: these caches
+// are written by database triggers, so no process here can count the rows they persisted the way an
+// indexer counts its own writes. The level is what the plain-table tripwire compares to its budget.
+func (t *Telemetry) RecordCacheRows(ctx context.Context, table string, rows int64) {
+	if t == nil {
+		return
+	}
+	t.cacheRows.Record(ctx, rows, metric.WithAttributes(attribute.String("table", table)))
 }
 
 // RecordRefused publishes how many positions a projection's latest run withheld. A gauge, not a

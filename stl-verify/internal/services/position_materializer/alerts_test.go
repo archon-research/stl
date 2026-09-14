@@ -20,11 +20,13 @@ var (
 		"position_materializer_projection_runs_total": true,
 		"position_materializer_rows_changed_total":    true,
 		"position_materializer_positions_refused":     true,
+		"position_materializer_cache_rows":            true,
 	}
 	emittedAttrs = map[string]bool{
 		"materializer": true,
 		"status":       true,
 		"projection":   true,
+		"table":        true,
 	}
 	emittedStatuses = map[string]bool{"ok": true, "error": true}
 	// Set by the collector rather than the instrument, so grouping on them is legitimate.

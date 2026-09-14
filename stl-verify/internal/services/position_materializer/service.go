@@ -114,7 +114,27 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		s.telemetry.RecordRun(ctx, m, "ok", changed)
 	}
 	s.publishWithheld(ctx)
+	s.publishCacheRows(ctx)
 	return errors.Join(errs...)
+}
+
+// publishCacheRows reports the size of each trigger-fed cache derived from position_state. Those
+// caches are plain tables, and db/migrations/AGENTS.md makes a row-growth tripwire the price of
+// that: nothing else notices a plain table growing. They are written by database triggers, so this
+// run cannot count what they persisted — it reads their level instead, once per run.
+//
+// A failure here does not fail the run, for the same reason as publishWithheld: the projections
+// did their work and the rows are committed. A read that keeps failing shows as the gauge going
+// absent, which is what the alert's own absence handling is for.
+func (s *Service) publishCacheRows(ctx context.Context) {
+	estimates, err := s.materializer.CacheRowEstimates(ctx)
+	if err != nil {
+		s.logger.Error("reading cache row estimates failed; the projections themselves succeeded", "error", err)
+		return
+	}
+	for table, rows := range estimates {
+		s.telemetry.RecordCacheRows(ctx, table, rows)
+	}
 }
 
 // publishWithheld reports each projection's positions_refused from its latest run: positions whose

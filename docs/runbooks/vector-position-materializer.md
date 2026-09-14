@@ -137,6 +137,58 @@ recovered run writes exactly the observations the failed runs missed.
 
 ---
 
+## VectorPositionMaterializerCacheTableGrowthHigh
+
+**What it means.** `position_current` or `position_daily` has passed 50M estimated rows. Both are plain
+tables, and this is the tripwire `db/migrations/AGENTS.md` charges for that choice — nothing else notices
+a plain table growing. **Nothing is broken.** It says the table has outgrown the size at which staying
+plain was the right trade, and the conversion should now be planned.
+
+**Confirm it, and see which table.** The alert reads `pg_class.reltuples`, the planner's estimate, which
+moves with autovacuum rather than continuously. Confirm before acting:
+
+```sql
+SELECT c.relname,
+       c.reltuples::bigint AS estimated_rows,
+       pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+ WHERE n.nspname = 'public' AND c.relname IN ('position_current', 'position_daily')
+ ORDER BY c.reltuples DESC;
+```
+
+If the estimate looks stale, `ANALYZE position_daily;` refreshes it. An exact `count(*)` is a full scan
+of the table you are already worried about — reach for it only if the estimate is not believable.
+
+**Check the premise before converting.** Both caches collapse `position_state`, which bounds them: one
+row per position for `position_current`, one per position per *observed* date for `position_daily`.
+Neither can exceed the spine. If one is near the spine's own row count, the growth is upstream — a
+projection emitting far more positions than expected — and the fix is there, not here.
+
+**Conversion path.** Converting is in-place and keeps the indexes, the grants and the trigger:
+
+```sql
+SELECT create_hypertable('position_daily', 'as_of_date', migrate_data => true);
+```
+
+Do it in a new migration, never by editing the creating one, and add the compression and tiering
+policies in that same migration (`db/migrations/AGENTS.md`). Two things to settle first, because both
+writers of these caches upsert in place rather than appending:
+
+- a bulk refresh that rewrites rows in a compressed chunk hits
+  `max_tuples_decompressed_per_dml_transaction`, so the trigger function and the rebuild procedure each
+  need `SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0`;
+- S3 tiering makes a late observation for a date past the horizon fail the upsert rather than slow it,
+  so pick a tiering horizon beyond the reprocess window, or none.
+
+Confirm the hot reads prune chunks before shipping the conversion.
+
+**Resolution.** Either convert, or — if the growth turned out to be an upstream defect — fix that and let
+the table shrink. If the threshold itself is wrong once there is a real production write rate to judge by,
+change it in `alerts/vector-cronjobs.yaml` and say so in the PR; its derivation is in the rule's comment.
+
+---
+
 ## Checking what a run actually did
 
 `build_id` records which build wrote each row and `run_id` which process start, so a run is traceable after the fact:

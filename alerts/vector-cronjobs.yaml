@@ -738,3 +738,61 @@ groups:
             and continues, so the other views in the same run did write; only
             this one did not.
           runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerviewfailing"
+
+      - alert: VectorPositionMaterializerCacheTableGrowthHigh
+        # position_current and position_daily are PLAIN tables (their COMMENT ON
+        # TABLE and db/migrations/AGENTS.md, "create every table plain; convert
+        # on measured need"). This rule is the tripwire that rule charges for:
+        # nothing else notices a plain table growing. Nothing is broken when it
+        # fires — it means the conversion should now be planned.
+        #
+        # A LEVEL, not a rate, unlike VectorUniswapV4AppendOnChangeGrowthHigh.
+        # That rule reads counters an indexer increments as it writes; these two
+        # caches are written by database triggers on position_state, so no
+        # process can count the rows they persisted. The runner reads their
+        # estimated size once per run instead, and the question a level answers
+        # -- "is this table too big to stay plain" -- is the one the budget is
+        # about.
+        #
+        # Threshold derivation:
+        #   - the plain-table budget this repo already works to is ~100M rows
+        #     (VectorUniswapV4AppendOnChangeGrowthHigh, alerts/vector-indexers.yaml:
+        #     index depth, autovacuum, bloat on rewrite);
+        #   - trip at half of it, 50M, so the conversion can be planned and
+        #     shipped while the table is still comfortable rather than already
+        #     past the budget;
+        #   - both caches collapse position_state, which bounds them: one row
+        #     per position (position_current) and one per position per OBSERVED
+        #     date (position_daily), so neither can exceed the spine.
+        # Unlike the uniswap rule, no runway in TIME is claimed here: the spine
+        # has no production write rate yet to derive one from. Revisit the
+        # threshold once one exists.
+        #
+        # `max by (table, cluster)`, and the budget is per TABLE, so the two are
+        # compared separately rather than summed -- each converts on its own.
+        # position_daily's own migration (VEC-636) has not landed yet, so until
+        # it does the runner reports only position_current and this rule simply
+        # has one series instead of two.
+        # No zero-fill: the gauge is recorded every run for every cache the
+        # query returns, and an absent series means the runner is not reporting,
+        # which VectorPositionMaterializerSilentlyEmpty and the generic cronjob
+        # alerts already cover. `0 > 5e7` would be false anyway.
+        expr: |
+          max by (table, cluster) (
+            position_materializer_cache_rows{k8s_namespace_name="vector"}
+          ) > 5e7
+        for: 6h
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "Vector {{ $labels.table }} outgrowing its plain-table budget"
+          description: >-
+            {{ $labels.table }} holds an estimated {{ $value }} rows on
+            {{ $labels.cluster }}, past the 50M mark at which a plain table
+            should be converted to a hypertable. Nothing is broken; the runbook
+            carries the conversion path. The figure is the planner's estimate
+            from pg_class, so it moves with autovacuum rather than continuously.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializercachetablegrowthhigh"
