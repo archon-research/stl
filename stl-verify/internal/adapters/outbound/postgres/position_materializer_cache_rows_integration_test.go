@@ -84,99 +84,76 @@ func TestCacheRowEstimates_ReadsTheLevelFromPlannerStatistics(t *testing.T) {
 	}
 }
 
-// position_daily (VEC-636) is named in the cache list but its migration has not landed yet. A cache
-// whose table does not exist must be absent from the map rather than an error, or this read starts
-// failing every run the moment the list runs ahead of the schema -- and it takes the level for the
-// caches that DO exist down with it.
-func TestCacheRowEstimates_SkipsACacheWhoseTableDoesNotExistYet(t *testing.T) {
-	ctx := context.Background()
-	repo := NewPositionMaterializerRepository(cacheRowsPool, nil)
-
-	var exists bool
-	if err := cacheRowsPool.QueryRow(ctx,
-		`SELECT to_regclass('public.position_daily') IS NOT NULL`).Scan(&exists); err != nil {
-		t.Fatalf("check whether position_daily exists: %v", err)
-	}
-
-	estimates, err := repo.CacheRowEstimates(ctx)
-	if err != nil {
-		t.Fatalf("CacheRowEstimates: %v", err)
-	}
-	if _, reported := estimates["position_daily"]; reported != exists {
-		t.Errorf("position_daily exists=%t but reported=%t; a cache is reported exactly when its table is there", exists, reported)
-	}
-	// Whatever the answer, the cache that does exist still reports: one missing table must not empty
-	// the map, which is what would silence the tripwire for every cache at once.
-	if _, ok := estimates["position_current"]; !ok {
-		t.Errorf("position_current dropped out of the estimates: %v", estimates)
-	}
-}
-
-// The tripwire tells an operator to convert the table to a hypertable, and the measurement has to
-// survive that or the alert goes quiet exactly when it succeeded. pg_class.reltuples does not: a
-// hypertable's rows live in its chunks, so the root relation reads 0 while the data is all still there.
-//
-// position_daily's own migration (VEC-636) has not landed on this branch, so the table is built here
-// with the shape the read cares about -- it is looked up by name, so this exercises the real query --
-// and dropped again. position_current cannot stand in: its PK is position_id alone, and
-// create_hypertable refuses a unique index that omits the partition column.
+// The tripwire tells an operator to convert a cache to a hypertable where its key allows, and the
+// measurement has to survive that or the alert goes quiet exactly when it succeeded. pg_class.reltuples
+// does not: a hypertable's rows live in its chunks, so the root relation reads 0 while the data is all
+// still there. position_current cannot be converted (its PK omits the time column), so this runs the
+// adapter's read over a throwaway table that can be.
 func TestCacheRowEstimates_SurvivesAHypertableConversion(t *testing.T) {
 	ctx := context.Background()
 	repo := NewPositionMaterializerRepository(cacheRowsPool, nil)
+	const table = "cache_rows_probe"
 
 	if _, err := cacheRowsPool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS position_daily (
-		    position_id bytea NOT NULL,
-		    as_of_date  date  NOT NULL,
-		    quantity    numeric NOT NULL,
-		    CONSTRAINT position_daily_probe_pkey PRIMARY KEY (position_id, as_of_date))`); err != nil {
+		CREATE TABLE `+table+` (k bytea NOT NULL, d date NOT NULL, v numeric NOT NULL, PRIMARY KEY (k, d))`); err != nil {
 		t.Fatalf("build the table under test: %v", err)
 	}
-	t.Cleanup(func() { _, _ = cacheRowsPool.Exec(context.Background(), `DROP TABLE IF EXISTS position_daily CASCADE`) })
+	t.Cleanup(func() { _, _ = cacheRowsPool.Exec(context.Background(), `DROP TABLE IF EXISTS `+table+` CASCADE`) })
 	if _, err := cacheRowsPool.Exec(ctx, `
-		INSERT INTO position_daily
-		SELECT sha256(g::text::bytea), DATE '2026-03-01' + (g % 40), 1 FROM generate_series(1, 4000) g`); err != nil {
+		INSERT INTO `+table+` SELECT sha256(g::text::bytea), DATE '2026-03-01' + (g % 40), 1 FROM generate_series(1, 4000) g`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if _, err := cacheRowsPool.Exec(ctx, `ANALYZE position_daily`); err != nil {
+	if _, err := cacheRowsPool.Exec(ctx, `ANALYZE `+table); err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
-
-	before, err := repo.CacheRowEstimates(ctx)
+	before, err := repo.rowEstimates(ctx, []string{table})
 	if err != nil {
-		t.Fatalf("CacheRowEstimates before conversion: %v", err)
+		t.Fatalf("rowEstimates before conversion: %v", err)
 	}
-	if before["position_daily"] != 4000 {
-		t.Fatalf("the plain table reports %d rows, want 4000; the conversion comparison below would prove nothing",
-			before["position_daily"])
+	if before[table] != 4000 {
+		t.Fatalf("the plain table reports %d rows, want 4000; the comparison below would prove nothing", before[table])
 	}
 
 	if _, err := cacheRowsPool.Exec(ctx,
-		`SELECT create_hypertable('position_daily', by_range('as_of_date', INTERVAL '7 days'), migrate_data => true)`); err != nil {
-		t.Fatalf("convert position_daily: %v", err)
+		`SELECT create_hypertable('`+table+`', by_range('d', INTERVAL '7 days'), migrate_data => true)`); err != nil {
+		t.Fatalf("convert: %v", err)
 	}
-	if _, err := cacheRowsPool.Exec(ctx, `ANALYZE position_daily`); err != nil {
+	if _, err := cacheRowsPool.Exec(ctx, `ANALYZE `+table); err != nil {
 		t.Fatalf("analyze after conversion: %v", err)
 	}
-	// Control: this is the reading that breaks, and it must really break, or the assertion below
-	// passes for a table that was never actually converted.
+	// Control: the reading that breaks must really break, or the assertion below passes for a table
+	// that was never actually converted.
 	var rootReltuples int64
 	if err := cacheRowsPool.QueryRow(ctx,
-		`SELECT GREATEST(reltuples, 0)::bigint FROM pg_class WHERE oid = 'public.position_daily'::regclass`).
-		Scan(&rootReltuples); err != nil {
+		`SELECT GREATEST(reltuples, 0)::bigint FROM pg_class WHERE oid = 'public.`+table+`'::regclass`).Scan(&rootReltuples); err != nil {
 		t.Fatal(err)
 	}
 	if rootReltuples != 0 {
 		t.Fatalf("pg_class.reltuples still reads %d on the converted table; the hazard this guards did not occur", rootReltuples)
 	}
 
-	after, err := repo.CacheRowEstimates(ctx)
+	after, err := repo.rowEstimates(ctx, []string{table})
 	if err != nil {
-		t.Fatalf("CacheRowEstimates after conversion: %v", err)
+		t.Fatalf("rowEstimates after conversion: %v", err)
 	}
-	if after["position_daily"] != before["position_daily"] {
-		t.Errorf("position_daily reports %d rows after the conversion and %d before; the level must survive the "+
-			"very remedy the alert prescribes, or the tripwire reads empty forever",
-			after["position_daily"], before["position_daily"])
+	if after[table] != before[table] {
+		t.Errorf("%s reports %d rows after the conversion and %d before; the level must survive the very remedy "+
+			"the alert prescribes, or the tripwire reads empty forever", table, after[table], before[table])
+	}
+}
+
+// A name with no relation is absent, not an error: one missing table must not silence the level for
+// every cache at once.
+func TestCacheRowEstimates_ANameWithNoRelationIsAbsentNotAnError(t *testing.T) {
+	repo := NewPositionMaterializerRepository(cacheRowsPool, nil)
+	got, err := repo.rowEstimates(context.Background(), []string{"position_current", "no_such_cache"})
+	if err != nil {
+		t.Fatalf("a missing name made the read fail: %v", err)
+	}
+	if _, ok := got["no_such_cache"]; ok {
+		t.Error("a name with no relation was reported")
+	}
+	if _, ok := got["position_current"]; !ok {
+		t.Errorf("the cache that exists dropped out alongside the missing name: %v", got)
 	}
 }

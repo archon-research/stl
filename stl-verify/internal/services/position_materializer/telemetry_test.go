@@ -77,7 +77,7 @@ func TestRunOnce_PublishesEachCacheTableSize(t *testing.T) {
 	tel, reader := newRecordingTelemetry(t)
 	mm := &mockMaterializer{
 		fn:        func(context.Context, string, int, int64) (int64, error) { return 0, nil },
-		cacheRows: map[string]int64{"position_daily": 1234, "position_current": 0},
+		cacheRows: map[string]int64{"position_current": 1234, "some_other_cache": 0},
 	}
 	s, err := NewService([]string{"materialize_sky_prime_debt"}, mm, 0, 77, nil, tel)
 	if err != nil {
@@ -88,16 +88,16 @@ func TestRunOnce_PublishesEachCacheTableSize(t *testing.T) {
 	}
 
 	byTable := testutil.CollectGaugeByAttr(t, reader, "position_materializer.cache_rows", "table")
-	got, ok := byTable["position_daily"]
+	got, ok := byTable["position_current"]
 	if !ok {
-		t.Fatalf("no size published for position_daily; series present: %v", byTable)
+		t.Fatalf("no size published for position_current; series present: %v", byTable)
 	}
 	if got != 1234 {
-		t.Errorf("position_daily cache_rows = %d, want 1234", got)
+		t.Errorf("position_current cache_rows = %d, want 1234", got)
 	}
 	// An empty cache still reports: the alert compares a level, so a table that has not grown must
 	// read as zero rather than as an absent series indistinguishable from a runner that stopped.
-	if _, ok := byTable["position_current"]; !ok {
+	if _, ok := byTable["some_other_cache"]; !ok {
 		t.Error("an empty cache published no series, so the alert cannot tell empty from absent")
 	}
 }
@@ -127,5 +127,5 @@ func TestRunOnce_CacheSizeReadFailureDoesNotFailTheRun(t *testing.T) {
 // A nil Telemetry is the documented no-op, and the service passes nil when no meter is wired.
 func TestRecordCacheRows_NilTelemetryIsANoOp(t *testing.T) {
 	var tel *Telemetry
-	tel.RecordCacheRows(context.Background(), "position_daily", 42) // must not panic
+	tel.RecordCacheRows(context.Background(), "position_current", 42) // must not panic
 }

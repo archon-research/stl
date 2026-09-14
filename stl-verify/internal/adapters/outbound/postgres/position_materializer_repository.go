@@ -106,10 +106,9 @@ func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context
 }
 
 // positionStateCaches are the trigger-fed caches derived from position_state. Named here rather
-// than discovered, so a table that stops being one has to be removed deliberately. A name whose
-// migration has not landed yet is simply absent from the result: position_daily (VEC-636) is in
-// this list ahead of its own migration, and a missing table must not fail the read for the rest.
-var positionStateCaches = []string{"position_current", "position_daily"}
+// than discovered, so a table that stops being one has to be removed deliberately, and a new one
+// registers itself here in the migration that creates it.
+var positionStateCaches = []string{"position_current"}
 
 // CacheRowEstimates reads each cache's estimated row count.
 //
@@ -119,11 +118,17 @@ var positionStateCaches = []string{"position_current", "position_daily"}
 // and converts, leaving the tripwire silently reading empty (measured: 5,000 -> 0 on conversion, where
 // approximate_row_count stayed 5,000). It also reports 0 rather than -1 for a never-analyzed table.
 func (r *PositionMaterializerRepository) CacheRowEstimates(ctx context.Context) (map[string]int64, error) {
+	return r.rowEstimates(ctx, positionStateCaches)
+}
+
+// rowEstimates is CacheRowEstimates over an explicit table list. A name with no relation is absent
+// from the result rather than an error, so one missing table cannot silence the level for the rest.
+func (r *PositionMaterializerRepository) rowEstimates(ctx context.Context, tables []string) (map[string]int64, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT c.relname, approximate_row_count(c.oid)
 		  FROM pg_class c
 		  JOIN pg_namespace n ON n.oid = c.relnamespace
-		 WHERE n.nspname = 'public' AND c.relname = ANY($1)`, positionStateCaches)
+		 WHERE n.nspname = 'public' AND c.relname = ANY($1)`, tables)
 	if err != nil {
 		return nil, fmt.Errorf("reading cache row estimates: %w", err)
 	}

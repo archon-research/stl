@@ -740,14 +740,14 @@ groups:
           runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerviewfailing"
 
       - alert: VectorPositionMaterializerCacheTableGrowthHigh
-        # position_current and position_daily are PLAIN tables (their COMMENT ON
-        # TABLE and db/migrations/AGENTS.md, "create every table plain; convert
-        # on measured need"). This rule is the tripwire that rule charges for:
-        # nothing else notices a plain table growing. Nothing is broken when it
-        # fires — it means the conversion should now be planned.
+        # position_current is a PLAIN table (db/migrations/AGENTS.md, "create
+        # every table plain; convert on measured need"), and any further
+        # trigger-fed cache off position_state registers with the same gauge.
+        # This rule is the tripwire that rule charges for: nothing else notices
+        # a plain table growing. Nothing is broken when it fires.
         #
         # A LEVEL, not a rate, unlike VectorUniswapV4AppendOnChangeGrowthHigh.
-        # That rule reads counters an indexer increments as it writes; these two
+        # That rule reads counters an indexer increments as it writes; these
         # caches are written by database triggers on position_state, so no
         # process can count the rows they persisted. The runner reads their
         # estimated size once per run instead, and the question a level answers
@@ -761,19 +761,15 @@ groups:
         #   - trip at half of it, 50M, so the conversion can be planned and
         #     shipped while the table is still comfortable rather than already
         #     past the budget;
-        #   - both caches collapse position_state: one row per position
-        #     (position_current) and one per position per OBSERVED date
-        #     (position_daily). That bounds them BELOW the spine, which is a
-        #     ratio and not a ceiling -- the spine grows with blocks.
+        #   - the cache collapses position_state to one row per position, which
+        #     bounds it BELOW the spine -- a ratio, not a ceiling, since the
+        #     spine grows with blocks.
         # Unlike the uniswap rule, no runway in TIME is claimed here: the spine
         # has no production write rate yet to derive one from. Revisit the
         # threshold once one exists.
         #
-        # `max by (table, cluster)`, and the budget is per TABLE, so the two are
-        # compared separately rather than summed -- each converts on its own.
-        # position_daily's own migration (VEC-636) has not landed yet, so until
-        # it does the runner reports only position_current and this rule simply
-        # has one series instead of two.
+        # `max by (table, cluster)`: the budget is per TABLE, so caches are
+        # compared separately rather than summed.
         # No zero-fill: the gauge is recorded every run for every cache the
         # query returns, and `0 > 5e7` is false anyway. Note what an absent
         # series does NOT mean: the SDK exports cumulatively, so a failing read
@@ -781,10 +777,10 @@ groups:
         # going absent. A read that keeps failing is visible only in the run
         # logs today -- covering it needs its own signal (VEC-402 follow-up).
         #
-        # Only position_daily can act on this alert by converting. position_current's
-        # PK is position_id alone and create_hypertable refuses a unique index
-        # without the partition column, so for that table the runbook's action is
-        # to find the upstream cause of the position count, not to partition.
+        # position_current cannot act on this by converting: its PK is
+        # position_id alone and create_hypertable refuses a unique index without
+        # the partition column, so the runbook's action is to find the upstream
+        # cause of the position count, not to partition.
         expr: |
           max by (table, cluster) (
             position_materializer_cache_rows{k8s_namespace_name="vector"}
@@ -800,9 +796,7 @@ groups:
           description: >-
             {{ $labels.table }} holds an estimated {{ $value | humanize }} rows on
             {{ $labels.cluster }}, past the 50M mark at which a plain table needs
-            revisiting. Nothing is broken. The runbook carries the action, which
-            differs per table: position_daily converts to a hypertable,
-            position_current cannot and its growth is an upstream signal. The
+            revisiting. Nothing is broken; the runbook carries the action. The
             figure is an estimate from planner statistics, so it moves with
             autovacuum rather than continuously.
           runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializercachetablegrowthhigh"

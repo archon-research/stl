@@ -139,72 +139,46 @@ recovered run writes exactly the observations the failed runs missed.
 
 ## VectorPositionMaterializerCacheTableGrowthHigh
 
-**What it means.** `position_current` or `position_daily` has passed 50M estimated rows. Both are plain
-tables, and this is the tripwire `db/migrations/AGENTS.md` charges for that choice — nothing else notices
-a plain table growing. **Nothing is broken.** It says the table has outgrown the size at which staying
-plain was the right trade, and the conversion should now be planned.
+**What it means.** A trigger-fed cache off `position_state` — today `position_current` — has passed 50M
+estimated rows. It is a plain table, and this is the tripwire `db/migrations/AGENTS.md` charges for that
+choice: nothing else notices a plain table growing. **Nothing is broken.** It says the table has outgrown
+the size at which staying plain was the right trade.
 
-**Confirm it, and see which table.** The alert reads `pg_class.reltuples`, the planner's estimate, which
-moves with autovacuum rather than continuously. Confirm before acting:
+**Confirm it.** The alert reads `approximate_row_count`, an estimate from planner statistics that moves
+with autovacuum rather than continuously:
 
 ```sql
 SELECT c.relname,
-       c.reltuples::bigint AS estimated_rows,
+       approximate_row_count(c.oid) AS estimated_rows,
        pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
- WHERE n.nspname = 'public' AND c.relname IN ('position_current', 'position_daily')
- ORDER BY c.reltuples DESC;
+ WHERE n.nspname = 'public' AND c.relname = 'position_current';
 ```
 
-If the estimate looks stale, `ANALYZE position_daily;` refreshes it. An exact `count(*)` is a full scan
+If the estimate looks stale, `ANALYZE position_current;` refreshes it. An exact `count(*)` is a full scan
 of the table you are already worried about — reach for it only if the estimate is not believable.
 
-**Check the premise before converting.** Both caches collapse `position_state`, which bounds them: one
-row per position for `position_current`, one per position per *observed* date for `position_daily`.
-Neither can exceed the spine. If one is near the spine's own row count, the growth is upstream — a
-projection emitting far more positions than expected — and the fix is there, not here.
-
-**Conversion path — and it differs per table.**
-
-`position_daily` can be converted in place, keeping its indexes, grants and trigger:
-
-```sql
-SELECT create_hypertable('position_daily', by_range('as_of_date', INTERVAL '7 days'), migrate_data => true);
-```
-
-**`position_current` cannot be converted at all.** Its primary key is `(position_id)` alone, and
+**`position_current` cannot be converted to a hypertable.** Its primary key is `(position_id)` alone, and
 `create_hypertable` refuses a unique index that omits the partition column —
 `cannot create a unique index without the column "block_timestamp" (used in partitioning)`. Adding the
 timestamp to that key would change the grain from one row per position to one row per position per
-block, which is `position_state`'s job, not this cache's. So if the alert fires on `position_current`,
-partitioning is not the answer: the growth is upstream. One row per position means the position count
-itself has exploded — check for a projection minting identities it should not
-(`VectorPositionMaterializerWithholdingPositions` and the refusal table are the place to start), and
-fix that rather than the storage. If the count is legitimate, raise the threshold deliberately and say
-why in the rule's comment.
+block, which is `position_state`'s job, not this cache's. So partitioning is not the answer here: one row
+per position means the **position count** itself has exploded. Check for a projection minting identities
+it should not (`VectorPositionMaterializerWithholdingPositions` and the refusal table are the place to
+start) and fix that rather than the storage. If the count is legitimate, raise the threshold deliberately
+and say why in the rule's comment.
 
-Do the `position_daily` conversion in a new migration, never by editing the creating one, and add the
-compression and tiering policies in that same migration (`db/migrations/AGENTS.md`). Three things to
-settle first, because both writers of these caches upsert in place rather than appending:
+**A cache that can be partitioned** — one whose PK includes a time column — converts in place per
+`db/migrations/AGENTS.md`, in a new migration, with the compression and tiering policies in that same
+migration. Because these caches upsert in place rather than appending, settle first: the decompression cap
+(`SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0` on the trigger function and the rebuild
+procedure), `enable_tiered_reads` on the rebuild (it computes newest-per-key over the whole table), and a
+tiering horizon beyond the reprocess window or none. Confirm the hot reads prune chunks before shipping.
+The alert's metric survives the conversion — `approximate_row_count` counts chunk rows, where
+`pg_class.reltuples` would drop to zero and silently take the tripwire with it.
 
-- a bulk refresh that rewrites rows in a compressed chunk hits
-  `max_tuples_decompressed_per_dml_transaction`, so the trigger function and the rebuild procedure each
-  need `SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0`;
-- the rebuild reads newest-per-key across the whole table, so it needs
-  `SET timescaledb.enable_tiered_reads = 'on'` once chunks can tier — without it the read computes over
-  a partial table (`rebuild_position_current()` already sets it for exactly this reason);
-- S3 tiering is worse than slow for an upsert cache. A late observation for a date past the horizon
-  fails the write outright, and for any read-before-write path a tiered row the lookup cannot see makes
-  the writer record a change that never happened (`db/migrations/AGENTS.md`). Pick a horizon beyond the
-  reprocess window, or none.
-
-Confirm the hot reads prune chunks before shipping the conversion. Note that the alert's own metric
-survives the conversion — it reads `approximate_row_count`, which counts chunk rows; `pg_class.reltuples`
-would drop to zero and silently take the tripwire with it.
-
-**Resolution.** Either convert, or — if the growth turned out to be an upstream defect — fix that and let
-the table shrink. If the threshold itself is wrong once there is a real production write rate to judge by,
+**Resolution.** Fix the upstream cause and let the table shrink, or convert where the table's key allows it. If the threshold itself is wrong once there is a real production write rate to judge by,
 change it in `alerts/vector-cronjobs.yaml` and say so in the PR; its derivation is in the rule's comment.
 
 ---
