@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -223,5 +224,42 @@ func TestBlockMetaLoad_HeadMarginHoldsBackTheNewestBlocks(t *testing.T) {
 	}
 	if rows != 0 {
 		t.Errorf("block_meta holds %d rows; blocks inside the head margin must be held back", rows)
+	}
+}
+
+// The archive grants come from an EKS Pod Identity association granted in the infra repo, and
+// without them every header read fails. Proven at registration, a missing grant is a pod that will
+// not start; discovered on the first read it is a run an operator started and has to come back to.
+// A bucket that does not exist stands in for the denial here: LocalStack grants everything, so an
+// absent bucket is the only way to make the probe fail without a policy engine.
+func TestBlockMetaLoad_RefusesToStartWithoutArchiveAccess(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+
+	// Deliberately not created, so the probe cannot list or read it.
+	t.Setenv("BUILD_GIT_HASH", "integration-test")
+	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("DEPLOY_ENV", testDeployEnv)
+	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("DATABASE_URL", "unused-here")
+	t.Setenv("AWS_S3_ENDPOINT", sharedLocalStackCfg.Endpoint)
+	t.Setenv("AWS_REGION", sharedLocalStackCfg.Region)
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	err = register(ctx, cfg, temporal.Dependencies{Pool: pool, Logger: discardLogger()}, env)
+	if err == nil {
+		t.Fatal("registration succeeded against an archive it cannot read; the first run would fail on AccessDenied instead")
+	}
+	if !strings.Contains(err.Error(), testBucket) {
+		t.Errorf("error %q does not name the bucket it could not use", err)
 	}
 }
