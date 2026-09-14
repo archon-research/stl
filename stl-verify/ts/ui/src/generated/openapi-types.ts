@@ -1096,6 +1096,11 @@ export interface components {
        */
       detail: string;
       /**
+       * Errors
+       * @description The parameters that failed, one entry each. `invalid_request` only.
+       */
+      errors?: components['schemas']['FieldError'][] | null;
+      /**
        * Max Points
        * @description Ceiling the request exceeded. Max-points rejections only.
        */
@@ -1382,6 +1387,29 @@ export interface components {
       source: components['schemas']['Provenance'];
       /** @description The window and frequency applied to this response. */
       window: components['schemas']['ResampledTimeSeriesWindow'];
+    };
+    /**
+     * FieldError
+     * @description One parameter's rejection, so a client branches per field instead of on prose.
+     */
+    FieldError: {
+      /**
+       * Code
+       * @description Machine-readable reason code for this field.
+       * @example datetime_parsing
+       */
+      code: string;
+      /**
+       * Field
+       * @description Dotted path to the parameter, as `location.name`.
+       * @example query.to_timestamp
+       */
+      field: string;
+      /**
+       * Message
+       * @description Human-readable reason. The submitted value is redacted out of it.
+       */
+      message: string;
     };
     /**
      * GapSweepDetails
@@ -2036,8 +2064,8 @@ export interface components {
     RejectionSuggestions: {
       /** @description Absent once the scaled span rounds below a second. */
       narrower_window?: components['schemas']['NarrowerWindow'] | null;
-      /** @description Always present on a max-points rejection. */
-      resampled?: components['schemas']['ResampledRetry'] | null;
+      /** @description Grid that fits the window as asked. */
+      resampled: components['schemas']['ResampledRetry'];
     };
     /**
      * ResampledRetry

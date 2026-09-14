@@ -17,7 +17,9 @@ the client's branch, and a URI would commit the surface to resolvable documentat
 at every one of them.
 """
 
+from collections.abc import Mapping
 from datetime import datetime
+from typing import Any, ClassVar
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -34,10 +36,8 @@ from app.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Every rejection FastAPI raises before a route is reached — an unparseable
-# timestamp, an out-of-range limit, an unknown enum value — under one type, since
-# the per-field detail is in ``detail`` and a client's branch is the same either
-# way: fix the request.
+# One type for every rejection FastAPI raises before a route is reached: the branch
+# is the same either way, and which parameter failed is in ``errors``.
 INVALID_REQUEST_TYPE = "invalid_request"
 INVALID_REQUEST_TITLE = "Invalid request"
 
@@ -56,16 +56,8 @@ class ApiRejectionError(Exception):
     wire under a schema that promises this model.
     """
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        error_type: str = INVALID_REQUEST_TYPE,
-        title: str = INVALID_REQUEST_TITLE,
-    ) -> None:
-        super().__init__(message)
-        self.error_type = error_type
-        self.title = title
+    error_type: ClassVar[str] = INVALID_REQUEST_TYPE
+    title: ClassVar[str] = INVALID_REQUEST_TITLE
 
 
 class NarrowerWindow(BaseModel):
@@ -105,7 +97,15 @@ class RejectionSuggestions(BaseModel):
     narrower_window: NarrowerWindow | None = Field(
         default=None, description="Absent once the scaled span rounds below a second."
     )
-    resampled: ResampledRetry | None = Field(default=None, description="Always present on a max-points rejection.")
+    resampled: ResampledRetry = Field(description="Grid that fits the window as asked.")
+
+
+class FieldError(BaseModel):
+    """One parameter's rejection, so a client branches per field instead of on prose."""
+
+    field: str = Field(description="Dotted path to the parameter, as `location.name`.", examples=["query.to_timestamp"])
+    code: str = Field(description="Machine-readable reason code for this field.", examples=["datetime_parsing"])
+    message: str = Field(description="Human-readable reason. The submitted value is redacted out of it.")
 
 
 class ApiErrorResponse(BaseModel):
@@ -132,11 +132,13 @@ class ApiErrorResponse(BaseModel):
     suggestions: RejectionSuggestions | None = Field(
         default=None, description="Ways out of the rejection. Max-points rejections only."
     )
+    errors: list[FieldError] | None = Field(
+        default=None, description="The parameters that failed, one entry each. `invalid_request` only."
+    )
 
 
-# Declared on every route through ``FastAPI(responses=...)``, which replaces
-# FastAPI's default `HTTPValidationError` 422 so the schema matches what the
-# handlers below actually return.
+# Declared on every route through ``FastAPI(responses=...)``, replacing FastAPI's
+# default `HTTPValidationError` so the schema matches what the handlers return.
 API_ERROR_RESPONSES: dict[int | str, dict] = {
     422: {"model": ApiErrorResponse, "description": "Request rejected; branch on `type`."}
 }
@@ -144,7 +146,7 @@ API_ERROR_RESPONSES: dict[int | str, dict] = {
 
 def error_response(error: ApiErrorResponse) -> JSONResponse:
     """Serialize a problem detail, omitting the extension members its type does not promise."""
-    return JSONResponse(status_code=422, content=error.model_dump(mode="json", exclude_none=True))
+    return JSONResponse(status_code=error.status, content=error.model_dump(mode="json", exclude_none=True))
 
 
 def _suggestions(exc: MaxPointsExceededError) -> RejectionSuggestions:
@@ -174,11 +176,27 @@ def time_series_error(exc: TimeSeriesQueryError) -> ApiErrorResponse:
     return ApiErrorResponse(type=exc.error_type, title=exc.title, detail=str(exc))
 
 
-def _validation_message(exc: RequestValidationError) -> str:
-    """Name the offending parameters and why, without echoing what was sent."""
-    return "; ".join(
-        f"{'.'.join(str(part) for part in error.get('loc', ()))}: {error.get('msg', '')}" for error in exc.errors()
-    )
+# Validators interpolate the rejected value into their own message, so the value is
+# cut back out here — one funnel, holding for validators not yet written.
+_REDACTED = "<redacted>"
+
+
+def _redact(message: str, error: Mapping[str, Any]) -> str:
+    """Replace the submitted value wherever a validator spliced it into its message."""
+    raw = str(error.get("input", ""))
+    return message.replace(raw, _REDACTED) if raw else message
+
+
+def _field_errors(exc: RequestValidationError) -> list[FieldError]:
+    """Name each offending parameter and why, without echoing what was sent."""
+    return [
+        FieldError(
+            field=".".join(str(part) for part in error.get("loc", ())),
+            code=str(error.get("type", "value_error")),
+            message=_redact(str(error.get("msg", "")), error),
+        )
+        for error in exc.errors()
+    ]
 
 
 def _log_validation_inputs(request: Request, exc: RequestValidationError) -> None:
@@ -228,6 +246,12 @@ def register_error_handlers(application: FastAPI) -> None:
             },
         )
         _log_validation_inputs(request, exc)
+        field_errors = _field_errors(exc)
         return error_response(
-            ApiErrorResponse(type=INVALID_REQUEST_TYPE, title=INVALID_REQUEST_TITLE, detail=_validation_message(exc))
+            ApiErrorResponse(
+                type=INVALID_REQUEST_TYPE,
+                title=INVALID_REQUEST_TITLE,
+                detail="; ".join(f"{error.field}: {error.message}" for error in field_errors),
+                errors=field_errors,
+            )
         )

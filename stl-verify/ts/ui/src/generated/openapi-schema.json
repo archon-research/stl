@@ -904,6 +904,21 @@
             "title": "Detail",
             "type": "string"
           },
+          "errors": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/FieldError"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The parameters that failed, one entry each. `invalid_request` only.",
+            "title": "Errors"
+          },
           "max_points": {
             "anyOf": [
               {
@@ -1412,6 +1427,39 @@
           "data"
         ],
         "title": "ExposureEnvelope",
+        "type": "object"
+      },
+      "FieldError": {
+        "description": "One parameter's rejection, so a client branches per field instead of on prose.",
+        "properties": {
+          "code": {
+            "description": "Machine-readable reason code for this field.",
+            "examples": [
+              "datetime_parsing"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "field": {
+            "description": "Dotted path to the parameter, as `location.name`.",
+            "examples": [
+              "query.to_timestamp"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable reason. The submitted value is redacted out of it.",
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "code",
+          "message"
+        ],
+        "title": "FieldError",
         "type": "object"
       },
       "GapSweepDetails": {
@@ -2501,17 +2549,13 @@
             "description": "Absent once the scaled span rounds below a second."
           },
           "resampled": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ResampledRetry"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Always present on a max-points rejection."
+            "$ref": "#/components/schemas/ResampledRetry",
+            "description": "Grid that fits the window as asked."
           }
         },
+        "required": [
+          "resampled"
+        ],
         "title": "RejectionSuggestions",
         "type": "object"
       },

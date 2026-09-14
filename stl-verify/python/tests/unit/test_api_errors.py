@@ -6,11 +6,13 @@ handlers, the typed body, the window echo, and the cache policy.
 """
 
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 
 import pytest
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Response
 from fastapi.testclient import TestClient
 
+from app.api._validators import OptionalTxHashParam
 from app.api.errors import API_ERROR_RESPONSES, ApiErrorResponse, register_error_handlers
 from app.api.time_series import (
     apply_cache_control,
@@ -48,6 +50,11 @@ def _probe_app() -> FastAPI:
         if not query.is_bucketed:
             enforce_max_points(point_count or len(_in_window(query)), query=query)
         return {"window": build_raw_window(query).model_dump(mode="json"), "data": _in_window(query)}
+
+    @router.get("/probe/{identifier}/by-tx")
+    def by_tx(identifier: str, tx_hash: Annotated[OptionalTxHashParam, Query()] = None) -> dict:
+        _require_known(identifier)
+        return {"tx_hash": tx_hash}
 
     @router.get("/probe/{identifier}/latest")
     def latest(identifier: str, response: Response, window: TimeWindow = Depends(get_latest_query_params)) -> dict:
@@ -214,6 +221,29 @@ def test_a_validation_failure_does_not_echo_what_was_sent(client: TestClient) ->
     assert "totally-bogus-value" not in response.text
 
 
+def test_a_validator_that_splices_the_value_into_its_own_message_still_does_not_echo_it(
+    client: TestClient,
+) -> None:
+    response = client.get(f"/probe/{_KNOWN_SERIES}/by-tx", params={"tx_hash": "0xnot-a-hash"})
+
+    assert response.status_code == 422
+    assert "0xnot-a-hash" not in response.text
+
+
+def test_a_validation_failure_names_each_parameter_and_why_without_prose_parsing(client: TestClient) -> None:
+    response = _history(client, to_timestamp="not-a-timestamp", aggregation_method="period-mean")
+
+    errors = response.json()["errors"]
+    assert {error["field"] for error in errors} == {"query.to_timestamp", "query.aggregation_method"}
+    assert all(error["code"] for error in errors)
+
+
+def test_a_domain_rejection_carries_no_per_field_errors(client: TestClient) -> None:
+    response = _history(client, from_timestamp="2020-01-01T00:00:00Z", to_timestamp="2026-01-01T00:00:00Z")
+
+    assert "errors" not in response.json()
+
+
 def test_the_schema_declares_the_shared_body_on_every_route(client: TestClient) -> None:
     schema = client.app.openapi()
 
@@ -262,11 +292,11 @@ def test_latest_distinguishes_an_unknown_series_from_an_empty_one(client: TestCl
         (
             "/probe/known",
             {"from_timestamp": "2026-03-05T08:00:00Z", "to_timestamp": "2026-03-05T13:00:00Z"},
-            "public, max-age=300",
+            "private, max-age=300",
         ),
         ("/probe/known", {"from_timestamp": "2026-03-05T08:00:00Z"}, "no-store"),
         ("/probe/known", {}, "no-store"),
-        ("/probe/known/latest", {"to_timestamp": "2026-03-05T13:00:00Z"}, "public, max-age=300"),
+        ("/probe/known/latest", {"to_timestamp": "2026-03-05T13:00:00Z"}, "private, max-age=300"),
         ("/probe/known/latest", {}, "no-store"),
     ],
     ids=["history-pinned", "history-open-upper-bound", "history-defaulted", "latest-pinned", "latest-defaulted"],
@@ -277,11 +307,16 @@ def test_cache_control_follows_whether_the_window_is_pinned(
     assert client.get(path, params=params).headers["Cache-Control"] == expected
 
 
-def test_a_bound_near_the_start_of_time_is_answered_rather_than_crashing(client: TestClient) -> None:
+def test_a_bound_near_the_start_of_time_is_rejected_rather_than_crashing(client: TestClient) -> None:
     start_of_time = {"to_timestamp": "0001-01-01T00:00:00Z"}
 
-    assert client.get(f"/probe/{_KNOWN_SERIES}/latest", params=start_of_time).status_code == 200
-    assert _history(client, **start_of_time).status_code == 200
+    latest = client.get(f"/probe/{_KNOWN_SERIES}/latest", params=start_of_time)
+    history = _history(client, **start_of_time)
+
+    assert latest.status_code == 422
+    assert latest.json()["type"] == "timestamp_out_of_range"
+    assert history.status_code == 422
+    assert history.json()["type"] == "timestamp_out_of_range"
 
 
 def test_a_rejection_that_cannot_suggest_a_window_still_suggests_a_frequency(client: TestClient) -> None:
