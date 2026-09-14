@@ -133,3 +133,43 @@ func setEnv(t *testing.T, base, override map[string]string) {
 		t.Setenv(key, value)
 	}
 }
+
+// A run pins the worker's own chain, so each chain polls its own queue: bare on
+// mainnet (the deployed name), prefixed with the chain's slug everywhere else,
+// the way block-republisher and the V4 indexer Deployments are named.
+func TestTaskQueueName(t *testing.T) {
+	tests := []struct {
+		name            string
+		chainID         string
+		want            string
+		wantErrContains string
+	}{
+		{name: "mainnet", chainID: "1", want: "uniswap-v4-position-bootstrap"},
+		{name: "base", chainID: "8453", want: "base-uniswap-v4-position-bootstrap"},
+		{name: "arbitrum", chainID: "42161", want: "arbitrum-uniswap-v4-position-bootstrap"},
+		{name: "avalanche", chainID: "43114", want: "avalanche-uniswap-v4-position-bootstrap"},
+		{name: "a chain with no slug would poll a queue no operator can find", chainID: "999999", wantErrContains: "999999"},
+		{name: "an absent chain id", chainID: "", wantErrContains: "CHAIN_ID"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CHAIN_ID", tc.chainID)
+
+			got, err := taskQueueName()
+
+			if tc.wantErrContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrContains) {
+					t.Fatalf("error = %v, want one mentioning %q", err, tc.wantErrContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("taskQueueName() error = %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("taskQueueName() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

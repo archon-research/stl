@@ -7,8 +7,8 @@ import "testing"
 // alerts/vector-cronjobs.yaml, the Deployment and the runbook carry the same
 // two strings.
 func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
-	if taskQueueName != "uniswap-v4-position-bootstrap" {
-		t.Errorf("taskQueueName = %q, want %q", taskQueueName, "uniswap-v4-position-bootstrap")
+	if ethereumQueueName != "uniswap-v4-position-bootstrap" {
+		t.Errorf("ethereumQueueName = %q, want %q", ethereumQueueName, "uniswap-v4-position-bootstrap")
 	}
 	if workflowTypeName != "UniswapV4PositionBootstrap" {
 		t.Errorf("workflowTypeName = %q, want %q", workflowTypeName, "UniswapV4PositionBootstrap")

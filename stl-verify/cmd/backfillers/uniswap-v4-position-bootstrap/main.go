@@ -102,11 +102,6 @@ func init() {
 }
 
 const (
-	// taskQueueName is the Temporal task queue an operator starts a run on, and
-	// also the OTel service name and the Deployment name the vector-cronjobs
-	// alerts select by.
-	taskQueueName = "uniswap-v4-position-bootstrap"
-
 	// workflowTypeName is what an operator types into the Temporal UI's "Workflow
 	// Type" field, so it is registered explicitly rather than derived from a Go
 	// name — a rename must not invalidate the runbook or muscle memory.
@@ -127,13 +122,18 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("startup configuration: %w", err)
 	}
 
+	taskQueue, err := taskQueueName()
+	if err != nil {
+		return fmt.Errorf("resolving the task queue: %w", err)
+	}
+
 	bootstrap := &bootstrapWorker{}
 	defer bootstrap.close()
 
 	return temporal.RunWorker(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.WorkerConfig{
-		Name:         taskQueueName,
+		Name:         taskQueue,
 		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
 		Register:     bootstrap.register,
 	})
@@ -276,7 +276,7 @@ func newMulticaller(
 		return nil, nil, fmt.Errorf("creating the multicall client: %w", err)
 	}
 
-	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.bootstrap.ChainID, int64(buildID), taskQueueName)
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.bootstrap.ChainID, int64(buildID), ethereumQueueName)
 	if err != nil {
 		ethClient.Close()
 		return nil, nil, err
