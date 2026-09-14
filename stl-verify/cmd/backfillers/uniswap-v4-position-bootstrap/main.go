@@ -1,49 +1,66 @@
-// Package main implements the uniswap-v4-position-bootstrap Temporal worker: a
-// one-shot, hand-started backfill that snapshots every historical Uniswap V4 LP
-// position the live indexer's event-driven coverage can never reach (VEC-639).
+// Package main implements the uniswap-v4-position-bootstrap Temporal worker: two
+// one-shot, hand-started backfills that close the holes the live Uniswap V4
+// indexer's event-driven coverage can never reach. Neither carries a schedule, so
+// deploying the worker never starts anything. Operation is in
+// docs/runbooks/vector-indexers.md, section "Uniswap V4 indexer".
 //
-// # What it closes
+// # UniswapV4PositionBootstrap — the LP positions (VEC-639)
 //
-// v4-core exposes no position enumeration, so the live indexer only ever learns
-// a position from a ModifyLiquidity log. One minted before the indexer went live
+// v4-core exposes no position enumeration, so the live indexer only ever learns a
+// position from a ModifyLiquidity log. One minted before the indexer went live
 // and never touched since is invisible to it forever. A run replays the
 // PoolManager's whole ModifyLiquidity history for the registered
 // snapshot-supported pools, decodes the position keys with the indexer's own
 // decoder, and reads each one through the same StateView.getPositionInfo getter
 // and append-on-change write path the live indexer uses, at ONE pinned
-// finality-safe block. Operation is in docs/runbooks/vector-indexers.md,
-// section "Uniswap V4 indexer".
+// finality-safe block.
+//
+// Idempotent: the append-on-change writer inserts only where the stored value for
+// a slot differs, so a second run over covered history writes nothing
+// (positionsWritten=0) — except at a pinned height where the live indexer holds a
+// block_version > 0 row, the edge the runbook documents.
+//
+// # UniswapV4PosmTransferBackfill — the posm token holders (VEC-790)
+//
+// uniswap_v4_position.owner is the PoolManager-level owner, which for a
+// PositionManager-managed position is the PositionManager contract rather than a
+// person; the holder lives only in uniswap_v4_position_nft_transfer. A token that
+// was minted and then held emits no Transfer at all, so forward-only coverage
+// never reaches it and the holder query answers "no row" — indistinguishable from
+// a burned or non-existent token. A run replays the PositionManager's whole
+// ERC-721 Transfer history from uniswap_v4_position_manager.deploy_block up to a
+// pinned finality-safe height, above which the live indexer owns the stream.
+//
+// Nothing is read from chain state: a log carries its own height, timestamp,
+// token id and both parties. Idempotent for a different reason than the position
+// run — the writer appends only log sites that hold no row, so replaying history
+// the live indexer already covered adds nothing rather than a correction version
+// per site.
 //
 // # How to start a run
 //
-// This carries no schedule: the worker idles on its task queue, so deploying it
-// never starts a run. An operator starts one from the Temporal UI or the CLI and
-// supplies nothing — the run reads the chain from the environment, the pool set
-// from the database, and pins its own finalized head:
+// An operator starts one from the Temporal UI or the CLI and supplies nothing:
+// the run reads the chain from the environment, the registry from the database,
+// and pins its own finalized head.
 //
 //	temporal workflow start --namespace vector \
 //	  --task-queue uniswap-v4-position-bootstrap --type UniswapV4PositionBootstrap \
 //	  --workflow-id uniswap-v4-position-bootstrap-<date>
 //
 // The workflow ID is the concurrency guard: Temporal rejects a duplicate while a
-// run with that ID is in flight.
-//
-// # Idempotency
-//
-// Every row goes through the append-on-change writer, which inserts only where
-// the stored value for a slot differs, so a second run over covered history
-// writes nothing (positionsWritten=0) — except at a pinned height where the live
-// indexer holds a block_version > 0 row, the edge the runbook documents.
+// run with that ID is in flight. It is per ID, not per queue, so the two workflow
+// types can run at once — they write different tables.
 //
 // # Resuming an interrupted run
 //
-// The run records its pin and every pool it has finished in the activity's
-// Temporal heartbeat details. A worker killed mid-run (a deploy rolls this
-// Deployment like any other) therefore does not re-derive a fresh head-64 pin on
-// the next attempt, which would stitch one snapshot across two heights: the
-// attempt reads the record back, holds the pinned height to the recorded hash,
-// and continues with the pools still to do. A recorded pin whose height has
-// since been reorged fails the run; the answer is a new run on a fresh pin.
+// Each run records its pin, and how far it got, in its activity's Temporal
+// heartbeat details. A worker killed mid-run (a deploy rolls this Deployment like
+// any other) therefore does not re-derive a fresh pin on the next attempt, which
+// would stitch one snapshot across two heights: the attempt reads the record
+// back, holds the pinned height to the recorded hash, and continues — with the
+// pools still to do, or from the first scan window it had not finished. A
+// recorded pin whose height has since been reorged fails the run; the answer is a
+// new run on a fresh pin.
 //
 // Heartbeat details belong to one activity execution, so this only spans the
 // automatic attempts within a single run. A run that goes red and is started
@@ -61,7 +78,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/worker"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
@@ -73,6 +89,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/dextelemetry"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -107,10 +124,19 @@ const (
 	// alerts select by.
 	taskQueueName = "uniswap-v4-position-bootstrap"
 
-	// workflowTypeName is what an operator types into the Temporal UI's "Workflow
-	// Type" field, so it is registered explicitly rather than derived from a Go
-	// name — a rename must not invalidate the runbook or muscle memory.
-	workflowTypeName = "UniswapV4PositionBootstrap"
+	// The workflow type names are what an operator types into the Temporal UI's
+	// "Workflow Type" field, so they are registered explicitly rather than derived
+	// from Go names — a rename must not invalidate the runbook or muscle memory.
+	// One queue, two types: the two backfills close different holes in the same
+	// data and neither is a phase of the other, so an operator starts whichever
+	// one a gap calls for.
+	positionWorkflowTypeName = "UniswapV4PositionBootstrap"
+	transferWorkflowTypeName = "UniswapV4PosmTransferBackfill"
+
+	// metricPrefix must match uniswapV4Factory.MetricPrefix() in the dex-indexer:
+	// the transfer backfill's rows have to land on the SAME counter the live
+	// indexer's do, because that counter is what the table's growth tripwire reads.
+	metricPrefix = "uniswap_v4"
 
 	// A wide eth_getLogs window can take longer than the client's default to
 	// answer or to refuse; a timeout is retried as transient and then fails the
@@ -152,22 +178,22 @@ func (b *bootstrapWorker) close() {
 }
 
 func (b *bootstrapWorker) register(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
-	// One store, shared by the run and the liveness heartbeat: the ticker
-	// re-sends what the run recorded instead of erasing it with a bare ping.
-	progress := temporal.NewActivityProgress[uniswapv4bootstrap.Progress]()
+	// One store per workflow type, each shared by its run and the liveness
+	// heartbeat: the ticker re-sends what the run recorded instead of erasing it
+	// with a bare ping. Separate stores because heartbeat details belong to one
+	// activity execution, and the two runs record different shapes.
+	positionProgress := temporal.NewActivityProgress[uniswapv4bootstrap.Progress]()
+	transferProgress := temporal.NewActivityProgress[uniswapv4bootstrap.TransferProgress]()
 
-	runner, cleanup, err := setupRunner(ctx, deps, progress)
+	jobs, cleanup, err := setupRunners(ctx, deps, positionProgress, transferProgress)
 	if err != nil {
-		return fmt.Errorf("setting up bootstrap runner: %w", err)
+		return fmt.Errorf("setting up the uniswap-v4 backfill runners: %w", err)
 	}
-	if err := temporal.RegisterRunner(r, temporal.RunnerJob{
-		WorkflowType: workflowTypeName,
-		Runner:       runner,
-		Timeouts:     bootstrapActivityTimeouts,
-		Progress:     progress,
-	}); err != nil {
-		cleanup()
-		return fmt.Errorf("registering bootstrap runner: %w", err)
+	for _, job := range jobs {
+		if err := temporal.RegisterRunner(r, job); err != nil {
+			cleanup()
+			return fmt.Errorf("registering the %s runner: %w", job.WorkflowType, err)
+		}
 	}
 	b.cleanup = cleanup
 	return nil
@@ -198,7 +224,18 @@ var bootstrapActivityTimeouts = temporal.ActivityTimeouts{
 	Heartbeat:       time.Minute,
 }
 
-func setupRunner(ctx context.Context, deps temporal.Dependencies, progress uniswapv4bootstrap.ProgressStore) (temporal.Runner, func(), error) {
+// setupRunners builds both of this worker's jobs off one registry read, one
+// Alchemy client and one RPC connection.
+//
+// newMulticaller comes before the registry read because it asserts the endpoint's
+// chain id: a worker pointed at the wrong endpoint must say so, not report the
+// empty registry that a wrong CHAIN_ID also produces.
+func setupRunners(
+	ctx context.Context,
+	deps temporal.Dependencies,
+	positionProgress *temporal.ActivityProgress[uniswapv4bootstrap.Progress],
+	transferProgress *temporal.ActivityProgress[uniswapv4bootstrap.TransferProgress],
+) ([]temporal.RunnerJob, func(), error) {
 	cfg, err := loadConfig()
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading configuration: %w", err)
@@ -219,14 +256,98 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, progress unisw
 		return nil, nil, err
 	}
 
-	svc, err := newBootstrapService(ctx, deps.Logger, deps.Pool, buildReg.BuildID(), logScan, multicaller, progress, cfg)
+	jobs, err := loadAndBuildJobs(ctx, deps, jobInputs{
+		cfg: cfg, buildID: buildReg.BuildID(), logScan: logScan, multicaller: multicaller,
+		positionProgress: positionProgress, transferProgress: transferProgress,
+	})
 	if err != nil {
 		closeRPC()
 		return nil, nil, err
 	}
-	return temporal.RunnerFunc(func(ctx context.Context) error {
-		return runBootstrap(ctx, deps.Logger, svc, cfg.bootstrap.ChainID)
-	}), closeRPC, nil
+	return jobs, closeRPC, nil
+}
+
+// jobInputs is what setupRunners has built by the time the database reads happen.
+type jobInputs struct {
+	cfg              config
+	buildID          buildregistry.BuildID
+	logScan          outbound.LogScanClient
+	multicaller      outbound.Multicaller
+	positionProgress *temporal.ActivityProgress[uniswapv4bootstrap.Progress]
+	transferProgress *temporal.ActivityProgress[uniswapv4bootstrap.TransferProgress]
+}
+
+func loadAndBuildJobs(ctx context.Context, deps temporal.Dependencies, in jobInputs) ([]temporal.RunnerJob, error) {
+	repo := postgres.NewUniswapV4Repository(deps.Pool, in.buildID)
+	pools, err := loadRegisteredPools(ctx, repo, in.cfg.bootstrap.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	txMgr, err := postgres.NewTxManager(deps.Pool, deps.Logger)
+	if err != nil {
+		return nil, fmt.Errorf("creating the tx manager: %w", err)
+	}
+
+	return buildRunnerJobs(deps, runnerWiring{
+		cfg: in.cfg, pools: pools, repo: repo, txMgr: txMgr,
+		logScan: in.logScan, multicaller: in.multicaller,
+		positionProgress: in.positionProgress, transferProgress: in.transferProgress,
+	})
+}
+
+// runnerWiring is the dependency set both jobs draw from, named so the two
+// constructions below read as a list of what each job takes.
+type runnerWiring struct {
+	cfg              config
+	pools            []uniswapv4indexer.RegisteredPool
+	repo             *postgres.UniswapV4Repository
+	txMgr            outbound.TxManager
+	logScan          outbound.LogScanClient
+	multicaller      outbound.Multicaller
+	positionProgress *temporal.ActivityProgress[uniswapv4bootstrap.Progress]
+	transferProgress *temporal.ActivityProgress[uniswapv4bootstrap.TransferProgress]
+}
+
+func buildRunnerJobs(deps temporal.Dependencies, w runnerWiring) ([]temporal.RunnerJob, error) {
+	chainID := w.cfg.bootstrap.ChainID
+
+	positions, err := uniswapv4bootstrap.New(uniswapv4bootstrap.Deps{
+		Pools:       w.pools,
+		LogScan:     w.logScan,
+		Multicaller: w.multicaller,
+		Repo:        w.repo,
+		TxManager:   w.txMgr,
+		Progress:    w.positionProgress,
+		Logger:      deps.Logger,
+		Config:      w.cfg.bootstrap,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	transfers, err := newTransferService(deps.Logger, w)
+	if err != nil {
+		return nil, err
+	}
+
+	return []temporal.RunnerJob{
+		{
+			WorkflowType: positionWorkflowTypeName,
+			Runner: temporal.RunnerFunc(func(ctx context.Context) error {
+				return runBootstrap(ctx, deps.Logger, positions, chainID)
+			}),
+			Timeouts: bootstrapActivityTimeouts,
+			Progress: w.positionProgress,
+		},
+		{
+			WorkflowType: transferWorkflowTypeName,
+			Runner: temporal.RunnerFunc(func(ctx context.Context) error {
+				return runTransferBackfill(ctx, deps.Logger, transfers, chainID)
+			}),
+			Timeouts: transferActivityTimeouts,
+			Progress: w.transferProgress,
+		},
+	}, nil
 }
 
 // runBootstrap is one attempt of the activity: the service's run plus the one
@@ -287,38 +408,78 @@ func newMulticaller(
 	}, nil
 }
 
-func newBootstrapService(
-	ctx context.Context,
-	logger *slog.Logger,
-	db *pgxpool.Pool,
-	buildID buildregistry.BuildID,
-	logScan outbound.LogScanClient,
-	multicaller outbound.Multicaller,
-	progress uniswapv4bootstrap.ProgressStore,
-	cfg config,
-) (*uniswapv4bootstrap.Service, error) {
-	repo := postgres.NewUniswapV4Repository(db, buildID)
-	poolRows, err := repo.LoadPools(ctx, cfg.bootstrap.ChainID)
+// transferActivityTimeouts sizes one run against a full mainnet posm history.
+// Measured 2026-09-14 against mainnet: 487,908 Transfer logs over 4.29M blocks in
+// 68 windows with 25 narrowings, ~2 minutes of eth_getLogs; the writes dominate
+// the rest. The ceilings are headroom for provider slowness and for a chain with
+// an order of magnitude more tokens, not an estimate.
+//
+// Wider than the position bootstrap's because the row count is two orders of
+// magnitude larger; the attempt count and heartbeat are its, for its reasons.
+var transferActivityTimeouts = temporal.ActivityTimeouts{
+	StartToClose:    4 * time.Hour,
+	ScheduleToClose: 12 * time.Hour,
+	MaximumAttempts: 3,
+	Heartbeat:       time.Minute,
+}
+
+func newTransferService(logger *slog.Logger, w runnerWiring) (*uniswapv4bootstrap.TransferService, error) {
+	positionManager, err := uniswapv4indexer.PositionManagerFor(w.pools)
+	if err != nil {
+		return nil, err
+	}
+	// The prefix is the live indexer's, so both writers move one counter; the
+	// chain name comes from the chain id, as it does for every dex worker.
+	telemetry, err := dextelemetry.NewTelemetry(metricPrefix, w.cfg.bootstrap.ChainID)
+	if err != nil {
+		return nil, fmt.Errorf("creating uniswap-v4 transfer telemetry: %w", err)
+	}
+
+	return uniswapv4bootstrap.NewTransferService(uniswapv4bootstrap.TransferDeps{
+		PositionManager: positionManager,
+		LogScan:         w.logScan,
+		Repo:            w.repo,
+		TxManager:       w.txMgr,
+		Progress:        w.transferProgress,
+		Telemetry:       telemetry,
+		Logger:          logger,
+		Config:          w.cfg.bootstrap,
+	})
+}
+
+// runTransferBackfill is one attempt of the transfer activity: the service's run
+// plus the one log line that reports what it did, or how far it got before failing.
+func runTransferBackfill(ctx context.Context, logger *slog.Logger, svc *uniswapv4bootstrap.TransferService, chainID int64) error {
+	summary, err := svc.Run(ctx)
+	if err != nil {
+		if summary.PinnedBlock != 0 {
+			logger.Warn("uniswap-v4 posm transfer backfill stopped with partial progress",
+				"chainId", chainID, "pinnedBlock", summary.PinnedBlock, "fromBlock", summary.FromBlock,
+				"resumedFromBlock", summary.ResumedFromBlock, "scanWindows", summary.ScanWindows,
+				"scanNarrowings", summary.ScanNarrowings, "scanLogs", summary.ScanLogs,
+				"transfersDecoded", summary.TransfersDecoded, "transfersWritten", summary.TransfersWritten,
+				"batches", summary.Batches)
+		}
+		return err
+	}
+	logger.Info("uniswap-v4 posm transfer backfill finished",
+		"chainId", chainID,
+		"pinnedBlock", summary.PinnedBlock, "pinnedHash", summary.PinnedHash,
+		"fromBlock", summary.FromBlock, "resumedFromBlock", summary.ResumedFromBlock,
+		"scanWindows", summary.ScanWindows, "scanNarrowings", summary.ScanNarrowings,
+		"scanLogs", summary.ScanLogs, "transfersDecoded", summary.TransfersDecoded,
+		"transfersWritten", summary.TransfersWritten, "batches", summary.Batches,
+		"lowestBlockSeen", summary.LowestBlockSeen, "highestBlockSeen", summary.HighestBlockSeen)
+	return nil
+}
+
+func loadRegisteredPools(ctx context.Context, repo *postgres.UniswapV4Repository, chainID int64) ([]uniswapv4indexer.RegisteredPool, error) {
+	poolRows, err := repo.LoadPools(ctx, chainID)
 	if err != nil {
 		return nil, fmt.Errorf("loading uniswap v4 pools: %w", err)
 	}
 	if len(poolRows) == 0 {
-		return nil, fmt.Errorf("no uniswap v4 pools registered for chain %d", cfg.bootstrap.ChainID)
+		return nil, fmt.Errorf("no uniswap v4 pools registered for chain %d", chainID)
 	}
-
-	txMgr, err := postgres.NewTxManager(db, logger)
-	if err != nil {
-		return nil, fmt.Errorf("creating the tx manager: %w", err)
-	}
-
-	return uniswapv4bootstrap.New(uniswapv4bootstrap.Deps{
-		Pools:       uniswapv4indexer.RegisteredPoolsFromRows(poolRows),
-		LogScan:     logScan,
-		Multicaller: multicaller,
-		Repo:        repo,
-		TxManager:   txMgr,
-		Progress:    progress,
-		Logger:      logger,
-		Config:      cfg.bootstrap,
-	})
+	return uniswapv4indexer.RegisteredPoolsFromRows(poolRows), nil
 }

@@ -53,6 +53,16 @@ const (
 	txHash           = "0xfeed000000000000000000000000000000000000000000000000000000000001"
 	pinnedBlockHash  = "0x2222222222222222222222222222222222222222222222222222222222222222"
 
+	// posmAddr is the PositionManager the seed migration registers on chain 1; it
+	// is also every posm-managed position's owner, hence positionOwner above.
+	posmAddr        = positionOwner
+	transferFrom    = "0x0000000000000000000000000000000000000000"
+	transferTo      = "0x1111111111111111111111111111111111111111"
+	transferTokenID = int64(51423)
+	// Inside the scan range and below the pin.
+	transferBlock    = int64(21_800_000)
+	transferLogIndex = int64(7)
+
 	// Above every seeded pool's deploy block, so the whole registry is in range.
 	// The mock's head sits the default finality depth above it, so a run pins here.
 	pinnedBlock       = int64(25_600_000)
@@ -155,11 +165,48 @@ func (c *mockChain) serveLogs(w http.ResponseWriter, req rpcutil.Request) {
 		testutil.WriteRPCError(w, req.ID, -32602, "Log response size exceeded. this block range should work: [0x0, 0x1]")
 		return
 	}
-	raw, err := json.Marshal([]map[string]any{modifyLiquidityLogJSON(c.t)})
+	raw, err := json.Marshal(c.logsFor(req))
 	if err != nil {
 		c.t.Fatalf("marshalling logs: %v", err)
 	}
 	testutil.WriteRPCResult(w, req.ID, raw)
+}
+
+// The two workflow types scan different contracts, so the mock answers by the
+// filter's address exactly as a node would — an address-blind mock would hand the
+// posm scan a PoolManager log and the decoder would rightly refuse it.
+func (c *mockChain) logsFor(req rpcutil.Request) []map[string]any {
+	var params []struct {
+		Address string `json:"address"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil || len(params) == 0 {
+		c.t.Fatalf("bad eth_getLogs params: %s", req.Params)
+	}
+	if common.HexToAddress(params[0].Address) == common.HexToAddress(posmAddr) {
+		return []map[string]any{posmTransferLogJSON(c.t)}
+	}
+	return []map[string]any{modifyLiquidityLogJSON(c.t)}
+}
+
+func posmTransferLogJSON(t *testing.T) map[string]any {
+	t.Helper()
+	return map[string]any{
+		"address": posmAddr,
+		"topics": []string{
+			uniswapv4indexer.ERC721TransferTopic0().Hex(),
+			common.BytesToHash(common.HexToAddress(transferFrom).Bytes()).Hex(),
+			common.BytesToHash(common.HexToAddress(transferTo).Bytes()).Hex(),
+			common.BigToHash(big.NewInt(transferTokenID)).Hex(),
+		},
+		"data":             "0x",
+		"blockHash":        pinnedBlockHash,
+		"blockNumber":      "0x" + strconv.FormatInt(transferBlock, 16),
+		"blockTimestamp":   "0x68a3f900",
+		"transactionHash":  txHash,
+		"transactionIndex": "0x0",
+		"logIndex":         "0x" + strconv.FormatInt(transferLogIndex, 16),
+		"removed":          false,
+	}
 }
 
 func (c *mockChain) serveCall(w http.ResponseWriter, req rpcutil.Request) {
@@ -294,7 +341,7 @@ func registerWorker(t *testing.T, db *pgxpool.Pool) (*testsuite.TestWorkflowEnvi
 
 func (d *deployment) run(t *testing.T) error {
 	t.Helper()
-	d.env.ExecuteWorkflow(workflowTypeName)
+	d.env.ExecuteWorkflow(positionWorkflowTypeName)
 	return d.env.GetWorkflowError()
 }
 
@@ -350,7 +397,7 @@ func TestRunIntegration_ASecondRunWritesNoNewRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register again: %v", err)
 	}
-	again.ExecuteWorkflow(workflowTypeName)
+	again.ExecuteWorkflow(positionWorkflowTypeName)
 	if err := again.GetWorkflowError(); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
@@ -513,5 +560,141 @@ func TestRunIntegration_StopsCleanlyWhenTheContextIsCancelled(t *testing.T) {
 
 	if err != nil {
 		t.Fatalf("run = %v, want a cancelled startup reported as a clean stop", err)
+	}
+}
+
+func (d *deployment) runTransfers(t *testing.T) error {
+	t.Helper()
+	d.env.ExecuteWorkflow(transferWorkflowTypeName)
+	return d.env.GetWorkflowError()
+}
+
+func countTransfers(t *testing.T, db *pgxpool.Pool) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(context.Background(), `SELECT COUNT(*) FROM uniswap_v4_position_nft_transfer`).Scan(&n); err != nil {
+		t.Fatalf("counting nft transfers: %v", err)
+	}
+	return n
+}
+
+func TestTransferRunIntegration_PersistsTheScannedTransfer(t *testing.T) {
+	d := newDeployment(t, mockChainOptions{})
+
+	if err := d.runTransfers(t); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var (
+		tokenID      string
+		blockNumber  int64
+		blockVersion int
+		logIndex     int
+		from, to     []byte
+		blockTS      string
+		version      int
+	)
+	err := d.db.QueryRow(context.Background(), `
+		SELECT token_id::text, block_number, block_version, log_index,
+		       from_address, to_address, to_char(block_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+		       processing_version
+		FROM uniswap_v4_position_nft_transfer`).
+		Scan(&tokenID, &blockNumber, &blockVersion, &logIndex, &from, &to, &blockTS, &version)
+	if err != nil {
+		t.Fatalf("reading the persisted transfer: %v", err)
+	}
+
+	if tokenID != strconv.FormatInt(transferTokenID, 10) {
+		t.Errorf("token_id = %s, want %d", tokenID, transferTokenID)
+	}
+	if blockNumber != transferBlock {
+		t.Errorf("block_number = %d, want the log's own height %d", blockNumber, transferBlock)
+	}
+	if blockVersion != 0 {
+		t.Errorf("block_version = %d, want 0: the scan stops below the reorg window", blockVersion)
+	}
+	if logIndex != int(transferLogIndex) {
+		t.Errorf("log_index = %d, want %d", logIndex, transferLogIndex)
+	}
+	// 0x68a3f900. Carried by the log, not read from a header.
+	if blockTS != "2025-08-19 04:09:36" {
+		t.Errorf("block_timestamp = %s, want the log's blockTimestamp", blockTS)
+	}
+	if got := common.BytesToAddress(from); got != common.HexToAddress(transferFrom) {
+		t.Errorf("from_address = %s, want %s", got, transferFrom)
+	}
+	if got := common.BytesToAddress(to); got != common.HexToAddress(transferTo) {
+		t.Errorf("to_address = %s, want %s", got, transferTo)
+	}
+	if version != 0 {
+		t.Errorf("processing_version = %d, want 0 for a first write", version)
+	}
+}
+
+func TestTransferRunIntegration_ASecondRunWritesNoNewRows(t *testing.T) {
+	d := newDeployment(t, mockChainOptions{})
+	if err := d.runTransfers(t); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	first := countTransfers(t, d.db)
+	if first == 0 {
+		t.Fatal("the first run persisted nothing; the rerun assertion would be vacuous")
+	}
+
+	again, err := registerWorker(t, d.db)
+	if err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	again.ExecuteWorkflow(transferWorkflowTypeName)
+	if err := again.GetWorkflowError(); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+
+	if second := countTransfers(t, d.db); second != first {
+		t.Errorf("row count went %d -> %d across a rerun, want it unchanged", first, second)
+	}
+}
+
+// The reason SaveNFTTransfersIfAbsent exists. The live indexer writes a log site
+// under its own build_id; a plain ON CONFLICT insert from the backfill's build
+// would miss that conflict target (processing_version is trigger-assigned per
+// build) and append a SECOND row at processing_version 1 — a correction version
+// that corrects nothing, for every site the two writers' coverage shares.
+func TestTransferRunIntegration_LeavesALogSiteAnotherBuildAlreadyWrote(t *testing.T) {
+	d := newDeployment(t, mockChainOptions{})
+
+	var posmID int64
+	if err := d.db.QueryRow(context.Background(),
+		`SELECT id FROM uniswap_v4_position_manager WHERE chain_id = 1`).Scan(&posmID); err != nil {
+		t.Fatalf("reading the seeded PositionManager: %v", err)
+	}
+	// build_id 4242 stands in for the live indexer's build, which is never the
+	// backfill's; the trigger keys its version reuse on exactly that column.
+	_, err := d.db.Exec(context.Background(), `
+		INSERT INTO uniswap_v4_position_nft_transfer
+		  (position_manager_id, token_id, block_number, block_version, block_timestamp,
+		   tx_hash, log_index, from_address, to_address, build_id)
+		VALUES ($1, $2, $3, 0, '2025-08-19 04:09:36+00', $4, $5, $6, $7, 4242)`,
+		posmID, transferTokenID, transferBlock,
+		common.HexToHash(txHash).Bytes(), transferLogIndex,
+		common.HexToAddress(transferFrom).Bytes(), common.HexToAddress(transferTo).Bytes())
+	if err != nil {
+		t.Fatalf("seeding the live indexer's row: %v", err)
+	}
+
+	if err := d.runTransfers(t); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if n := countTransfers(t, d.db); n != 1 {
+		t.Fatalf("row count = %d, want 1: the backfill appended a correction version for a site already recorded", n)
+	}
+	var buildID, version int
+	if err := d.db.QueryRow(context.Background(),
+		`SELECT build_id, processing_version FROM uniswap_v4_position_nft_transfer`).Scan(&buildID, &version); err != nil {
+		t.Fatalf("reading the surviving row: %v", err)
+	}
+	if buildID != 4242 || version != 0 {
+		t.Errorf("surviving row is build_id %d / processing_version %d, want the pre-existing 4242 / 0", buildID, version)
 	}
 }
