@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
@@ -96,11 +97,13 @@ type RunnerJob struct {
 }
 
 // RegisterRunner registers job as a workflow that accepts no input, plus the
-// shared activity that executes its Runner. Call it from WorkerConfig.Register.
+// activity that executes its Runner. Call it from WorkerConfig.Register.
 //
 // The activity gets no metrics recorder on purpose: RunWorker's interceptor
 // already records one cronjob.runs.total per activity execution, so a second
-// recorder here would double every count.
+// recorder here would double every count. That interceptor is name-agnostic, so
+// every job on a worker lands on one cronjob.runs.total per task queue — an
+// alert keyed on it cannot say WHICH of a worker's jobs failed.
 func RegisterRunner(r worker.Registry, job RunnerJob) error {
 	if job.WorkflowType == "" {
 		return fmt.Errorf("RunnerJob.WorkflowType is required")
@@ -114,15 +117,27 @@ func RegisterRunner(r worker.Registry, job RunnerJob) error {
 	if err != nil {
 		return fmt.Errorf("creating the runner activity: %w", err)
 	}
-	r.RegisterWorkflowWithOptions(runnerWorkflow(job.Timeouts), workflow.RegisterOptions{Name: job.WorkflowType})
-	r.RegisterActivity(activities)
+	r.RegisterWorkflowWithOptions(runnerWorkflow(job.Timeouts, job.activityName()), workflow.RegisterOptions{Name: job.WorkflowType})
+	r.RegisterActivityWithOptions(activities, activity.RegisterOptions{Name: job.WorkflowType})
 	return nil
 }
 
+// activityName is the name the SDK registers cronjobActivities.Execute under
+// once RegisterActivityWithOptions prefixes it with the workflow type.
+//
+// Prefixed because the prefix is what lets two jobs share one worker: the method
+// is called Execute on both, and the registry rejects the second — or, without
+// the check, would route both workflows to whichever Runner registered first.
+func (j RunnerJob) activityName() string {
+	return j.WorkflowType + cronjobActivityMethod
+}
+
 // runnerWorkflow is cronjobWorkflow with its bounds closed over instead of
-// arriving as an argument, so a run starts with no input payload at all.
-func runnerWorkflow(timeouts ActivityTimeouts) func(workflow.Context) error {
-	return func(ctx workflow.Context) error { return cronjobWorkflow(ctx, timeouts) }
+// arriving as an argument, so a run starts with no input payload at all, and with
+// its activity named rather than referenced: the method reference resolves to the
+// bare method name, which is not what a prefixed registration answers to.
+func runnerWorkflow(timeouts ActivityTimeouts, activityName string) func(workflow.Context) error {
+	return func(ctx workflow.Context) error { return runActivityWorkflow(ctx, timeouts, activityName) }
 }
 
 // RunWorker runs an on-demand Temporal worker until ctx is cancelled. It shares

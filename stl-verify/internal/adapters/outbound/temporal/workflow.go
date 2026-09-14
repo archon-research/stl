@@ -219,9 +219,23 @@ func (t ActivityTimeouts) resolve() ActivityTimeouts {
 }
 
 // cronjobWorkflow orchestrates a single cronjob activity execution.
+// cronjobActivityMethod is the exported method name the SDK derives
+// cronjobActivities' activity name from, and so the name a SCHEDULED cronjob's
+// workflow history already carries. RunCronjob keeps it bare; only RegisterRunner
+// prefixes it (RunnerJob.activityName).
+const cronjobActivityMethod = "Execute"
+
 func cronjobWorkflow(ctx workflow.Context, timeouts ActivityTimeouts) error {
+	return runActivityWorkflow(ctx, timeouts, cronjobActivityMethod)
+}
+
+// runActivityWorkflow executes one named activity under the shared retry policy
+// and timeouts. The name goes on the wire either way — a method reference
+// resolves to exactly this string — so naming it changes nothing for a scheduled
+// cronjob and is what lets a worker host more than one runner.
+func runActivityWorkflow(ctx workflow.Context, timeouts ActivityTimeouts, activityName string) error {
 	logger := workflow.GetLogger(ctx)
-	logger.Info("starting cronjob workflow")
+	logger.Info("starting cronjob workflow", "activity", activityName)
 
 	timeouts = timeouts.resolve()
 	activityOptions := workflow.ActivityOptions{
@@ -241,9 +255,8 @@ func cronjobWorkflow(ctx workflow.Context, timeouts ActivityTimeouts) error {
 	// activity retries (the RetryPolicy above) all observe the same value.
 	scheduledAt := workflow.Now(ctx).UTC()
 
-	var activities *cronjobActivities
-	if err := workflow.ExecuteActivity(ctx, activities.Execute, scheduledAt).Get(ctx, nil); err != nil {
-		return fmt.Errorf("executing cronjob activity: %w", err)
+	if err := workflow.ExecuteActivity(ctx, activityName, scheduledAt).Get(ctx, nil); err != nil {
+		return fmt.Errorf("executing cronjob activity %s: %w", activityName, err)
 	}
 
 	logger.Info("cronjob workflow completed")

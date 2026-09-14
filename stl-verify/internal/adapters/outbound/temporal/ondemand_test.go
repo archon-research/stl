@@ -245,3 +245,54 @@ func TestNewBootstrap_SurfacesACancelledContextWithoutDialingTemporal(t *testing
 		t.Fatalf("newBootstrap = %v, want the cancelled context, not a dial error", err)
 	}
 }
+
+// Two jobs on one worker is what a worker that owns more than one backfill of the
+// same data needs (the Uniswap V4 bootstrap owns two). Both register a method
+// called Execute, so without a per-job activity name a real worker panics on the
+// second registration, and the test environment — which disables that check —
+// silently routes BOTH workflow types to whichever Runner registered last. Each
+// case therefore starts one of the two and demands its own Runner.
+func TestRegisterRunner_HostsTwoJobsOnOneWorkerWithoutCrossingThem(t *testing.T) {
+	for _, started := range []string{"FirstBackfill", "SecondBackfill"} {
+		t.Run(started, func(t *testing.T) {
+			env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+			var ran []string
+
+			for _, workflowType := range []string{"FirstBackfill", "SecondBackfill"} {
+				name := workflowType
+				err := RegisterRunner(env, RunnerJob{
+					WorkflowType: name,
+					Runner: RunnerFunc(func(context.Context) error {
+						ran = append(ran, name)
+						return nil
+					}),
+					Timeouts: ActivityTimeouts{StartToClose: time.Minute, ScheduleToClose: 2 * time.Minute, MaximumAttempts: 1},
+				})
+				if err != nil {
+					t.Fatalf("RegisterRunner(%s): %v", name, err)
+				}
+			}
+
+			env.ExecuteWorkflow(started)
+
+			if err := env.GetWorkflowError(); err != nil {
+				t.Fatalf("running %s: %v", started, err)
+			}
+			if len(ran) != 1 || ran[0] != started {
+				t.Fatalf("runners that ran = %v, want only %s: the workflow reached another job's Runner", ran, started)
+			}
+		})
+	}
+}
+
+// A scheduled cronjob's workflow history names its activity "Execute"; a replay
+// after this worker upgrades has to find that name still registered.
+func TestRunnerJobActivityName_LeavesTheScheduledPathsNameAlone(t *testing.T) {
+	if cronjobActivityMethod != "Execute" {
+		t.Fatalf("cronjobActivityMethod = %q, want Execute: an in-flight scheduled run replays against that name", cronjobActivityMethod)
+	}
+	job := RunnerJob{WorkflowType: "UniswapV4PositionBootstrap"}
+	if got := job.activityName(); got != "UniswapV4PositionBootstrapExecute" {
+		t.Fatalf("activityName() = %q, want the workflow type prefixed onto the method name", got)
+	}
+}
