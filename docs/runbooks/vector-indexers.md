@@ -3176,6 +3176,54 @@ fire, but its error ratio is 100% and trips this alert.
   sustained.
 - DB write error (constraint, pool exhaustion) -> inspect the failing block.
 - Per-chain queue outage — the chain's SQS/SNS wiring broke; check upstream.
+- **Wedged on share-token resolution** — see below.
+
+### Wedged on share-token resolution (100% error ratio, one chain)
+
+A `centrifuge` entry is keyed on an ERC-7540 vault, and the tracker must learn
+which token emits that entry's `Transfer` logs before it can match them. That
+resolution is a hard failure by design (VEC-535): skipping it would leave the
+position silently moving only on the 75-block sweep, which is exactly the class
+of bug the ticket fixed. So the block NACKs, SQS redelivers it, and it fails
+again — **every block on that chain stops, not just blocks touching the entry**,
+because the resolution runs on any block carrying a tracked transfer.
+
+Log lines. grep for the inner text, not the wrapper: an entry's first resolution
+wraps them in `resolve transfer aliases for block <N>`, every later fetch in
+`route transfers for block <N>` / `route transfers for sweep block <N>`, and the
+last line below in `read the [sweep] share tokens of block <N>`.
+
+- `erc7540 naming the share tokens of <n> entries: ...` — the `share()` multicall
+  failed or returned something undecodable. One variant is deliberate:
+  `share() reverted and decimals() did not answer, neither a vault nor a token: <A>`
+  — a reverting `share()` is only accepted as a direct share when `decimals()`
+  answers on the same address; a node answering wrongly self-clears on redelivery,
+  a genuinely dead address does not.
+- `... needs a share alias but its source cannot name one` — an entry routes to a
+  source that cannot resolve shares; a registry/entry misconfiguration.
+- `no share token named for entry <contract>/<wallet>` — the resolver answered
+  but omitted an entry.
+- `entry <contract>/<wallet> named share <S> before and now reports itself` — the
+  ratchet: a `share()` revert on an entry that already named a share would re-key
+  the position onto its vault, where no price ever attaches, while every health
+  signal stays green.
+- `<A> and <B> both claim transfers of <S> into <W>` — two vaults front one share
+  for one wallet; tracking both would double count.
+- `centrifuge entry <contract>/<wallet> came back with no share token` — the
+  source returned a balance without naming the share; the routes would otherwise
+  freeze at their last good value.
+- `share token re-pointed; event rows for this position stop until the next sweep`
+  — a Warn, not an error: the entry's `share()` now names a different token, so its
+  old route is dropped and the position moves again on the next sweep. The same
+  event increments `allocation.share_repoints.total` (labels `chain`, `entry`,
+  `wallet`); no alert reads it yet.
+
+**There is no per-entry discard.** The only sanctioned remedy today is to fix the
+underlying entry: correct or remove it in the axis-synome contract, regenerate,
+and redeploy. Do not "unblock" the chain by deleting the SQS message — that
+drops a block for every other position on it. If the cause is a transient RPC
+failure the worker recovers on its own once the node answers; the ratchet line
+specifically should not self-clear, and means the read is wrong rather than slow.
 
 ### Verify recovery
 

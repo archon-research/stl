@@ -118,3 +118,8 @@ htmlcov/
 .skillfile/cache/
 .skillfile/conflict
 bin/skillfile
+
+# Transient control files written by scripts/deploy/check-build-reproducible.sh.
+# Ignored so an interrupted run cannot leave one to be committed by accident.
+stl-verify/**/zz_reproducibility_control.go
+stl-verify/**/zz_reproducibility_control.py

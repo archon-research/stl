@@ -48,7 +48,12 @@ _COVERED_STARS_SQL = text(
 
 _TOTALS_SQL = text(
     PRIME_BY_STAR_CTE
-    + """
+    + """,
+    valid_cycles AS (
+        SELECT DISTINCT synced_at
+        FROM prime_capital_stack_allocation
+        WHERE prime_id = (SELECT id FROM target)
+    )
     SELECT
         pcs.synced_at,
         pcs.exposure_usd,
@@ -67,18 +72,9 @@ _TOTALS_SQL = text(
         pcs.spj_utilization
     FROM prime_capital_stack pcs
     WHERE pcs.prime_id = (SELECT id FROM target)
-      -- A cycle written before prime_capital_stack_allocation existed (every
-      -- cycle from 2026-08-19 to 2026-08-26) has totals with no breakdown, and
-      -- a prime the monitor has since stopped covering keeps that as its
-      -- newest row forever. Skipping past it to an earlier complete cycle, or
-      -- to none, is what turns that into a 404 -- the endpoint's documented
-      -- indexed fallback -- instead of a permanent 500.
       AND (
         pcs.exposure_usd = 0
-        OR EXISTS (
-            SELECT 1 FROM prime_capital_stack_allocation a
-            WHERE a.prime_id = pcs.prime_id AND a.synced_at = pcs.synced_at
-        )
+        OR pcs.synced_at IN (SELECT synced_at FROM valid_cycles)
       )
     ORDER BY pcs.synced_at DESC, pcs.processing_version DESC
     LIMIT 1

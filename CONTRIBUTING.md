@@ -430,6 +430,13 @@ func run(ctx context.Context, args []string) error {
    rollout lists in `_dev-up-alchemy-workers` and `dev-up`). Grep for an
    existing worker name in the Makefile to see every site you need to
    touch.
+
+   **Include `docker-release-all`.** It is an explicit chain of
+   `_docker-release-<name>-internal` calls, not a wildcard — only cronjobs
+   are picked up automatically, via its `$(CRONJOBS)` loop. Forgetting it
+   is caught loudly rather than silently: that target is what the deploy
+   builds with, so the image is never pushed and the overlay's pinned tag
+   reaches the cluster as ImagePullBackOff (ORB-313).
 8. **Coordinate with infra.** Open a PR in the Infrastructure repo for
    the SQS queue, SNS subscription, IAM policy, and any secrets — your
    code PR depends on those resources existing.
