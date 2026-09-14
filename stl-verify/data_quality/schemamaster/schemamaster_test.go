@@ -197,3 +197,29 @@ func TestNormalizeType(t *testing.T) {
 		}
 	}
 }
+
+// The registry's fill flag and this struct's tag have to name the same key. When the JSON was
+// renamed to block_meta and the tag still read block_time, every one of these unmarshalled false
+// and checkBucket1Fills silently stopped refusing them, which is the whole reason it exists.
+func TestLoad_BlockMetaFillsUnmarshal(t *testing.T) {
+	r, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	var flagged, blockTimestampFills int
+	for _, f := range r.Fills {
+		if f.Column != "block_timestamp" || f.Parent != "" {
+			continue
+		}
+		blockTimestampFills++
+		if f.BlockMeta {
+			flagged++
+		}
+	}
+	if blockTimestampFills == 0 {
+		t.Fatal("no parentless block_timestamp fills in the registry; this test no longer guards anything")
+	}
+	if flagged != blockTimestampFills {
+		t.Errorf("%d of %d parentless block_timestamp fills carry the block_meta flag; want all of them", flagged, blockTimestampFills)
+	}
+}

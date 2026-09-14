@@ -79,7 +79,7 @@ var (
 	BuildTime string
 )
 
-func init() { buildinfo.PopulateFromVCS(&GitCommit, &BuildTime) }
+func init() { buildinfo.Populate(&GitCommit, &GitBranch, &BuildTime) }
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

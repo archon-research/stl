@@ -4,7 +4,7 @@
 # Include language-agnostic linting targets
 include lint.mk
 
-.PHONY: golangci-lint-new all test test-race test-integration test-integration-shard integration-shard-check ci-service-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-watcher-robinhood run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-sparklend-position-tracker-arbitrum run-sparklend-position-tracker-optimism run-sparklend-position-tracker-base run-allocation-tracker run-allocation-tracker-avax run-allocation-tracker-robinhood help ci ci-checks install-hooks format \
+.PHONY: golangci-lint-new all test test-race test-integration test-integration-shard integration-shard-check ci-service-check buildinfo-populate-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-watcher-robinhood run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-sparklend-position-tracker-arbitrum run-sparklend-position-tracker-optimism run-sparklend-position-tracker-base run-allocation-tracker run-allocation-tracker-avax run-allocation-tracker-robinhood help ci ci-checks install-hooks format \
 	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-secrets dev-env-files dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service _docker-build-go-service _docker-push-go-service \
@@ -13,6 +13,7 @@ include lint.mk
 		docker-build-reference-capital-backfill docker-release-reference-capital-backfill _docker-release-reference-capital-backfill-internal \
 		docker-build-morpho-vault-backfill docker-release-morpho-vault-backfill _docker-release-morpho-vault-backfill-internal \
 		docker-build-block-republisher docker-release-block-republisher _docker-release-block-republisher-internal \
+		docker-build-uniswap-v4-position-bootstrap docker-release-uniswap-v4-position-bootstrap _docker-release-uniswap-v4-position-bootstrap-internal \
 		build-backfiller-% run-backfiller-% \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
@@ -51,7 +52,7 @@ include lint.mk
 		kind-create kind-delete kind-infra kind-config kind-secrets kind-bootstrap-db kind-migrate \
 		kind-load-migrate kind-load-watcher kind-load-workers kind-load-python-api kind-load-cronjobs \
 		kind-deploy-apps kind-deploy-workers kind-deploy-data-validator check-dev-overlay-sync \
-		check-reloader-opt-in check-overlay-images \
+		check-reloader-opt-in check-overlay-images build-reproducibility-check \
 		kind-redeploy-watcher kind-redeploy-worker \
 		docker-build-migrate \
 		kind-infra-ci kind-ci-up kind-ci-down \
@@ -246,6 +247,9 @@ integration-shard-check:
 ci-service-check:
 	@bash ci/check-ci-services.sh
 
+buildinfo-populate-check:
+	@bash ci/check-buildinfo-populate.sh
+
 # Removes the template databases of migration sets you no longer test, on the server
 # STL_TEST_POSTGRES_DSN names. Hand-run, not part of the suite: see the script.
 test-templates-clean:
@@ -409,7 +413,7 @@ tools:
 # CI target for lint/format/static/security checks. go vet, staticcheck, and
 # go fix -diff are covered by golangci-lint v2 (govet, staticcheck, modernize
 # linters — see .golangci.yml); running them separately tripled analysis time.
-ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check check-overlay-images golangci-lint golangci-lint-new vulncheck
+ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check buildinfo-populate-check check-overlay-images golangci-lint golangci-lint-new vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks
@@ -899,6 +903,19 @@ dev-env-files:
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
 		> cmd/backfillers/oracle-pricing-backfill/.env
+	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
+	printf '%s\n' \
+		"CHAIN_ID=1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:$(KIND_HOST_TEMPORAL_PORT)" \
+		"TEMPORAL_NAMESPACE=vector" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
+		"BUILD_GIT_HASH=dev" \
+		"LOG_LEVEL=info" \
+		> cmd/backfillers/uniswap-v4-position-bootstrap/.env
 	@set -a; . ../.env.secrets; set +a; \
 	printf '%s\n' \
 		"CHAIN_ID=1" \
@@ -1187,14 +1204,15 @@ docker-push: ecr-login
 # stay cache-free and cannot fail on it. CI provides the driver via
 # docker/setup-buildx-action and passes both vars. `ignore-error=true` keeps a
 # failed cache push (auth/network) from failing an otherwise-good build, and a
-# missing cache on import is a normal miss. The cache is only *exported* when
-# DOCKER_PUSH != 0, so a build-only run (DOCKER_PUSH=0) imports the cache but
-# never overwrites it; only real pushes update the shared cache.
+# missing cache on import is a normal miss. The cache is exported whenever we
+# push, so a build-only run (DOCKER_PUSH=0) imports the cache but never
+# overwrites it and only real pushes update the shared cache.
 #   $(1) = cache key, unique per image (used as the cache tag)
 ifeq ($(DOCKER_CACHE),1)
 ifndef DOCKER_CACHE_REPO
 $(error DOCKER_CACHE=1 requires DOCKER_CACHE_REPO, e.g. ghcr.io/<owner>/<repo>/buildcache)
 endif
+# Advisory: a failed cache push must not fail an image that built fine.
 docker_cache_to = --cache-to type=registry,ref=$(DOCKER_CACHE_REPO):$(1),mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true
 docker_cache_flags = \
 	--cache-from type=registry,ref=$(DOCKER_CACHE_REPO):$(1) \
@@ -1211,9 +1229,8 @@ endif
 #   IMG_TAG         image tag (default: $(IMAGE_TAG))
 #   IMG_LATEST_TAG  moving tag pushed alongside IMG_TAG (default: latest)
 # Set DOCKER_PUSH=0 to build only: validate the build and import the registry
-# cache, without loading or pushing the final image. Cache export is gated on
-# DOCKER_PUSH, so a build-only run reuses the cache but does not warm/overwrite
-# it. Useful for a CI build check that needs no ECR credentials.
+# cache, without loading or pushing the final image. A build-only run reuses the
+# cache but never overwrites it, so it needs no ECR credentials.
 IMG_TAG        ?= $(IMAGE_TAG)
 IMG_LATEST_TAG ?= latest
 DOCKER_PUSH    ?= 1
@@ -1432,6 +1449,8 @@ docker-release-all:
 	@$(MAKE) _docker-release-reference-capital-backfill-internal ENV=$(ENV)
 	@$(MAKE) _docker-release-morpho-vault-backfill-internal ENV=$(ENV)
 	@$(MAKE) _docker-release-block-republisher-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-uniswap-v4-position-bootstrap-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
 		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
@@ -2292,6 +2311,17 @@ check-overlay-images:
 	  ../scripts/deploy/render-overlay-images.sh --env $$env --check ../k8s/overlays/$$env/kustomization.yaml --allow-missing || exit 1; \
 	done
 
+# Assert that an image's layers depend only on its source, not on build
+# metadata (ORB-366) — the property the deploy comparison relies on to leave
+# an unchanged service's pods alone. Not part of `ci`/`ci-checks`: it costs
+# four real Docker builds per image, some under QEMU, and needs BuildKit (see the
+# script's header) rather than the podman this repo's `docker` shims to. Same
+# check the Build Reproducibility workflow runs, one image at a time.
+build-reproducibility-check:
+	@../scripts/deploy/check-build-reproducible.sh --image go
+	@../scripts/deploy/check-build-reproducible.sh --image python
+	@../scripts/deploy/check-build-reproducible.sh --image migrate
+
 # Apply the dev core overlay (watcher, python-api, cronjobs) — reuses k8s/base.
 # Images must already be built + loaded into kind.
 kind-deploy-apps: check-dev-overlay-sync
@@ -2378,6 +2408,16 @@ docker-release-reference-capital-backfill: ecr-login _docker-release-reference-c
 
 _docker-release-reference-capital-backfill-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Reference Capital Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/reference-capital-backfill GO_BIN=reference-capital-backfill GO_CACHE_KEY="cronjob-reference-capital-backfill" GO_TAG="reference-capital-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="reference-capital-backfill-latest"
+
+# uniswap-v4-position-bootstrap (VEC-639): an on-demand Temporal worker with no
+# schedule, so it is not auto-discovered as a cronjob; it only shares the ECR repo.
+docker-build-uniswap-v4-position-bootstrap:
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/uniswap-v4-position-bootstrap --build-arg BIN=uniswap-v4-position-bootstrap -t stl-uniswap-v4-position-bootstrap:local -f Dockerfile.common .
+
+docker-release-uniswap-v4-position-bootstrap: ecr-login _docker-release-uniswap-v4-position-bootstrap-internal
+
+_docker-release-uniswap-v4-position-bootstrap-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Uniswap V4 Position Bootstrap" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/uniswap-v4-position-bootstrap GO_BIN=uniswap-v4-position-bootstrap GO_CACHE_KEY="cronjob-uniswap-v4-position-bootstrap" GO_TAG="uniswap-v4-position-bootstrap-$(IMAGE_TAG)" GO_LATEST_TAG="uniswap-v4-position-bootstrap-latest"
 
 # offchain-price-backfill (VEC-540): the on-demand CoinGecko history backfill. Not a
 # cronjob (it registers no Temporal schedule) so it is not auto-discovered, but it is

@@ -76,6 +76,23 @@ func (r *SourceRegistry) warnUntrackedOnce(entry *TokenEntry, msg string) {
 		"exampleContract", entry.ContractAddress.Hex())
 }
 
+// shareResolvers groups entries by the source that can name the token they hold.
+// A source that cannot is a misconfiguration, not a variant: skipped, the entry
+// would go unaliased and its transfers unmatched for the life of the process.
+func (r *SourceRegistry) shareResolvers(entries []*TokenEntry) (map[shareResolver][]*TokenEntry, error) {
+	grouped := make(map[shareResolver][]*TokenEntry)
+	for _, entry := range entries {
+		resolver, ok := r.Route(entry).(shareResolver)
+		if !ok {
+			return nil, fmt.Errorf(
+				"entry %s/%s (type=%q protocol=%q) needs a share alias but its source cannot name one",
+				entry.ContractAddress.Hex(), entry.WalletAddress.Hex(), entry.TokenType, entry.Protocol)
+		}
+		grouped[resolver] = append(grouped[resolver], entry)
+	}
+	return grouped, nil
+}
+
 // FetchAll groups entries by source, fetches in batch, unions both the balance
 // and supply maps across sources, and returns the aggregated FetchResult.
 // blockHash pins every source's read to the exact block being processed (see
