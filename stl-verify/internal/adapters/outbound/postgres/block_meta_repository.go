@@ -34,6 +34,12 @@ func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID bui
 	if runID == 0 {
 		return nil, fmt.Errorf("run id cannot be zero")
 	}
+	// 0 is the column default, which ADR-0006 reads as pre-tracking data, so a caller that lost the
+	// registry would write rows indistinguishable from untracked ones. Refused here for the same
+	// reason the run is: at the boundary, not after a run has written.
+	if buildID == 0 {
+		return nil, fmt.Errorf("build id cannot be zero")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}

@@ -397,3 +397,84 @@ func TestWorkListEnumeratesWithTieredReadsOn(t *testing.T) {
 		}
 	}
 }
+
+// The provenance invariants, as a battery rather than one case.
+//
+// The behaviour was already correct; what was missing was anything holding it there. These name
+// what must stay true: the constructor refuses a build it cannot attribute, the writer's build and
+// run reach the row, and a later run by a different build does not rewrite what an earlier one
+// wrote — build_id is audit metadata, and ON CONFLICT DO NOTHING is what keeps the first writer's.
+func TestBlockMetaProvenanceInvariants(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	if _, err := pool.Exec(ctx, `INSERT INTO chain (chain_id, name) VALUES (1, 'ethereum') ON CONFLICT DO NOTHING`); err != nil {
+		t.Fatalf("seed chain: %v", err)
+	}
+
+	t.Run("a zero build is refused, as a zero run already is", func(t *testing.T) {
+		if _, err := NewBlockMetaRepository(pool, nil, 0, runID); err == nil {
+			t.Error("a zero build id was accepted; 0 is the column default that ADR-0006 reads as pre-tracking")
+		}
+	})
+
+	t.Run("a zero run is refused", func(t *testing.T) {
+		if _, err := NewBlockMetaRepository(pool, nil, buildID, 0); err == nil {
+			t.Error("a zero run id was accepted")
+		}
+	})
+
+	t.Run("the writer's build and run reach the row", func(t *testing.T) {
+		repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+		if err != nil {
+			t.Fatalf("build the repository: %v", err)
+		}
+		if _, err := repo.Upsert(ctx, []outbound.BlockMetaRow{{
+			ChainID: 1, BlockNumber: 9100, BlockVersion: 0, BlockTimestamp: time.Unix(1_700_000_000, 0).UTC(),
+		}}); err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
+		var gotBuild, gotRun int64
+		if err := pool.QueryRow(ctx,
+			`SELECT build_id, run_id FROM block_meta WHERE chain_id = 1 AND block_number = 9100`).Scan(&gotBuild, &gotRun); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if gotBuild != int64(buildID) || gotRun != int64(runID) {
+			t.Errorf("row carries build %d run %d, want %d and %d", gotBuild, gotRun, buildID, runID)
+		}
+	})
+
+	t.Run("a later run does not rewrite an earlier one's provenance", func(t *testing.T) {
+		// A second writer run, as a redeploy produces, re-offering the same block.
+		build2, run2 := testutil.OpenTestRun(t, ctx, pool)
+		if run2 == runID {
+			t.Skip("the harness reused the run; this case needs two")
+		}
+		repo2, err := NewBlockMetaRepository(pool, nil, build2, run2)
+		if err != nil {
+			t.Fatalf("build the second repository: %v", err)
+		}
+		n, err := repo2.Upsert(ctx, []outbound.BlockMetaRow{{
+			ChainID: 1, BlockNumber: 9100, BlockVersion: 0, BlockTimestamp: time.Unix(1_700_000_999, 0).UTC(),
+		}})
+		if err != nil {
+			t.Fatalf("second upsert: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("the second run reported %d rows written for a block already present, want 0", n)
+		}
+		var gotBuild, gotRun int64
+		var gotTS time.Time
+		if err := pool.QueryRow(ctx,
+			`SELECT build_id, run_id, block_timestamp FROM block_meta WHERE chain_id = 1 AND block_number = 9100`).Scan(&gotBuild, &gotRun, &gotTS); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if gotBuild != int64(buildID) || gotRun != int64(runID) {
+			t.Errorf("the stored row now carries build %d run %d; the first writer's must survive", gotBuild, gotRun)
+		}
+		if gotTS.Unix() != 1_700_000_000 {
+			t.Errorf("the stored timestamp changed to %d; a correction belongs at a higher processing_version", gotTS.Unix())
+		}
+	})
+}
