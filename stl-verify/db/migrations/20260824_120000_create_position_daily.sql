@@ -31,9 +31,12 @@ CREATE TABLE IF NOT EXISTS position_daily (
 
 -- CREATE TABLE IF NOT EXISTS adds no column to a table an earlier revision of this file created, so both
 -- columns added after the first revision get an idempotent ALTER: the procedure below reads run_id and must
--- parse, and created_at takes now() on rows written before it existed.
+-- parse, and created_at is added -infinity then re-defaulted, per ADR-0006's add-nullable-then-default rule.
 ALTER TABLE position_daily ADD COLUMN IF NOT EXISTS run_id bigint;
-ALTER TABLE position_daily ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
+-- A row written before the column existed has no known write time. -infinity says so and reads as
+-- maximally stale; now() would fabricate one and make a stale cache report itself fresh.
+ALTER TABLE position_daily ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT '-infinity';
+ALTER TABLE position_daily ALTER COLUMN created_at SET DEFAULT now();
 
 -- A plain table, not a hypertable: reads are PK point lookups per (position, date) and holder series, and
 -- both writers upsert, so there is no time-ordered scan for chunk exclusion to prune and no append-only
@@ -55,7 +58,7 @@ COMMENT ON COLUMN position_daily.projection IS 'Roles: Audit. Which projection v
 COMMENT ON COLUMN position_daily.deal_type IS 'Roles: Derived (copy of position_state.deal_type). The deal type of that day''s winning observation.';
 COMMENT ON COLUMN position_daily.build_id IS 'Roles: Audit. Which build wrote the winning observation (build_registry.id; 0 = pre-tracking).';
 COMMENT ON COLUMN position_daily.run_id IS 'Roles: Audit (copy of position_state.run_id). Which writer run appended the winning observation (writer_run.id; NULL means it predates run tracking).';
-COMMENT ON COLUMN position_daily.created_at IS 'Roles: Audit. When this day''s row was last written - its first insert or the latest overwrite by a newer observation for the same date; one the guard rejects leaves it alone. Not block time (see block_timestamp). max(created_at) behind max(position_state.created_at), both processing time, is the staleness signal, weaker at this grain than at position_current''s: a late observation for a date with no row yet is an INSERT, so it advances the reading rather than lagging it.';
+COMMENT ON COLUMN position_daily.created_at IS 'Roles: Audit. When this day''s row was last written - its first insert or the latest overwrite by a newer observation for the same date; one the guard rejects leaves it alone. Not block time (see block_timestamp). max(created_at) behind max(position_state.created_at), both processing time, is the staleness signal, weaker at this grain than at position_current''s: a late observation for a date with no row yet is an INSERT, so it advances the reading rather than lagging it. A row written before this column existed carries -infinity, not a fabricated write time.';
 
 -- Trigger-only cache, like position_current and allocation_position_current: the app role reads and the
 -- SECURITY DEFINER maintainer writes, so no caller needs a write grant and the cache cannot fork from

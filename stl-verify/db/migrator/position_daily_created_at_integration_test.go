@@ -142,14 +142,14 @@ func TestPositionDailyMigrationAddsItsLaterColumnsInPlace(t *testing.T) {
 		}
 	})
 
-	t.Run("created_at is added in place", func(t *testing.T) {
+	t.Run("created_at is added in place, and a pre-ALTER row says it has no write time", func(t *testing.T) {
 		f := newPositionDailyFixture(t)
 		f.observe("earlier", dailyObs{qty: 1, block: 50, ts: "2026-01-01T10:00:00Z", dealType: "LOAN"})
 		if _, err := f.pool.Exec(f.ctx, `ALTER TABLE position_daily DROP COLUMN created_at`); err != nil {
 			t.Fatalf("shape the table as an earlier revision left it: %v", err)
 		}
-		// Read the marker from the database, not the host: the container's clock is its own, and the two
-		// differ by enough to make a host timestamp reject a value stamped moments after it.
+		// Marker from the database, not the host: the container's clock is its own, and the two differ
+		// by enough to reject a value stamped moments after a host timestamp.
 		var before time.Time
 		if err := f.pool.QueryRow(f.ctx, `SELECT clock_timestamp()`).Scan(&before); err != nil {
 			t.Fatalf("read the marker: %v", err)
@@ -157,14 +157,28 @@ func TestPositionDailyMigrationAddsItsLaterColumnsInPlace(t *testing.T) {
 		if _, err := f.pool.Exec(f.ctx, src(t)); err != nil {
 			t.Fatalf("re-applying the revised file over the earlier table: %v", err)
 		}
-		// The row that predates the ALTER takes the column's default rather than blocking the migration,
-		// which is the whole reason created_at can carry one where run_id cannot.
-		if at := f.createdAt("earlier", "2026-01-01"); at.Before(before) {
-			t.Errorf("the pre-ALTER row carries created_at = %s, before the ALTER at %s; want the default stamped on it", at, before)
+
+		// The row predates the column, so its write time is unknown. now() would invent one and, because
+		// the forward-only rebuild cannot lower a row ahead of history, would make a WRONG row report
+		// itself freshly written -- the staleness signal reads level instead of lagging. Read as text:
+		// -infinity is exactly the value a time.Time cannot take, which is the point of choosing it.
+		var pre string
+		if err := f.pool.QueryRow(f.ctx, `
+			SELECT created_at::text FROM position_daily
+			 WHERE position_id = sha256($1::bytea) AND as_of_date = $2::date`, "earlier", "2026-01-01").Scan(&pre); err != nil {
+			t.Fatalf("read the pre-ALTER row's created_at: %v", err)
 		}
+		if pre != "-infinity" {
+			t.Errorf("the pre-ALTER row carries created_at = %s; want -infinity, which reads as maximally stale rather than a fabricated write time", pre)
+		}
+		if !f.cacheLagsSpine() {
+			t.Error("the staleness reading is level after a re-apply over a row with no known write time; -infinity must leave it lagging")
+		}
+
+		// A day observed after the re-apply takes a real write time, so the re-default is in force.
 		f.observe("revised", dailyObs{qty: 5, block: 100, ts: "2026-01-02T10:00:00Z", dealType: "LOAN"})
-		if at := f.createdAt("revised", "2026-01-02"); at.Before(before) {
-			t.Errorf("a day observed after the re-apply carries created_at = %s; want its own write time", at)
+		if revised := f.createdAt("revised", "2026-01-02"); !revised.After(before) {
+			t.Errorf("a day observed after the re-apply carries created_at = %s, not after the marker %s; the column was left defaulting to the sentinel", revised, before)
 		}
 	})
 }

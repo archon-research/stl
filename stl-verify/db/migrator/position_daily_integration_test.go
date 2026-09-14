@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -410,22 +411,50 @@ func TestPositionDailyRebuildResolvesUnderAShadowingSearchPath(t *testing.T) {
 	}
 }
 
-// A plain postgres table, which is the house default: no hypertable, and therefore no chunks, whatever
-// dates the rows carry. A migration that reaches for create_hypertable again fails here.
+// A plain postgres table, which is the house default: no hypertable, no chunks, and no native
+// partitioning either. A migration that reaches for create_hypertable again fails here.
 func TestPositionDailyIsAPlainTable(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	f.observe("d-plain", dailyObs{qty: 1, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
 	f.observe("d-plain", dailyObs{qty: 2, block: 200, ts: "2026-01-20T00:00:00Z", dealType: "LOAN"})
-	var dimensions, chunks int
+
+	// position_state is a hypertable in this same database, read through the same views with the same
+	// filter shape: without it, a mistyped name or a renamed catalogue column reads as "plain" and the
+	// test passes on the pre-change code too.
+	var dimensions, chunks, spineDimensions, spineChunks, jobs int
 	if err := f.pool.QueryRow(f.ctx, `
 		SELECT (SELECT count(*) FROM timescaledb_information.dimensions WHERE hypertable_name = 'position_daily'),
-		       (SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_name = 'position_daily')`).
-		Scan(&dimensions, &chunks); err != nil {
+		       (SELECT count(*) FROM timescaledb_information.chunks     WHERE hypertable_name = 'position_daily'),
+		       (SELECT count(*) FROM timescaledb_information.dimensions WHERE hypertable_name = 'position_state'),
+		       (SELECT count(*) FROM timescaledb_information.chunks     WHERE hypertable_name = 'position_state'),
+		       (SELECT count(*) FROM timescaledb_information.jobs       WHERE hypertable_name = 'position_daily')`).
+		Scan(&dimensions, &chunks, &spineDimensions, &spineChunks, &jobs); err != nil {
 		t.Fatal(err)
+	}
+	if spineDimensions < 1 || spineChunks < 1 {
+		t.Fatalf("the control reads %d dimension(s) and %d chunk(s) for position_state, which IS a hypertable; "+
+			"the catalogue views or the filter are not reporting, so zeroes below prove nothing", spineDimensions, spineChunks)
 	}
 	if dimensions != 0 || chunks != 0 {
 		t.Errorf("position_daily has %d partitioning dimension(s) and %d chunk(s); a plain table has neither", dimensions, chunks)
 	}
+	// The COMMENT promises no compression and no tiering; both are jobs, so this pins it directly.
+	if jobs != 0 {
+		t.Errorf("position_daily carries %d scheduled policy job(s); the table COMMENT says it has none", jobs)
+	}
+
+	// Native declarative partitioning reports zero dimensions and zero chunks too, so exclude it.
+	var relkind string
+	var partitions int
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT c.relkind::text, (SELECT count(*) FROM pg_inherits WHERE inhparent = c.oid)
+		  FROM pg_class c WHERE c.oid = 'public.position_daily'::regclass`).Scan(&relkind, &partitions); err != nil {
+		t.Fatal(err)
+	}
+	if relkind != "r" || partitions != 0 {
+		t.Errorf("position_daily is relkind %q with %d partition(s); want an ordinary table ('r') with none", relkind, partitions)
+	}
+
 	// Negative control: the rows are really there, so the counts above are not zero for want of data.
 	var rows int
 	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM position_daily`).Scan(&rows); err != nil {
@@ -460,24 +489,87 @@ func TestPositionDailyAsOfDateIsPinnedToBlockTimestamp(t *testing.T) {
 	}
 }
 
-// Two indexes the PK cannot serve: the holder filter, and a cross-position query for one date -- which on
-// a plain table has nothing else to read, where chunk exclusion once pruned it.
-func TestPositionDailyIndexesExist(t *testing.T) {
+// Two indexes the PK cannot serve: the holder filter, and a cross-position query for one date -- which
+// on a plain table has nothing else to read, where chunk exclusion once pruned it. Read from the
+// catalogue rather than the indexdef text, so a partial, expression or INCLUDE-only index fails.
+func TestPositionDailyIndexesCoverTheHolderAndDateReads(t *testing.T) {
 	f := newPositionDailyFixture(t)
-	for _, want := range []struct{ name, leads, then string }{
-		{"position_daily_holder_idx", "holder_id", "as_of_date"},
-		{"position_daily_as_of_date_idx", "as_of_date", ""},
+	for _, want := range []struct {
+		name string
+		cols []string
+	}{
+		{name: "position_daily_holder_idx", cols: []string{"holder_id", "as_of_date"}},
+		{name: "position_daily_as_of_date_idx", cols: []string{"as_of_date"}},
 	} {
-		var def string
-		if err := f.pool.QueryRow(f.ctx,
-			`SELECT indexdef FROM pg_indexes WHERE tablename = 'position_daily' AND indexname = $1`, want.name).Scan(&def); err != nil {
+		var cols []string
+		var notPartial, notExpression, noInclude, valid bool
+		if err := f.pool.QueryRow(f.ctx, `
+			SELECT (SELECT array_agg(a.attname ORDER BY k.ord)
+			          FROM unnest(i.indkey[0:i.indnkeyatts-1]) WITH ORDINALITY k(attnum, ord)
+			          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum),
+			       i.indpred IS NULL, i.indexprs IS NULL, i.indnatts = i.indnkeyatts, i.indisvalid
+			  FROM pg_index i WHERE i.indexrelid = ('public.' || $1)::regclass`, want.name).
+			Scan(&cols, &notPartial, &notExpression, &noInclude, &valid); err != nil {
 			t.Errorf("%s is missing: %v", want.name, err)
 			continue
 		}
-		cols := def[strings.Index(def, "(")+1:]
-		if !strings.HasPrefix(cols, want.leads) || (want.then != "" && !strings.Contains(cols, want.then)) {
-			t.Errorf("%s is %q; want it to lead on %s", want.name, def, want.leads)
+		if !slices.Equal(cols, want.cols) {
+			t.Errorf("%s keys on %v, want %v in that order", want.name, cols, want.cols)
 		}
+		// A partial index covers a slice of the table, and an INCLUDE column is unordered payload, so
+		// neither serves the read this index exists for even when the key list looks right.
+		if !notPartial || !notExpression || !noInclude || !valid {
+			t.Errorf("%s: partial=%t expression=%t include=%t valid=%t; want a plain, complete, valid btree",
+				want.name, !notPartial, !notExpression, !noInclude, valid)
+		}
+	}
+}
+
+// The rebuild's DISTINCT ON sorts the whole spine, which is why the procedure pins work_mem. A rebuild
+// over a handful of rows never reaches that path, so this one converges a spine big enough to sort.
+func TestPositionDailyRebuildConvergesOverABulkSpine(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	const positions = 20000
+	seed := func(qty, block int, ts, dealType string) {
+		f.t.Helper()
+		if _, err := f.pool.Exec(f.ctx, `
+			INSERT INTO position_state
+			    (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
+			     block_number, block_version, processing_version, block_timestamp, projection, build_id, deal_type)
+			SELECT sha256(g::text::bytea), 1, 1, 'inst-' || g, substr(md5(g::text) || md5(g::text), 1, 40), $1,
+			       $2, 0, 0, $3::timestamptz, 'public.proj-0', 0, $4
+			  FROM generate_series(1, $5) g`, qty, block, ts, dealType, positions); err != nil {
+			t.Fatalf("seed the spine at block %d: %v", block, err)
+		}
+	}
+	// The trigger caches all of these, so the rebuild below meets rows that already exist and must take
+	// its ON CONFLICT DO UPDATE arm in bulk -- emptying the cache first would exercise INSERTs only.
+	seed(5, 100, "2026-03-02T00:00:00Z", "LOAN")
+	seed(9, 200, "2026-03-02T06:00:00Z", "BORROW")
+	var cached int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM position_daily`).Scan(&cached); err != nil {
+		t.Fatal(err)
+	}
+	if cached != positions {
+		t.Fatalf("the trigger cached %d rows before the rebuild, want %d; the rebuild would not meet a populated cache", cached, positions)
+	}
+	// Stale every cached row (owner role) so the rebuild has to raise all of them.
+	if _, err := f.pool.Exec(f.ctx, `
+		UPDATE position_daily SET quantity = 5, deal_type = 'LOAN', block_number = 100,
+		       block_timestamp = '2026-03-02T00:00:00Z'`); err != nil {
+		t.Fatalf("stale the cached rows: %v", err)
+	}
+	f.rebuild()
+
+	var converged, total int
+	if err := f.pool.QueryRow(f.ctx,
+		`SELECT count(*) FILTER (WHERE quantity = 9 AND deal_type = 'BORROW'), count(*) FROM position_daily`).
+		Scan(&converged, &total); err != nil {
+		t.Fatal(err)
+	}
+	if converged != positions || total != positions {
+		t.Errorf("after the rebuild %d of %d rows carry the newer observation, %d rows total; want all %d",
+			converged, total, total, positions)
 	}
 }
 
