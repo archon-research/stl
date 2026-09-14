@@ -534,6 +534,25 @@ func TestSecStoreWave1IsAppendOnlyUnderTheRealRoles(t *testing.T) {
 		}
 	})
 
+	t.Run("every_vocabulary_carries_its_immutability_trigger", func(t *testing.T) {
+		for _, table := range vocabularies {
+			var exists bool
+			if err := pool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM pg_trigger t
+					JOIN pg_class c ON c.oid = t.tgrelid
+					WHERE c.relname = $1
+					  AND t.tgname = $1 || '_immutable'
+					  AND NOT t.tgisinternal
+				)`, table).Scan(&exists); err != nil {
+				t.Fatalf("check trigger on %s: %v", table, err)
+			}
+			if !exists {
+				t.Errorf("%s: missing %s_immutable trigger — reference_table_immutable() is the append-only enforcement for vocabulary tables whose owner keeps UPDATE", table, table)
+			}
+		}
+	})
+
 	t.Run("the_login_role_cannot_update_but_can_still_append", func(t *testing.T) {
 		appPool, err := pgxpool.New(ctx, loginRoleDSN(t, pool))
 		if err != nil {

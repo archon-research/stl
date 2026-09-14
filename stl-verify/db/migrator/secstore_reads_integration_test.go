@@ -84,6 +84,33 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 		t.Fatalf("insert edge second window: %v", err)
 	}
 
+	edgePvN := correctionVersion(ctx, t, pool, "sec_edge")
+	_, err = pool.Exec(ctx, fmt.Sprintf(`
+		INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, processing_version, `+secstoreSpine+`)
+		VALUES ('sec-t-reads-src', 'SECURITY', 'em-t-reads-edst', 'ENTITY', 'ISSUED_BY', '2026-06-01', %d, 'test', 'RESTATEMENT', 'edge pv-N restatement', 'test')`, edgePvN))
+	if err != nil {
+		t.Fatalf("insert edge pv-N restatement: %v", err)
+	}
+
+	// Overlapping-window node: two open windows valid at as_of('2026-04-01')
+	const overlapNodeID = "em-t-reads-overlap"
+	insertNode(ctx, t, pool, overlapNodeID, "ACTIVE", "2026-01-01", "'infinity'", "overlap window A")
+	insertNode(ctx, t, pool, overlapNodeID, "ACTIVE", "2026-03-01", "'infinity'", "overlap window B")
+
+	// Overlapping-window edge: same pattern
+	_, err = pool.Exec(ctx, `
+		INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, `+secstoreSpine+`)
+		VALUES ('sec-t-reads-overlap-src', 'SECURITY', 'em-t-reads-overlap-dst', 'ENTITY', 'ISSUED_BY', '2026-01-01', 'test', 'SEED_LOAD', 'overlap edge A', 'test')`)
+	if err != nil {
+		t.Fatalf("insert overlap edge A: %v", err)
+	}
+	_, err = pool.Exec(ctx, `
+		INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, `+secstoreSpine+`)
+		VALUES ('sec-t-reads-overlap-src', 'SECURITY', 'em-t-reads-overlap-dst', 'ENTITY', 'ISSUED_BY', '2026-03-01', 'test', 'SEED_LOAD', 'overlap edge B', 'test')`)
+	if err != nil {
+		t.Fatalf("insert overlap edge B: %v", err)
+	}
+
 	// -----------------------------------------------------------------------
 	// WI-2: reads with supersession and window coverage
 	// -----------------------------------------------------------------------
@@ -125,6 +152,52 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 		}
 		if pv != pvN {
 			t.Fatalf("got processing_version=%d, want %d (the restatement wins)", pv, pvN)
+		}
+	})
+
+	t.Run("node_as_of_returns_restatement", func(t *testing.T) {
+		var pv int
+		if err := pool.QueryRow(ctx, `
+			SELECT processing_version FROM sec_node_as_of('2026-07-01'::date) WHERE id = $1`, nodeID).Scan(&pv); err != nil {
+			t.Fatalf("sec_node_as_of(2026-07-01) for %s: %v", nodeID, err)
+		}
+		if pv != pvN {
+			t.Fatalf("got processing_version=%d, want %d", pv, pvN)
+		}
+	})
+
+	t.Run("node_as_of_kind_returns_restatement", func(t *testing.T) {
+		var pv int
+		if err := pool.QueryRow(ctx, `
+			SELECT processing_version FROM sec_node_as_of_kind('2026-07-01'::date, 'ENTITY') WHERE id = $1`, nodeID).Scan(&pv); err != nil {
+			t.Fatalf("sec_node_as_of_kind(2026-07-01, ENTITY) for %s: %v", nodeID, err)
+		}
+		if pv != pvN {
+			t.Fatalf("got processing_version=%d, want %d", pv, pvN)
+		}
+	})
+
+	t.Run("edge_current_returns_restatement", func(t *testing.T) {
+		var pv int
+		if err := pool.QueryRow(ctx, `
+			SELECT processing_version FROM sec_edge_current
+			WHERE src_id = 'sec-t-reads-src' AND rel_type = 'ISSUED_BY'`).Scan(&pv); err != nil {
+			t.Fatalf("sec_edge_current: %v", err)
+		}
+		if pv != edgePvN {
+			t.Fatalf("got processing_version=%d, want %d", pv, edgePvN)
+		}
+	})
+
+	t.Run("edge_as_of_returns_restatement", func(t *testing.T) {
+		var pv int
+		if err := pool.QueryRow(ctx, `
+			SELECT processing_version FROM sec_edge_as_of('2026-07-01'::date)
+			WHERE src_id = 'sec-t-reads-src' AND rel_type = 'ISSUED_BY'`).Scan(&pv); err != nil {
+			t.Fatalf("sec_edge_as_of(2026-07-01): %v", err)
+		}
+		if pv != edgePvN {
+			t.Fatalf("got processing_version=%d, want %d", pv, edgePvN)
 		}
 	})
 
@@ -218,6 +291,59 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 		}
 	})
 
+	t.Run("node_as_of_pv0_does_not_beat_correction", func(t *testing.T) {
+		var pv int
+		if err := pool.QueryRow(ctx, `
+			SELECT processing_version FROM sec_node_as_of('2026-07-01'::date) WHERE id = $1`, nodeID).Scan(&pv); err != nil {
+			t.Fatalf("sec_node_as_of after late pv-0: %v", err)
+		}
+		if pv != pvN {
+			t.Fatalf("got pv=%d, want %d", pv, pvN)
+		}
+	})
+
+	t.Run("node_as_of_kind_pv0_does_not_beat_correction", func(t *testing.T) {
+		var pv int
+		if err := pool.QueryRow(ctx, `
+			SELECT processing_version FROM sec_node_as_of_kind('2026-07-01'::date, 'ENTITY') WHERE id = $1`, nodeID).Scan(&pv); err != nil {
+			t.Fatalf("sec_node_as_of_kind after late pv-0: %v", err)
+		}
+		if pv != pvN {
+			t.Fatalf("got pv=%d, want %d", pv, pvN)
+		}
+	})
+
+	t.Run("edge_current_pv0_does_not_beat_correction", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to, processing_version, `+secstoreSpine+`)
+			VALUES ('sec-t-reads-src', 'SECURITY', 'em-t-reads-edst', 'ENTITY', 'ISSUED_BY', '2026-06-01', '2026-12-01', 0, 'test', 'SEED_LOAD', 'late pv-0 edge', 'test')`)
+		if err != nil {
+			t.Fatalf("late pv-0 edge append: %v", err)
+		}
+
+		var pv int
+		if err := pool.QueryRow(ctx, `
+			SELECT processing_version FROM sec_edge_current
+			WHERE src_id = 'sec-t-reads-src' AND rel_type = 'ISSUED_BY'`).Scan(&pv); err != nil {
+			t.Fatalf("sec_edge_current after late pv-0: %v", err)
+		}
+		if pv != edgePvN {
+			t.Fatalf("got pv=%d, want %d — a pv-0 append must not beat a correction", pv, edgePvN)
+		}
+	})
+
+	t.Run("edge_as_of_pv0_does_not_beat_correction", func(t *testing.T) {
+		var pv int
+		if err := pool.QueryRow(ctx, `
+			SELECT processing_version FROM sec_edge_as_of('2026-07-01'::date)
+			WHERE src_id = 'sec-t-reads-src' AND rel_type = 'ISSUED_BY'`).Scan(&pv); err != nil {
+			t.Fatalf("sec_edge_as_of after late pv-0: %v", err)
+		}
+		if pv != edgePvN {
+			t.Fatalf("got pv=%d, want %d — a pv-0 append must not beat a correction", pv, edgePvN)
+		}
+	})
+
 	// -----------------------------------------------------------------------
 	// WI-6: tiebreak and boundaries
 	// -----------------------------------------------------------------------
@@ -286,6 +412,137 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 		}
 		if count != 0 {
 			t.Fatalf("as_of exactly at valid_to of a closed window: got %d, want 0 (half-open interval)", count)
+		}
+	})
+
+	t.Run("edge_close_and_open_in_one_transaction", func(t *testing.T) {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, `+secstoreSpine+`)
+			VALUES ('sec-t-reads-txn', 'SECURITY', 'em-t-reads-txn-dst', 'ENTITY', 'ISSUED_BY', '2026-01-01', 'test', 'SEED_LOAD', 'edge open', 'test')`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to, `+secstoreSpine+`)
+			VALUES ('sec-t-reads-txn', 'SECURITY', 'em-t-reads-txn-dst', 'ENTITY', 'ISSUED_BY', '2026-01-01', '2026-06-01', 'test', 'VALID_TIME_AMEND', 'edge close', 'test')`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, `+secstoreSpine+`)
+			VALUES ('sec-t-reads-txn', 'SECURITY', 'em-t-reads-txn-dst', 'ENTITY', 'ISSUED_BY', '2026-06-01', 'test', 'SEED_LOAD', 'edge reopen', 'test')`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		var validTo string
+		if err := pool.QueryRow(ctx, `
+			SELECT valid_to::text FROM sec_edge_as_of('2026-03-01'::date)
+			WHERE src_id = 'sec-t-reads-txn' AND rel_type = 'ISSUED_BY'`).Scan(&validTo); err != nil {
+			t.Fatalf("edge as_of(Mar) for txn: %v", err)
+		}
+		if validTo != "2026-06-01" {
+			t.Fatalf("got valid_to=%s, want 2026-06-01 — the closing row must win by record_id", validTo)
+		}
+	})
+
+	t.Run("edge_as_of_exactly_at_valid_from", func(t *testing.T) {
+		var count int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM sec_edge_as_of('2026-01-01'::date)
+			WHERE src_id = 'sec-t-reads-src' AND rel_type = 'ISSUED_BY'`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("edge as_of exactly at valid_from: got %d, want 1", count)
+		}
+	})
+
+	t.Run("edge_as_of_exactly_at_valid_to", func(t *testing.T) {
+		const edgeBoundSrc = "sec-t-reads-ebound"
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to, `+secstoreSpine+`)
+			VALUES ($1, 'SECURITY', 'em-t-reads-ebound-dst', 'ENTITY', 'ISSUED_BY', '2026-01-01', '2026-06-01', 'test', 'SEED_LOAD', 'single closed edge', 'test')`, edgeBoundSrc)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var count int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM sec_edge_as_of('2026-06-01'::date)
+			WHERE src_id = $1 AND rel_type = 'ISSUED_BY'`, edgeBoundSrc).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("edge as_of exactly at valid_to: got %d, want 0 (half-open interval)", count)
+		}
+	})
+
+	t.Run("node_as_of_kind_exactly_at_valid_from", func(t *testing.T) {
+		var count int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM sec_node_as_of_kind('2026-01-01'::date, 'ENTITY') WHERE id = $1`, nodeID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("as_of_kind exactly at valid_from: got %d, want 1", count)
+		}
+	})
+
+	t.Run("node_as_of_kind_exactly_at_valid_to", func(t *testing.T) {
+		const kindBoundID = "em-t-reads-kindbound"
+		insertNode(ctx, t, pool, kindBoundID, "ACTIVE", "2026-01-01", "'2026-06-01'", "single closed window for kind boundary")
+
+		var count int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM sec_node_as_of_kind('2026-06-01'::date, 'ENTITY') WHERE id = $1`, kindBoundID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("as_of_kind exactly at valid_to: got %d, want 0 (half-open interval)", count)
+		}
+	})
+
+	t.Run("overlapping_windows_as_of_picks_latest_valid_from", func(t *testing.T) {
+		var validFrom string
+		if err := pool.QueryRow(ctx, `
+			SELECT valid_from::text FROM sec_node_as_of('2026-04-01'::date) WHERE id = $1`, overlapNodeID).Scan(&validFrom); err != nil {
+			t.Fatalf("sec_node_as_of(2026-04-01) for %s: %v", overlapNodeID, err)
+		}
+		if validFrom != "2026-03-01" {
+			t.Fatalf("got valid_from=%s, want 2026-03-01 (the later window)", validFrom)
+		}
+	})
+
+	t.Run("overlapping_windows_as_of_kind_picks_latest_valid_from", func(t *testing.T) {
+		var validFrom string
+		if err := pool.QueryRow(ctx, `
+			SELECT valid_from::text FROM sec_node_as_of_kind('2026-04-01'::date, 'ENTITY') WHERE id = $1`, overlapNodeID).Scan(&validFrom); err != nil {
+			t.Fatalf("sec_node_as_of_kind(2026-04-01, ENTITY) for %s: %v", overlapNodeID, err)
+		}
+		if validFrom != "2026-03-01" {
+			t.Fatalf("got valid_from=%s, want 2026-03-01 (the later window)", validFrom)
+		}
+	})
+
+	t.Run("overlapping_windows_edge_as_of_picks_latest_valid_from", func(t *testing.T) {
+		var validFrom string
+		if err := pool.QueryRow(ctx, `
+			SELECT valid_from::text FROM sec_edge_as_of('2026-04-01'::date)
+			WHERE src_id = 'sec-t-reads-overlap-src' AND rel_type = 'ISSUED_BY'`).Scan(&validFrom); err != nil {
+			t.Fatalf("sec_edge_as_of(2026-04-01) for overlap edge: %v", err)
+		}
+		if validFrom != "2026-03-01" {
+			t.Fatalf("got valid_from=%s, want 2026-03-01 (the later window)", validFrom)
 		}
 	})
 

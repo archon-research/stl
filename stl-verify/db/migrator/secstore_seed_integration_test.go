@@ -296,6 +296,74 @@ func assertVocabContent(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	if !isTerminal {
 		t.Error("SECURITY/MATURED.is_terminal must be true")
 	}
+
+	// The complete set of codes that require approval — a mutation flipping one true→false
+	// in the seed is caught only if we pin the full set, not just one sample row.
+	approvalRows, err := pool.Query(ctx, `
+		SELECT code FROM change_reason_vocabulary WHERE requires_approval ORDER BY code`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer approvalRows.Close()
+	var gotApproval []string
+	for approvalRows.Next() {
+		var code string
+		if err := approvalRows.Scan(&code); err != nil {
+			t.Fatal(err)
+		}
+		gotApproval = append(gotApproval, code)
+	}
+	wantApproval := []string{"DEDUP_SUPERSEDE", "RECLASSIFICATION", "REPOINT", "RESTATEMENT", "RETRACTION"}
+	if len(gotApproval) != len(wantApproval) {
+		t.Fatalf("requires_approval codes: got %v, want %v", gotApproval, wantApproval)
+	}
+	for i := range wantApproval {
+		if gotApproval[i] != wantApproval[i] {
+			t.Errorf("requires_approval[%d]: got %s, want %s", i, gotApproval[i], wantApproval[i])
+		}
+	}
+
+	// The complete set of terminal statuses — a mutation flipping one true→false is caught
+	// only if we pin every (record_type, status) pair that is terminal.
+	termRows, err := pool.Query(ctx, `
+		SELECT record_type, status FROM node_status_vocabulary WHERE is_terminal ORDER BY record_type, status`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer termRows.Close()
+	type rtStatus struct{ rt, st string }
+	var gotTerminal []rtStatus
+	for termRows.Next() {
+		var rt, st string
+		if err := termRows.Scan(&rt, &st); err != nil {
+			t.Fatal(err)
+		}
+		gotTerminal = append(gotTerminal, rtStatus{rt, st})
+	}
+	wantTerminal := []rtStatus{
+		{"ACCOUNT", "CLOSED"},
+		{"CONCEPT", "RETIRED"},
+		{"CONCEPT", "SUPERSEDED"},
+		{"ENTITY", "DISSOLVED"},
+		{"ENTITY", "MERGED"},
+		{"ENTITY", "SUPERSEDED"},
+		{"SECURITY", "CONVERTED"},
+		{"SECURITY", "EXPIRED"},
+		{"SECURITY", "MATURED"},
+		{"SECURITY", "MERGED"},
+		{"SECURITY", "REDEEMED"},
+		{"SECURITY", "RETIRED"},
+		{"SOURCE", "DECOMMISSIONED"},
+		{"SOURCE", "SUPERSEDED"},
+	}
+	if len(gotTerminal) != len(wantTerminal) {
+		t.Fatalf("terminal statuses: got %d, want %d — %v", len(gotTerminal), len(wantTerminal), gotTerminal)
+	}
+	for i := range wantTerminal {
+		if gotTerminal[i] != wantTerminal[i] {
+			t.Errorf("terminal[%d]: got %s/%s, want %s/%s", i, gotTerminal[i].rt, gotTerminal[i].st, wantTerminal[i].rt, wantTerminal[i].st)
+		}
+	}
 }
 
 func assertNodeHashesRecompute(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {

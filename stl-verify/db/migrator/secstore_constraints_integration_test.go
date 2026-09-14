@@ -284,6 +284,145 @@ func TestSecStoreEveryEngineRuleRejectsItsInput(t *testing.T) {
 	})
 }
 
+func TestSecStoreNotNullAndForeignKeyCompleteness(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	// --- Vocabulary NOT NULL ---
+
+	t.Run("rel_type_vocabulary_not_null", func(t *testing.T) {
+		cases := []struct {
+			col string
+			sql string
+		}{
+			{"description", `INSERT INTO rel_type_vocabulary (rel_type, family, src_kinds, dst_kinds, cardinality, maturity, description, change_reason) VALUES ('TEST_NN_DESC', 'composition', '{ENTITY}', '{ENTITY}', '1', 'draft', NULL, 'test')`},
+			{"src_kinds", `INSERT INTO rel_type_vocabulary (rel_type, family, src_kinds, dst_kinds, cardinality, maturity, description, change_reason) VALUES ('TEST_NN_SK', 'composition', NULL, '{ENTITY}', '1', 'draft', 'test', 'test')`},
+			{"dst_kinds", `INSERT INTO rel_type_vocabulary (rel_type, family, src_kinds, dst_kinds, cardinality, maturity, description, change_reason) VALUES ('TEST_NN_DK', 'composition', '{ENTITY}', NULL, '1', 'draft', 'test', 'test')`},
+			{"derived_only", `INSERT INTO rel_type_vocabulary (rel_type, family, src_kinds, dst_kinds, cardinality, maturity, description, derived_only, change_reason) VALUES ('TEST_NN_DO', 'composition', '{ENTITY}', '{ENTITY}', '1', 'draft', 'test', NULL, 'test')`},
+			{"change_reason", `INSERT INTO rel_type_vocabulary (rel_type, family, src_kinds, dst_kinds, cardinality, maturity, description, change_reason) VALUES ('TEST_NN_CR', 'composition', '{ENTITY}', '{ENTITY}', '1', 'draft', 'test', NULL)`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.col, func(t *testing.T) {
+				_, err := pool.Exec(ctx, tc.sql)
+				assertSQLState(t, err, "23502", "rel_type_vocabulary."+tc.col+" NOT NULL")
+			})
+		}
+	})
+
+	t.Run("weight_basis_vocabulary_description_not_null", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `INSERT INTO weight_basis_vocabulary (basis, description) VALUES ('TEST_BASIS', NULL)`)
+		assertSQLState(t, err, "23502", "weight_basis_vocabulary.description NOT NULL")
+	})
+
+	t.Run("change_reason_vocabulary_not_null", func(t *testing.T) {
+		cases := []struct {
+			col string
+			sql string
+		}{
+			{"description", `INSERT INTO change_reason_vocabulary (code, description) VALUES ('TEST_CRV_DESC', NULL)`},
+			{"requires_approval", `INSERT INTO change_reason_vocabulary (code, description, requires_approval) VALUES ('TEST_CRV_RA', 'test', NULL)`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.col, func(t *testing.T) {
+				_, err := pool.Exec(ctx, tc.sql)
+				assertSQLState(t, err, "23502", "change_reason_vocabulary."+tc.col+" NOT NULL")
+			})
+		}
+	})
+
+	t.Run("concept_class_vocabulary_description_not_null", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `INSERT INTO concept_class_vocabulary (concept_class, maturity, description) VALUES ('TEST_CCV', 'draft', NULL)`)
+		assertSQLState(t, err, "23502", "concept_class_vocabulary.description NOT NULL")
+	})
+
+	t.Run("node_status_vocabulary_not_null", func(t *testing.T) {
+		cases := []struct {
+			col string
+			sql string
+		}{
+			{"record_type", `INSERT INTO node_status_vocabulary (record_type, status, is_terminal, description) VALUES (NULL, 'TEST_ST', false, 'test')`},
+			{"status", `INSERT INTO node_status_vocabulary (record_type, status, is_terminal, description) VALUES ('TEST_RT', NULL, false, 'test')`},
+			{"is_terminal", `INSERT INTO node_status_vocabulary (record_type, status, is_terminal, description) VALUES ('TEST_RT2', 'TEST_ST2', NULL, 'test')`},
+			{"description", `INSERT INTO node_status_vocabulary (record_type, status, is_terminal, description) VALUES ('TEST_RT3', 'TEST_ST3', false, NULL)`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.col, func(t *testing.T) {
+				_, err := pool.Exec(ctx, tc.sql)
+				assertSQLState(t, err, "23502", "node_status_vocabulary."+tc.col+" NOT NULL")
+			})
+		}
+	})
+
+	// --- Vocabulary FK run_id ---
+
+	t.Run("vocabulary_run_id_fk", func(t *testing.T) {
+		cases := []struct {
+			table string
+			sql   string
+		}{
+			{"rel_type_vocabulary", `INSERT INTO rel_type_vocabulary (rel_type, family, src_kinds, dst_kinds, cardinality, maturity, description, change_reason, run_id) VALUES ('TEST_FK_RUN', 'composition', '{ENTITY}', '{ENTITY}', '1', 'draft', 'test', 'test', 999999)`},
+			{"weight_basis_vocabulary", `INSERT INTO weight_basis_vocabulary (basis, description, run_id) VALUES ('TEST_FK_RUN', 'test', 999999)`},
+			{"change_reason_vocabulary", `INSERT INTO change_reason_vocabulary (code, description, run_id) VALUES ('TEST_FK_RUN', 'test', 999999)`},
+			{"concept_class_vocabulary", `INSERT INTO concept_class_vocabulary (concept_class, maturity, description, run_id) VALUES ('TEST_FK_RUN', 'draft', 'test', 999999)`},
+			{"node_status_vocabulary", `INSERT INTO node_status_vocabulary (record_type, status, is_terminal, description, run_id) VALUES ('TEST_FK_RT', 'TEST_FK_ST', false, 'test', 999999)`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.table, func(t *testing.T) {
+				_, err := pool.Exec(ctx, tc.sql)
+				assertSQLState(t, err, "23503", tc.table+".run_id FK")
+			})
+		}
+	})
+
+	// --- rel_type_vocabulary weight_basis FK ---
+
+	t.Run("rel_type_vocabulary_weight_basis_fk", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `INSERT INTO rel_type_vocabulary (rel_type, family, src_kinds, dst_kinds, cardinality, maturity, description, change_reason, weight_basis) VALUES ('TEST_WB_FK', 'composition', '{ENTITY}', '{ENTITY}', '1', 'draft', 'test', 'test', 'NONEXISTENT')`)
+		assertSQLState(t, err, "23503", "rel_type_vocabulary.weight_basis FK")
+	})
+
+	// --- sec_node NOT NULL (non-PK, non-equivalent) ---
+
+	t.Run("sec_node_status_not_null", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, `+secstoreSpine+`)
+			VALUES ('em-t-null-status', 'ENTITY', NULL, '2026-01-01', 'test', 'SEED_LOAD', 'null status', 'test')`)
+		assertSQLState(t, err, "23502", "sec_node.status NOT NULL")
+	})
+
+	t.Run("sec_node_attrs_not_null", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, attrs, valid_from, `+secstoreSpine+`)
+			VALUES ('em-t-null-attrs', 'ENTITY', 'ACTIVE', NULL, '2026-01-01', 'test', 'SEED_LOAD', 'null attrs', 'test')`)
+		assertSQLState(t, err, "23502", "sec_node.attrs NOT NULL")
+	})
+
+	// --- sec_edge NOT NULL (non-PK, non-equivalent) ---
+
+	t.Run("sec_edge_not_null", func(t *testing.T) {
+		cases := []struct {
+			col  string
+			sql  string
+			want []string // acceptable SQLSTATE codes
+		}{
+			{"src_kind", `INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, actor, change_reason_code, change_reason, source_system) VALUES ('sec-t-nn-sk', NULL, 'em-t-nn-dst', 'ENTITY', 'HAS_UNDERLYING', '2026-01-01', 'test', 'SEED_LOAD', 'null src_kind', 'test')`, []string{"23502", "P0001"}},
+			{"dst_kind", `INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, actor, change_reason_code, change_reason, source_system) VALUES ('sec-t-nn-dk', 'SECURITY', 'em-t-nn-dst2', NULL, 'HAS_UNDERLYING', '2026-01-01', 'test', 'SEED_LOAD', 'null dst_kind', 'test')`, []string{"23502", "P0001"}},
+			{"payload", `INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, payload, valid_from, actor, change_reason_code, change_reason, source_system) VALUES ('sec-t-nn-pl', 'SECURITY', 'em-t-nn-dst3', 'SECURITY', 'HAS_UNDERLYING', NULL, '2026-01-01', 'test', 'SEED_LOAD', 'null payload', 'test')`, []string{"23502"}},
+			{"actor", `INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, actor, change_reason_code, change_reason, source_system) VALUES ('sec-t-nn-ac', 'SECURITY', 'em-t-nn-dst4', 'SECURITY', 'HAS_UNDERLYING', '2026-01-01', NULL, 'SEED_LOAD', 'null actor', 'test')`, []string{"23502"}},
+			{"change_reason_code", `INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, actor, change_reason_code, change_reason, source_system) VALUES ('sec-t-nn-crc', 'SECURITY', 'em-t-nn-dst5', 'SECURITY', 'HAS_UNDERLYING', '2026-01-01', 'test', NULL, 'null crc', 'test')`, []string{"23502"}},
+			{"change_reason", `INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, actor, change_reason_code, change_reason, source_system) VALUES ('sec-t-nn-cr', 'SECURITY', 'em-t-nn-dst6', 'SECURITY', 'HAS_UNDERLYING', '2026-01-01', 'test', 'SEED_LOAD', NULL, 'test')`, []string{"23502"}},
+			{"source_system", `INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, actor, change_reason_code, change_reason, source_system) VALUES ('sec-t-nn-ss', 'SECURITY', 'em-t-nn-dst7', 'SECURITY', 'HAS_UNDERLYING', '2026-01-01', 'test', 'SEED_LOAD', 'null ss', NULL)`, []string{"23502"}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.col, func(t *testing.T) {
+				_, err := pool.Exec(ctx, tc.sql)
+				assertSQLStateOneOf(t, err, tc.want, "sec_edge."+tc.col+" NOT NULL")
+			})
+		}
+	})
+}
+
 func assertSQLState(t *testing.T, err error, wantCode, desc string) {
 	t.Helper()
 	var pgErr *pgconn.PgError
@@ -296,4 +435,21 @@ func assertSQLState(t *testing.T, err error, wantCode, desc string) {
 	if pgErr.Code != wantCode {
 		t.Fatalf("%s: got SQLSTATE %s (%s), want %s", desc, pgErr.Code, pgErr.Message, wantCode)
 	}
+}
+
+func assertSQLStateOneOf(t *testing.T, err error, wantCodes []string, desc string) {
+	t.Helper()
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		if err == nil {
+			t.Fatalf("%s: insert succeeded, want SQLSTATE %v", desc, wantCodes)
+		}
+		t.Fatalf("%s: non-PG error %v, want SQLSTATE %v", desc, err, wantCodes)
+	}
+	for _, c := range wantCodes {
+		if pgErr.Code == c {
+			return
+		}
+	}
+	t.Fatalf("%s: got SQLSTATE %s (%s), want one of %v", desc, pgErr.Code, pgErr.Message, wantCodes)
 }
