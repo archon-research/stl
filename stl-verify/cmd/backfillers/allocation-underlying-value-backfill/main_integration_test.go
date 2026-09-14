@@ -17,7 +17,9 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.temporal.io/sdk/testsuite"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -847,5 +849,140 @@ func TestRunIntegration_OracleGateRejectsUnboundOracle(t *testing.T) {
 	}
 	if corrected != 0 {
 		t.Errorf("corrected rows = %d, want 0: a price from an oracle not bound to this row's protocol must not be used", corrected)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Temporal worker: register() wires the real workflow and activity, and the
+// Workflow Type an operator types into the UI has to run the real engine end
+// to end, not a re-declaration of it.
+// ---------------------------------------------------------------------------
+
+// The Workflow Type is an operator-facing contract: the runbook tells the
+// on-call to start --type AllocationUnderlyingValueBackfill, and Temporal
+// resolves it by string. So the literal is spelled out here rather than
+// referencing workflowTypeName — using the constant would rename both sides
+// together and pin nothing.
+func TestIntegration_Register_ExposesTheDocumentedWorkflowType(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	ctx := context.Background()
+	t.Setenv("BUILD_GIT_HASH", "test")
+
+	seedChain(t, ctx, pool)
+	primeID := sparkPrimeID(t, ctx, pool)
+	tokenID := testutil.SeedToken(t, ctx, pool, 1, "0x6B175474E89094C44Da98b954EedeAC495271d0F", "DAI", 18)
+	proxy := common.HexToAddress("0x0001000000000000000000000000000000000a")
+
+	const balanceHuman = "1000.000000000000000000"
+	insertHistoricalPosition(t, ctx, pool, historicalPosition{
+		tokenID: tokenID, primeID: primeID, proxyAddress: proxy,
+		balance: balanceHuman, blockNumber: 26_000_000,
+		txHash: fmt.Sprintf("0x%064d", 50), logIndex: 0,
+		txAmount: balanceHuman, direction: "sweep",
+		createdAt: mustParseTime(t, "2026-02-01T00:00:00Z"),
+	})
+
+	deps := temporal.Dependencies{Pool: pool, Logger: testutil.DiscardLogger()}
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	if err := register(ctx, deps, env); err != nil {
+		t.Fatalf("running the production registration: %v", err)
+	}
+
+	env.ExecuteWorkflow("AllocationUnderlyingValueBackfill", BackfillParams{Limit: 100, Write: true})
+
+	if !env.IsWorkflowCompleted() {
+		t.Fatal("expected the workflow to complete")
+	}
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("running the workflow by its documented type name: %v", err)
+	}
+
+	var result BackfillResult
+	if err := env.GetWorkflowResult(&result); err != nil {
+		t.Fatalf("reading workflow result: %v", err)
+	}
+	if result.RowsWritten != 1 {
+		t.Errorf("RowsWritten = %d, want 1", result.RowsWritten)
+	}
+
+	var underlyingValue string
+	if err := pool.QueryRow(ctx,
+		`SELECT underlying_value::text FROM allocation_position WHERE token_id = $1 AND processing_version > 0`,
+		tokenID,
+	).Scan(&underlyingValue); err != nil {
+		t.Fatalf("query corrected row: %v", err)
+	}
+	if underlyingValue != balanceHuman {
+		t.Errorf("underlying_value = %q, want %q (self-referencing direct holding)", underlyingValue, balanceHuman)
+	}
+}
+
+// A dry run started through the real workflow must reach the same "nothing
+// written" guarantee run(ctx, args) gives the CLI: BackfillParams.Write
+// defaults to false, so the zero value of the JSON an operator forgets to set
+// it in is the safe one.
+func TestIntegration_Register_DryRunByDefaultWritesNothing(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	ctx := context.Background()
+	t.Setenv("BUILD_GIT_HASH", "test")
+
+	seedChain(t, ctx, pool)
+	primeID := sparkPrimeID(t, ctx, pool)
+	tokenID := testutil.SeedToken(t, ctx, pool, 1, "0x6B175474E89094C44Da98b954EedeAC495271d0F", "DAI", 18)
+	proxy := common.HexToAddress("0x0001000000000000000000000000000000000b")
+
+	insertHistoricalPosition(t, ctx, pool, historicalPosition{
+		tokenID: tokenID, primeID: primeID, proxyAddress: proxy,
+		balance: "1.000000000000000000", blockNumber: 26_000_001,
+		txHash: fmt.Sprintf("0x%064d", 51), logIndex: 0,
+		txAmount: "1.000000000000000000", direction: "sweep",
+		createdAt: mustParseTime(t, "2026-02-02T00:00:00Z"),
+	})
+
+	deps := temporal.Dependencies{Pool: pool, Logger: testutil.DiscardLogger()}
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	if err := register(ctx, deps, env); err != nil {
+		t.Fatalf("running the production registration: %v", err)
+	}
+
+	// Write omitted entirely, the way a hand-typed UI input that forgets it looks.
+	env.ExecuteWorkflow("AllocationUnderlyingValueBackfill", BackfillParams{Limit: 100})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("unexpected workflow error: %v", err)
+	}
+	var result BackfillResult
+	if err := env.GetWorkflowResult(&result); err != nil {
+		t.Fatalf("reading workflow result: %v", err)
+	}
+	if result.RowsWritten != 0 {
+		t.Errorf("result = %+v, want RowsWritten 0 for an unwritten dry run", result)
+	}
+
+	var corrected int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM allocation_position WHERE token_id = $1 AND processing_version > 0`,
+		tokenID,
+	).Scan(&corrected); err != nil {
+		t.Fatalf("count corrected rows: %v", err)
+	}
+	if corrected != 0 {
+		t.Errorf("corrected rows = %d, want 0: an omitted Write must default to a dry run", corrected)
+	}
+}
+
+// A SIGTERM during startup — a pod rolled while it was still wiring itself up
+// — is a shutdown, not a failure: surfacing the cancelled context would exit 1
+// and make an ordinary rollout read like a crash. This is the one path a test
+// can drive without a live Temporal server, and it is what proves the signal
+// context actually stops the worker.
+func TestRunWorker_StopsCleanlyWhenTheContextIsCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := runWorker(ctx); err != nil {
+		t.Fatalf("runWorker = %v, want a cancelled startup reported as a clean stop", err)
 	}
 }

@@ -44,62 +44,81 @@ func classifyCandidates(candidates []candidateRow, archiveResults map[int]*big.I
 	var stats classificationStats
 
 	for i, c := range candidates {
+		var (
+			pos  positionSource
+			emit bool
+			err  error
+		)
 		switch {
 		case !c.isReceiptToken && c.underlyingAddress == nil:
-			if entry, ok := tokenTypes.lookup(c.chainID, c.tokenAddress); ok && (entry.tokenType == "atoken" || entry.tokenType == "erc4626") {
-				// The registry resolved a route for this row (see
-				// registryPromotableEntry) but the asset_address it named
-				// isn't a token we know decimals for yet -- an unresolved
-				// underlying, the same outcome a receipt_token row with no
-				// registry match for its own underlying already gets.
-				stats.skippedNoUnderlying++
-				continue
-			}
-			if !tokenTypes.isPlainERC20(c.chainID, c.tokenAddress) {
-				// Curve LP shares, NAV/RWA shares and uni_v3 pool/lp rows all
-				// clear the receipt_token check too (it is seeded only for
-				// SparkLend/Aave/Morpho/Maple); self-denominating them would
-				// write plausible-but-wrong data the live tracker itself
-				// refuses to write (see underlyingValuation's default case).
-				stats.skippedNotPlainERC20++
-				continue
-			}
-			out = append(out, directHoldingPosition(c))
-			stats.direct++
-
+			pos, emit = classifyDirectRow(c, tokenTypes, &stats)
 		case c.underlyingIsOneToOne:
-			pos, ok := aTokenPosition(c)
-			if !ok {
-				stats.skippedNoUnderlying++
-				continue
-			}
-			out = append(out, pos)
-			if c.isReceiptToken {
-				stats.aToken++
-			} else {
-				stats.aTokenViaRegistry++
-			}
-
+			pos, emit = classifyATokenRow(c, &stats)
 		default:
-			pos, skip, err := classifyERC4626(c, archiveResults[i], cfg)
-			if err != nil {
-				return nil, classificationStats{}, err
-			}
-			switch skip {
-			case skipNoPriceHistory:
-				stats.skippedNoPriceHistory++
-			case skipPriceTooStale:
-				stats.skippedPriceTooStale++
-			case skipRatioNotExact:
-				stats.skippedRatioNotExact++
-			default:
-				out = append(out, pos)
-				recordERC4626Conversion(&stats, pos.source, c.isReceiptToken)
-			}
+			pos, emit, err = classifyERC4626Row(c, archiveResults[i], cfg, &stats)
+		}
+		if err != nil {
+			return nil, classificationStats{}, err
+		}
+		if emit {
+			out = append(out, pos)
 		}
 	}
 
 	return out, stats, nil
+}
+
+// classifyDirectRow resolves a row with no receipt_token match and no registry
+// underlying, tallying which of the two refusals applied when it resolves none.
+func classifyDirectRow(c candidateRow, tokenTypes tokenTypeRegistry, stats *classificationStats) (positionSource, bool) {
+	pos, skip := classifyDirect(c, tokenTypes)
+	switch skip {
+	case directSkipNoUnderlying:
+		stats.skippedNoUnderlying++
+	case directSkipNotPlainERC20:
+		stats.skippedNotPlainERC20++
+	default:
+		stats.direct++
+		return pos, true
+	}
+	return positionSource{}, false
+}
+
+// classifyATokenRow resolves a 1:1 aToken holding, counting it against the
+// receipt_token or the registry route it arrived by.
+func classifyATokenRow(c candidateRow, stats *classificationStats) (positionSource, bool) {
+	pos, ok := aTokenPosition(c)
+	if !ok {
+		stats.skippedNoUnderlying++
+		return positionSource{}, false
+	}
+	if c.isReceiptToken {
+		stats.aToken++
+	} else {
+		stats.aTokenViaRegistry++
+	}
+	return pos, true
+}
+
+// classifyERC4626Row converts a share balance, tallying the documented skip
+// when the conversion cannot be trusted.
+func classifyERC4626Row(c candidateRow, archiveResult *big.Int, cfg cliConfig, stats *classificationStats) (positionSource, bool, error) {
+	pos, skip, err := classifyERC4626(c, archiveResult, cfg)
+	if err != nil {
+		return positionSource{}, false, err
+	}
+	switch skip {
+	case skipNoPriceHistory:
+		stats.skippedNoPriceHistory++
+	case skipPriceTooStale:
+		stats.skippedPriceTooStale++
+	case skipRatioNotExact:
+		stats.skippedRatioNotExact++
+	default:
+		recordERC4626Conversion(stats, pos.source, c.isReceiptToken)
+		return pos, true, nil
+	}
+	return positionSource{}, false, nil
 }
 
 // recordERC4626Conversion tallies a resolved erc4626 conversion into the
@@ -123,6 +142,39 @@ func recordERC4626Conversion(stats *classificationStats, source string, isReceip
 // a self-reference here, not NULL.
 func directHoldingPosition(c candidateRow) positionSource {
 	return positionSource{toEntity(c, c.tokenAddress, c.tokenDecimals, c.balance), "direct"}
+}
+
+// directSkip is why a non-receipt-token, non-registry-resolved candidate could
+// not be self-denominated as a plain erc20 holding.
+type directSkip int
+
+const (
+	directSkipNone directSkip = iota
+	directSkipNoUnderlying
+	directSkipNotPlainERC20
+)
+
+// classifyDirect resolves a row with no receipt_token match and no
+// registry-resolved underlying: a plain erc20 holding denominated in itself,
+// or a documented skip.
+func classifyDirect(c candidateRow, tokenTypes tokenTypeRegistry) (positionSource, directSkip) {
+	if entry, ok := tokenTypes.lookup(c.chainID, c.tokenAddress); ok && (entry.tokenType == "atoken" || entry.tokenType == "erc4626") {
+		// The registry resolved a route for this row (see
+		// registryPromotableEntry) but the asset_address it named isn't a
+		// token we know decimals for yet -- an unresolved underlying, the
+		// same outcome a receipt_token row with no registry match for its
+		// own underlying already gets.
+		return positionSource{}, directSkipNoUnderlying
+	}
+	if !tokenTypes.isPlainERC20(c.chainID, c.tokenAddress) {
+		// Curve LP shares, NAV/RWA shares and uni_v3 pool/lp rows all clear
+		// the receipt_token check too (it is seeded only for
+		// SparkLend/Aave/Morpho/Maple); self-denominating them would write
+		// plausible-but-wrong data the live tracker itself refuses to write
+		// (see underlyingValuation's default case).
+		return positionSource{}, directSkipNotPlainERC20
+	}
+	return directHoldingPosition(c), directSkipNone
 }
 
 // aTokenPosition resolves a 1:1 aToken holding: the raw underlying amount

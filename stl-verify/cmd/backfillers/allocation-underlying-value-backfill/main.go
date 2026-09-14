@@ -1,5 +1,6 @@
-// Package main backfills allocation_position.underlying_value for rows written
-// before the 2026-07-06 deploy that started populating it on ingest.
+// Package main implements an on-demand Temporal worker that backfills
+// allocation_position.underlying_value for rows written before the 2026-07-06
+// deploy that started populating it on ingest.
 //
 // Four kinds of holding are resolved: direct erc20 holdings (underlying_value
 // duplicates balance, underlying_token_id self-referencing per the column's
@@ -32,6 +33,15 @@
 // uses, so the append-only invariant holds for free: a new build_id makes the
 // assign_processing_version_allocation_position trigger see no exact-duplicate row
 // and assign a fresh processing_version rather than colliding with the original.
+//
+// It carries no schedule. The worker idles on its task queue until someone
+// starts a run and supplies the window, either from the Temporal UI ("Start
+// Workflow", Workflow Type "AllocationUnderlyingValueBackfill") or via
+// `temporal workflow start` (see backfill.go). A run walks the range forward
+// in -limit sized passes, one activity per pass, so a range too large for one
+// workflow history is simply resumed with a later -after. run(ctx, args) below
+// is the same engine the workflow drives, callable directly from a laptop or a
+// test.
 package main
 
 import (
@@ -41,24 +51,105 @@ import (
 	"log/slog"
 	"math/big"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
+const (
+	jobName = "allocation-underlying-value-backfill"
+
+	// workflowTypeName is what an operator types into the Temporal UI's "Workflow
+	// Type" field, so it is registered explicitly rather than derived from the Go
+	// function name — a rename must not invalidate the runbook or muscle memory.
+	workflowTypeName = "AllocationUnderlyingValueBackfill"
+
+	// progressQueryName is queryable mid-run from the UI's Query tab, which is the
+	// only way to see how far a long backfill has got without reading raw history.
+	progressQueryName = "progress"
+
+	defaultDatabaseURL = "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"
+
+	// defaultBeforeCutover is the 2026-07-06 deploy that started populating
+	// underlying_value on ingest — the point this backfill exists to close.
+	// Shared by parseFlags and BackfillParams.resolve so the CLI and the UI
+	// default identically.
+	defaultBeforeCutover = "2026-07-06T14:00:00Z"
+	defaultLimit         = 100
+	defaultMaxPriceLag   = 7200
+)
+
+var (
+	GitCommit string
+	GitBranch string
+	BuildTime string
+)
+
+func init() { buildinfo.PopulateFromVCS(&GitCommit, &BuildTime) }
+
+// Invoked with no arguments -- how the Deployment runs it -- this starts the
+// Temporal worker and idles on the task queue until an operator starts a run.
+// Given flags, it performs that one pass in-process instead, which is the form
+// the integration tests and a local run against a dev cluster both use.
 func main() {
-	if err := run(context.Background(), os.Args[1:]); err != nil {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+
+	args := os.Args[1:]
+	var err error
+	if len(args) == 0 {
+		err = runWorker(ctx)
+	} else {
+		err = run(ctx, args)
+	}
+	cancel()
+	if err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("completed successfully")
+}
+
+func runWorker(ctx context.Context) error {
+	return temporal.RunWorker(ctx, temporal.BuildMeta{
+		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
+	}, temporal.WorkerConfig{
+		Name:         jobName,
+		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", defaultDatabaseURL))),
+		Register:     register,
+	})
+}
+
+// register wires one build/writer-run and one erc4626 archive resolver for the
+// whole worker process, shared by every pass of every workflow execution this
+// worker ever runs — the same lifetime newPriceFetcher gives
+// offchain-price-backfill's service, so the archive resolver's per-chain
+// multicaller memoization actually pays off across passes.
+func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
+	runDeps, err := wireDependencies(ctx, deps.Pool)
+	if err != nil {
+		return err
+	}
+	archiveResolver, err := newERC4626ArchiveResolver()
+	if err != nil {
+		return fmt.Errorf("initializing erc4626 archive resolver: %w", err)
+	}
+
+	r.RegisterWorkflowWithOptions(backfillWorkflow, workflow.RegisterOptions{Name: workflowTypeName})
+	r.RegisterActivity(&backfillActivities{pool: deps.Pool, deps: runDeps, archiveResolver: archiveResolver})
+	return nil
 }
 
 type cliConfig struct {
@@ -74,12 +165,12 @@ type cliConfig struct {
 func parseFlags(args []string) (cliConfig, error) {
 	fs := flag.NewFlagSet("allocation-underlying-value-backfill", flag.ContinueOnError)
 	dbURL := fs.String("db", "", "PostgreSQL connection URL (required)")
-	before := fs.String("before", "2026-07-06T14:00:00Z", "Backfill rows created strictly before this RFC3339 instant")
+	before := fs.String("before", defaultBeforeCutover, "Backfill rows created strictly before this RFC3339 instant")
 	after := fs.String("after", "", "Resume cursor: only rows created at or after this RFC3339 instant (empty = from the beginning)")
 	primeID := fs.Int64("prime-id", 0, "Restrict to one prime.id (0 = all primes)")
-	limit := fs.Int("limit", 100, "Max candidate rows to process this run")
+	limit := fs.Int("limit", defaultLimit, "Max candidate rows to process this run")
 	dryRun := fs.Bool("dry-run", true, "Log what would be written without saving")
-	maxPriceLag := fs.Int64("max-price-block-lag", 7200, "Reject an erc4626 conversion whose newest at-or-before price is more than this many blocks older than the row (~1 day on mainnet)")
+	maxPriceLag := fs.Int64("max-price-block-lag", defaultMaxPriceLag, "Reject an erc4626 conversion whose newest at-or-before price is more than this many blocks older than the row (~1 day on mainnet)")
 	if err := fs.Parse(args); err != nil {
 		return cliConfig{}, err
 	}
@@ -151,26 +242,64 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	candidates, err := fetchCandidates(ctx, pool, cfg)
+	archiveResolver, err := newERC4626ArchiveResolver()
 	if err != nil {
-		return fmt.Errorf("fetch candidates: %w", err)
+		return fmt.Errorf("initializing erc4626 archive resolver: %w", err)
 	}
 
-	classified, err := resolveAndClassify(ctx, pool, candidates, cfg)
+	_, err = runPass(ctx, pool, deps, archiveResolver, cfg)
+	return err
+}
+
+// passResult is what one pass over the candidate query achieved: how many rows
+// it looked at, how many it resolved and submitted for writing, and the cursor
+// a caller resumes from. written is zero on a dry run.
+type passResult struct {
+	fetched int
+	written int
+	cursor  time.Time
+}
+
+// runPass is the engine both run(ctx, args) and the Temporal activity drive:
+// one call fetches up to cfg.limit candidates, classifies them, and (unless
+// cfg.dryRun) writes them, sharing pool/deps/archiveResolver across calls so a
+// multi-pass caller pays for connection and multicaller setup once.
+func runPass(ctx context.Context, pool *pgxpool.Pool, deps runnerDeps, archiveResolver *erc4626ArchiveResolver, cfg cliConfig) (passResult, error) {
+	candidates, err := fetchCandidates(ctx, pool, cfg)
 	if err != nil {
-		return err
+		return passResult{}, fmt.Errorf("fetch candidates: %w", err)
+	}
+
+	classified, err := resolveAndClassify(ctx, pool, archiveResolver, candidates, cfg)
+	if err != nil {
+		return passResult{}, err
 	}
 	// Logged only once classification has actually succeeded: this count and
 	// cursor are what a batched caller advances -after by, and a value logged
 	// before a possible abort above would name a batch that was never written.
 	logCandidatesFetched(candidates, cfg.limit)
 
+	result := passResult{fetched: len(candidates), cursor: cursorOf(candidates)}
+
 	if cfg.dryRun {
 		logDryRunPreview(classified)
-		return nil
+		return result, nil
 	}
 
-	return persist(ctx, deps, classified)
+	result.written = len(classified)
+	if err := persist(ctx, deps, classified); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// cursorOf returns the created_at of the last candidate fetched — the value a
+// caller resumes -after from — or the zero time when none were fetched.
+func cursorOf(candidates []candidateRow) time.Time {
+	if len(candidates) == 0 {
+		return time.Time{}
+	}
+	return candidates[len(candidates)-1].createdAt
 }
 
 // runnerDeps bundles the write-path collaborators run() needs once
@@ -226,7 +355,7 @@ func logCandidatesFetched(candidates []candidateRow, limit int) {
 		slog.Info("candidates fetched", "count", 0)
 		return
 	}
-	maxCreatedAt := candidates[len(candidates)-1].createdAt
+	maxCreatedAt := cursorOf(candidates)
 	slog.Info("candidates fetched",
 		"count", len(candidates),
 		"max_created_at", maxCreatedAt.UTC().Format(time.RFC3339Nano),
@@ -244,7 +373,7 @@ func logCandidatesFetched(candidates []candidateRow, limit int) {
 // applyRegistryUnderlyings), reads the real erc4626 conversions this batch's
 // rows need from the archive, then classifies every candidate (falling back
 // to the price-ratio derivation only where the archive could not answer).
-func resolveAndClassify(ctx context.Context, pool *pgxpool.Pool, candidates []candidateRow, cfg cliConfig) ([]positionSource, error) {
+func resolveAndClassify(ctx context.Context, pool *pgxpool.Pool, archiveResolver *erc4626ArchiveResolver, candidates []candidateRow, cfg cliConfig) ([]positionSource, error) {
 	tokenTypes, err := loadTokenTypeRegistry()
 	if err != nil {
 		return nil, fmt.Errorf("loading token type registry: %w", err)
@@ -256,10 +385,6 @@ func resolveAndClassify(ctx context.Context, pool *pgxpool.Pool, candidates []ca
 	}
 	candidates = applyRegistryUnderlyings(candidates, tokenTypes, underlyingDecimals)
 
-	archiveResolver, err := newERC4626ArchiveResolver()
-	if err != nil {
-		return nil, fmt.Errorf("initializing erc4626 archive resolver: %w", err)
-	}
 	archiveResults, err := archiveResolver.resolve(ctx, candidates, slog.Default())
 	if err != nil {
 		return nil, fmt.Errorf("resolving erc4626 conversions via archive: %w", err)
