@@ -188,10 +188,35 @@ jobs:
       - name: Layer comparator reports failures as failures
         run: scripts/deploy/compare-image-layers.test.sh
 
+  shell:
+    name: Shell
+    # Runs on every push: the repo has 14 scripts, the check takes seconds, and
+    # a script can be broken by a change that touches no .sh file at all -- a
+    # sourced library moving, or a caller's flags changing.
+    if: '!cancelled()'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # -x follows `source` into scripts/deploy/lib, where the shared overlay
+      # parser lives (VEC-754); without it the library's only readers are
+      # invisible and its variables all look unused.
+      #
+      # shellcheck ships with the runner image, so its version moves when that
+      # image does; printing it makes a new finding traceable to that bump.
+      - name: Shell scripts pass shellcheck
+        run: |
+          shellcheck --version
+          git ls-files '*.sh' -z | xargs -0 -r shellcheck -x -S warning
+
   ci-passed:
     name: Success
     needs:
       - detect-changes
+      - shell
       - go-ci
       - python-ci
       - ts-ci
