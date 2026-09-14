@@ -417,7 +417,8 @@ class Calibrator:
                 )
 
                 hit_list = Parallel(n_jobs=4)(
-                    delayed(backtester.hit_backtest)(i) for i in range(0, len(self.price_series) - train_size)
+                    delayed(backtester.hit_backtest)(i, use_log_returns=use_log_returns, alpha=backtest_alpha)
+                    for i in range(0, len(self.price_series) - train_size)
                 )
                 all_hits = np.concatenate(hit_list)
                 total_exceedance_rate = all_hits.mean()
@@ -437,7 +438,7 @@ class Calibrator:
                     print(f"❌ {model} rejected in backtest (Kupiec or Christoffersen).")
 
             # Soft fallback: if no model passed the formal tests, pick the candidate
-            # whose exceedance rate is closest to the 5% target rather than abandoning
+            # whose exceedance rate is closest to backtest_alpha rather than abandoning
             # GARCH entirely and falling back to ARIMA-only.
             if best_garch_fitted is None and fallback_candidates:
                 fallback_candidates.sort(key=lambda x: abs(x[0] - backtest_alpha))

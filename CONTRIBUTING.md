@@ -15,9 +15,9 @@ Welcome!
 >   ≠ compute-meaning. The correct pattern is for data pipelines to write
 >   to the data store, and model pipelines to ingest the data needed from
 >   that store.
-> - Every timeseries table must be a hypertable + compressed + S3-tiered,
->   in the same migration that creates it (one narrow carve-out for
->   sparse governance-event tables — see §11 rule 4).
+> - **Create tables plain.** Compression and tiering policies come with the
+>   later migration that partitions the table, once measurement says to
+>   (see §11 rule 4).
 > - **Never modify an applied migration** — write a new one.
 > - PR title: `TICKET-1234: <description>`. GitHub squash-merges; don't
 >   squash locally.
@@ -230,7 +230,7 @@ Pick the language **before** you start, and when in doubt, ask first.
   Python is a fully supported second option.
 - **Anything outside Go or Python needs prior discussion.** Open an
   issue or start a thread with
-  `@archon-research/vector-engineers` **before** writing code. PRs
+  `@archon-research/stl-engineers` **before** writing code. PRs
   introducing a new runtime (Rust, TypeScript, Java, …) without
   a prior design conversation **may be rejected** regardless of code
   quality — every new language adds build infrastructure, observability
@@ -430,6 +430,13 @@ func run(ctx context.Context, args []string) error {
    rollout lists in `_dev-up-alchemy-workers` and `dev-up`). Grep for an
    existing worker name in the Makefile to see every site you need to
    touch.
+
+   **Include `docker-release-all`.** It is an explicit chain of
+   `_docker-release-<name>-internal` calls, not a wildcard — only cronjobs
+   are picked up automatically, via its `$(CRONJOBS)` loop. Forgetting it
+   is caught loudly rather than silently: that target is what the deploy
+   builds with, so the image is never pushed and the overlay's pinned tag
+   reaches the cluster as ImagePullBackOff (ORB-313).
 8. **Coordinate with infra.** Open a PR in the Infrastructure repo for
    the SQS queue, SNS subscription, IAM policy, and any secrets — your
    code PR depends on those resources existing.
@@ -879,34 +886,19 @@ ArgoCD PreSync hook in staging/prod.
 3. **Never modify an applied migration.** The migrator checksums every
    file; a changed checksum fails the deploy. To fix a mistake, write a
    new migration.
-4. **Every timeseries table is a hypertable, tiered to S3, and
-   compressed.** One narrow exception, below. All three are set up in the
-   same migration that creates the table — don't ship a naked table and
-   "add the policies later". Specifically:
-   - **Hypertable** via `SELECT create_hypertable(...)` (or the
-     distributed-hypertable equivalent). Pick a chunk interval that
-     matches the ingest rate — too small and planning cost dominates,
-     too large and compression and S3 tiering can't evict anything.
-   - **Compression policy** via `ALTER TABLE ... SET (timescaledb.compress, ...)`
-     plus `SELECT add_compression_policy(...)`. Choose
-     `segmentby`/`orderby` columns that reflect how the table is
-     queried — getting this wrong costs 10–100× on reads.
-   - **Tiered-storage (S3) policy** via `SELECT add_tiering_policy(...)`.
-     This is what keeps the hot Postgres volume small; skipping it is
-     how we run out of disk in prod.
-   Also: primitives must be compatible with **distributed** hypertables.
-   When in doubt, read `docs/data_entities.md` and ADR-0002, or copy
-   the most recent timeseries migration as a template.
+4. **Create tables plain; partition later, if at all.** A chunk interval,
+   `segmentby`/`orderby` and a tiering horizon are bets on ingest rate and
+   query shape — let measurement settle them. Convert when the numbers say
+   to, in a **new** migration: that is where the compression and tiering
+   policies land, and it re-checks that the hot reads prune chunks. A few
+   tables stay plain permanently — see
+   `stl-verify/db/migrations/AGENTS.md`.
 
-   **The exception:** sparse governance/config-event tables — those
-   writing on the order of rows per day or less (e.g.
-   `morpho_adapter_membership`, `morpho_vault_cap`, `morpho_vault_fee`)
-   — may be plain tables at maintainer discretion, because chunking,
-   compression and tiering buy nothing at that rate. State the decision
-   and its rationale in the table's `COMMENT`; the append-only +
-   `processing_version`/`build_id` + advisory-locked trigger requirements
-   still apply in full. If you are not sure your table qualifies, it
-   doesn't — make it a hypertable.
+   A plain table owes a **row-growth alert** plus a runbook section
+   carrying its conversion path in the same PR (copy
+   `VectorUniswapV4AppendOnChangeGrowthHigh`) — that alert is what notices
+   it growing. Say in the `COMMENT` that it is plain and what would change
+   that.
 5. **Append-only, and enforced by the database.** No `UPDATE`, no `DELETE`, no
    `INSERT … ON CONFLICT … DO UPDATE` (a no-op `SET` still needs UPDATE privilege
    and still fails) on a converted table. Identity rows are written once;
@@ -995,7 +987,7 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 1. **Branch off `main`.** Name the branch after the Linear ticket if
    there is one (`VEC-123-short-slug`).
 2. **Open a PR early** — drafts are fine. The `CODEOWNERS` file
-   auto-requests review from `@archon-research/vector-engineers`.
+   auto-requests review from `@archon-research/stl-engineers`.
 3. **Before you push**, run:
    ```bash
    cd stl-verify
@@ -1078,7 +1070,7 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 
 ## 16. Getting help
 
-- **Code questions / design review:** `@archon-research/vector-engineers`
+- **Code questions / design review:** `@archon-research/stl-engineers`
   on GitHub, or [`#proj-verify-beacon`](https://sentinel-0rx1449.slack.com/archives/C0AN04V9NGZ)
   on Laniakea Slack (review is required anyway — ask early).
 - **Protocol specs:** see `docs/` — `aave_v3_spec.md`, `morpho_spec.md`,
