@@ -38,6 +38,18 @@ func GetInt(key string, defaultValue int) (int, error) {
 	return v, nil
 }
 
+func GetInt64(key string, defaultValue int64) (int64, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return defaultValue, nil
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsing %s %q as int64: %w", key, raw, err)
+	}
+	return v, nil
+}
+
 // GetDuration returns the duration value of the environment variable or the
 // default if unset. The value is parsed via time.ParseDuration so callers can
 // configure it as e.g. "5s", "250ms", "2m". A set-but-unparseable value is

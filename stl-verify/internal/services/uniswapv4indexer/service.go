@@ -89,7 +89,7 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 	if _, err := eventsByID(); err != nil {
 		return nil, err
 	}
-	poolManager, err := poolManagerFor(deps.Pools)
+	poolManager, err := PoolManagerFor(deps.Pools)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +99,7 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 	}
 	baselineSeen := seenSet(everSnapshotted)
 	svc := &UniswapV4Service{
-		poolsByID:    indexPoolsByHash(deps.Pools),
+		poolsByID:    IndexPoolsByHash(deps.Pools),
 		poolsByRow:   indexPoolsByRowID(deps.Pools),
 		pools:        deps.Pools,
 		poolManager:  poolManager,
@@ -172,7 +172,9 @@ func (s *UniswapV4Service) reportExcludedFromSnapshots() {
 		"chainId", s.chainID, "count", len(ids), "poolRowIds", ids, "poolIds", hashes)
 }
 
-func poolManagerFor(pools []RegisteredPool) (common.Address, error) {
+// PoolManagerFor returns the one PoolManager address the registry shares; a
+// mixed registry is two deployments, which the log filter silently mis-handles.
+func PoolManagerFor(pools []RegisteredPool) (common.Address, error) {
 	first := pools[0]
 	for _, pool := range pools[1:] {
 		if pool.PoolManager != first.PoolManager {
@@ -186,7 +188,7 @@ func poolManagerFor(pools []RegisteredPool) (common.Address, error) {
 }
 
 // ValidatePoolKeys has already rejected duplicate PoolIds.
-func indexPoolsByHash(pools []RegisteredPool) map[common.Hash]RegisteredPool {
+func IndexPoolsByHash(pools []RegisteredPool) map[common.Hash]RegisteredPool {
 	byHash := make(map[common.Hash]RegisteredPool, len(pools))
 	for _, p := range pools {
 		byHash[p.PoolIDHash] = p
@@ -472,47 +474,7 @@ func (s *UniswapV4Service) snapshotPoolPositions(ctx context.Context, pool Regis
 		keys = MergePositionKeys(keys, prior)
 	}
 
-	return s.readPositions(ctx, pool, coords, keys)
-}
-
-func (s *UniswapV4Service) readPositions(ctx context.Context, pool RegisteredPool, coords blockCoords, keys []entity.UniswapV4PositionKey) ([]*entity.UniswapV4Position, error) {
-	if len(keys) == 0 {
-		return nil, nil
-	}
-
-	rows := make([]*entity.UniswapV4Position, 0, len(keys))
-	for chunk := range slices.Chunk(keys, positionsPerCall) {
-		chunkRows, err := s.readPositionChunk(ctx, pool, coords, chunk)
-		if err != nil {
-			return nil, err
-		}
-		rows = append(rows, chunkRows...)
-	}
-	return rows, nil
-}
-
-func (s *UniswapV4Service) readPositionChunk(ctx context.Context, pool RegisteredPool, coords blockCoords, chunk []entity.UniswapV4PositionKey) ([]*entity.UniswapV4Position, error) {
-	calls, err := BuildPositionCalls(pool, chunk)
-	if err != nil {
-		return nil, fmt.Errorf("building position calls for pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
-	}
-	results, err := s.multicaller.ExecuteAtHash(ctx, calls, coords.hash)
-	if err != nil {
-		return nil, fmt.Errorf("executing position multicall for pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
-	}
-	if len(results) != len(chunk) {
-		return nil, fmt.Errorf("pool %s block %d: got %d position results, want %d", pool.PoolIDHash, coords.number, len(results), len(chunk))
-	}
-
-	rows := make([]*entity.UniswapV4Position, 0, len(chunk))
-	for i, key := range chunk {
-		row, err := DecodePosition(pool, key, coords.number, coords.version, coords.ts, results[i])
-		if err != nil {
-			return nil, fmt.Errorf("decoding position %+v for pool %s block %d: %w", key, pool.PoolIDHash, coords.number, err)
-		}
-		rows = append(rows, row)
-	}
-	return rows, nil
+	return ReadPositions(ctx, s.multicaller, pool, keys, coords.hash, coords.number, coords.version, coords.ts)
 }
 
 // A tick initialized only on an orphaned fork is invisible to the bitmap scan, so

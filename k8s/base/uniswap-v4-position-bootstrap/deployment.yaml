@@ -1,0 +1,54 @@
+# On-demand Uniswap V4 position bootstrap (VEC-639).
+#
+# A long-running Deployment, not a k8s Job or CronJob: it polls the Temporal task
+# queue "uniswap-v4-position-bootstrap" and stays idle until someone starts a run
+# from the Temporal UI. It registers NO schedule, so an always-on pod costs
+# nothing but a poller. A run snapshots every historical position key of the
+# registered snapshot-supported pools at one finality-safe block; see
+# docs/runbooks/vector-indexers.md, section "Uniswap V4 indexer".
+#
+# replicas: 1 — one pod on one task queue. A run is one activity, so a second
+# replica would buy nothing and double the request rate against the same
+# Alchemy key.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uniswap-v4-position-bootstrap
+spec:
+  replicas: 1
+  # Recreate: the default RollingUpdate rounds maxSurge up to 1, so a rollout —
+  # including a Reloader-triggered one — would put two pods on this task queue.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: uniswap-v4-position-bootstrap
+  template:
+    metadata:
+      labels:
+        app: uniswap-v4-position-bootstrap
+    spec:
+      serviceAccountName: uniswap-v4-position-bootstrap
+      containers:
+        - name: uniswap-v4-position-bootstrap
+          image: uniswap-v4-position-bootstrap
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: uniswap-v4-position-bootstrap
+            - secretRef:
+                name: uniswap-v4-position-bootstrap
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              # Peak memory is the distinct position keys plus one window's logs
+              # plus one multicall batch: ~70 B per key, so ~10^6 keys fit.
+              cpu: "1000m"
+              memory: "512Mi"
+      # An in-flight run is cancelled on shutdown and Temporal retries it on the
+      # next worker, which resumes the same pin from the activity's heartbeat
+      # details (60s heartbeat against a 3-minute timeout).
+      terminationGracePeriodSeconds: 90
