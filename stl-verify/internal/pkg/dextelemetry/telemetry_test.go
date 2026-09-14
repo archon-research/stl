@@ -295,6 +295,50 @@ func TestTelemetry_NilSafe(t *testing.T) {
 	tel.RecordTickRows(ctx, 0)
 	tel.RecordPositionRows(ctx, 5)
 	tel.RecordPositionRows(ctx, 0)
+	tel.RecordNFTTransferRows(ctx, 5, 5)
+	tel.RecordNFTTransferRows(ctx, 0, 0)
+}
+
+// VectorUniswapV4IndexerNoNFTTransfers keys on the attempted series alone: a
+// wrong posm address or a topic regression empties it and raises no error, while
+// a same-build replay empties only written.
+func TestRecordNFTTransferRows_IncrementsBothCounters(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := NewTelemetry("uniswap_v4", 1)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	ctx := context.Background()
+	tel.RecordNFTTransferRows(ctx, 3, 3)
+	tel.RecordNFTTransferRows(ctx, 5, 0) // a replay: queued, all conflicted away
+	tel.RecordNFTTransferRows(ctx, 0, 0) // no-op
+	tel.RecordNFTTransferRows(ctx, -1, -1)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	const attempted = "uniswap_v4.nft.transfer.rows.attempted"
+	if got := readSingleSumCount(t, &rm, attempted); got != 8 {
+		t.Errorf("%s = %d, want 8 (3+5; 0 and -1 are no-ops)", attempted, got)
+	}
+	const written = "uniswap_v4.nft.transfer.rows.written"
+	if got := readSingleSumCount(t, &rm, written); got != 3 {
+		t.Errorf("%s = %d, want 3 (the replay landed nothing)", written, got)
+	}
+	if want := "mainnet"; readChainAttr(t, &rm, attempted) != want {
+		t.Errorf("%s chain attr = %q, want %q", attempted, readChainAttr(t, &rm, attempted), want)
+	}
 }
 
 func TestRecordAppendOnChangeRows_IncrementsItsOwnCounter(t *testing.T) {
