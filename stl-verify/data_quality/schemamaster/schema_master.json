@@ -1,24 +1,5 @@
 {
   "ignore_tables": [
-    "migrations",
-    "ref_asset_class_l1",
-    "ref_corporate_action_type",
-    "ref_counterparty_role",
-    "ref_country",
-    "ref_credit_rating",
-    "ref_currency",
-    "ref_deal_type",
-    "entity_master",
-    "entity_ref_codes",
-    "ref_entity_type",
-    "ref_industry_group_l2",
-    "ref_origination_type",
-    "position_entity_link",
-    "ref_sector_l1",
-    "ref_security_subtype_l3",
-    "ref_security_type_l2",
-    "security_instrument_bridge",
-    "security_master",
     "curve_cryptoswap_config",
     "curve_cryptoswap_state",
     "curve_liquidity_event",
@@ -29,6 +10,25 @@
     "curve_stableswap_config",
     "curve_stableswap_state",
     "curve_swap",
+    "entity_master",
+    "entity_ref_codes",
+    "migrations",
+    "position_entity_link",
+    "ref_asset_class_l1",
+    "ref_corporate_action_type",
+    "ref_counterparty_role",
+    "ref_country",
+    "ref_credit_rating",
+    "ref_currency",
+    "ref_deal_type",
+    "ref_entity_type",
+    "ref_industry_group_l2",
+    "ref_origination_type",
+    "ref_sector_l1",
+    "ref_security_subtype_l3",
+    "ref_security_type_l2",
+    "security_instrument_bridge",
+    "security_master",
     "uniswap_v3_liquidity_event",
     "uniswap_v3_pool",
     "uniswap_v3_pool_event",
@@ -41,6 +41,8 @@
     "uniswap_v4_pool_manager",
     "uniswap_v4_pool_state",
     "uniswap_v4_position",
+    "uniswap_v4_position_manager",
+    "uniswap_v4_position_nft_transfer",
     "uniswap_v4_swap",
     "uniswap_v4_tick"
   ],
@@ -203,11 +205,6 @@
     },
     "block_timestamp": {
       "type": "timestamptz",
-      "class": "S",
-      "semantics": "event_time"
-    },
-    "as_of_date": {
-      "type": "date",
       "class": "S",
       "semantics": "event_time"
     },
@@ -1528,6 +1525,16 @@
       "type": "text",
       "class": "A",
       "not_null": true
+    },
+    "observations": {
+      "type": "int8",
+      "class": "A",
+      "not_null": true
+    },
+    "as_of_date": {
+      "type": "date",
+      "class": "S",
+      "semantics": "event_time"
     }
   },
   "tables": {
@@ -1569,10 +1576,6 @@
     },
     "block_meta": {
       "type": "dimension",
-      "owner": "infra"
-    },
-    "block_meta_worklist": {
-      "type": "infrastructure",
       "owner": "infra"
     },
     "borrower": {
@@ -1763,10 +1766,6 @@
       "type": "infrastructure",
       "owner": "prime"
     },
-    "position_daily": {
-      "type": "derived",
-      "owner": "prime"
-    },
     "position_state": {
       "type": "derived",
       "owner": "prime"
@@ -1879,6 +1878,18 @@
     "writer_run": {
       "type": "infrastructure",
       "owner": "infra"
+    },
+    "aave_unmapped_reserve": {
+      "type": "infrastructure",
+      "owner": "prime"
+    },
+    "block_meta_worklist": {
+      "type": "infrastructure",
+      "owner": "infra"
+    },
+    "position_daily": {
+      "type": "derived",
+      "owner": "prime"
     }
   },
   "transforms": [
@@ -2114,21 +2125,21 @@
       "column": "id",
       "canonical": "id",
       "accepted_type": "text",
-      "reason": "VEC-617: opaque kind-prefixed node id (em-/sec-/concept-/src-/acct-) per ADR-0007 §1 — house-assigned once, never derived from a public identifier, never hashed into position_id. Canonical id=int8 is the ingest layer's surrogate-key convention and does not apply to the combined master's id space."
+      "reason": "VEC-617: opaque kind-prefixed node id (em-/sec-/concept-/src-/acct-) per ADR-0007 \u00a71 \u2014 house-assigned once, never derived from a public identifier, never hashed into position_id. Canonical id=int8 is the ingest layer's surrogate-key convention and does not apply to the combined master's id space."
     },
     {
       "table": "sec_node",
       "column": "valid_from",
       "canonical": "valid_from",
       "accepted_type": "date",
-      "reason": "VEC-617: the combined master's valid time is a UTC calendar date, half-open [valid_from, valid_to), per ADR-0007 §3 — graph validity is calendar-dated and joins the block-time dimension at the block's UTC date (§9.3). Canonical valid_from=timestamptz is the ingest layer's effective-time stamp; valid_to is canonically date, so the pair is consistent in the store."
+      "reason": "VEC-617: the combined master's valid time is a UTC calendar date, half-open [valid_from, valid_to), per ADR-0007 \u00a73 \u2014 graph validity is calendar-dated and joins the block-time dimension at the block's UTC date (\u00a79.3). Canonical valid_from=timestamptz is the ingest layer's effective-time stamp; valid_to is canonically date, so the pair is consistent in the store."
     },
     {
       "table": "sec_edge",
       "column": "valid_from",
       "canonical": "valid_from",
       "accepted_type": "date",
-      "reason": "VEC-617: as sec_node.valid_from — UTC calendar date per ADR-0007 §3."
+      "reason": "VEC-617: as sec_node.valid_from \u2014 UTC calendar date per ADR-0007 \u00a73."
     }
   ],
   "fills": [
