@@ -40,9 +40,12 @@ func TestMain(m *testing.M) {
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // The bucket name has to satisfy the chain guard, which keys on DEPLOY_ENV and the chain slug.
+// absentBucket satisfies that guard and is never created: LocalStack grants every action, so a
+// bucket that is not there is the only way to make the startup probe fail.
 const (
 	testDeployEnv = "staging"
 	testBucket    = "stl-sentinelstaging-ethereum-raw-itest"
+	absentBucket  = testBucket + "-absent"
 )
 
 func uploadBlock(t *testing.T, ctx context.Context, client *s3.Client, blockNum int64, version int, hexTimestamp string) {
@@ -239,11 +242,18 @@ func TestBlockMetaLoad_RefusesToStartWithoutArchiveAccess(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
-	// Deliberately not created, so the probe cannot list or read it.
+	// The probe can only fail on a bucket that is really absent, and the tests above create
+	// testBucket in this same LocalStack. Assert the precondition: were absentBucket ever
+	// created, this test would pass on a probe that rejected nothing.
+	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
+	if _, err := s3Client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(absentBucket)}); err == nil {
+		t.Fatalf("%s exists, so a passing probe here would prove nothing", absentBucket)
+	}
+
 	t.Setenv("BUILD_GIT_HASH", "integration-test")
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("DEPLOY_ENV", testDeployEnv)
-	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("S3_BUCKET", absentBucket)
 	t.Setenv("DATABASE_URL", "unused-here")
 	t.Setenv("AWS_S3_ENDPOINT", sharedLocalStackCfg.Endpoint)
 	t.Setenv("AWS_REGION", sharedLocalStackCfg.Region)
@@ -259,7 +269,7 @@ func TestBlockMetaLoad_RefusesToStartWithoutArchiveAccess(t *testing.T) {
 	if err == nil {
 		t.Fatal("registration succeeded against an archive it cannot read; the first run would fail on AccessDenied instead")
 	}
-	if !strings.Contains(err.Error(), testBucket) {
+	if !strings.Contains(err.Error(), absentBucket) {
 		t.Errorf("error %q does not name the bucket it could not use", err)
 	}
 }

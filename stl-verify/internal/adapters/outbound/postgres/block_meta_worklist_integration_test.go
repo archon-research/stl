@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -446,10 +447,20 @@ func TestBlockMetaProvenanceInvariants(t *testing.T) {
 	})
 
 	t.Run("a later run does not rewrite an earlier one's provenance", func(t *testing.T) {
-		// A second writer run, as a redeploy produces, re-offering the same block.
-		build2, run2 := testutil.OpenTestRun(t, ctx, pool)
-		if run2 == runID {
-			t.Skip("the harness reused the run; this case needs two")
+		// A second writer run from a DIFFERENT artefact, as a redeploy produces, re-offering the same
+		// block. The build has to differ too: OpenTestRun registers one identity, so reusing it would
+		// leave build2 == buildID and the build half of the assertion below could not fail.
+		reg2, err := buildregistry.NewWithIdentity(ctx, pool, testutil.TestIdentity("test-redeploy"))
+		if err != nil {
+			t.Fatalf("register the second build: %v", err)
+		}
+		run2, err := reg2.OpenRun(ctx, time.Now().UTC(), nil)
+		if err != nil {
+			t.Fatalf("open the second writer run: %v", err)
+		}
+		build2 := reg2.BuildID()
+		if build2 == buildID || run2 == runID {
+			t.Fatalf("the second writer reused build %d run %d; this case needs two of each", build2, run2)
 		}
 		repo2, err := NewBlockMetaRepository(pool, nil, build2, run2)
 		if err != nil {
@@ -477,4 +488,53 @@ func TestBlockMetaProvenanceInvariants(t *testing.T) {
 			t.Errorf("the stored timestamp changed to %d; a correction belongs at a higher processing_version", gotTS.Unix())
 		}
 	})
+}
+
+// The head margin exists to leave the newest blocks alone while the archive catches up, so it has
+// to measure from the chain's head. Measured instead from the highest block still pending, a gap
+// repaired deep in the chain's history sits entirely within its own margin and is deleted whole:
+// the run loads nothing, reports success, and every later run repeats it.
+func TestHeadMarginMeasuresFromTheChainHeadNotThePendingSet(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+
+	// A gap of eleven blocks spanning ten, four million blocks below the head.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO chain (chain_id, name) VALUES (1, 'ethereum') ON CONFLICT DO NOTHING;
+		INSERT INTO protocol (chain_id, address, name) VALUES (1, '\x9101', 'margin-eth') ON CONFLICT DO NOTHING;
+		INSERT INTO token (chain_id, address) VALUES (1, '\x9102') ON CONFLICT DO NOTHING;
+		INSERT INTO sparklend_reserve_data (protocol_id, token_id, block_number, block_version)
+		SELECT (SELECT id FROM protocol WHERE address='\x9101'),
+		       (SELECT id FROM token WHERE address='\x9102'),
+		       1000000 + g, 0
+		  FROM generate_series(0, 10) g;`); err != nil {
+		t.Fatalf("seed the gap: %v", err)
+	}
+
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	// block_meta already holds the chain up to 5,000,000, so the head is nowhere near the gap.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp, build_id, run_id)
+		VALUES (1, 5000000, 0, TIMESTAMPTZ '2026-01-01', $1, $2)`, int(buildID), int64(runID)); err != nil {
+		t.Fatalf("seed the chain head: %v", err)
+	}
+
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+	list, err := repo.OpenWorkList(ctx, 1, 300)
+	if err != nil {
+		t.Fatalf("open the work list: %v", err)
+	}
+	defer list.Close(ctx)
+
+	refs, err := list.Next(ctx, 100)
+	if err != nil {
+		t.Fatalf("page the work list: %v", err)
+	}
+	if len(refs) != 11 {
+		t.Fatalf("the work list holds %d of the 11 blocks in the gap; a margin measured from the pending set deletes a gap narrower than itself", len(refs))
+	}
 }

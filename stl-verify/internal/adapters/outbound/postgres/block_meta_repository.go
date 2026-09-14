@@ -241,14 +241,18 @@ func (r *BlockMetaRepository) OpenWorkList(ctx context.Context, chainID int64, h
 		                  AND m.block_version = w.block_version)`, chainID); err != nil {
 		return nil, fmt.Errorf("removing already-loaded blocks for chain %d: %w", chainID, err)
 	}
-	// The head margin is applied last, so it trims whatever the arms found rather than
-	// racing them. Rows it removes are not lost: the next run re-enumerates them once
-	// the archive has caught up, because a completed run clears its chain.
+	// The head margin holds back the newest blocks while the archive catches up, so it measures from
+	// the chain's head: the highest block either still pending or already loaded. Measured from the
+	// pending set alone, a gap narrower than the margin sits entirely inside it and is deleted whole.
 	if headMargin > 0 {
 		if _, err := r.pool.Exec(ctx, `
 			DELETE FROM block_meta_worklist w
 			 WHERE w.chain_id = $1
-			   AND w.block_number > (SELECT max(block_number) - $2 FROM block_meta_worklist WHERE chain_id = $1)`,
+			   AND w.block_number > (
+			        SELECT max(head) - $2 FROM (
+			          SELECT max(block_number) AS head FROM block_meta_worklist WHERE chain_id = $1
+			          UNION ALL
+			          SELECT max(block_number) FROM block_meta WHERE chain_id = $1) t)`,
 			chainID, headMargin); err != nil {
 			return nil, fmt.Errorf("applying the head margin for chain %d: %w", chainID, err)
 		}
@@ -301,10 +305,9 @@ func (w *blockWorkList) Close(ctx context.Context) {
 	w.pool = nil
 }
 
-// Upsert COPYs the batch into a session-scoped TEMP table (dropped at commit) and then does a single
-// INSERT ... SELECT ... ON CONFLICT DO NOTHING. COPY is an order of magnitude faster than per-row
-// INSERTs at the millions-of-blocks scale of a full-history backfill, and folding the whole batch
-// into one INSERT keeps the conflict check server-side.
+// Upsert writes the batch as one INSERT ... SELECT FROM unnest(...) ON CONFLICT DO NOTHING, with no
+// transaction and no stage table: a temp table per batch is catalogue churn that a 500-row batch
+// cannot repay against S3 reads dominating it by three orders of magnitude.
 //
 // The arbiter is block_meta's primary key (chain_id, block_number, block_version, processing_version).
 // The loader always writes processing_version 0, so a re-run is a no-op; a mis-parsed header is
@@ -315,9 +318,6 @@ func (r *BlockMetaRepository) Upsert(ctx context.Context, rows []outbound.BlockM
 		return 0, nil
 	}
 
-	// One statement, no transaction and no temp table. A stage table per batch is ~2,000 creates and
-	// drops over chain 1's first pass, all of it catalogue churn, and the COPY it existed to enable
-	// buys nothing at 500 rows against S3 reads that dominate by three orders of magnitude.
 	numbers := make([]int64, len(rows))
 	versions := make([]int32, len(rows))
 	stamps := make([]time.Time, len(rows))

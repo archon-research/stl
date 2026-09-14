@@ -21,6 +21,8 @@ COMMENT ON COLUMN block_meta_worklist.block_version IS 'Roles: PK. Reorg version
 
 -- The loader owns this table's lifecycle: it clears its own chain and repopulates per run. DELETE is
 -- the run boundary, not a correction to history, so the append-only default does not engage here.
+-- UPDATE is revoked: default privileges grant it, and no writer here amends a row in place.
 GRANT SELECT, INSERT, DELETE ON block_meta_worklist TO stl_readwrite;
+REVOKE UPDATE ON block_meta_worklist FROM stl_readwrite;
 
 INSERT INTO migrations (filename) VALUES ('20260911_130000_create_block_meta_worklist.sql') ON CONFLICT (filename) DO NOTHING;

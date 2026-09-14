@@ -22,11 +22,6 @@ const (
 	// naming the same activity across a Go rename.
 	loadActivityName = "LoadBlockMeta"
 
-	// progressQueryName is queryable mid-run from the Temporal UI's Query tab. It
-	// is also the only channel a FAILING run has: Temporal discards the result
-	// payload of a workflow that returns an error.
-	progressQueryName = "progress"
-
 	// heartbeatInterval is how often a running load reports liveness, and
 	// heartbeatTimeoutFactor the grace Temporal allows over it so one missed ping
 	// cannot fail a live attempt.
@@ -67,13 +62,6 @@ type LoadProgress struct {
 // second cursor in the workflow history that could disagree with the one in the
 // database.
 func loadWorkflow(ctx workflow.Context, params LoadParams) (LoadProgress, error) {
-	var progress LoadProgress
-	if err := workflow.SetQueryHandler(ctx, progressQueryName, func() (LoadProgress, error) {
-		return progress, nil
-	}); err != nil {
-		return progress, fmt.Errorf("registering the progress query: %w", err)
-	}
-
 	actx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: activityTimeout,
 		HeartbeatTimeout:    heartbeatInterval * heartbeatTimeoutFactor,
@@ -81,9 +69,8 @@ func loadWorkflow(ctx workflow.Context, params LoadParams) (LoadProgress, error)
 
 	var result LoadProgress
 	if err := workflow.ExecuteActivity(actx, loadActivityName, params).Get(actx, &result); err != nil {
-		return progress, err
+		return LoadProgress{}, err
 	}
-	progress = result
 	return result, nil
 }
 
