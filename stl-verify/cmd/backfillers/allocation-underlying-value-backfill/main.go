@@ -99,7 +99,7 @@ var (
 	BuildTime string
 )
 
-func init() { buildinfo.PopulateFromVCS(&GitCommit, &BuildTime) }
+func init() { buildinfo.Populate(&GitCommit, &GitBranch, &BuildTime) }
 
 // Invoked with no arguments -- how the Deployment runs it -- this starts the
 // Temporal worker and idles on the task queue until an operator starts a run.
