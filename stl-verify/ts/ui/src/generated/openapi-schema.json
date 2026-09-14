@@ -969,12 +969,8 @@
             "type": "string"
           },
           "type": {
-            "description": "Stable, machine-readable rejection identifier.",
-            "examples": [
-              "max_points_exceeded"
-            ],
-            "title": "Type",
-            "type": "string"
+            "$ref": "#/components/schemas/RejectionType",
+            "description": "Stable, machine-readable rejection identifier."
           }
         },
         "required": [
@@ -2558,6 +2554,20 @@
         ],
         "title": "RejectionSuggestions",
         "type": "object"
+      },
+      "RejectionType": {
+        "description": "Every ``type`` the surface can put on a 422, closed so a client can be exhaustive.\n\nAn enum rather than a free string: this is the member a caller branches on, and\npublishing the closed set is what lets a generated TS client fail to compile when\na new rejection appears rather than fall through its `switch`. ``INVALID_REQUEST``\ncovers every rejection FastAPI raises before a route is reached \u2014 the branch is the\nsame either way, and which parameter failed is in ``errors``.",
+        "enum": [
+          "invalid_request",
+          "invalid_time_range",
+          "timestamp_out_of_range",
+          "window_too_large",
+          "frequency_too_fine",
+          "frequency_requires_aggregation_method",
+          "max_points_exceeded"
+        ],
+        "title": "RejectionType",
+        "type": "string"
       },
       "ResampledRetry": {
         "description": "A frequency to retry the same window on, keyed like the query parameters.\n\nFits the window as asked, so unlike ``narrower_window`` it needs no second round\ntrip and returns the whole span the caller requested.",

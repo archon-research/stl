@@ -19,6 +19,7 @@ at every one of them.
 
 from collections.abc import Mapping
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, ClassVar
 
 from fastapi import FastAPI, Request
@@ -28,17 +29,44 @@ from pydantic import BaseModel, Field
 
 from app.domain.time_series import (
     AggregationMethod,
+    FrequencyTooFineError,
+    FrequencyWithoutAggregationMethodError,
+    InvalidTimeRangeError,
     MaxPointsExceededError,
+    OutOfRangeTimestampError,
     TimeSeriesFrequency,
     TimeSeriesQueryError,
+    WindowTooLargeError,
 )
 from app.logging import get_logger
 
 logger = get_logger(__name__)
 
-# One type for every rejection FastAPI raises before a route is reached: the branch
-# is the same either way, and which parameter failed is in ``errors``.
-INVALID_REQUEST_TYPE = "invalid_request"
+
+class RejectionType(StrEnum):
+    """Every ``type`` the surface can put on a 422, closed so a client can be exhaustive.
+
+    An enum rather than a free string: this is the member a caller branches on, and
+    publishing the closed set is what lets a generated TS client fail to compile when
+    a new rejection appears rather than fall through its `switch`. ``INVALID_REQUEST``
+    covers every rejection FastAPI raises before a route is reached — the branch is the
+    same either way, and which parameter failed is in ``errors``.
+    """
+
+    INVALID_REQUEST = "invalid_request"
+    INVALID_TIME_RANGE = InvalidTimeRangeError.error_type
+    TIMESTAMP_OUT_OF_RANGE = OutOfRangeTimestampError.error_type
+    WINDOW_TOO_LARGE = WindowTooLargeError.error_type
+    FREQUENCY_TOO_FINE = FrequencyTooFineError.error_type
+    FREQUENCY_REQUIRES_AGGREGATION_METHOD = FrequencyWithoutAggregationMethodError.error_type
+    MAX_POINTS_EXCEEDED = MaxPointsExceededError.error_type
+
+
+# Fail at import time (not at the first rejection) if a domain rejection has no member.
+_unpublished_types = {error.error_type for error in TimeSeriesQueryError.__subclasses__()} - set(RejectionType)
+if _unpublished_types:
+    raise RuntimeError(f"TimeSeriesQueryError subclasses missing a RejectionType member: {_unpublished_types}")
+
 INVALID_REQUEST_TITLE = "Invalid request"
 
 # The status every body on this surface reports. RFC 9457 makes the member advisory
@@ -56,7 +84,7 @@ class ApiRejectionError(Exception):
     wire under a schema that promises this model.
     """
 
-    error_type: ClassVar[str] = INVALID_REQUEST_TYPE
+    error_type: ClassVar[RejectionType] = RejectionType.INVALID_REQUEST
     title: ClassVar[str] = INVALID_REQUEST_TITLE
 
 
@@ -116,7 +144,7 @@ class ApiErrorResponse(BaseModel):
     promises.
     """
 
-    type: str = Field(description="Stable, machine-readable rejection identifier.", examples=["max_points_exceeded"])
+    type: RejectionType = Field(description="Stable, machine-readable rejection identifier.")
     title: str = Field(
         description="Short static label for the `type`. Same across every occurrence of one type.",
         examples=["Too many points"],
@@ -166,14 +194,14 @@ def time_series_error(exc: TimeSeriesQueryError) -> ApiErrorResponse:
     """The body for a domain rejection, carrying suggestions where the type has them."""
     if isinstance(exc, MaxPointsExceededError):
         return ApiErrorResponse(
-            type=exc.error_type,
+            type=RejectionType(exc.error_type),
             title=exc.title,
             detail=str(exc),
             point_count=exc.point_count,
             max_points=exc.max_points,
             suggestions=_suggestions(exc),
         )
-    return ApiErrorResponse(type=exc.error_type, title=exc.title, detail=str(exc))
+    return ApiErrorResponse(type=RejectionType(exc.error_type), title=exc.title, detail=str(exc))
 
 
 # Validators interpolate the rejected value into their own message, so the value is
@@ -249,7 +277,7 @@ def register_error_handlers(application: FastAPI) -> None:
         field_errors = _field_errors(exc)
         return error_response(
             ApiErrorResponse(
-                type=INVALID_REQUEST_TYPE,
+                type=RejectionType.INVALID_REQUEST,
                 title=INVALID_REQUEST_TITLE,
                 detail="; ".join(f"{error.field}: {error.message}" for error in field_errors),
                 errors=field_errors,

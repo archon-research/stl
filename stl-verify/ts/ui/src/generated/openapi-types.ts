@@ -1124,12 +1124,8 @@ export interface components {
        * @example Too many points
        */
       title: string;
-      /**
-       * Type
-       * @description Stable, machine-readable rejection identifier.
-       * @example max_points_exceeded
-       */
-      type: string;
+      /** @description Stable, machine-readable rejection identifier. */
+      type: components['schemas']['RejectionType'];
     };
     /**
      * BadDebtResponse
@@ -2067,6 +2063,25 @@ export interface components {
       /** @description Grid that fits the window as asked. */
       resampled: components['schemas']['ResampledRetry'];
     };
+    /**
+     * RejectionType
+     * @description Every ``type`` the surface can put on a 422, closed so a client can be exhaustive.
+     *
+     *     An enum rather than a free string: this is the member a caller branches on, and
+     *     publishing the closed set is what lets a generated TS client fail to compile when
+     *     a new rejection appears rather than fall through its `switch`. ``INVALID_REQUEST``
+     *     covers every rejection FastAPI raises before a route is reached — the branch is the
+     *     same either way, and which parameter failed is in ``errors``.
+     * @enum {string}
+     */
+    RejectionType:
+      | 'invalid_request'
+      | 'invalid_time_range'
+      | 'timestamp_out_of_range'
+      | 'window_too_large'
+      | 'frequency_too_fine'
+      | 'frequency_requires_aggregation_method'
+      | 'max_points_exceeded';
     /**
      * ResampledRetry
      * @description A frequency to retry the same window on, keyed like the query parameters.

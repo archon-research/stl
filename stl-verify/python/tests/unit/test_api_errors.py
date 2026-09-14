@@ -13,14 +13,21 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Response
 from fastapi.testclient import TestClient
 
 from app.api._validators import OptionalTxHashParam
-from app.api.errors import API_ERROR_RESPONSES, ApiErrorResponse, register_error_handlers
+from app.api.errors import API_ERROR_RESPONSES, ApiErrorResponse, RejectionType, register_error_handlers
 from app.api.time_series import (
     apply_cache_control,
     build_raw_window,
     get_latest_query_params,
     get_time_series_query_params,
 )
-from app.domain.time_series import MAX_POINTS, MAX_WINDOW, TimeSeriesQuery, TimeWindow, enforce_max_points
+from app.domain.time_series import (
+    MAX_POINTS,
+    MAX_WINDOW,
+    TimeSeriesQuery,
+    TimeSeriesQueryError,
+    TimeWindow,
+    enforce_max_points,
+)
 
 _KNOWN_SERIES = "known"
 
@@ -242,6 +249,16 @@ def test_a_domain_rejection_carries_no_per_field_errors(client: TestClient) -> N
     response = _history(client, from_timestamp="2020-01-01T00:00:00Z", to_timestamp="2026-01-01T00:00:00Z")
 
     assert "errors" not in response.json()
+
+
+def test_the_schema_publishes_the_rejection_types_as_a_closed_set(client: TestClient) -> None:
+    schema = client.app.openapi()
+
+    assert set(schema["components"]["schemas"]["RejectionType"]["enum"]) == set(RejectionType)
+
+
+def test_every_domain_rejection_is_published_as_a_rejection_type() -> None:
+    assert {error.error_type for error in TimeSeriesQueryError.__subclasses__()} <= set(RejectionType)
 
 
 def test_the_schema_declares_the_shared_body_on_every_route(client: TestClient) -> None:
