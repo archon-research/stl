@@ -383,6 +383,7 @@ else
   (
     eval "$CLASSIFY_SRC"
     classify_pair_status 9 0 "sha256:one" "sha256:one" "some-repo" "pinned-tag" "candidate-tag"
+    # shellcheck disable=SC2154  # set by the eval'd classify_pair_status above
     printf '%s\t%s\n' "$verdict" "$detail"
   ) > "${WORK}/classify-out"
   CLASSIFY_VERDICT="$(cut -f1 "${WORK}/classify-out")"
