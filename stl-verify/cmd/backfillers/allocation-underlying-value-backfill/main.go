@@ -252,8 +252,8 @@ func run(ctx context.Context, args []string) error {
 }
 
 // passResult is what one pass over the candidate query achieved: how many rows
-// it looked at, how many it resolved and submitted for writing, and the cursor
-// a caller resumes from. written is zero on a dry run.
+// it looked at, how many reached allocation_position, and the cursor a caller
+// resumes from. written is zero on a dry run.
 type passResult struct {
 	fetched int
 	written int
@@ -265,6 +265,12 @@ type passResult struct {
 // cfg.dryRun) writes them, sharing pool/deps/archiveResolver across calls so a
 // multi-pass caller pays for connection and multicaller setup once.
 func runPass(ctx context.Context, pool *pgxpool.Pool, deps runnerDeps, archiveResolver *erc4626ArchiveResolver, cfg cliConfig) (passResult, error) {
+	if !cfg.dryRun {
+		if err := ensureTargetChunksAreDecompressed(ctx, pool, cfg); err != nil {
+			return passResult{}, err
+		}
+	}
+
 	candidates, err := fetchCandidates(ctx, pool, cfg)
 	if err != nil {
 		return passResult{}, fmt.Errorf("fetch candidates: %w", err)
@@ -286,10 +292,11 @@ func runPass(ctx context.Context, pool *pgxpool.Pool, deps runnerDeps, archiveRe
 		return result, nil
 	}
 
-	result.written = len(classified)
-	if err := persist(ctx, deps, classified); err != nil {
+	written, err := persist(ctx, deps, classified)
+	if err != nil {
 		return result, err
 	}
+	result.written = written
 	return result, nil
 }
 
@@ -458,24 +465,39 @@ func logDryRunPreview(classified []positionSource) {
 	}
 }
 
-func persist(ctx context.Context, deps runnerDeps, classified []positionSource) error {
+// persist writes one classified batch and returns the rows history received.
+//
+// Every row is expected to land: candidateQuery already excludes anything a
+// previous run corrected, so a row submitted here has no newer version to
+// collide with. Any shortfall is therefore real loss — rolled back with the
+// transaction and failed loudly, never logged as a success (VEC-759).
+func persist(ctx context.Context, deps runnerDeps, classified []positionSource) (int, error) {
 	positions := make([]*entity.AllocationPosition, len(classified))
 	for i, ps := range classified {
 		positions[i] = ps.position
 	}
 
+	var inserted int64
 	if err := deps.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return deps.allocRepo.SavePositions(ctx, tx, positions)
+		var saveErr error
+		inserted, saveErr = deps.allocRepo.SavePositions(ctx, tx, positions)
+		if saveErr != nil {
+			return saveErr
+		}
+		if inserted != int64(len(positions)) {
+			return fmt.Errorf(
+				"%d of %d rows reached allocation_position; the rest were discarded without an error, "+
+					"which is what a still-compressed target chunk does to a write",
+				inserted, len(positions),
+			)
+		}
+		return nil
 	}); err != nil {
-		return fmt.Errorf("save positions: %w", err)
+		return 0, fmt.Errorf("save positions: %w", err)
 	}
 
-	// "submitted", not "confirmed inserted": ON CONFLICT DO NOTHING can no-op
-	// an individual row (e.g. a concurrent run already wrote it), and
-	// SavePositions returns no per-row count to distinguish that from a real
-	// insert.
-	slog.Info("backfilled", "rows_submitted", len(positions))
-	return nil
+	slog.Info("backfilled", "rows_inserted", inserted)
+	return int(inserted), nil
 }
 
 // toEntity rebuilds the original event as a new AllocationPosition carrying the
