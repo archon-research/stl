@@ -104,23 +104,35 @@ CREATE OR REPLACE FUNCTION materialize_aave_lending(p_build_id integer DEFAULT 0
     LANGUAGE plpgsql
     SET search_path FROM CURRENT AS $fn$
 DECLARE
-    v_bad text;
+    v_bad  text;
+    v_msgs text[];
 BEGIN
-    SELECT string_agg(msg, '; ' ORDER BY msg) INTO v_bad FROM (
-        SELECT msg FROM (
+    v_msgs := ARRAY[]::text[];
+
+    -- Refusal branch 1 of 5, planned on its own.
+    v_msgs := v_msgs || ARRAY(
+        SELECT * FROM (
             SELECT format('variable-debt token %s is mapped to %s reserves of protocol_id %s', encode(dt.variable_debt_address, 'hex'), count(*), dt.protocol_id) AS msg
             FROM public.debt_token dt
             WHERE dt.variable_debt_address IS NOT NULL
               AND EXISTS (SELECT 1 FROM public.borrower b WHERE b.protocol_id = dt.protocol_id AND b.token_id = dt.underlying_token_id)
             GROUP BY dt.protocol_id, dt.variable_debt_address
             HAVING count(*) > 1
-            UNION ALL
+        ) b1 ORDER BY 1 LIMIT 10);
+
+    -- Refusal branch 2 of 5, planned on its own.
+    v_msgs := v_msgs || ARRAY(
+        SELECT * FROM (
             SELECT format('supply reserve (protocol_id %s, token_id %s) maps to %s receipt tokens', r.protocol_id, r.token_id, count(rt.receipt_token_address))
             FROM (SELECT DISTINCT protocol_id, token_id FROM public.borrower_collateral) r
             JOIN public.receipt_token rt ON rt.protocol_id = r.protocol_id AND rt.underlying_token_id = r.token_id
             GROUP BY r.protocol_id, r.token_id
             HAVING count(*) > 1
-            UNION ALL
+        ) b2 ORDER BY 1 LIMIT 10);
+
+    -- Refusal branch 3 of 5, planned on its own.
+    v_msgs := v_msgs || ARRAY(
+        SELECT * FROM (
             SELECT format('address %s is registered as both a variable-debt and a receipt token of protocol_id %s', encode(dt.variable_debt_address, 'hex'), dt.protocol_id)
             FROM public.debt_token dt
             JOIN public.receipt_token rt ON rt.protocol_id = dt.protocol_id
@@ -132,13 +144,21 @@ BEGIN
                             WHERE b.protocol_id = dt.protocol_id AND b.token_id = dt.underlying_token_id)
                 OR EXISTS (SELECT 1 FROM public.borrower_collateral c
                             WHERE c.protocol_id = rt.protocol_id AND c.token_id = rt.underlying_token_id))
-            UNION ALL
+        ) b3 ORDER BY 1 LIMIT 10);
+
+    -- Refusal branch 4 of 5, planned on its own.
+    v_msgs := v_msgs || ARRAY(
+        SELECT * FROM (
             SELECT format('holder %s is a %s-byte address, so holder_id would fail position_state''s 40-hex check', encode(u.address, 'hex'), length(u.address))
             FROM (SELECT DISTINCT user_id FROM public.borrower
                   UNION SELECT DISTINCT user_id FROM public.borrower_collateral) r
             JOIN public."user" u ON u.id = r.user_id
             WHERE length(u.address) <> 20
-            UNION ALL
+        ) b4 ORDER BY 1 LIMIT 10);
+
+    -- Refusal branch 5 of 5, planned on its own.
+    v_msgs := v_msgs || ARRAY(
+        SELECT * FROM (
             SELECT format('ledger row (user_id %s, protocol_id %s, token_id %s) mixes chains: holder %s, token %s, protocol %s', r.user_id, r.protocol_id, r.token_id, u.chain_id, t.chain_id, p.chain_id)
             FROM (SELECT DISTINCT user_id, protocol_id, token_id FROM public.borrower
                   UNION SELECT DISTINCT user_id, protocol_id, token_id FROM public.borrower_collateral) r
@@ -146,10 +166,10 @@ BEGIN
             JOIN public."user"   u ON u.id = r.user_id
             JOIN public.token    t ON t.id = r.token_id
             WHERE u.chain_id <> p.chain_id OR t.chain_id <> p.chain_id
-        ) all_msgs
-        ORDER BY msg
-        LIMIT 10
-    ) z;
+        ) b5 ORDER BY 1 LIMIT 10);
+
+    SELECT string_agg(msg, '; ' ORDER BY msg) INTO v_bad
+      FROM (SELECT unnest(v_msgs) AS msg ORDER BY 1 LIMIT 10) z;
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'materialize_aave_lending: inputs that would key wrongly, refusing to run: %', v_bad;
     END IF;
@@ -173,6 +193,10 @@ BEGIN
     -- A mapping that disappears strands live exposure: the view stops emitting that instrument, the
     -- stored rows keep their last quantity and nothing closes them. Reference data regressing is not a
     -- data conflict, so refuse by name rather than leave the exposure reading as current.
+    -- Keyed off the two reference tables, not the view: instrument_key is only the hex of
+    -- debt_token.variable_debt_address or receipt_token.receipt_token_address, so asking whether the
+    -- mapping still exists needs those rather than a second full evaluation of the view -- which was a
+    -- hash anti-join over the whole of it, one extra unpredicated pass over both ledgers per call.
     SELECT string_agg(DISTINCT s.instrument_key, ', ' ORDER BY s.instrument_key) INTO v_bad
     FROM (SELECT DISTINCT ON (p.position_id) p.instrument_key, p.quantity
             FROM public.position_state p
@@ -180,8 +204,12 @@ BEGIN
            ORDER BY p.position_id, p.block_number DESC, p.block_version DESC,
                     p.processing_version DESC, p.block_timestamp DESC) s
     WHERE s.quantity > 0
-      AND NOT EXISTS (SELECT 1 FROM public.position_aave_lending v
-                       WHERE v.instrument_key = s.instrument_key);
+      AND NOT EXISTS (SELECT 1 FROM public.debt_token dt
+                       WHERE dt.variable_debt_address IS NOT NULL
+                         AND encode(dt.variable_debt_address, 'hex') = s.instrument_key)
+      AND NOT EXISTS (SELECT 1 FROM public.receipt_token rt
+                       WHERE rt.receipt_token_address IS NOT NULL
+                         AND encode(rt.receipt_token_address, 'hex') = s.instrument_key);
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'materialize_aave_lending: live exposure whose instrument the view no longer emits, so a lost token mapping would strand it; refusing to run: %', v_bad;
     END IF;
