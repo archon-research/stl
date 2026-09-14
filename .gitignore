@@ -106,7 +106,7 @@ __pycache__/
 htmlcov/
 
 # Go
-.gopath/
+.gopath
 
 # Skillfile (github.com/eljulians/skillfile)
 # Skill sources live in skills/ (local) or are pinned by SHA in Skillfile.lock
