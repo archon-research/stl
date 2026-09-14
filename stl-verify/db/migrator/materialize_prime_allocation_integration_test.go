@@ -526,7 +526,7 @@ func TestMaterializePrimeAllocationResolvesPastAShadowingSchema(t *testing.T) {
 	if _, err := pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+pgIdent(role)); err != nil {
 		t.Fatalf("creating the shadowing schema: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `CREATE OR REPLACE FUNCTION `+pgIdent(role)+`.materialize_position_projection(regclass, integer)
+	if _, err := pool.Exec(ctx, `CREATE OR REPLACE FUNCTION `+pgIdent(role)+`.materialize_position_projection(regclass, integer, bigint)
 	                             RETURNS bigint LANGUAGE sql AS $$ SELECT -1::bigint $$`); err != nil {
 		t.Fatalf("creating the shadowing function: %v", err)
 	}
@@ -541,12 +541,23 @@ func TestMaterializePrimeAllocationResolvesPastAShadowingSchema(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DROP SCHEMA IF EXISTS `+pgIdent(role)+` CASCADE`) })
 
+	// A block the fixture has not materialized, so a correct wrapper appends it. Without this the call
+	// below appends 0 whether it read the real view or the empty shadow -- the fixture already ran the
+	// projection, and it is idempotent -- and the row count could not tell them apart.
+	alloc(t, ctx, pool, allocProxyA, allocTokenX, 80, 300, 1, "2026-01-03T00:00:00Z", "in")
+
 	var got int64
 	if err := pool.QueryRow(ctx, `SELECT public.materialize_prime_allocation()`).Scan(&got); err != nil {
 		t.Fatalf("materialize_prime_allocation: %v", err)
 	}
 	if got == -1 {
 		t.Error("the wrapper called the shadowing function, so its reference is unqualified")
+	}
+	// The row count, not just the sentinel: the shadow VIEW is the mirror case, and a de-qualified
+	// regclass literal resolving to it appends 0 rows rather than -1, which the check above cannot see.
+	if got != 1 {
+		t.Errorf("the wrapper appended %d rows for one new observation; a de-qualified view reference "+
+			"resolves to the empty shadow and appends nothing, which the sentinel check cannot detect", got)
 	}
 }
 
