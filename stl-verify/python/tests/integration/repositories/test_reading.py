@@ -2,18 +2,18 @@
 
 A probe table rather than a dataset's own: the dataset SQL lands in later
 tickets, and what is under test is the reading contract they will all sit on —
-one snapshot behind a count and its rows, latest-version-only, and a rejection
-that never turns into a truncated answer.
+a count taken over the rows served, latest-version-only, and a rejection that
+never turns into a truncated answer.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.adapters.postgres._reading import read_bounded_series, snapshot_reading
+from app.adapters.postgres._reading import read_bounded_series
 from app.domain.time_series import MaxPointsExceededError, TimeWindow
 
 _NOW = datetime(2026, 3, 5, 13, 0, tzinfo=UTC)
@@ -33,17 +33,15 @@ CREATE TABLE IF NOT EXISTS series_probe (
 )
 """
 
-# The latest processing version of each observation, and nothing else, reaches
-# either statement — so the count guards the series the rows carry.
-_LATEST_VERSIONS = """
+# The latest processing version of each observation, and nothing else: the count
+# is taken over this, so it guards exactly the series the rows carry.
+_SERIES_SQL = """
     SELECT DISTINCT ON (observed_at) observed_at, value
       FROM series_probe
      WHERE observed_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
        AND observed_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
      ORDER BY observed_at, processing_version DESC
 """
-_COUNT_SQL = f"SELECT count(*) FROM ({_LATEST_VERSIONS}) AS latest"
-_ROWS_SQL = f"SELECT observed_at, value FROM ({_LATEST_VERSIONS}) AS latest ORDER BY observed_at"
 
 
 def _window(from_timestamp: datetime, to_timestamp: datetime = _NOW) -> TimeWindow:
@@ -75,8 +73,7 @@ async def _read(engine, window: TimeWindow, **kwargs):
     return await read_bounded_series(
         engine,
         what="reading the probe series",
-        count_sql=_COUNT_SQL,
-        rows_sql=_ROWS_SQL,
+        series_sql=_SERIES_SQL,
         params=_params(window),
         query=window,
         **kwargs,
@@ -135,19 +132,7 @@ async def test_a_rejected_read_reaches_the_caller_as_a_rejection_not_a_database_
     assert "Database query failed" not in str(exc_info.value)
 
 
-async def test_a_write_landing_mid_read_is_invisible_to_the_rest_of_the_snapshot(engine, async_db_url) -> None:
-    writer = create_async_engine(async_db_url)
-    window = _window(datetime(2026, 3, 5, 8, 0, tzinfo=UTC))
-    try:
-        async with snapshot_reading(engine, what="reading the probe series") as conn:
-            before = (await conn.execute(text(_COUNT_SQL), _params(window))).scalar_one()
-            async with writer.begin() as write_conn:
-                await write_conn.execute(
-                    text("INSERT INTO series_probe (observed_at, processing_version, value) VALUES (:at, 0, 7)"),
-                    {"at": _OBSERVED_AT[-1] + timedelta(minutes=1)},
-                )
-            after = (await conn.execute(text(_COUNT_SQL), _params(window))).scalar_one()
-    finally:
-        await writer.dispose()
+async def test_a_served_read_carries_no_more_rows_than_the_series_holds(engine) -> None:
+    rows = await _read(engine, _window(datetime(2026, 3, 5, 8, 0, tzinfo=UTC)), max_points=len(_OBSERVED_AT))
 
-    assert before == after
+    assert len(rows) == len(_OBSERVED_AT)
