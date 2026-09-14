@@ -92,13 +92,13 @@ var uniswapV4Tables = []string{
 // append-only too, so all 10 carry a processing_version trigger.
 var uniswapV4VersionedTables = uniswapV4Tables
 
-// uniswapV4Hypertables excludes the append-on-change tables (uniswapV4PlainTables).
+// uniswapV4Hypertables excludes the plain tables (uniswapV4PlainTables and
+// uniswapV4CreatedPlainTables).
 var uniswapV4Hypertables = []string{
 	"uniswap_v4_pool_state",
 	"uniswap_v4_swap",
 	"uniswap_v4_liquidity_event",
 	"uniswap_v4_pool_event",
-	"uniswap_v4_position_nft_transfer",
 }
 
 // uniswapV4PlainTables are append-on-change: partitioning would fan their
@@ -106,6 +106,13 @@ var uniswapV4Hypertables = []string{
 var uniswapV4PlainTables = []string{
 	"uniswap_v4_tick",
 	"uniswap_v4_position",
+}
+
+// uniswapV4CreatedPlainTables follow the create-plain rule: partitioned only in a
+// later migration, once VectorUniswapV4NFTTransferGrowthHigh says the rate calls
+// for it (the runbook section of that name carries the conversion).
+var uniswapV4CreatedPlainTables = []string{
+	"uniswap_v4_position_nft_transfer",
 }
 
 func TestUniswapV4MigrationCreatesTables(t *testing.T) {
@@ -153,11 +160,10 @@ func TestUniswapV4MigrationRegistersHypertables(t *testing.T) {
 type uniswapV4CompressionSettings struct{ segmentby, orderby string }
 
 var uniswapV4HypertableCompressionOrder = map[string]uniswapV4CompressionSettings{
-	"uniswap_v4_pool_state":            {"pool_id", "block_number DESC,block_version DESC,processing_version DESC,block_timestamp DESC"},
-	"uniswap_v4_swap":                  {"pool_id", "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC"},
-	"uniswap_v4_liquidity_event":       {"pool_id", "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC"},
-	"uniswap_v4_pool_event":            {"pool_id", "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC"},
-	"uniswap_v4_position_nft_transfer": {"position_manager_id", "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC"},
+	"uniswap_v4_pool_state":      {"pool_id", "block_number DESC,block_version DESC,processing_version DESC,block_timestamp DESC"},
+	"uniswap_v4_swap":            {"pool_id", "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC"},
+	"uniswap_v4_liquidity_event": {"pool_id", "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC"},
+	"uniswap_v4_pool_event":      {"pool_id", "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC"},
 }
 
 func TestUniswapV4HypertablesChunkIntervalAndCompressionOrder(t *testing.T) {
@@ -195,10 +201,10 @@ func TestUniswapV4HypertablesChunkIntervalAndCompressionOrder(t *testing.T) {
 	}
 }
 
-func TestUniswapV4AppendOnChangeTablesAreNotHypertables(t *testing.T) {
+func TestUniswapV4PlainTablesAreNotHypertables(t *testing.T) {
 	ctx := context.Background()
 
-	for _, table := range uniswapV4PlainTables {
+	for _, table := range slices.Concat(uniswapV4PlainTables, uniswapV4CreatedPlainTables) {
 		t.Run(table, func(t *testing.T) {
 			var exists bool
 			if err := uniswapV4TestPool.QueryRow(ctx, `
@@ -209,7 +215,7 @@ func TestUniswapV4AppendOnChangeTablesAreNotHypertables(t *testing.T) {
 				t.Fatalf("checking %s hypertable registration: %v", table, err)
 			}
 			if exists {
-				t.Errorf("%s should be a regular append-on-change table, not a hypertable", table)
+				t.Errorf("%s should be a plain table, not a hypertable", table)
 			}
 		})
 	}
@@ -313,9 +319,9 @@ func uniswapV4PlanIndexCondCovers(plan, column string) bool {
 	return false
 }
 
-// The PK cannot serve the holder query: it leads with block_timestamp, which the
-// question does not bound. Without the token_block index the answer still comes
-// back — after re-checking every transfer the manager ever emitted.
+// The PK cannot serve the holder query: it is keyed by log site, and the question
+// is about one token. Without the token_block index the answer still comes back —
+// after re-checking every transfer the manager ever emitted.
 func TestUniswapV4NFTTransferTokenBlockIndexServesTheHolderQuery(t *testing.T) {
 	ctx := context.Background()
 	managerID := seedUniswapV4PositionManagerOnChain(t, ctx, uniswapV4FactParentChainID+900)
@@ -1256,12 +1262,31 @@ func TestUniswapV4NFTTransferPrimaryKeyCoversTheLogSiteAndVersion(t *testing.T) 
 	}
 
 	// token_id is deliberately absent: a log site is already unique without it.
+	// So is block_timestamp: it joins the key only in the runbook's hypertable
+	// conversion, where TimescaleDB demands the partition column.
 	want := []string{
-		"block_number", "block_timestamp", "block_version",
+		"block_number", "block_version",
 		"log_index", "position_manager_id", "processing_version",
 	}
 	if !slices.Equal(columns, want) {
 		t.Errorf("uniswap_v4_position_nft_transfer PK = %v, want %v", columns, want)
+	}
+}
+
+// The create-plain rule asks the COMMENT to say the table is plain and what would
+// change that: the tripwire alert, whose runbook section holds the conversion.
+func TestUniswapV4NFTTransferCommentRecordsThePlainTableDecision(t *testing.T) {
+	ctx := context.Background()
+
+	comment := uniswapV4TableComment(t, ctx, "uniswap_v4_position_nft_transfer")
+	for _, want := range []string{
+		"[Timeseries]",
+		"plain",
+		"VectorUniswapV4NFTTransferGrowthHigh",
+	} {
+		if !strings.Contains(comment, want) {
+			t.Errorf("uniswap_v4_position_nft_transfer COMMENT lacks %q:\n%s", want, comment)
+		}
 	}
 }
 

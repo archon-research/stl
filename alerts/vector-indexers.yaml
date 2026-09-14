@@ -2972,6 +2972,50 @@ groups:
             the only source of posm token holders, so it is going stale.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexernonfttransfers
 
+      - alert: VectorUniswapV4NFTTransferGrowthHigh
+        # uniswap_v4_position_nft_transfer is created PLAIN under the create-plain
+        # rule (db/migrations/AGENTS.md): partitioning is a later migration, made
+        # once measurement calls for it, and this rule is that measurement.
+        # Nothing is broken when it fires; the runbook section carries the
+        # conversion.
+        #
+        # Same budget as AppendOnChangeGrowthHigh below: a plain table gets
+        # uncomfortable past ~100M rows, so trip at 250k rows/day sustained =
+        # 2.9 rows/s (~90M rows/year, a year of runway). Mainnet emits ~1k posm
+        # Transfers/day (290 logs over 2,001 blocks on 2026-08-31), two orders
+        # of magnitude under it, so ordinary growth cannot fire this: reaching
+        # it means another chain's indexer writing into the same table, a
+        # traffic regime change, or the ARCT-385 historical backfill of the
+        # transfer log — the last is legitimate, spikes the rate by design and
+        # clears itself, which is what the 6h window and `for: 6h` absorb.
+        #
+        # The counter counts rows the writer PERSISTED (conflicts excluded), so
+        # the rate is real table growth. `sum by (cluster)` without `chain`: the
+        # budget belongs to the table, and one table holds every chain's rows.
+        # One term, so no zero-fill is needed: an absent series and a zero rate
+        # both stay quiet.
+        expr: |
+          sum by (cluster) (
+            rate(uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector"}[6h])
+          ) > 2.9
+        for: 6h
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v4-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap_v4_position_nft_transfer outgrowing its plain-table budget"
+          description: |
+            Rows written into `uniswap_v4_position_nft_transfer` have exceeded
+            250k/day (2.9 rows/s) sustained for 6h — about 90M rows/year against
+            the ~100M-row budget an un-partitioned table is comfortable with.
+            Nothing is broken: the table was created plain and this is the
+            measurement the hypertable decision was deferred to. Check the real
+            row count and whether the transfer-log backfill is running; if the
+            rate is the new normal, plan the conversion described in the runbook.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4nfttransfergrowthhigh
+
       # =====================================================================
       # VEC-572 — design-decision watchdog. Self-contained; keep it last in
       # this group.

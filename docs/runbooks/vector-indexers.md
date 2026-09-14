@@ -3009,6 +3009,144 @@ chain, and the step-3 SQL's `newest_block` tracks the chain head.
 
 ---
 
+## VectorUniswapV4NFTTransferGrowthHigh
+
+**Severity:** warning · **For:** 6h
+
+**Nothing is broken.** `uniswap_v4_position_nft_transfer` was created plain under
+the create-plain rule (`stl-verify/db/migrations/AGENTS.md`): a chunk interval, a
+compression order and a tiering horizon are bets on ingest rate and read shape,
+and this alert is the measurement the rule defers them to. Treat it as a planning
+ticket, not an incident — roughly a year of runway from the moment it fires
+(derivation below).
+
+### What it means
+
+Rows written into `uniswap_v4_position_nft_transfer` — one per PositionManager
+ERC-721 `Transfer` — have run above 250k/day for six hours. The counter is
+`uniswap_v4_nft_transfer_rows_written_total`, the rows the writer **persisted**:
+a redelivered range whose INSERTs all conflict away adds nothing, so the rate is
+real table growth.
+
+**Threshold derivation** (mirrored in the rule comment):
+
+| | |
+|---|---|
+| Plain-table comfort ceiling | ~100M rows (index depth, autovacuum, bloat on rewrite) |
+| Observed rate today | ~1k rows/day on mainnet (290 `Transfer` logs over 2,001 blocks on 2026-08-31) |
+| Alert threshold | 250k rows/day sustained = **2.9 rows/s** (`250000 / 86400 = 2.894`) |
+| Implied growth | ~90M rows/year — about a year of runway |
+
+The rule sums across `chain`: the budget belongs to the table, and one table holds
+every chain's rows (they key on the `uniswap_v4_position_manager` surrogate, which
+spans chains).
+
+### First checks
+
+1. **Actual row count**, the truth the metric approximates, and **ingest per day**
+   by `created_at` — a backfill writes rows with old `block_timestamp`s, so only
+   the insertion time shows where the growth landed:
+
+   ```sql
+   SELECT n_live_tup, pg_size_pretty(pg_total_relation_size(relid)) AS total_size
+   FROM pg_stat_user_tables
+   WHERE relname = 'uniswap_v4_position_nft_transfer';
+
+   SELECT date_trunc('day', created_at) AS day, count(*) AS rows_inserted
+   FROM uniswap_v4_position_nft_transfer
+   WHERE created_at > now() - INTERVAL '30 days'
+   GROUP BY 1 ORDER BY 1;
+   ```
+
+2. **Is the transfer-log backfill running?** The historical backfill from the
+   PositionManager's deploy block (`uniswap_v4_position_manager.deploy_block`)
+   writes years of transfers in hours and fires this by design. Confirm it, let it
+   finish, expect the alert to clear itself.
+
+3. **What changed.** Another chain's `uniswap-v4-indexer` now writing into the
+   same table, or a traffic regime change on an existing one:
+
+   ```sql
+   SELECT m.chain_id, count(*) AS rows_last_day
+   FROM uniswap_v4_position_nft_transfer t
+   JOIN uniswap_v4_position_manager m ON m.id = t.position_manager_id
+   WHERE t.created_at > now() - INTERVAL '1 day'
+   GROUP BY 1 ORDER BY 1;
+   ```
+
+### Remediation — converting to a hypertable
+
+Only once the rate is confirmed to be the new normal. A **new** migration, never
+an edit to the creating one. The conversion is in place —
+`create_hypertable(…, migrate_data => true)` keeps the FK, the secondary indexes,
+the `processing_version` trigger and the grants — at the price of an exclusive
+lock while the rows migrate, so it needs a maintenance window.
+
+```sql
+-- 1. block_timestamp joins the PK: TimescaleDB requires the partition column in
+--    every unique index. One height on one fork is one block, so it is
+--    functionally determined by (block_number, block_version) and the
+--    uniqueness the key guards is unchanged.
+ALTER TABLE uniswap_v4_position_nft_transfer
+    DROP CONSTRAINT uniswap_v4_position_nft_transfer_pkey,
+    ADD PRIMARY KEY (position_manager_id, block_timestamp, block_number, block_version,
+                     log_index, processing_version);
+
+-- 2. Partition in place. 30 days: VEC-663's cap, as for the four V4 hypertables.
+SELECT create_hypertable('uniswap_v4_position_nft_transfer', 'block_timestamp',
+                         chunk_time_interval => INTERVAL '30 days',
+                         migrate_data => true);
+
+-- 3. Compression: segmented by manager, ordered the way the holder read descends.
+ALTER TABLE uniswap_v4_position_nft_transfer SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'position_manager_id',
+    timescaledb.compress_orderby = 'block_number DESC, block_version DESC, log_index DESC, processing_version DESC'
+);
+SELECT add_compression_policy('uniswap_v4_position_nft_transfer', INTERVAL '2 days');
+```
+
+Three things the conversion has to carry, or it ships a defect:
+
+1. **The VEC-615 version shape, before any compression policy.** On a columnstored
+   chunk `ON CONFLICT` is resolved before row triggers fire, so a
+   `processing_version` left to the trigger reaches the arbiter as `DEFAULT 0` and
+   a rebuild's correction row is silently discarded. The four compressed V4 fact
+   tables carry a `next_processing_version_<table>()` function that the INSERT
+   calls in its `VALUES` list and the trigger delegates to
+   (`20260819_120000_create_uniswap_v4_tables.sql`, `uniswap_v4_pool_state`);
+   give this table the same and switch `queueV4NFTTransfers` to call it, in the
+   same PR. `TestUniswapV4CompressedFactTablesHaveAVersionFunction` asserts it
+   once the table joins `uniswapV4Hypertables`.
+2. **Pin `block_timestamp` in the trigger's two lookups** by equality, so the
+   per-inserted-row version lookup prunes to one chunk instead of paying the
+   VEC-541 fan-out.
+3. **No S3 tiering policy — or a holder read bounded inside the horizon.** The
+   holder query (`uniswapV4HolderAtBlockSQL`, and the SQL in the V4 overview
+   above) walks one token's history downwards from `block_number <= N` with no
+   lower bound; a token's last transfer can be arbitrarily old, and with
+   `timescaledb.enable_tiered_reads` off a row past the horizon is invisible, so
+   the query answers "no holder" for a token that plainly has one. Record the
+   choice in the table `COMMENT`.
+
+Then, in the same PR: the table `COMMENT` (`[Timeseries]` → `[Hypertable]`, the
+plain-table sentence goes), `uniswapV4Hypertables` and
+`uniswapV4HypertableCompressionOrder` in the migration test gain the table, and
+this rule is deleted or re-scoped rather than left firing (`alerts/AGENTS.md`,
+alert ownership).
+
+### Verify recovery
+
+If the spike was the backfill, recovery is the rate falling back:
+
+```promql
+sum(rate(uniswap_v4_nft_transfer_rows_written_total[6h])) <= 2.9
+```
+
+After a conversion the rule no longer describes the table — remove it in that PR.
+
+---
+
 ## VectorUniswapV4AppendOnChangeGrowthHigh
 
 **Severity:** warning · **For:** 6h
@@ -3022,8 +3160,10 @@ moment it fires (derivation below).
 ### What it means
 
 `uniswap_v4_tick` and `uniswap_v4_position` are deliberately **plain tables, not
-hypertables** — the only two `uniswap_v4_*` fact tables that are. The reason is
-their write path, not their size.
+hypertables**, and permanently so. The reason is their write path, not their
+size. (`uniswap_v4_position_nft_transfer` is plain too, but under the
+create-plain rule and with its own tripwire,
+[`VectorUniswapV4NFTTransferGrowthHigh`](#vectoruniswapv4nfttransfergrowthhigh).)
 
 Both are *append-on-change*. Every write first reads the latest row per natural
 key (`(pool_id, tick)` / `(pool_id, owner, tick_lower, tick_upper, salt)`) to

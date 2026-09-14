@@ -85,51 +85,23 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_position_nft_transfer
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     processing_version  INT         NOT NULL DEFAULT 0,
     build_id            INT         NOT NULL DEFAULT 0,
-    PRIMARY KEY (position_manager_id, block_timestamp, block_number, block_version,
-                 log_index, processing_version)
-) WITH (
-    tsdb.hypertable,
-    tsdb.partition_column = 'block_timestamp',
-    -- 30 days: VEC-663's rule, as for the parent's four hypertables (a few MB/day, so the cap decides).
-    tsdb.chunk_interval = '30 days',
-    tsdb.columnstore = false
+    PRIMARY KEY (position_manager_id, block_number, block_version, log_index, processing_version)
 );
-
-ALTER TABLE uniswap_v4_position_nft_transfer SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = 'position_manager_id',
-    timescaledb.compress_orderby = 'block_number DESC, block_version DESC, log_index DESC, processing_version DESC'
-);
-
-SELECT add_compression_policy('uniswap_v4_position_nft_transfer', INTERVAL '2 days', if_not_exists => TRUE);
-
-DO $$ BEGIN
-    PERFORM add_tiering_policy('uniswap_v4_position_nft_transfer', INTERVAL '1 year', if_not_exists => TRUE);
-EXCEPTION WHEN undefined_function THEN
-    RAISE NOTICE 'add_tiering_policy not available, skipping tiering for uniswap_v4_position_nft_transfer';
-END $$;
 
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_position_nft_transfer_pv_lookup
     ON uniswap_v4_position_nft_transfer
        (position_manager_id, block_number, block_version, log_index, build_id);
 
 -- The holder query walks one token's history downwards, a prefix the PK cannot
--- serve: it leads with block_timestamp, which the question does not bound.
+-- serve: it is keyed by log site, and the question is about one token.
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_position_nft_transfer_token_block
     ON uniswap_v4_position_nft_transfer
        (position_manager_id, token_id, block_number DESC, block_version DESC, log_index DESC);
 
--- Prefix 'u4pnt' for uniswap_v4_position_nft_transfer. Same VEC-615 shape as
--- uniswap_v4_pool_state's (see the note there): the INSERT calls the version
--- function, the trigger delegates to it, force_custom_plan per VEC-541.
-CREATE OR REPLACE FUNCTION next_processing_version_uniswap_v4_position_nft_transfer(
-    p_position_manager_id BIGINT,
-    p_block_number        BIGINT,
-    p_block_version       INT,
-    p_log_index           INT,
-    p_build_id            INT)
-RETURNS INT
-VOLATILE
+-- Prefix 'u4pnt' for uniswap_v4_position_nft_transfer. force_custom_plan per
+-- VEC-541 (see assign_processing_version_uniswap_v4_pool_state).
+CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_position_nft_transfer()
+RETURNS TRIGGER
 SET plan_cache_mode = 'force_custom_plan'
 AS $$
 DECLARE
@@ -137,42 +109,29 @@ DECLARE
     max_ver      INT;
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
-        format('u4pnt|%s|%s|%s|%s', p_position_manager_id, p_block_number,
-               p_block_version, p_log_index), 0));
+        format('u4pnt|%s|%s|%s|%s', NEW.position_manager_id, NEW.block_number,
+               NEW.block_version, NEW.log_index), 0));
 
     SELECT processing_version INTO existing_ver
     FROM uniswap_v4_position_nft_transfer
-    WHERE position_manager_id = p_position_manager_id
-      AND block_number        = p_block_number
-      AND block_version       = p_block_version
-      AND log_index           = p_log_index
-      AND build_id            = p_build_id
+    WHERE position_manager_id = NEW.position_manager_id
+      AND block_number        = NEW.block_number
+      AND block_version       = NEW.block_version
+      AND log_index           = NEW.log_index
+      AND build_id            = NEW.build_id
     LIMIT 1;
 
     IF FOUND THEN
-        RETURN existing_ver;
+        NEW.processing_version := existing_ver;
+    ELSE
+        SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
+        FROM uniswap_v4_position_nft_transfer
+        WHERE position_manager_id = NEW.position_manager_id
+          AND block_number        = NEW.block_number
+          AND block_version       = NEW.block_version
+          AND log_index           = NEW.log_index;
+        NEW.processing_version := max_ver + 1;
     END IF;
-
-    SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
-    FROM uniswap_v4_position_nft_transfer
-    WHERE position_manager_id = p_position_manager_id
-      AND block_number        = p_block_number
-      AND block_version       = p_block_version
-      AND log_index           = p_log_index;
-    RETURN max_ver + 1;
-END;
-$$ LANGUAGE plpgsql;
-
-COMMENT ON FUNCTION next_processing_version_uniswap_v4_position_nft_transfer(BIGINT, BIGINT, INT, INT, INT) IS
-  'Returns the processing_version a uniswap_v4_position_nft_transfer row at (position_manager, block, block_version, log_index) must carry for build_id: the version that build already wrote there, else MAX+1. Takes the key''s advisory lock (ADR-0002 §3) for the transaction. Call it in the INSERT''s VALUES list: on a columnstored chunk ON CONFLICT is resolved before row triggers fire, so a version left to the trigger is DEFAULT 0 there and the correction row is silently discarded (VEC-615).';
-
-CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_position_nft_transfer()
-RETURNS TRIGGER
-SET plan_cache_mode = 'force_custom_plan'
-AS $$
-BEGIN
-    NEW.processing_version := next_processing_version_uniswap_v4_position_nft_transfer(
-        NEW.position_manager_id, NEW.block_number, NEW.block_version, NEW.log_index, NEW.build_id);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -183,7 +142,7 @@ CREATE TRIGGER trigger_assign_processing_version
 EXECUTE FUNCTION assign_processing_version_uniswap_v4_position_nft_transfer();
 
 COMMENT ON TABLE uniswap_v4_position_nft_transfer IS
-  '[Hypertable] One row per ERC-721 Transfer log emitted by the Uniswap V4 PositionManager: a posm position NFT being minted, moved or burned. The holder of token_id at block N is the newest row at or below it -- WHERE position_manager_id = M AND token_id = T AND block_number <= N ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC LIMIT 1 -- and its to_address is the answer; log_index is part of that order because a token can change hands twice in one block. Every field is carried by the log itself, so a reorg redelivery re-decodes the new fork''s logs and appends them at the new block_version; nothing is ever re-read from chain state, which also means a row decoded on a fork the watcher later orphaned is superseded only if the canonical block re-emits a transfer of that token -- the holder query therefore excludes (block_number, block_version) pairs that block_states marks is_orphaned. Partitioned on block_timestamp (30-day chunks) rather than left plain: mainnet mints alone run to hundreds of thousands of tokens, transfers grow without bound, and no write path here reads an earlier row. Append-only via the processing_version trigger.';
+  '[Timeseries] One row per ERC-721 Transfer log emitted by the Uniswap V4 PositionManager: a posm position NFT being minted, moved or burned. The holder of token_id at block N is the newest row at or below it -- WHERE position_manager_id = M AND token_id = T AND block_number <= N ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC LIMIT 1 -- and its to_address is the answer; log_index is part of that order because a token can change hands twice in one block. Every field is carried by the log itself, so a reorg redelivery re-decodes the new fork''s logs and appends them at the new block_version; nothing is ever re-read from chain state, which also means a row decoded on a fork the watcher later orphaned is superseded only if the canonical block re-emits a transfer of that token -- the holder query therefore excludes (block_number, block_version) pairs that block_states marks is_orphaned. Created plain, not as a hypertable, under the create-plain rule in db/migrations/AGENTS.md: mainnet emits about a thousand posm transfers a day (290 logs over 2,001 blocks on 2026-08-31), and partitioning is a later migration made once measurement calls for it. The VectorUniswapV4NFTTransferGrowthHigh row-growth alert is that measurement (250k rows/day sustained), and its runbook section carries the conversion -- block_timestamp joins the PK, create_hypertable with migrate_data, 30-day chunks, compression segmented by position_manager_id behind the VEC-615 version function, and no tiering policy unless the holder read is bounded inside the horizon, because that read has no lower bound and timescaledb.enable_tiered_reads is off. Append-only via the processing_version trigger.';
 COMMENT ON COLUMN uniswap_v4_position_nft_transfer.position_manager_id IS
   'PK, FK->uniswap_v4_position_manager.id. Surrogate id of the PositionManager version that emitted the log. There is no chain_id column: the chain comes from this FK, exactly as it does for uniswap_v4_swap through uniswap_v4_pool.';
 COMMENT ON COLUMN uniswap_v4_position_nft_transfer.token_id IS
@@ -193,7 +152,7 @@ COMMENT ON COLUMN uniswap_v4_position_nft_transfer.block_number IS
 COMMENT ON COLUMN uniswap_v4_position_nft_transfer.block_version IS
   'PK. Reorg version of the block (0 = first/canonical; incremented when a block hash is replaced by a chain reorg).';
 COMMENT ON COLUMN uniswap_v4_position_nft_transfer.block_timestamp IS
-  'PK, Partition. Block timestamp (UTC); hypertable partition column.';
+  'Block timestamp (UTC) of the block that emitted the log.';
 COMMENT ON COLUMN uniswap_v4_position_nft_transfer.tx_hash IS
   'Transaction hash, 32 bytes.';
 COMMENT ON COLUMN uniswap_v4_position_nft_transfer.log_index IS
