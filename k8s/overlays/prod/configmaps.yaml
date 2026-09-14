@@ -1003,3 +1003,17 @@ data:
   # now() so its legacy rows carry wall clock. Both join once their views read block_meta
   # instead, as position_maple_loan already does; Anchorage and prime allocation follow.
   POSITION_PROJECTIONS: "materialize_morpho_market,materialize_morpho_vault"
+# block-meta-loader (VEC-491): on-demand Temporal worker filling block_meta for
+# Ethereum from that chain's raw-block archive. Started by hand from the Temporal
+# UI; no schedule. S3_BUCKET and DATABASE_URL come from the ExternalSecret, since
+# both are per-environment infra config.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: block-meta-loader
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  DEPLOY_ENV: "prod"

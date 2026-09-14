@@ -77,6 +77,7 @@ resources:
   # archive (backup worker, #870) but no republisher yet: its ServiceAccount
   # needs a Pod Identity grant in the infra repo first — follow-up, not here.
   - ../../base/block-republisher
+  - ../../base/block-meta-loader
   - ../../base/arbitrum-block-republisher
   - ../../base/avalanche-block-republisher
   - ../../base/base-block-republisher

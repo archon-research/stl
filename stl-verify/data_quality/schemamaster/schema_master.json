@@ -41,8 +41,6 @@
     "uniswap_v4_pool_manager",
     "uniswap_v4_pool_state",
     "uniswap_v4_position",
-    "uniswap_v4_position_manager",
-    "uniswap_v4_position_nft_transfer",
     "uniswap_v4_swap",
     "uniswap_v4_tick"
   ],
@@ -1521,11 +1519,6 @@
       "class": "A",
       "not_null": true
     },
-    "observations": {
-      "type": "int8",
-      "class": "A",
-      "not_null": true
-    },
     "detail": {
       "type": "text",
       "class": "A",
@@ -1571,6 +1564,10 @@
     },
     "block_meta": {
       "type": "dimension",
+      "owner": "infra"
+    },
+    "block_meta_worklist": {
+      "type": "infrastructure",
       "owner": "infra"
     },
     "borrower": {
@@ -1758,10 +1755,6 @@
       "owner": "prime"
     },
     "position_projection_run": {
-      "type": "infrastructure",
-      "owner": "prime"
-    },
-    "aave_unmapped_reserve": {
       "type": "infrastructure",
       "owner": "prime"
     },

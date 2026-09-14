@@ -63,3 +63,4 @@ cronjob uniswap-v4-position-bootstrap uniswap-v4-position-bootstrap
 cronjob morpho-v2-bootstrap        morpho-v2-bootstrap
 cronjob morpho-vault-backfill      morpho-vault-backfill
 cronjob block-republisher          block-republisher
+cronjob block-meta-loader          block-meta-loader
