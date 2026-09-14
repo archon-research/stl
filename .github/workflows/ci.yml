@@ -180,6 +180,14 @@ jobs:
             scripts/deploy/render-overlay-images.sh --env "$env" --check "k8s/overlays/$env/kustomization.yaml" --allow-missing
           done
 
+      # ORB-366: the layer comparator's dangerous failure is a reassuring
+      # verdict — "unchanged" because a credential expired or a manifest would
+      # not parse. Those paths cannot be exercised against a real registry, so
+      # they are driven through a stub ECR here. Needs no credentials and takes
+      # seconds, so it is not change-detected either.
+      - name: Layer comparator reports failures as failures
+        run: scripts/deploy/compare-image-layers.test.sh
+
   ci-passed:
     name: Success
     needs:

@@ -32,7 +32,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/psm3"
 )
 
-// Build-time variables - can be set via ldflags, otherwise populated from Go's build info.
 var (
 	GitCommit string
 	GitBranch string
@@ -40,7 +39,7 @@ var (
 )
 
 func init() {
-	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
+	buildinfo.Populate(&GitCommit, &GitBranch, &BuildTime)
 }
 
 func main() {
