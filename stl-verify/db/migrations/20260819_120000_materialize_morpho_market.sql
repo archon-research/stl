@@ -27,10 +27,20 @@ netted AS (
 series AS (
     SELECT n.*,
            abs(n.signed_net) AS net_loan,
-           (array_remove(array_agg(CASE WHEN n.signed_net <> 0 THEN n.signed_net > 0 END)
-                                   OVER (PARTITION BY n.user_id, n.morpho_market_id
-                                         ORDER BY n.block_number, n.block_version, n.processing_version
-                                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), NULL)) AS dirs
+           -- Direction of the latest non-zero observation, carried forward. A max() of one array per
+           -- row, not array_agg over the frame: array_agg has no inverse transition function, so an
+           -- expanding frame copies the whole accumulated array once per row -- K(K+1)/2 element copies
+           -- per position, measured at 3.23 billion for 1.36 million rows, quadratic in a position's
+           -- history. max() keeps constant-size state. (block_number, block_version, processing_version)
+           -- already orders the partition, so the greatest array IS the latest such row and the
+           -- direction rides in slot 4. NULL until the first non-zero row, which keeps the leading
+           -- net-zero rows NULL so closure still drops them.
+           (max(CASE WHEN n.signed_net <> 0
+                     THEN ARRAY[n.block_number, n.block_version::bigint,
+                                n.processing_version::bigint, (n.signed_net > 0)::int::bigint]
+                END) OVER (PARTITION BY n.user_id, n.morpho_market_id
+                           ORDER BY n.block_number, n.block_version, n.processing_version
+                           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))[4] = 1 AS is_loan
     FROM netted n
 ),
 legs AS (
@@ -40,7 +50,7 @@ legs AS (
     SELECT s.user_id, s.morpho_market_id,
            encode(m.market_id, 'hex') || ':' || encode(lt.address, 'hex') AS instrument_key,
            s.net_loan AS quantity,
-           CASE s.dirs[cardinality(s.dirs)] WHEN true THEN 'LOAN' WHEN false THEN 'BORROW' END AS deal_type,
+           CASE s.is_loan WHEN true THEN 'LOAN' WHEN false THEN 'BORROW' END AS deal_type,
            s.block_number, s.block_version, s.processing_version, s.block_timestamp
     FROM series s
     JOIN morpho_market m ON m.id = s.morpho_market_id
