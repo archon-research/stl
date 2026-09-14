@@ -11,6 +11,10 @@ Before modifying either side, read both this file and
   the label, severity→routing, and window conventions; follow them.
 - Cover at minimum: liveness/stall, error rate, silent-empty / data-quality
   holes the error path won't catch, and latency.
+- A PR that creates a database table ships a **row-growth tripwire** for it:
+  tables are created plain (`stl-verify/db/migrations/AGENTS.md`) and that
+  alert is what notices one growing. Its runbook section carries the path;
+  copy `VectorUniswapV4AppendOnChangeGrowthHigh`.
 - A counter an alert reads with an absence shape (`increase()`/`rate()` `== 0`)
   needs its series to exist from process start. An unseeded OTel counter series
   first appears at 1, so `increase()` misses the 0->1 after every pod rollover
