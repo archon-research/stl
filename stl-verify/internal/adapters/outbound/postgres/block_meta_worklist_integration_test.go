@@ -306,3 +306,94 @@ func TestBlockMetaUpsertStampsBuildAndRun(t *testing.T) {
 		t.Errorf("run_id = %d, want %d", gotRun, runID)
 	}
 }
+
+// Four of the six source tables carry a one-year tiering policy. A tiered chunk is still listed in
+// the chunk catalogue, so a window gets built for it; read with enable_tiered_reads at its default
+// of off, that window silently returns nothing — losing exactly the deep-tail blocks this loader
+// exists to cover. Nothing is a year old yet, so no local fixture can tier a chunk; what is
+// assertable is that the setting is on for the statement, which is the thing that was missing.
+//
+// The arm list is swapped for a probe that records the setting it actually observes, because the
+// value has to be read from inside the arm's own transaction — SET LOCAL is invisible outside it.
+func TestWorkListEnumeratesWithTieredReadsOn(t *testing.T) {
+	ctx := context.Background()
+	pool, dsn, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	if _, err := pool.Exec(ctx, `CREATE TABLE tiered_probe (setting text NOT NULL)`); err != nil {
+		t.Fatalf("create the probe table: %v", err)
+	}
+
+	// The default is already on in the versions in use, so asserting the arm observes "on" proves
+	// nothing by itself — it passes with the SET LOCAL deleted. Lower the database default to off
+	// first, so "on" can only come from the statement's own setting.
+	var alter string
+	if err := pool.QueryRow(ctx,
+		`SELECT format('ALTER DATABASE %I SET timescaledb.enable_tiered_reads = off', current_database())`).Scan(&alter); err != nil {
+		t.Fatalf("build the ALTER DATABASE: %v", err)
+	}
+	if _, err := pool.Exec(ctx, alter); err != nil {
+		t.Fatalf("lower the default: %v", err)
+	}
+
+	// A fresh pool, so sessions pick the lowered default up.
+	lowered := testutil.ConnectPool(t, dsn)
+	defer lowered.Close()
+	var def string
+	if err := lowered.QueryRow(ctx, `SELECT current_setting('timescaledb.enable_tiered_reads')`).Scan(&def); err != nil {
+		t.Fatalf("read the lowered default: %v", err)
+	}
+	if def != "off" {
+		t.Fatalf("database default is %q, want off; the test would pass on the default alone", def)
+	}
+
+	// One arm over sparklend_reserve_data, which the fixture gives chunks, so windows exist and the
+	// statement runs. It writes the observed setting instead of work-list rows.
+	original := workListArms
+	workListArms = []workListArm{{
+		table:   "sparklend_reserve_data",
+		partCol: "sr.block_number",
+		sql: `INSERT INTO tiered_probe (setting)
+		      SELECT current_setting('timescaledb.enable_tiered_reads')
+		        FROM sparklend_reserve_data sr
+		       WHERE $1::bigint > 0 AND %s
+		       LIMIT 1`,
+	}}
+	t.Cleanup(func() { workListArms = original })
+
+	buildID, runID := testutil.OpenTestRun(t, ctx, lowered)
+	repo, err := NewBlockMetaRepository(lowered, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+	if _, err := repo.OpenWorkList(ctx, 1, 0); err != nil {
+		t.Fatalf("open the work list: %v", err)
+	}
+
+	var observed []string
+	rows, err := lowered.Query(ctx, `SELECT setting FROM tiered_probe`)
+	if err != nil {
+		t.Fatalf("read the probe: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var got string
+		if err := rows.Scan(&got); err != nil {
+			t.Fatalf("scan the probe: %v", err)
+		}
+		observed = append(observed, got)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate the probe: %v", err)
+	}
+
+	if len(observed) == 0 {
+		t.Fatal("the probe arm never ran; the test proves nothing about the setting")
+	}
+	for _, got := range observed {
+		if got != "on" {
+			t.Errorf("an arm statement ran with enable_tiered_reads=%q against an off default; a tiered chunk would return nothing", got)
+		}
+	}
+}

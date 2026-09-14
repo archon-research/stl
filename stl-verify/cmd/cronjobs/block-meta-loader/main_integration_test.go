@@ -143,6 +143,19 @@ func TestBlockMetaLoad_FillsReferencedBlocks(t *testing.T) {
 	if rows != 2 {
 		t.Errorf("block_meta holds %d rows, want 2", rows)
 	}
+
+	// Provenance has to survive the whole path, not just the repository: the activity opens the
+	// writer run and hands the build down, and only an end-to-end check sees it drop it. 0 is the
+	// column default, which ADR-0006 reads as pre-tracking data.
+	var unstamped int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM block_meta
+		 WHERE chain_id = 1 AND (build_id IS NULL OR build_id = 0 OR run_id IS NULL)`).Scan(&unstamped); err != nil {
+		t.Fatalf("count unstamped rows: %v", err)
+	}
+	if unstamped != 0 {
+		t.Errorf("%d row(s) carry no build or run; the activity is not passing them down", unstamped)
+	}
 }
 
 // The guard that keeps one chain's archive from being read under another chain's id. It runs at
