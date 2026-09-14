@@ -60,3 +60,4 @@ cronjob transform-bootstrap        -                          # one-off Job; pin
 cronjob morpho-v2-bootstrap        morpho-v2-bootstrap
 cronjob morpho-vault-backfill      morpho-vault-backfill
 cronjob block-republisher          block-republisher
+cronjob block-meta-loader          block-meta-loader

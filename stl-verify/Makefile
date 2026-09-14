@@ -2419,7 +2419,7 @@ docker-release-morpho-vault-backfill: ecr-login _docker-release-morpho-vault-bac
 
 _docker-release-morpho-vault-backfill-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Morpho Vault Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/morpho-vault-backfill GO_BIN=morpho-vault-backfill GO_CACHE_KEY="cronjob-morpho-vault-backfill" GO_TAG="morpho-vault-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="morpho-vault-backfill-latest"
-# block-meta-loader: a run-to-completion per-chain Job that fills the block_meta dimension from a
+# block-meta-loader: a per-chain on-demand Temporal worker that fills the block_meta dimension from a
 # chain's S3 raw-block archive. Ships in the shared cronjob ECR repo with a name-prefixed tag.
 docker-build-block-meta-loader:
 	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/block-meta-loader --build-arg BIN=block-meta-loader -t stl-block-meta-loader:$(LOCAL_TAG) -f Dockerfile.common .

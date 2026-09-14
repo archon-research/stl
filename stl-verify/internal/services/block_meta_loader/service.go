@@ -32,6 +32,12 @@ type Config struct {
 	ChainID   int64  // the chain whose block_meta rows this run fills
 	Bucket    string // that chain's raw-block S3 bucket (validate with chainutil.ValidateS3BucketForChain in main)
 	BatchSize int    // blocks fetched+upserted per iteration, one transaction each; defaults to 500 if 0, clamped to maxBatchSize
+
+	// OnProgress, when set, is called after every committed batch with the running
+	// total. It exists so a Temporal activity can heartbeat a real number rather
+	// than a bare liveness ping; a run that reports nothing for its whole duration
+	// is indistinguishable from a hung one. Optional: nil means no reporting.
+	OnProgress func(total int64)
 }
 
 // Service reads block headers from S3 and upserts block_meta for one chain.
@@ -115,6 +121,9 @@ func (s *Service) Run(ctx context.Context) (int64, error) {
 		}
 		total += n
 
+		if s.cfg.OnProgress != nil {
+			s.cfg.OnProgress(total)
+		}
 		s.logger.Info("block_meta batch", "chain", s.cfg.ChainID, "upserted", n, "total", total)
 	}
 }

@@ -960,3 +960,18 @@ data:
   # Same value as staging; the deployment's memory limit is sized for it — raise
   # both together (k8s/base/core-model-runner/deployment.yaml).
   CORE_MODEL_N_MC: "10000"
+---
+# block-meta-loader (VEC-491): on-demand Temporal worker filling block_meta for
+# Ethereum from that chain's raw-block archive. Started by hand from the Temporal
+# UI; no schedule. S3_BUCKET and DATABASE_URL come from the ExternalSecret, since
+# both are per-environment infra config.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: block-meta-loader
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  DEPLOY_ENV: "prod"

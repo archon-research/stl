@@ -1,9 +1,24 @@
-// Command block-meta-loader fills the block_meta dimension for ONE chain from that chain's S3
-// raw-block archive (the authoritative block-header timestamp). It is a run-to-completion job:
-// it exits once no referenced block is missing from block_meta. Run one per chain, out of band.
+// Command block-meta-loader is an on-demand Temporal worker that fills the
+// block_meta dimension for ONE chain from that chain's S3 raw-block archive (the
+// authoritative block-header timestamp). One deployment serves one chain, on that
+// chain's task queue.
 //
-// Env: DATABASE_URL (write role), CHAIN_ID, S3_BUCKET (that chain's raw-block bucket), DEPLOY_ENV.
-// Optional: AWS_REGION (default eu-west-1), AWS_ENDPOINT_URL (LocalStack), BATCH_SIZE, LOG_LEVEL.
+// It is a worker rather than a Job because the run must be started by an explicit
+// operator action, never by a deploy or an ArgoCD sync: the deployment idles on
+// its task queue with no schedule, and an operator starts a run from the Temporal
+// UI. The workflow id guards concurrency, cancel is a button, and a timed-out or
+// cancelled attempt resumes from the committed work list rather than
+// re-enumerating the chain.
+//
+//	temporal workflow start \
+//	  --task-queue block-meta-loader \
+//	  --type BlockMetaLoad \
+//	  --workflow-id block-meta-loader-ethereum-2026-09-14 \
+//	  --input '{}'
+//
+// Env: DATABASE_URL (write role), CHAIN_ID, S3_BUCKET (that chain's raw-block
+// bucket), DEPLOY_ENV. Optional: AWS_REGION (default eu-west-1), AWS_ENDPOINT_URL
+// (LocalStack), BATCH_SIZE, LOG_LEVEL.
 package main
 
 import (
@@ -12,115 +27,98 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awssdkconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
-	"github.com/archon-research/stl/stl-verify/internal/services/block_meta_loader"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-		Level: env.ParseLogLevel(slog.LevelInfo),
-	}))
-	slog.SetDefault(logger)
-	if err := run(context.Background(), logger); err != nil {
-		logger.Error("block-meta-loader failed", "error", err)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+
+	err := run(ctx)
+	cancel()
+	if err != nil {
+		slog.Error("block-meta-loader exited with error", "error", err)
 		os.Exit(1)
 	}
-	logger.Info("block-meta-loader completed successfully")
 }
 
-func run(parent context.Context, logger *slog.Logger) error {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		return fmt.Errorf("DATABASE_URL is required")
-	}
-	bucket := os.Getenv("S3_BUCKET")
-	if bucket == "" {
-		return fmt.Errorf("S3_BUCKET is required")
-	}
-	deployEnv := os.Getenv("DEPLOY_ENV")
-	chainID, err := strconv.ParseInt(os.Getenv("CHAIN_ID"), 10, 64)
+var (
+	GitCommit string
+	GitBranch string
+	BuildTime string
+)
+
+func init() {
+	buildinfo.Populate(&GitCommit, &GitBranch, &BuildTime)
+}
+
+// workflowTypeName is what an operator types into the Temporal UI's "Workflow
+// Type" field, so it is registered explicitly rather than derived from the Go
+// function name — a rename must not invalidate the runbook or muscle memory.
+const workflowTypeName = "BlockMetaLoad"
+
+func run(ctx context.Context) error {
+	taskQueue, err := taskQueueName()
 	if err != nil {
-		return fmt.Errorf("CHAIN_ID: %w", err)
-	}
-	batchSize := 0
-	if v := os.Getenv("BATCH_SIZE"); v != "" {
-		if batchSize, err = strconv.Atoi(v); err != nil {
-			return fmt.Errorf("BATCH_SIZE: %w", err)
-		}
+		return fmt.Errorf("resolving the task queue: %w", err)
 	}
 
-	// Guard against pointing at the wrong chain's archive (same check raw-data-backup uses at startup).
-	if err := chainutil.ValidateS3BucketForChain(chainID, bucket, deployEnv); err != nil {
-		return err
-	}
-
-	// Graceful shutdown: SIGINT/SIGTERM cancels the context, which the loader checks between batches.
-	ctx, stop := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	reader, err := newS3Reader(ctx, logger)
+	cfg, err := loadConfig()
 	if err != nil {
-		return err
+		return fmt.Errorf("loading configuration: %w", err)
 	}
 
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(dsn))
-	if err != nil {
-		return fmt.Errorf("connecting to database: %w", err)
-	}
-	defer pool.Close()
+	return temporal.RunWorker(ctx, temporal.BuildMeta{
+		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
+	}, temporal.WorkerConfig{
+		Name:         taskQueue,
+		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(cfg.dsn)),
+		Register: func(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
+			return register(ctx, cfg, deps, r)
+		},
+	})
+}
 
-	_, runID, err := writerrun.Open(ctx, pool)
+func register(ctx context.Context, cfg config, deps temporal.Dependencies, r worker.Registry) error {
+	reader, err := newS3Reader(ctx, deps.Logger)
 	if err != nil {
 		return err
 	}
 
-	repo, err := postgres.NewBlockMetaRepository(pool, logger, runID)
-	if err != nil {
-		return fmt.Errorf("creating block_meta repository: %w", err)
-	}
+	activities := &loadActivities{cfg: cfg, pool: deps.Pool, reader: reader, logger: deps.Logger}
 
-	svc, err := block_meta_loader.New(block_meta_loader.Config{
-		ChainID:   chainID,
-		Bucket:    bucket,
-		BatchSize: batchSize,
-	}, repo, reader, logger)
-	if err != nil {
-		return err
-	}
+	r.RegisterWorkflowWithOptions(loadWorkflow, workflow.RegisterOptions{Name: workflowTypeName})
+	activities.register(r)
 
-	logger.Info("starting block-meta-loader", "chain", chainID, "bucket", bucket)
-	loaded, err := svc.Run(ctx)
-	if err != nil {
-		return err
-	}
-	logger.Info("block-meta-loader done", "chain", chainID, "rows", loaded)
+	deps.Logger.Info("block-meta-loader configured",
+		"chainID", cfg.chainID, "bucket", cfg.bucket, "environment", cfg.deployEnv)
 	return nil
 }
 
-// newS3Reader builds the raw-block archive reader from the environment. A custom endpoint
-// (LocalStack) needs path-style addressing; virtual-hosted URLs won't resolve against it.
+// newS3Reader builds the raw-block archive reader from the environment. A custom
+// endpoint (LocalStack) needs path-style addressing; virtual-hosted URLs won't
+// resolve against it.
 func newS3Reader(ctx context.Context, logger *slog.Logger) (*s3adapter.Reader, error) {
 	awsRegion := os.Getenv("AWS_REGION")
 	if awsRegion == "" {
 		awsRegion = "eu-west-1"
 	}
-	awsOpts := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(awsRegion)}
+	awsOpts := []func(*awssdkconfig.LoadOptions) error{awssdkconfig.WithRegion(awsRegion)}
 	endpoint := os.Getenv("AWS_ENDPOINT_URL")
 	if endpoint != "" {
-		awsOpts = append(awsOpts, awsconfig.WithBaseEndpoint(endpoint))
+		awsOpts = append(awsOpts, awssdkconfig.WithBaseEndpoint(endpoint))
 		logger.Info("using custom AWS endpoint", "url", endpoint)
 	}
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsOpts...)
+	awsCfg, err := awssdkconfig.LoadDefaultConfig(ctx, awsOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("loading AWS config: %w", err)
 	}
