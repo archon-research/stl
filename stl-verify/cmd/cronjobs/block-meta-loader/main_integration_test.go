@@ -103,6 +103,8 @@ func TestBlockMetaLoad_FillsReferencedBlocks(t *testing.T) {
 	uploadBlock(t, ctx, s3Client, 501, 0, "0x67c02720")
 
 	t.Setenv("BUILD_GIT_HASH", "integration-test")
+	// Off, so this test is about the fill path. The margin's own behaviour is below.
+	t.Setenv("HEAD_MARGIN", "0")
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("DEPLOY_ENV", testDeployEnv)
 	t.Setenv("S3_BUCKET", testBucket)
@@ -153,5 +155,60 @@ func TestBlockMetaLoad_RefusesAnotherChainsBucket(t *testing.T) {
 
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("a bucket belonging to another chain was accepted")
+	}
+}
+
+// The head margin has to reach the work list, not just exist in config: the archive trails the
+// indexers at the head, so a run without it reports normal lag as an absent object on every pass.
+// Both blocks here sit inside the default margin, so a run that applied it loads nothing — and a
+// run that dropped it on the way through would load them and fail this.
+func TestBlockMetaLoad_HeadMarginHoldsBackTheNewestBlocks(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedReferencedBlocks(t, ctx, pool, 500, 501)
+
+	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
+	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(testBucket)}); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	uploadBlock(t, ctx, s3Client, 500, 0, "0x67c02710")
+	uploadBlock(t, ctx, s3Client, 501, 0, "0x67c02720")
+
+	t.Setenv("BUILD_GIT_HASH", "integration-test")
+	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("DEPLOY_ENV", testDeployEnv)
+	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("DATABASE_URL", "unused-here")
+	t.Setenv("AWS_S3_ENDPOINT", sharedLocalStackCfg.Endpoint)
+	t.Setenv("AWS_REGION", sharedLocalStackCfg.Region)
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.headMargin == 0 {
+		t.Fatal("the default head margin is 0; this test would prove nothing")
+	}
+
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	if err := register(ctx, cfg, temporal.Dependencies{Pool: pool, Logger: discardLogger()}, env); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	env.ExecuteWorkflow(workflowTypeName, LoadParams{})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("workflow: %v", err)
+	}
+
+	var rows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM block_meta WHERE chain_id = 1`).Scan(&rows); err != nil {
+		t.Fatalf("count block_meta: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("block_meta holds %d rows; blocks inside the head margin must be held back", rows)
 	}
 }

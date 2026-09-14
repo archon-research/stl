@@ -14,11 +14,13 @@ import (
 // Identity grant and the task queue are all per-chain and a run that took the
 // chain as a parameter could address none of them.
 type config struct {
-	chainID   int64
-	bucket    string
-	deployEnv string
-	dsn       string
-	batchSize int
+	chainID     int64
+	bucket      string
+	deployEnv   string
+	dsn         string
+	batchSize   int
+	concurrency int
+	headMargin  int64
 }
 
 const (
@@ -26,6 +28,12 @@ const (
 	// prefixes it with its own name, the way its Deployment is named.
 	ethereumQueueName = "block-meta-loader"
 	ethereumChain     = "ethereum"
+
+	// defaultHeadMargin keeps the newest blocks out of a run. The archive trails the
+	// indexers at the head, so without a margin every repeated run reports that normal
+	// lag as an absent object. This is a starting value covering ordinary lag rather
+	// than a measured one; HEAD_MARGIN tunes it per chain, and 0 disables it.
+	defaultHeadMargin = int64(300)
 )
 
 // taskQueueName is the Temporal task queue this deployment polls, which is also
@@ -83,6 +91,15 @@ func loadConfig() (config, error) {
 		}
 	}
 
+	if cfg.concurrency, err = positiveEnv("CONCURRENCY", 0); err != nil {
+		return cfg, err
+	}
+	margin, err := positiveEnv("HEAD_MARGIN", int(defaultHeadMargin))
+	if err != nil {
+		return cfg, err
+	}
+	cfg.headMargin = int64(margin)
+
 	// The same guard raw-data-backup takes at startup: the chain and the bucket
 	// arrive as independent variables, and reading the wrong chain's archive
 	// would write that chain's header times under this chain's id.
@@ -90,4 +107,22 @@ func loadConfig() (config, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// positiveEnv reads an optional non-negative integer, falling back to def when unset.
+// A negative parses fine and then reads as "unset" downstream, running at a default
+// the operator believes they overrode.
+func positiveEnv(key string, def int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("%s must not be negative, got %d", key, n)
+	}
+	return n, nil
 }

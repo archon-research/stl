@@ -121,9 +121,11 @@ func (a *loadActivities) LoadBlockMeta(ctx context.Context, params LoadParams) (
 
 	heartbeat := temporal.NewActivityProgress[LoadProgress]()
 	svc, err := block_meta_loader.New(block_meta_loader.Config{
-		ChainID:   a.cfg.chainID,
-		Bucket:    a.cfg.bucket,
-		BatchSize: batchSize,
+		ChainID:     a.cfg.chainID,
+		Bucket:      a.cfg.bucket,
+		BatchSize:   batchSize,
+		Concurrency: a.cfg.concurrency,
+		HeadMargin:  a.cfg.headMargin,
 		OnProgress: func(total int64) {
 			_ = heartbeat.SaveProgress(ctx, LoadProgress{Loaded: total})
 		},

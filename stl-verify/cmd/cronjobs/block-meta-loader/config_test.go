@@ -96,3 +96,59 @@ func TestLoadConfig(t *testing.T) {
 		})
 	}
 }
+
+// The head margin is the reason a repeated run does not report normal archive lag as a missing
+// object, so it has to be on by default rather than an available knob nobody sets.
+func TestLoadConfigDefaultsAndTunables(t *testing.T) {
+	base := map[string]string{
+		"CHAIN_ID": "1", "DEPLOY_ENV": "staging",
+		"DATABASE_URL": "postgres://u:p@localhost:5432/stl", "S3_BUCKET": ethereumRawBucket,
+		"BATCH_SIZE": "", "CONCURRENCY": "", "HEAD_MARGIN": "",
+	}
+	set := func(t *testing.T, over map[string]string) config {
+		t.Helper()
+		for k, v := range base {
+			t.Setenv(k, v)
+		}
+		for k, v := range over {
+			t.Setenv(k, v)
+		}
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig: %v", err)
+		}
+		return cfg
+	}
+
+	t.Run("head margin is on by default", func(t *testing.T) {
+		if got := set(t, nil).headMargin; got != defaultHeadMargin {
+			t.Errorf("headMargin = %d, want %d", got, defaultHeadMargin)
+		}
+	})
+	t.Run("head margin is tunable", func(t *testing.T) {
+		if got := set(t, map[string]string{"HEAD_MARGIN": "25"}).headMargin; got != 25 {
+			t.Errorf("headMargin = %d, want 25", got)
+		}
+	})
+	t.Run("head margin can be disabled explicitly", func(t *testing.T) {
+		if got := set(t, map[string]string{"HEAD_MARGIN": "0"}).headMargin; got != 0 {
+			t.Errorf("headMargin = %d, want 0", got)
+		}
+	})
+	t.Run("concurrency is tunable", func(t *testing.T) {
+		if got := set(t, map[string]string{"CONCURRENCY": "4"}).concurrency; got != 4 {
+			t.Errorf("concurrency = %d, want 4", got)
+		}
+	})
+	for _, key := range []string{"CONCURRENCY", "HEAD_MARGIN"} {
+		t.Run("negative "+key+" is refused", func(t *testing.T) {
+			for k, v := range base {
+				t.Setenv(k, v)
+			}
+			t.Setenv(key, "-1")
+			if _, err := loadConfig(); err == nil {
+				t.Fatalf("a negative %s was accepted; it would read as unset and run at the default", key)
+			}
+		})
+	}
+}
