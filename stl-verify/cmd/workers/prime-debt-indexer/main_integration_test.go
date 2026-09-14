@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -722,5 +723,22 @@ func TestRunIntegration_InvalidVatFlag(t *testing.T) {
 	}, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid vat address")
+	}
+}
+
+// VEC-744's interim guard: the Sky migration seeds the protocol row for one Vat address and backfills
+// every legacy snapshot to it. If this default drifts from that literal, those rows are stamped with a
+// Vat this indexer never read, and the projection hashes the wrong protocol into every legacy position.
+func TestDefaultVatAddressMatchesTheSeededProtocolRow(t *testing.T) {
+	sql, err := os.ReadFile(filepath.Join("..", "..", "..", "db", "migrations", "20260819_140000_materialize_sky_prime_debt.sql"))
+	if err != nil {
+		t.Fatalf("read the Sky migration: %v", err)
+	}
+	want := "'\\x" + strings.TrimPrefix(defaultVatAddress, "0x") + "'"
+	if !strings.Contains(string(sql), want) {
+		t.Fatalf("the Sky migration seeds no protocol row for %s; the migration and the indexer default have drifted apart", defaultVatAddress)
+	}
+	if strings.ToLower(defaultVatAddress) != defaultVatAddress {
+		t.Fatalf("defaultVatAddress %s is not lowercase; the migration's bytea literal is lowercase hex", defaultVatAddress)
 	}
 }
