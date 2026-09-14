@@ -19,18 +19,28 @@ Isolated database per module (``module_db`` from ``conftest.py``); seeded by
 import asyncio
 import datetime as dt
 import logging
+import re
 from decimal import Decimal
 
 import asyncpg
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.adapters.postgres.allocation_position_repository import AllocationRepository
-from app.adapters.postgres.reference_as_of import utc_now
+from app.adapters.postgres.allocation_position_repository import (
+    _EXPOSURE_BUCKETS_SQL,
+    AllocationRepository,
+)
+from app.adapters.postgres.reference_as_of import ReferenceAsOf, utc_now
 from app.domain.entities.allocation import EthAddress
 from tests.integration.seed import (
     RUV_ATOKEN_BALANCE,
+    RUV_CONTEST_BALANCE,
+    RUV_CONTEST_HIGH_ORACLE_PRICE,
+    RUV_CONTEST_LOW_ORACLE_STALE_PRICE,
+    RUV_CONTEST_PROXY_HEX,
+    RUV_CONTEST_WINNING_PRICE,
     RUV_DIVERGENT_BALANCE,
     RUV_LEGACY_BALANCE,
     RUV_LOCF_BASE_TS,
@@ -87,6 +97,17 @@ async def repo(async_db_url: str):
     engine = create_async_engine(async_db_url)
     try:
         yield AllocationRepository(engine, utc_now)
+    finally:
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture()
+async def conn(async_db_url: str):
+    """A connection for running the cache and history queries side by side."""
+    engine = create_async_engine(async_db_url)
+    try:
+        async with engine.connect() as connection:
+            yield connection
     finally:
         await engine.dispose()
 
@@ -208,15 +229,19 @@ async def test_morpho_vault_receipt_like_spark_usdc_bc_priced_by_redeemable_valu
 # ---------------------------------------------------------------------------
 
 
-async def _locf_exposure_by_bucket(repo: AllocationRepository) -> dict[dt.datetime, Decimal | None]:
+async def _exposure_by_bucket(repo: AllocationRepository, proxy_hex: str) -> dict[dt.datetime, Decimal | None]:
     buckets = await repo.list_exposure_buckets(
-        [EthAddress(f"0x{RUV_LOCF_PROXY_HEX}")],
+        [EthAddress(f"0x{proxy_hex}")],
         from_timestamp=RUV_LOCF_BASE_TS,
         to_timestamp=RUV_LOCF_BASE_TS + dt.timedelta(hours=3),
         bucket_seconds=3600.0,
         limit=10,
     )
     return {b.bucket_start: b.exposure_usd for b in buckets}
+
+
+async def _locf_exposure_by_bucket(repo: AllocationRepository) -> dict[dt.datetime, Decimal | None]:
+    return await _exposure_by_bucket(repo, RUV_LOCF_PROXY_HEX)
 
 
 @pytest.mark.asyncio
@@ -283,3 +308,75 @@ async def test_balance_basis_receipt_position_is_surfaced(repo) -> None:
     records = await _warning_records(repo)
     flagged = [r for r in records if "legacyReceipt" in getattr(r, "balance_basis_symbols", [])]
     assert flagged, "expected a warning flagging the receipt position valued on the balance fallback"
+
+
+# ---------------------------------------------------------------------------
+# VEC-712: the bucketed read resolves its latest prices from the
+# trigger-maintained ``token_price_current`` cache instead of LATERAL-ing into
+# the ``onchain_token_price`` hypertable behind it. The two must agree row for
+# row — the cache holds the newest row per (oracle, token) under the same
+# newer-wins comparison, so all that changed is which relation is scanned.
+# The columns are identically named, so the pre-swap query is the live one with
+# the relation substituted back; the guards below fail loudly if a later edit
+# makes that substitution a no-op, which would leave this test comparing a
+# query against itself.
+# ---------------------------------------------------------------------------
+
+# Matched by pattern rather than by literal: alias-agnostic, so a second cache
+# read added later cannot survive the substitution under a different alias, and
+# anchored to the keyword that introduces a relation, so prose naming the table
+# is not mistaken for a read of it. JOIN is covered as well as FROM — a cache
+# read reached by a join, not a lateral, is the form a literal FROM match misses.
+_CACHE_RELATION = re.compile(r"\b(FROM|JOIN)\s+token_price_current\b")
+
+_PRE_SWAP_EXPOSURE_BUCKETS_SQL = text(_CACHE_RELATION.sub(r"\1 onchain_token_price", str(_EXPOSURE_BUCKETS_SQL)))
+
+
+@pytest.mark.parametrize("proxy_hex", [RUV_LOCF_PROXY_HEX, RUV_CONTEST_PROXY_HEX])
+@pytest.mark.asyncio
+async def test_exposure_buckets_match_the_pre_swap_history_read(repo, conn, proxy_hex: str) -> None:
+    """Reading token_price_current yields the same buckets as LATERAL-ing into the history."""
+    assert _CACHE_RELATION.search(str(_EXPOSURE_BUCKETS_SQL)), (
+        "the bucketed read no longer resolves prices from the cache (VEC-712)"
+    )
+    assert not _CACHE_RELATION.search(str(_PRE_SWAP_EXPOSURE_BUCKETS_SQL)), (
+        "the pre-swap substitution missed a cache read; this test would compare the query against itself"
+    )
+
+    params = {
+        "proxy_addrs": [EthAddress(f"0x{proxy_hex}").to_bytes()],
+        "from_timestamp": RUV_LOCF_BASE_TS,
+        "to_timestamp": RUV_LOCF_BASE_TS + dt.timedelta(hours=3),
+        "bucket_seconds": 3600.0,
+        "limit": 10,
+    }
+    reference = ReferenceAsOf(utc_now)
+
+    before = (await conn.execute(_PRE_SWAP_EXPOSURE_BUCKETS_SQL, reference.params(**params))).fetchall()
+
+    after = await _exposure_by_bucket(repo, proxy_hex)
+
+    assert any(row.exposure_usd for row in before), (
+        "expected a priced bucket; two unpriced reads would both COALESCE to 0 and match vacuously"
+    )
+    assert {row.bucket_start: row.exposure_usd for row in before} == after
+
+
+@pytest.mark.asyncio
+async def test_exposure_bucket_prices_at_the_newest_revision_of_the_winning_oracle(repo) -> None:
+    """With two enabled oracles and a revised price, the bucket carries the newest revision.
+
+    Equality against the pre-swap query cannot show this on its own: a fixture
+    with one eligible candidate agrees either way. Here the low-id oracle's
+    revision (block 2100) must beat both its own superseded row (2000) and the
+    high-id oracle's row (2050) — so a cache that failed to retain the revision,
+    or an outer sort that ranked ``oracle_id`` above recency, lands on a
+    different, asserted-against price.
+    """
+    priced = [v for v in (await _exposure_by_bucket(repo, RUV_CONTEST_PROXY_HEX)).values() if v is not None]
+
+    assert priced, "expected at least one priced bucket for the contested-price position"
+    assert all(v == RUV_CONTEST_BALANCE * RUV_CONTEST_WINNING_PRICE for v in priced)
+    assert RUV_CONTEST_WINNING_PRICE not in (RUV_CONTEST_LOW_ORACLE_STALE_PRICE, RUV_CONTEST_HIGH_ORACLE_PRICE), (
+        "the losing prices must differ from the winner, or this test cannot fail"
+    )

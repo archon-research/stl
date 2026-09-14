@@ -145,7 +145,7 @@ func (r *UniswapV3Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbou
 	// and each tick insert depends on a prior read of the latest row for that
 	// (pool_id, tick) slot (a read-then-write race ON CONFLICT cannot guard,
 	// ADR-0002 §3).
-	if err := uniswapV3TickWriter.writeTicks(ctx, tx, uniswapV3TickRows(w.Ticks), r.buildID); err != nil {
+	if stateRows.TicksPersisted, err = uniswapV3TickWriter.writeTicks(ctx, tx, uniswapV3TickRows(w.Ticks), r.buildID); err != nil {
 		return stateRows, err
 	}
 
