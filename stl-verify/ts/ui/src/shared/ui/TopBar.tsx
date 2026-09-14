@@ -108,6 +108,26 @@ const sidebarToggleClassName = css({
   },
 });
 
+const signOutClassName = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  height: '9',
+  px: '3',
+  flexShrink: 0,
+  fontSize: 'md',
+  fontWeight: 'medium',
+  color: 'text.muted',
+  textDecoration: 'none',
+  borderWidth: '1px',
+  borderStyle: 'solid',
+  borderColor: 'border.subtle',
+  borderRadius: 'md',
+  background: 'surface.default',
+  transitionProperty: 'colors',
+  transitionDuration: 'fast',
+  _hover: { color: 'text.strong', borderColor: 'border.default' },
+});
+
 const rangeFieldClassName = css({
   width: { base: 'full', sm: '56' },
   flexShrink: 0,
@@ -314,6 +334,11 @@ export function TopBar({
             </div>
           ) : null}
           <SettingsMenu sections={[dataSource]} />
+          {/* A plain link, not a handler: the edge owns the session and clears
+              it at this path, so the page never touches a credential. */}
+          <a href="/logout" className={signOutClassName}>
+            Sign out
+          </a>
         </div>
       </div>
     </DesignSystemPageShell>
