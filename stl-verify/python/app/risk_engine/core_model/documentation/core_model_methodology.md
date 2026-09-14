@@ -140,7 +140,7 @@ A candidate model is accepted only if it passes all three residual diagnostics:
 - **Ljung-Box** on squared standardised residuals (no remaining ARCH effects)
 - **ARCH-LM test** on standardised residuals (no remaining heteroskedasticity)
 
-Accepted candidates are then subject to a **rolling 1-step-ahead VaR backtest**. The model is trained on a window of `TRAIN_SIZE` days and the 1-day-ahead VaR is computed at level `backtest_alpha = 1 - PERC`. The window then rolls forward by 1 day, producing approximately (`N_history` − `TRAIN_SIZE`) non-overlapping hit observations — roughly 1 280 over a 4-year history with a 180-day training window. Two statistical tests are applied to the resulting hit sequence:
+Accepted candidates are then subject to a **rolling 1-step-ahead VaR backtest**. The model is trained on a window of `TRAIN_SIZE` days and the 1-day-ahead VaR is computed at a fixed `backtest_alpha = 0.05` tail, independent of `PERC` (see **Calibration choices**). The window then rolls forward by 1 day, producing approximately (`N_history` − `TRAIN_SIZE`) non-overlapping hit observations — roughly 1 280 over a 4-year history with a 180-day training window. Two statistical tests are applied to the resulting hit sequence:
 
 - **Kupiec POF test** — tests unconditional coverage: does the observed exceedance rate match `backtest_alpha`?
 - **Christoffersen test** — tests conditional coverage: are exceedances independent over time?
@@ -358,6 +358,7 @@ VaR and ES are computed internally and remain available as diagnostics in `Liqui
 | BIC for model selection | Penalises complexity more heavily than AIC; prevents overfitting on short training windows |
 | ARCH-LM gate for GARCH | Ljung-Box on levels detects mean autocorrelation, not variance clustering; ARCH-LM is the correct pre-test for GARCH |
 | 1-step-ahead backtest rolling by 1 day | Rolling by `FORECAST_STEP` days produces only ~90 non-overlapping windows over 4 years — too sparse for reliable Kupiec / Christoffersen tests. Rolling by 1 day gives ~1280 non-overlapping 1-day hits, providing proper statistical power. The 1-step-ahead horizon is the standard for VaR model validation; the multi-step simulation horizon is a separate concern. |
+| Fixed 5% backtest tail (`backtest_alpha = 0.05`), independent of `PERC` | A 5% tail gives roughly twice the expected hits (~64 over 4 years) of `1 − PERC = 0.025`, which is what gives the Kupiec and Christoffersen tests their power. Coupling the gate to the simulation percentile would halve the hit count without validating the simulation tail any more directly. |
 | Soft backtest fallback | Hard rejection of all GARCH models when none passes formal tests causes a regression to constant-volatility forecasting; the least-bad GARCH candidate is always preferable |
 | ARMA retained when no ARCH effects | When no heteroskedasticity is detected, skipping GARCH does not mean discarding the mean model — the fitted ARMA is preserved and residuals are scaled by historical volatility, which is strictly better than reverting to a constant-mean random walk |
 | t-Copula over Gaussian | Crypto assets exhibit strong tail co-dependence; a Gaussian copula underestimates the probability of simultaneous crashes |

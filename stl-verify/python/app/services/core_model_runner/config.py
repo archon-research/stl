@@ -13,7 +13,13 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.risk_engine.core_model.config import DEFAULTS, INPUTS_DIR, load_commented_json, load_params
+from app.risk_engine.core_model.config import (
+    DEFAULTS,
+    EXPECTED_KINDS,
+    INPUTS_DIR,
+    load_commented_json,
+    load_params,
+)
 
 _MARKET_CONFIGS_DEFAULT = Path(INPUTS_DIR) / "market_configs.json"
 
@@ -118,21 +124,19 @@ def _coerce(param: str, raw: str) -> object:
     (JUMPS=ture -> False, MC_TARGET_LTV=0.8x -> None) is a typo, not an
     override, and params is recorded in the results table for auditability.
     """
-    default = DEFAULTS.get(param)
-    if isinstance(default, bool):
+    kind = EXPECTED_KINDS[param]
+    if kind == "bool":
         low = raw.lower()
         if low in ("true", "1", "yes"):
             return True
         if low in ("false", "0", "no"):
             return False
         raise ValueError(f"invalid boolean for {param}: {raw!r}")
-    if isinstance(default, int):
+    if kind == "int":
         return int(raw)
-    if isinstance(default, float):
-        return float(raw)
-    if default is None:
-        # Optional params (MC_TARGET_LTV): only a float override makes sense --
-        # None is the default, so there is no reason to set the var to get it.
+    # Nullable params (MC_TARGET_LTV): only a float override makes sense --
+    # None is the default, so there is no reason to set the var to get it.
+    if kind in ("float", "float | None"):
         try:
             return float(raw)
         except ValueError:
