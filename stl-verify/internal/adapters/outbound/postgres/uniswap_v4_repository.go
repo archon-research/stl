@@ -489,8 +489,11 @@ func (rows v4BatchRows) sections() []v4BatchSection {
 	}
 }
 
-// processing_version comes from each table's next_processing_version_* function, not
-// its trigger: on a columnstored chunk the arbiter resolves before triggers fire (VEC-615).
+// The four compressed tables take processing_version from their
+// next_processing_version_* function rather than their trigger: on a columnstored
+// chunk the arbiter resolves before triggers fire (VEC-615). uniswap_v4_position_nft_transfer
+// is plain, so its trigger assigns the version; converting it means giving it the
+// same function, which the runbook's conversion recipe spells out.
 func queueUniswapV4Batch(batch *pgx.Batch, rows v4BatchRows, buildID buildregistry.BuildID) {
 	queueV4States(batch, rows.states, buildID)
 	queueV4Swaps(batch, rows.swaps, buildID)

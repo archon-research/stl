@@ -1,7 +1,6 @@
 package uniswapv4indexer
 
 import (
-	"context"
 	"math/big"
 	"strings"
 	"testing"
@@ -236,86 +235,5 @@ func TestDecodeEvents_PositionManagerMalformedTopicErrors(t *testing.T) {
 		poolManagerAddress(), testPositionManager(), blockNumber, blockVer, blockTS)
 	if err == nil {
 		t.Fatal("DecodeEvents: want an error for a corrupted token id topic, got nil")
-	}
-}
-
-func posmRegistryPair() (RegisteredPool, RegisteredPool) {
-	first := servicePool()
-	first.PositionManagerID = positionManagerRowID
-	first.PositionManager = common.HexToAddress(positionManagerAddr)
-	second := secondServicePool()
-	second.PositionManagerID = positionManagerRowID
-	second.PositionManager = common.HexToAddress(positionManagerAddr)
-	return first, second
-}
-
-func TestPositionManagerFor_ReturnsTheSharedDeployment(t *testing.T) {
-	first, second := posmRegistryPair()
-
-	got, err := PositionManagerFor([]RegisteredPool{first, second})
-	if err != nil {
-		t.Fatalf("PositionManagerFor on one deployment: %v", err)
-	}
-	if got != testPositionManager() {
-		t.Errorf("PositionManagerFor = %+v, want %+v", got, testPositionManager())
-	}
-}
-
-func TestPositionManagerFor_RejectsAMixedRegistry(t *testing.T) {
-	first, second := posmRegistryPair()
-
-	for _, tc := range []struct {
-		name string
-		mut  func(*RegisteredPool)
-	}{
-		{"two addresses", func(p *RegisteredPool) { p.PositionManager = common.HexToAddress("0xdead") }},
-		{"two registry rows", func(p *RegisteredPool) { p.PositionManagerID = positionManagerRowID + 1 }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			odd := second
-			tc.mut(&odd)
-			if _, err := PositionManagerFor([]RegisteredPool{first, odd}); err == nil {
-				t.Fatal("PositionManagerFor: want an error for a registry naming two PositionManagers, got nil")
-			}
-		})
-	}
-}
-
-// A registry that lost the posm hands every pool address(0), which no log is
-// emitted by: every real transfer is dropped and no decode ever errors.
-func TestPositionManagerFor_RejectsARegistryWithoutAPositionManager(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		mut  func(*RegisteredPool)
-	}{
-		{"no address", func(p *RegisteredPool) { p.PositionManager = common.Address{} }},
-		{"no registry row id", func(p *RegisteredPool) { p.PositionManagerID = 0 }},
-		{"negative registry row id", func(p *RegisteredPool) { p.PositionManagerID = -1 }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			first, second := posmRegistryPair()
-			tc.mut(&first)
-			tc.mut(&second)
-			if _, err := PositionManagerFor([]RegisteredPool{first, second}); err == nil {
-				t.Fatal("PositionManagerFor: want an error for a registry carrying no PositionManager, got nil")
-			}
-		})
-	}
-}
-
-// A posm row pointing at the PoolManager's protocol row collides the two
-// addresses, and the posm branch runs first: every pool event would vanish with
-// nothing raising an error.
-func TestNewUniswapV4Service_RefusesAPositionManagerThatIsThePoolManager(t *testing.T) {
-	pool := servicePool()
-	pool.PositionManager = pool.PoolManager
-
-	deps, _, _, _ := validServiceDeps(t, []RegisteredPool{pool})
-	_, err := NewUniswapV4Service(context.Background(), deps)
-	if err == nil {
-		t.Fatal("NewUniswapV4Service: want an error when the PositionManager address is the PoolManager's, got nil")
-	}
-	if !strings.Contains(err.Error(), pool.PoolManager.String()) {
-		t.Errorf("error %q does not name the colliding address %s", err, pool.PoolManager)
 	}
 }

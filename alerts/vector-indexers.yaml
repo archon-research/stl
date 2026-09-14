@@ -2984,16 +2984,19 @@ groups:
         # 2.9 rows/s (~90M rows/year, a year of runway). Mainnet emits ~1k posm
         # Transfers/day (290 logs over 2,001 blocks on 2026-08-31), two orders
         # of magnitude under it, so ordinary growth cannot fire this: reaching
-        # it means another chain's indexer writing into the same table, a
-        # traffic regime change, or the ARCT-385 historical backfill of the
-        # transfer log — the last is legitimate, spikes the rate by design and
-        # clears itself, which is what the 6h window and `for: 6h` absorb.
+        # it means another chain's indexer writing into the same table, or a
+        # traffic regime change. The 6h rate window AND `for: 6h` are there
+        # because the signal is a sustained regime change, never a burst.
         #
-        # The counter counts rows the writer PERSISTED (conflicts excluded), so
-        # the rate is real table growth. `sum by (cluster)` without `chain`: the
-        # budget belongs to the table, and one table holds every chain's rows.
-        # One term, so no zero-fill is needed: an absent series and a zero rate
-        # both stay quiet.
+        # The counter counts rows the LIVE INDEXER persisted (conflicts
+        # excluded), so the rate is real table growth from that path, and today
+        # that path is the only writer. The ARCT-385 transfer-log backfill has
+        # to record through the same dextelemetry counter when it ships, or the
+        # rows it writes grow the table without moving this rule.
+        #
+        # `sum by (cluster)` without `chain`: the budget belongs to the table,
+        # and one table holds every chain's rows. One term, so no zero-fill is
+        # needed: an absent series and a zero rate both stay quiet.
         expr: |
           sum by (cluster) (
             rate(uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector"}[6h])

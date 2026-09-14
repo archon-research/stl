@@ -2818,22 +2818,28 @@ func newUniswapV4RepoNFTTransfer(managerID, blockNumber int64, blockVersion, log
 // uniswapV4HolderAtBlockSQL is the holder-at-block query the table's COMMENT and
 // the runbook publish. One copy, so the answer tests read and the plan the index
 // test pins cannot drift from each other or from the documented ordering.
+//
+// It keys on the chain and joins every uniswap_v4_position_manager version, not
+// one surrogate id: a registry correction starts a new id and the transfers
+// written before it keep the old one.
 const uniswapV4HolderAtBlockSQL = `
-	SELECT to_address
+	SELECT t.to_address
 	FROM uniswap_v4_position_nft_transfer t
-	WHERE position_manager_id = $1 AND token_id = $2 AND block_number <= $3
+	JOIN uniswap_v4_position_manager m
+	  ON m.id = t.position_manager_id AND m.chain_id = $1
+	WHERE t.token_id = $2 AND t.block_number <= $3
 	  AND NOT EXISTS (
 	      SELECT 1 FROM block_states b
-	      WHERE b.chain_id = $4 AND b.number = t.block_number
+	      WHERE b.chain_id = $1 AND b.number = t.block_number
 	        AND b.version = t.block_version AND b.is_orphaned)
-	ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC
+	ORDER BY t.block_number DESC, t.block_version DESC, t.log_index DESC, t.processing_version DESC
 	LIMIT 1`
 
-func holderOfUniswapV4Token(t *testing.T, ctx context.Context, managerID int64, tokenID int64, atBlock int64) common.Address {
+func holderOfUniswapV4Token(t *testing.T, ctx context.Context, chainID int, tokenID int64, atBlock int64) common.Address {
 	t.Helper()
 	var to []byte
 	if err := uniswapV4TestPool.QueryRow(ctx, uniswapV4HolderAtBlockSQL,
-		managerID, tokenID, atBlock, uniswapV4RepoSaveChainID).Scan(&to); err != nil {
+		chainID, tokenID, atBlock).Scan(&to); err != nil {
 		t.Fatalf("reading holder of token %d at block %d: %v", tokenID, atBlock, err)
 	}
 	return common.BytesToAddress(to)
@@ -3020,7 +3026,7 @@ func TestUniswapV4Repository_SaveBlock_ReorgAppendsASecondNFTTransferRowSet(t *t
 	if rows != 2 {
 		t.Errorf("rows at block %d = %d, want 2 (the orphaned fork's row is superseded, never replaced)", blockNumber, rows)
 	}
-	if got := holderOfUniswapV4Token(t, ctx, managerID, 4242, blockNumber); got != canonical.To {
+	if got := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, 4242, blockNumber); got != canonical.To {
 		t.Errorf("holder at block %d = %s, want %s (block_version DESC must pick the reorg re-observation)", blockNumber, got, canonical.To)
 	}
 }
@@ -3053,7 +3059,7 @@ func TestUniswapV4Repository_NFTTransferHolderAtBlockPicksTheLastLogInTheBlock(t
 		}
 	})
 
-	if got := holderOfUniswapV4Token(t, ctx, managerID, tokenID, blockNumber); got != owner {
+	if got := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, tokenID, blockNumber); got != owner {
 		t.Errorf("holder at block %d = %s, want %s (log_index DESC must pick log 4363, not 4325)", blockNumber, got, owner)
 	}
 }
@@ -3085,7 +3091,7 @@ func TestUniswapV4Repository_NFTTransferHolderAtBlockPrefersTheNewerBlockVersion
 		})
 	}
 
-	if got := holderOfUniswapV4Token(t, ctx, managerID, tokenID, blockNumber); got != canonical.To {
+	if got := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, tokenID, blockNumber); got != canonical.To {
 		t.Errorf("holder at block %d = %s, want %s (block_version %d at log %d must beat the orphaned fork's log %d)",
 			blockNumber, got, canonical.To, canonical.BlockVersion, canonical.LogIndex, orphaned.LogIndex)
 	}
@@ -3132,7 +3138,7 @@ func TestUniswapV4Repository_NFTTransferHolderAtBlockSkipsAnOrphanedVersion(t *t
 		}
 	}
 
-	if got := holderOfUniswapV4Token(t, ctx, managerID, tokenID, blockNumber); got != earlier.To {
+	if got := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, tokenID, blockNumber); got != earlier.To {
 		t.Errorf("holder at block %d = %s, want %s: the transfer at the orphaned version 0 must not answer", blockNumber, got, earlier.To)
 	}
 }
@@ -3160,4 +3166,46 @@ func TestUniswapV4Repository_SaveBlock_RejectsANilNFTTransferTokenID(t *testing.
 			t.Errorf("error %q does not name token_id", err)
 		}
 	})
+}
+
+// A posm registry correction appends a version with a new surrogate id, and the
+// transfers written before it keep pointing at the old one. Keying the holder
+// read on the current id alone would answer "no holder" for every token whose
+// last move predates the correction, which is what the id column's COMMENT
+// warns against.
+func TestUniswapV4Repository_NFTTransferHolderSurvivesAPositionManagerCorrection(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x58)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	const blockNumber = int64(25002000)
+	const tokenID = int64(4343)
+	transfer := newUniswapV4RepoNFTTransfer(managerID, blockNumber, 0, 11, tokenID,
+		common.Address{}, uniswapV4MintFixtureTo)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4BuildID).SaveBlock(ctx, tx,
+			outbound.UniswapV4BlockWrites{NFTTransfers: []*entity.UniswapV4PositionNFTTransfer{transfer}}); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+
+	var correctedID int64
+	if err := uniswapV4TestPool.QueryRow(ctx, `
+		INSERT INTO uniswap_v4_position_manager (chain_id, protocol_id, deploy_block, build_id)
+		SELECT chain_id, protocol_id, deploy_block, build_id + 1
+		FROM uniswap_v4_position_manager
+		WHERE chain_id = $1
+		ORDER BY processing_version DESC
+		LIMIT 1
+		RETURNING id`, uniswapV4RepoSaveChainID).Scan(&correctedID); err != nil {
+		t.Fatalf("appending a corrected position manager version: %v", err)
+	}
+	if correctedID == managerID {
+		t.Fatalf("the correction reused surrogate id %d, so this test proves nothing", correctedID)
+	}
+
+	if got := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, tokenID, blockNumber); got != uniswapV4MintFixtureTo {
+		t.Errorf("holder after a registry correction = %s, want %s: the read is keyed on one surrogate id instead of the chain",
+			got, uniswapV4MintFixtureTo)
+	}
 }

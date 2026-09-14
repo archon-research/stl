@@ -156,14 +156,15 @@ func TestUniswapV4MigrationRegistersHypertables(t *testing.T) {
 // The catalogue, not the DDL text: TimescaleDB appends the partition column to the
 // order-by, and a chunk interval typed in the CREATE is only real if the dimension
 // carries it. 30 days is VEC-663's cap; the version tuple leads the order-by so a
-// compressed batch is in the order of the latest-per-key read.
-type uniswapV4CompressionSettings struct{ segmentby, orderby string }
+// compressed batch is in the order of the latest-per-key read. Every one of them
+// segments by the pool surrogate, which is what their reads filter on.
+const uniswapV4CompressionSegmentBy = "pool_id"
 
-var uniswapV4HypertableCompressionOrder = map[string]uniswapV4CompressionSettings{
-	"uniswap_v4_pool_state":      {"pool_id", "block_number DESC,block_version DESC,processing_version DESC,block_timestamp DESC"},
-	"uniswap_v4_swap":            {"pool_id", "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC"},
-	"uniswap_v4_liquidity_event": {"pool_id", "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC"},
-	"uniswap_v4_pool_event":      {"pool_id", "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC"},
+var uniswapV4HypertableCompressionOrder = map[string]string{
+	"uniswap_v4_pool_state":      "block_number DESC,block_version DESC,processing_version DESC,block_timestamp DESC",
+	"uniswap_v4_swap":            "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC",
+	"uniswap_v4_liquidity_event": "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC",
+	"uniswap_v4_pool_event":      "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC",
 }
 
 func TestUniswapV4HypertablesChunkIntervalAndCompressionOrder(t *testing.T) {
@@ -171,7 +172,7 @@ func TestUniswapV4HypertablesChunkIntervalAndCompressionOrder(t *testing.T) {
 
 	for _, table := range uniswapV4Hypertables {
 		t.Run(table, func(t *testing.T) {
-			want, known := uniswapV4HypertableCompressionOrder[table]
+			wantOrderBy, known := uniswapV4HypertableCompressionOrder[table]
 			if !known {
 				t.Fatalf("%s has no expected compression order: add it to uniswapV4HypertableCompressionOrder", table)
 			}
@@ -191,11 +192,11 @@ func TestUniswapV4HypertablesChunkIntervalAndCompressionOrder(t *testing.T) {
 				WHERE hypertable::text = $1`, table).Scan(&segmentby, &orderby); err != nil {
 				t.Fatalf("reading %s's compression settings: %v", table, err)
 			}
-			if segmentby != want.segmentby {
-				t.Errorf("%s segmentby = %q, want %q", table, segmentby, want.segmentby)
+			if segmentby != uniswapV4CompressionSegmentBy {
+				t.Errorf("%s segmentby = %q, want %q", table, segmentby, uniswapV4CompressionSegmentBy)
 			}
-			if orderby != want.orderby {
-				t.Errorf("%s orderby = %q, want %q", table, orderby, want.orderby)
+			if orderby != wantOrderBy {
+				t.Errorf("%s orderby = %q, want %q", table, orderby, wantOrderBy)
 			}
 		})
 	}
@@ -308,8 +309,8 @@ func seedUniswapV4NFTTransferPlanHistory(t *testing.T, ctx context.Context, mana
 }
 
 // Whether column is resolved by the index or re-checked by a Filter afterwards.
-// Chunk copies of a hypertable index truncate their name at 63 bytes, so
-// matching by name is not an option.
+// Matching on the column rather than the index name keeps this readable across a
+// join, where the plan names the index only on the side that scans it.
 func uniswapV4PlanIndexCondCovers(plan, column string) bool {
 	for line := range strings.SplitSeq(plan, "\n") {
 		if strings.Contains(line, "Index Cond:") && strings.Contains(line, column) {
@@ -329,7 +330,7 @@ func TestUniswapV4NFTTransferTokenBlockIndexServesTheHolderQuery(t *testing.T) {
 	const firstBlock = int64(22600000)
 	seedUniswapV4NFTTransferPlanHistory(t, ctx, managerID, firstBlock, 60, 40)
 
-	plan := explainUniswapV4Query(t, ctx, uniswapV4HolderAtBlockSQL, managerID, 7, firstBlock+31, uniswapV4FactParentChainID+900)
+	plan := explainUniswapV4Query(t, ctx, uniswapV4HolderAtBlockSQL, uniswapV4FactParentChainID+900, 7, firstBlock+31)
 
 	if !uniswapV4PlanIndexCondCovers(plan, "token_id") {
 		t.Errorf("the holder query does not reach token_id through an index condition, so idx_uniswap_v4_position_nft_transfer_token_block is not serving it:\n%s", plan)
