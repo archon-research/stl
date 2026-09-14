@@ -206,6 +206,11 @@
       "class": "S",
       "semantics": "event_time"
     },
+    "as_of_date": {
+      "type": "date",
+      "class": "S",
+      "semantics": "event_time"
+    },
     "block_version": {
       "type": "int4",
       "class": "S"
@@ -1756,6 +1761,10 @@
     },
     "position_projection_run": {
       "type": "infrastructure",
+      "owner": "prime"
+    },
+    "position_daily": {
+      "type": "derived",
       "owner": "prime"
     },
     "position_state": {
