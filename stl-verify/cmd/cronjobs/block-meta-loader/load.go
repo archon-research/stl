@@ -28,10 +28,9 @@ const (
 	heartbeatInterval      = 30 * time.Second
 	heartbeatTimeoutFactor = 3
 
-	// activityTimeout bounds one attempt. Chain 1's first run is ~982k blocks, so
-	// this is sized for a full history pass rather than a top-up. It is not a
-	// budget the run must finish inside: the work list is a committed table, so a
-	// timed-out attempt resumes from where it stopped rather than re-enumerating.
+	// activityTimeout is the ceiling on one attempt, not a budget the run must finish inside:
+	// chain 1's first run is ~982k blocks, and a timed-out attempt resumes from the committed
+	// work list rather than re-enumerating.
 	activityTimeout = 24 * time.Hour
 )
 

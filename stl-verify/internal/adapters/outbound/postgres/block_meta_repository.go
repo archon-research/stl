@@ -202,10 +202,9 @@ type blockWorkList struct {
 // run because its temp table was ON COMMIT DROP, and that transaction's backend_xid pins VACUUM's
 // removable cutoff database-wide even with no snapshot held -- for chain 1 that is hours.
 func (r *BlockMetaRepository) OpenWorkList(ctx context.Context, chainID int64, headMargin int64) (outbound.BlockWorkList, error) {
-	// Rows left by a previous run ARE the resume: enumerating the six arms is the expensive half, so a
-	// run killed by a cancel or a timeout picks up that work rather than redoing it. The anti-join below
-	// still runs either way, so anything the killed run did load is dropped before paging resumes.
-	// A completed run clears the chain itself (see Close), so surviving rows always mean an interrupted one.
+	// Rows left by a previous run ARE the resume: enumerating the arms is the expensive half. The
+	// anti-join below still runs, so anything the killed run loaded is dropped before paging resumes.
+	// A completed run clears the chain itself (see Close).
 	var resumed int64
 	if err := r.pool.QueryRow(ctx,
 		`SELECT count(*) FROM block_meta_worklist WHERE chain_id = $1`, chainID).Scan(&resumed); err != nil {

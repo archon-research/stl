@@ -1,9 +1,6 @@
--- VEC-491: the block-meta loader's run scratch list, as a committed table rather than a temp table.
--- A temp table is ON COMMIT DROP, so the run had to hold one transaction open for its whole duration.
--- That transaction's backend_xid pins VACUUM's removable cutoff database-wide even with no snapshot
--- held, measured on pg18: an idle-in-transaction session with a filled temp table left 5,000 dead
--- tuples unremovable on an unrelated table. Chain 1 has ~982k pending blocks against a 6h deadline,
--- so that is hours of held-off vacuum, and on a deadline hit the temp table dropped with nothing reusable.
+-- VEC-491: the block-meta loader's run scratch list. A committed table, not a temp one, so a run
+-- holds no transaction open: an open backend_xid pins VACUUM's removable cutoff database-wide, and
+-- chain 1's ~982k pending blocks are hours of it.
 
 -- UNLOGGED: this is a work list, not history. Every row is reproducible by re-running the enumeration,
 -- it is never read as "as of block N", and losing it on a crash costs one re-enumeration.

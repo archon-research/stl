@@ -11,6 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	metricsdk "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -437,4 +441,60 @@ func TestRun_PagingFailureSurfaces(t *testing.T) {
 	if total != 0 {
 		t.Errorf("reported %d rows loaded after a paging failure, want 0", total)
 	}
+}
+
+// The growth tripwire reads this counter, so it has to carry the run's real pending-set size and it
+// has to exist before the first run: an unseeded counter first appears at its first increment, and
+// rate() never observes the 0->1.
+func TestRun_RecordsTheWorkListRowsItPages(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
+		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0},
+	}}
+	// New resolves the global meter, so it must run after SetMeterProvider above.
+	svc := newTestService(t, repo, &mockS3Reader{streamFn: streamTimestampByBlock}, 2)
+
+	if got, ok := collectPagedRows(t, reader); !ok || got != 0 {
+		t.Fatalf("before the run the counter reads %d (present=%t), want 0 and present", got, ok)
+	}
+	if _, err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Three blocks over two batches: the counter is the pending set, not the number of batches.
+	if got, ok := collectPagedRows(t, reader); !ok || got != 3 {
+		t.Errorf("block_meta.worklist.rows.paged = %d (present=%t), want 3", got, ok)
+	}
+}
+
+func collectPagedRows(t *testing.T, r *metricsdk.ManualReader) (int64, bool) {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := r.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "block_meta.worklist.rows.paged" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric is %T, want Sum[int64]", m.Data)
+			}
+			var total int64
+			for _, dp := range sum.DataPoints {
+				total += dp.Value
+			}
+			return total, true
+		}
+	}
+	return 0, false
 }

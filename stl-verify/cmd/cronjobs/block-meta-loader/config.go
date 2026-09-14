@@ -29,10 +29,9 @@ const (
 	ethereumQueueName = "block-meta-loader"
 	ethereumChain     = "ethereum"
 
-	// defaultHeadMargin keeps the newest blocks out of a run. The archive trails the
-	// indexers at the head, so without a margin every repeated run reports that normal
-	// lag as an absent object. This is a starting value covering ordinary lag rather
-	// than a measured one; HEAD_MARGIN tunes it per chain, and 0 disables it.
+	// defaultHeadMargin keeps the newest blocks out of a run, because the archive trails the
+	// indexers at the head. A starting value covering ordinary lag, not a measured one;
+	// HEAD_MARGIN tunes it per chain and 0 disables it.
 	defaultHeadMargin = int64(300)
 )
 
