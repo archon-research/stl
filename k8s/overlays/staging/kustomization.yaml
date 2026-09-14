@@ -66,6 +66,9 @@ resources:
   # On-demand Morpho vault backfill worker (VEC-218). No Temporal schedule: idles
   # on its task queue until a run is started by hand from the Temporal UI.
   - ../../base/morpho-vault-backfill
+  # On-demand Uniswap V4 position bootstrap (VEC-639). No Temporal schedule:
+  # idles on its task queue until a run is started by hand from the Temporal UI.
+  - ../../base/uniswap-v4-position-bootstrap
   # On-demand block republisher (ARCT-383). No Temporal schedule: idles on its
   # task queue until an operator starts a run with the heights to repair. One
   # per chain with a raw archive, each on its own task queue. Robinhood has an
