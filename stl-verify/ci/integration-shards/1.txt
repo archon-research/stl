@@ -61,3 +61,5 @@
 ./internal/pkg/tickbitmap
 ./internal/pkg/blockversion
 ./cmd/backfillers/allocation-underlying-value-backfill
+./internal/services/uniswapv4bootstrap
+./cmd/backfillers/uniswap-v4-position-bootstrap

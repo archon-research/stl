@@ -39,6 +39,13 @@ type UniswapV4BlockWrites struct {
 	Positions       []*entity.UniswapV4Position
 }
 
+// UniswapV4PositionWriter is the position bootstrap's one write: position rows
+// alone, through the same append-on-change path SaveBlock's position phase takes.
+type UniswapV4PositionWriter interface {
+	// Returns how many rows it inserted — zero when every slot's stored state already matches.
+	SavePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) (insertedRows int64, err error)
+}
+
 type UniswapV4Repository interface {
 	// Current version of every registered pool on chainID, with the chain's
 	// PoolManager/StateView and token decimals; an unresolvable pool is an error.
