@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/data_quality/schemamaster"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -536,5 +537,54 @@ func TestHeadMarginMeasuresFromTheChainHeadNotThePendingSet(t *testing.T) {
 	}
 	if len(refs) != 11 {
 		t.Fatalf("the work list holds %d of the 11 blocks in the gap; a margin measured from the pending set deletes a gap narrower than itself", len(refs))
+	}
+}
+
+// The arms decide which tables' blocks ever get a block_meta row, and schema_master.json's block_meta
+// fills declare which tables RESOLVE block_timestamp by joining block_meta. A table in the register but
+// not in the arms is never enumerated, so every one of its rows resolves to a NULL timestamp and the
+// conformance check still passes — the register is satisfied by the declaration alone. The two lists
+// agreed by hand until this test; now a table that gains the fill fails here until it gains an arm.
+//
+// This is the answer to "should the loader look at every data table": no — at every table that cannot
+// answer block_timestamp for itself, which is exactly this set.
+func TestWorkListArmsCoverEveryBlockMetaFill(t *testing.T) {
+	register, err := schemamaster.Load()
+	if err != nil {
+		t.Fatalf("load schema_master.json: %v", err)
+	}
+
+	declared := map[string]bool{}
+	for _, f := range register.Fills {
+		if f.BlockMeta {
+			declared[f.Table] = true
+		}
+	}
+	// Positive control: a register that parsed but declared nothing would make the loop below vacuous.
+	if len(declared) == 0 {
+		t.Fatal("no table declares a block_meta fill; the register did not load as expected and the comparison proves nothing")
+	}
+
+	armed := map[string]bool{}
+	for _, a := range workListArms {
+		armed[a.table] = true
+	}
+
+	for table := range declared {
+		if !armed[table] {
+			t.Errorf("%s resolves block_timestamp through block_meta (schema_master.json fills) but no work-list arm "+
+				"enumerates it, so its blocks never get a row and every one of its timestamps resolves NULL", table)
+		}
+	}
+	for table := range armed {
+		// prime_debt is the one arm with no fill, and deliberately: it carries block_number but resolves
+		// its own time, so it is loaded for consumers of block_meta rather than for its own sake.
+		if table == "prime_debt" {
+			continue
+		}
+		if !declared[table] {
+			t.Errorf("the work list enumerates %s, but nothing in schema_master.json says it needs block_meta; "+
+				"either it should declare the fill or the arm is loading blocks no one resolves", table)
+		}
 	}
 }
