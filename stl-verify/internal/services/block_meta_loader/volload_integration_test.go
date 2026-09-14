@@ -23,8 +23,13 @@ import (
 // Volume validation against real Postgres and real S3: enough referenced blocks, spread over enough
 // chunks, that batching, the windowed enumeration, bounded concurrency and the anti-join all do
 // real work rather than degenerate to one batch.
+//
+// 300 over 6 chunks at batch 50 is six batches and six windows, which exercises every one of those
+// paths. It was 2,000 while I was measuring throughput by hand; left that way it cost minutes of a
+// CI shard whose containers are shared with three other packages running in parallel, and pushed
+// db/migrator past its ten-minute budget. The one-off measurement does not need to live in the suite.
 func TestVolume_RealDataEndToEnd(t *testing.T) {
-	const blocks = 2000
+	const blocks = 300
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
@@ -85,8 +90,8 @@ func TestVolume_RealDataEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repository: %v", err)
 	}
-	svc, err := New(Config{ChainID: 1, Bucket: bucket, BatchSize: 100, Concurrency: 10},
-		repo, newLocalStackReader(t, ctx, logger), logger)
+	cfg := Config{ChainID: 1, Bucket: bucket, BatchSize: 50, Concurrency: 10}
+	svc, err := New(cfg, repo, newLocalStackReader(t, ctx, logger), logger)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -97,7 +102,8 @@ func TestVolume_RealDataEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	t.Logf("loaded %d rows in %s (%d chunks, batch 100, concurrency 10)", loaded, elapsed.Round(time.Millisecond), chunks)
+	t.Logf("loaded %d rows in %s (%d chunks, batch %d, concurrency %d)",
+		loaded, elapsed.Round(time.Millisecond), chunks, cfg.BatchSize, cfg.Concurrency)
 
 	if loaded != blocks {
 		t.Errorf("loaded %d rows, want %d", loaded, blocks)
