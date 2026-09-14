@@ -390,8 +390,17 @@ func (w *streamWorld) seedVaultWorld(t *testing.T, ctx context.Context, pool *pg
 func TestStreamHarness_EveryWrapperRunsInOneDatabase(t *testing.T) {
 	ctx, pool, w := streamHarness(t, 4242)
 	w.seedMorphoWorld(t, ctx, pool)
-	if n := w.seedVaultWorld(t, ctx, pool); n == 0 {
-		t.Fatal("the vault world seeded nothing")
+	for name, seeded := range map[string]int{
+		"vault":      w.seedVaultWorld(t, ctx, pool),
+		"aave":       w.seedAaveWorld(t, ctx, pool),
+		"sky":        w.seedSkyWorld(t, ctx, pool),
+		"allocation": w.seedAllocationWorld(t, ctx, pool),
+		"maple":      w.seedMapleWorld(t, ctx, pool),
+		"anchorage":  w.seedAnchorageWorld(t, ctx, pool),
+	} {
+		if seeded == 0 {
+			t.Fatalf("the %s world seeded nothing, so its wrapper appending 0 would prove nothing", name)
+		}
 	}
 
 	// Every wrapper on the branch, in the order the runner would call them.
@@ -413,9 +422,12 @@ func TestStreamHarness_EveryWrapperRunsInOneDatabase(t *testing.T) {
 	if len(appended) != len(wrappers) {
 		t.Fatalf("only %d of %d wrappers ran; the stream cannot be driven as one", len(appended), len(wrappers))
 	}
-	if appended["materialize_morpho_market"] == 0 || appended["materialize_morpho_vault"] == 0 {
-		t.Fatalf("the two seeded projections appended %d and %d; the run proves nothing about composition",
-			appended["materialize_morpho_market"], appended["materialize_morpho_vault"])
+	// Every projection now has a seeded source, so every wrapper must append something. A zero here
+	// is the interesting case: it means the source was seeded but the projection emitted nothing.
+	for _, fn := range wrappers {
+		if appended[fn] == 0 {
+			t.Errorf("%s appended 0 against a seeded source", fn)
+		}
 	}
 
 	// Cross-view disjointness: the spine refuses a position claimed by two projections, so every
@@ -468,4 +480,238 @@ func TestStreamHarness_EveryWrapperRunsInOneDatabase(t *testing.T) {
 	if currentWrong != 0 || dailyWrong != 0 {
 		t.Errorf("after the full stream: position_current wrong on %d, position_daily wrong on %d", currentWrong, dailyWrong)
 	}
+}
+
+// The remaining five source worlds. Every column list below was read out of the creating migration
+// rather than copied from an existing fixture, for the same reason the oracle is computed in Go: a
+// fixture that encodes a wrong assumption passes its own suite forever.
+
+// seedAaveWorld: borrower and borrower_collateral, plus the two reference tables the view keys on.
+// processing_version is deliberately NOT supplied -- trigger_assign_processing_version owns it.
+func (w *streamWorld) seedAaveWorld(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int {
+	t.Helper()
+	var protocolID, usdc, weth int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO protocol (chain_id, address, name, protocol_type)
+		VALUES (1, decode($1,'hex'), 'stream-aave', 'lending') RETURNING id`, w.addr(0x9100)).Scan(&protocolID); err != nil {
+		t.Fatalf("seed aave protocol: %v", err)
+	}
+	for _, s := range []struct {
+		out *int64
+		a   int
+		d   int
+	}{{&usdc, 0x9101, 6}, {&weth, 0x9102, 18}} {
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO token (chain_id, address, symbol, decimals)
+			VALUES (1, decode($1,'hex'), 'AAV', $2) RETURNING id`, w.addr(s.a), s.d).Scan(s.out); err != nil {
+			t.Fatalf("seed aave token: %v", err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `
+		-- debt_token has no chain_id; receipt_token does. The two sibling reference tables are
+		-- asymmetric, which is the kind of thing a shared fixture hides.
+		INSERT INTO debt_token (protocol_id, underlying_token_id, variable_debt_address, variable_symbol)
+		VALUES ($1, $2, decode($3,'hex'), 'vUSDC')`, protocolID, usdc, w.addr(0x9201)); err != nil {
+		t.Fatalf("seed debt_token: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO receipt_token (chain_id, protocol_id, underlying_token_id, receipt_token_address, symbol)
+		VALUES (1, $1, $2, decode($3,'hex'), 'aWETH')`, protocolID, weth, w.addr(0x9202)); err != nil {
+		t.Fatalf("seed receipt_token: %v", err)
+	}
+	rows := 0
+	for h := 0; h < 2+w.rng.Intn(3); h++ {
+		var userID int64
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO "user" (chain_id, address) VALUES (1, decode($1,'hex')) RETURNING id`,
+			w.addr(0xA000+h)).Scan(&userID); err != nil {
+			t.Fatalf("seed aave user: %v", err)
+		}
+		block := int64(3000 + w.rng.Intn(40))
+		var debt, coll int64
+		for o := 0; o < 2+w.rng.Intn(4); o++ {
+			block += int64(1 + w.rng.Intn(25))
+			debt += int64(w.rng.Intn(300))
+			coll += int64(w.rng.Intn(200))
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version,
+				                      amount, change, event_type, tx_hash, created_at, build_id)
+				VALUES ($1,$2,$3,$4,0,$5,$5,'Borrow',decode($6,'hex'),$7::timestamptz,0)
+				ON CONFLICT DO NOTHING`,
+				userID, protocolID, usdc, block, debt, fmt.Sprintf("%08x", block*7+int64(h)), streamBlockTime(block)); err != nil {
+				t.Fatalf("seed borrower: %v", err)
+			}
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version,
+				                                 amount, change, event_type, tx_hash, collateral_enabled, created_at, build_id)
+				VALUES ($1,$2,$3,$4,0,$5,$5,'Supply',decode($6,'hex'),$7,$8::timestamptz,0)
+				ON CONFLICT DO NOTHING`,
+				userID, protocolID, weth, block, coll, fmt.Sprintf("%08x", block*11+int64(h)),
+				w.rng.Intn(4) != 0, streamBlockTime(block)); err != nil {
+				t.Fatalf("seed borrower_collateral: %v", err)
+			}
+			rows += 2
+		}
+	}
+	return rows
+}
+
+// seedSkyWorld: prime_debt, which carries its own synced_at as event time and the Vat protocol row
+// the projection hashes into position_id.
+func (w *streamWorld) seedSkyWorld(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int {
+	t.Helper()
+	var vatID, primeID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO protocol (chain_id, address, name, protocol_type)
+		VALUES (1, decode($1,'hex'), 'stream-vat', NULL) RETURNING id`, w.addr(0xB100)).Scan(&vatID); err != nil {
+		t.Fatalf("seed vat: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO prime (name, vault_address) VALUES ('stream-sky', decode($1,'hex')) RETURNING id`,
+		w.addr(0xB101)).Scan(&primeID); err != nil {
+		t.Fatalf("seed sky prime: %v", err)
+	}
+	rows := 0
+	for i, ilk := range []string{"STR-A", "STR-B"} {
+		block := int64(4000 + w.rng.Intn(30))
+		var debt int64
+		for o := 0; o < 2+w.rng.Intn(3); o++ {
+			block += int64(1 + w.rng.Intn(20))
+			debt += int64(w.rng.Intn(900))
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO prime_debt (prime_id, protocol_id, ilk_name, debt_wad, block_number, block_version, synced_at)
+				VALUES ($1,$2,$3,$4,$5,0,$6::timestamptz) ON CONFLICT DO NOTHING`,
+				primeID, vatID, ilk, debt, block+int64(i), streamBlockTime(block)); err != nil {
+				t.Fatalf("seed prime_debt: %v", err)
+			}
+			rows++
+		}
+	}
+	return rows
+}
+
+// seedAllocationWorld: allocation_position, whose created_at is the view's block_timestamp.
+func (w *streamWorld) seedAllocationWorld(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int {
+	t.Helper()
+	var tok, primeID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO token (chain_id, address, symbol, decimals)
+		VALUES (1, decode($1,'hex'), 'ALC', 6) RETURNING id`, w.addr(0xC101)).Scan(&tok); err != nil {
+		t.Fatalf("seed alloc token: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO prime (name, vault_address) VALUES ('stream-alloc', decode($1,'hex')) RETURNING id`,
+		w.addr(0xC102)).Scan(&primeID); err != nil {
+		t.Fatalf("seed alloc prime: %v", err)
+	}
+	rows := 0
+	proxy := w.addr(0xC103)
+	block := int64(5000 + w.rng.Intn(30))
+	var balance int64
+	for o := 0; o < 3+w.rng.Intn(4); o++ {
+		block += int64(1 + w.rng.Intn(20))
+		balance += int64(w.rng.Intn(700))
+		dir := []string{"in", "out", "sweep"}[w.rng.Intn(3)]
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO allocation_position (chain_id, token_id, prime_id, proxy_address, balance,
+			                                 block_number, block_version, tx_hash, log_index, tx_amount,
+			                                 direction, created_at)
+			VALUES (1,$1,$2,decode($3,'hex'),$4,$5,0,decode($6,'hex'),$7,$8,$9,$10::timestamptz)
+			ON CONFLICT DO NOTHING`,
+			tok, primeID, proxy, balance, block, fmt.Sprintf("%08x", block*13), o, 1, dir, streamBlockTime(block)); err != nil {
+			t.Fatalf("seed allocation_position: %v", err)
+		}
+		rows++
+	}
+	return rows
+}
+
+// seedMapleWorld: maple_loan_state plus the block_meta rows the projection resolves each cycle to.
+func (w *streamWorld) seedMapleWorld(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int {
+	t.Helper()
+	var protocolID, assetTok, poolID, borrower, loanID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO protocol (chain_id, address, name, protocol_type)
+		VALUES (1, decode($1,'hex'), 'stream-maple', 'lending') RETURNING id`, w.addr(0xD100)).Scan(&protocolID); err != nil {
+		t.Fatalf("seed maple protocol: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO token (chain_id, address, symbol, decimals)
+		VALUES (1, decode($1,'hex'), 'MPL', 6) RETURNING id`, w.addr(0xD101)).Scan(&assetTok); err != nil {
+		t.Fatalf("seed maple token: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		-- No name / is_syrup: 20260627_120000 DROPPED both. Reading only the creating migration is not
+		-- enough when a later one removes columns.
+		INSERT INTO maple_pool (chain_id, protocol_id, address, asset_token_id)
+		VALUES (1,$1,decode($2,'hex'),$3) RETURNING id`, protocolID, w.addr(0xD102), assetTok).Scan(&poolID); err != nil {
+		t.Fatalf("seed maple pool: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO "user" (chain_id, address) VALUES (1, decode($1,'hex')) RETURNING id`,
+		w.addr(0xD103)).Scan(&borrower); err != nil {
+		t.Fatalf("seed maple borrower: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
+		VALUES (1,$1,decode($2,'hex'),$3,$4) RETURNING id`, protocolID, w.addr(0xD104), poolID, borrower).Scan(&loanID); err != nil {
+		t.Fatalf("seed maple loan: %v", err)
+	}
+	// block_meta must precede every cycle, or the projection refuses the chain by design.
+	rows := 0
+	block := int64(6000)
+	for i := 0; i < 12; i++ {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO block_meta (chain_id, block_number, block_version, processing_version, block_timestamp)
+			VALUES (1,$1,0,0,$2::timestamptz) ON CONFLICT DO NOTHING`,
+			block+int64(i*5), streamBlockTime(block+int64(i*5))); err != nil {
+			t.Fatalf("seed block_meta: %v", err)
+		}
+	}
+	var owed int64
+	for o := 0; o < 3+w.rng.Intn(3); o++ {
+		owed += int64(w.rng.Intn(1000))
+		// synced_at sits just after a known block so the cycle resolves to it.
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed)
+			VALUES ($1,$2::timestamptz,'Active',$3) ON CONFLICT DO NOTHING`,
+			loanID, streamBlockTime(block+int64(o*5)), owed); err != nil {
+			t.Fatalf("seed maple_loan_state: %v", err)
+		}
+		rows++
+	}
+	return rows
+}
+
+// seedAnchorageWorld: anchorage_package_snapshot, an off-chain source keyed on snapshot_time.
+func (w *streamWorld) seedAnchorageWorld(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int {
+	t.Helper()
+	var primeID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO prime (name, vault_address) VALUES ('stream-anchorage', decode($1,'hex')) RETURNING id`,
+		w.addr(0xE101)).Scan(&primeID); err != nil {
+		t.Fatalf("seed anchorage prime: %v", err)
+	}
+	rows := 0
+	for p := 0; p < 2; p++ {
+		pkg := fmt.Sprintf("strpkg%014x", p)
+		qty := int64(100 + w.rng.Intn(900))
+		for o := 0; o < 2+w.rng.Intn(3); o++ {
+			qty += int64(w.rng.Intn(50))
+			ts := fmt.Sprintf("2026-05-%02dT12:00:00Z", 1+o+p)
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO anchorage_package_snapshot
+				    (prime_id, package_id, pledgor_id, secured_party_id, active, state,
+				     current_ltv, exposure_value, package_value, margin_call_ltv, critical_ltv,
+				     margin_return_ltv, asset_type, custody_type, asset_price, asset_quantity,
+				     asset_weighted_value, ltv_timestamp, snapshot_time)
+				VALUES ($1,$2,'pledgor','secured',true,'HEALTHY',
+				        0.5,1,1,0.7,0.8,0.6,'BTC','AnchorageCustody',1,$3,1,$4::timestamptz,$4::timestamptz)
+				ON CONFLICT DO NOTHING`, primeID, pkg, qty, ts); err != nil {
+				t.Fatalf("seed anchorage snapshot: %v", err)
+			}
+			rows++
+		}
+	}
+	return rows
 }
