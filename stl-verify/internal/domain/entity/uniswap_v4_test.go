@@ -432,3 +432,48 @@ func assertValidateErr(t *testing.T, err error, wantErr bool) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+func TestUniswapV4PositionNFTTransfer_Validate(t *testing.T) {
+	cases := []struct {
+		name    string
+		mut     func(*UniswapV4PositionNFTTransfer)
+		wantErr bool
+	}{
+		{"ok", func(*UniswapV4PositionNFTTransfer) {}, false},
+		{"missing position manager id", func(t *UniswapV4PositionNFTTransfer) { t.PositionManagerID = 0 }, true},
+		{"negative position manager id", func(t *UniswapV4PositionNFTTransfer) { t.PositionManagerID = -1 }, true},
+		{"missing block number", func(t *UniswapV4PositionNFTTransfer) { t.BlockNumber = 0 }, true},
+		{"negative block version", func(t *UniswapV4PositionNFTTransfer) { t.BlockVersion = -1 }, true},
+		{"missing block timestamp", func(t *UniswapV4PositionNFTTransfer) { t.BlockTimestamp = time.Time{} }, true},
+		{"missing tx hash", func(t *UniswapV4PositionNFTTransfer) { t.TxHash = common.Hash{} }, true},
+		{"negative log index", func(t *UniswapV4PositionNFTTransfer) { t.LogIndex = -1 }, true},
+		{"nil token id", func(t *UniswapV4PositionNFTTransfer) { t.TokenID = nil }, true},
+		{"negative token id", func(t *UniswapV4PositionNFTTransfer) { t.TokenID = big.NewInt(-1) }, true},
+		{"token id zero", func(t *UniswapV4PositionNFTTransfer) { t.TokenID = big.NewInt(0) }, false},
+		// A mint has from = address(0) and a burn has to = address(0); both are
+		// ordinary rows, so neither address may be required to be non-zero.
+		{"mint from the zero address", func(t *UniswapV4PositionNFTTransfer) { t.From = common.Address{} }, false},
+		{"burn to the zero address", func(t *UniswapV4PositionNFTTransfer) { t.To = common.Address{} }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := validV4NFTTransfer()
+			tc.mut(tr)
+			assertValidateErr(t, tr.Validate(), tc.wantErr)
+		})
+	}
+}
+
+func validV4NFTTransfer() *UniswapV4PositionNFTTransfer {
+	return &UniswapV4PositionNFTTransfer{
+		PositionManagerID: 1,
+		TokenID:           big.NewInt(388720),
+		BlockNumber:       100,
+		BlockVersion:      0,
+		BlockTimestamp:    time.Unix(1, 0).UTC(),
+		TxHash:            v4TxHash,
+		LogIndex:          0,
+		From:              v4Sender,
+		To:                common.HexToAddress("0xe588dDd13a8bDBee578eAa7c4Fd9780180b2f10C"),
+	}
+}
