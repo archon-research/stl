@@ -137,26 +137,10 @@ const poolManagerEventsJSON = `[
 	}
 ]`
 
-var positionManagerABIOnce = sync.OnceValues(func() (*abi.ABI, error) {
-	return abis.ParseABI(positionManagerEventsJSON)
-})
-
-// PositionManagerABI returns the ERC-721 Transfer fragment. Kept apart from
-// PoolManagerABI: its inherited ERC-6909 Transfer is a different event, and one
-// shared topic0 map would decode either against the other.
-func PositionManagerABI() (*abi.ABI, error) {
-	return positionManagerABIOnce()
+// PositionManagerTransferEvent is the posm's ERC-721 Transfer fragment. Kept
+// apart from PoolManagerABI: the PoolManager's inherited ERC-6909 Transfer is a
+// different event, and one shared topic0 map would decode either against the
+// other.
+func PositionManagerTransferEvent() (*abi.Event, error) {
+	return abis.ERC721TransferEvent()
 }
-
-const positionManagerEventsJSON = `[
-	{
-		"anonymous": false,
-		"inputs": [
-			{"indexed": true, "name": "from",    "type": "address"},
-			{"indexed": true, "name": "to",      "type": "address"},
-			{"indexed": true, "name": "tokenId", "type": "uint256"}
-		],
-		"name": "Transfer",
-		"type": "event"
-	}
-]`
