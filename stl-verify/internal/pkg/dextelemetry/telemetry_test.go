@@ -671,6 +671,26 @@ func TestNewTelemetry_SeedsAlertedSeriesAtZero(t *testing.T) {
 	}
 }
 
+// NoNFTTransfers reads nft.transfer.rows.attempted as ==0, which an absent
+// series cannot match. The seed is what makes absence mean "this build predates
+// the posm decoder" — the window between the rules syncing on merge and the
+// image reaching the cluster — rather than "decoding is broken".
+func TestNewTelemetry_SeedsTheNFTTransferAttemptedSeries(t *testing.T) {
+	_, reader := newTestTelemetry(t, "uniswap_v4", 1)
+
+	dps := testutil.CollectSumDataPoints(t, reader, "uniswap_v4.nft.transfer.rows.attempted")
+	if len(dps) != 1 {
+		t.Fatalf("uniswap_v4.nft.transfer.rows.attempted has %d series before any block, want 1 (the seed)", len(dps))
+	}
+	if dps[0].Value != 0 {
+		t.Errorf("seeded value = %d, want 0", dps[0].Value)
+	}
+	if chain := testutil.AttrValue(dps[0], "chain"); chain != "mainnet" {
+		t.Errorf("seeded chain attr = %q, want %q", chain, "mainnet")
+	}
+
+}
+
 func TestRecordPoolsNeverIndexed_RecordsZeroAsAValue(t *testing.T) {
 	tel, reader := newTestTelemetry(t, "uniswap_v4", 1)
 	tel.RecordPoolsNeverIndexed(context.Background(), 0)
