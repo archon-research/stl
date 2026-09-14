@@ -2,6 +2,11 @@
 -- prime's debt in an ilk, held by the prime's vault address; instrument_key = ilk_name (unique within
 -- the single Vat); protocol_id = the Vat row the indexer stamps on each prime_debt row.
 
+-- Bounds the wait for the ADD COLUMN's lock on prime_debt, which the indexer writes to, as
+-- 20260818_150000 does in this PR for the same shape. The migrator runs a file in one transaction,
+-- so this covers the DO block's EXECUTE too. Never mark this file `migrate: no-transaction`.
+SET LOCAL lock_timeout = '10s';
+
 -- The MCD Vat, the indexer's VAT_ADDRESS default: the row every pre-existing snapshot was read from.
 -- Named for the contract, not for Sky, and protocol_type is left NULL: the column is free text with
 -- no vocabulary behind it, and Sky is not a lending protocol.
