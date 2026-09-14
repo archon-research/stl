@@ -250,6 +250,24 @@ respond stl-sentinelstaging-cronjob "transform-worker-${DEPLOY_SHA}" "$(manifest
 check "a cronjob tag keeps its name prefix" 0 "UNCHANGED   stl-sentinelstaging-cronjob" -- \
   --kustomization "$CRONJOB_OVERLAY" --tag "$DEPLOY_SHA"
 
+# VEC-754: a quoted newTag with a trailing comment (the deploy bot's actual
+# hand-pinned form, e.g. ARCT-436) used to leave the closing quote and comment
+# stuck to the value, so the lookup tag never matched anything in ECR and the
+# verdict came back UNKNOWN instead of comparing the real SHA.
+rm -rf "${WORK}/responses"
+COMMENTED_OVERLAY="${WORK}/kustomization-commented.yaml"
+{
+  echo "images:"
+  echo "  - name: watcher"
+  echo "    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher"
+  echo "    newTag: \"${PINNED_SHA}\"  # pinned per ARCT-436"
+} > "$COMMENTED_OVERLAY"
+respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
+respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one)"
+check "a trailing comment on a quoted newTag does not stick to the value" 0 \
+  "UNCHANGED   stl-sentinelstaging-watcher" -- \
+  --kustomization "$COMMENTED_OVERLAY" --tag "$DEPLOY_SHA"
+
 # Bad invocations fail loudly rather than comparing something arbitrary.
 check "a short SHA is rejected" 2 "40-char lowercase git SHA" -- \
   --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag deadbeef
