@@ -1,14 +1,20 @@
 """The one 422 body for the whole API surface, and the handlers that emit it.
 
-A rejection is machine-readable first: history is never truncated, so this body
-is the only signal a caller gets that a request was refused, and a client has to
-be able to re-tile a window or drop to a fitting frequency without parsing prose.
-One model rather than one per rejection, so the conformance harness has a single
-contract to assert against every route.
+The body is an RFC 9457 problem detail: ``type`` identifies the rejection, ``title``
+labels it, ``detail`` describes the occurrence, and everything specific to one
+``type`` rides alongside as an RFC extension member. A rejection is machine-readable
+first: history is never truncated, so this body is the only signal a caller gets that
+a request was refused, and a client has to be able to re-tile a window or drop to a
+fitting frequency without parsing prose. One model rather than one per rejection, so
+the conformance harness has a single contract to assert against every route.
 
 Both a domain ``TimeSeriesQueryError`` and FastAPI's own ``RequestValidationError``
 answer with it, so an unparseable timestamp and an oversized window are the same
 shape to a client.
+
+``type`` carries a bare slug rather than the URI RFC 9457 asks for: the values are
+the client's branch, and a URI would commit the surface to resolvable documentation
+at every one of them.
 """
 
 from datetime import datetime
@@ -28,10 +34,15 @@ from app.logging import get_logger
 logger = get_logger(__name__)
 
 # Every rejection FastAPI raises before a route is reached — an unparseable
-# timestamp, an out-of-range limit, an unknown enum value — under one code, since
-# the per-field detail is in the message and a client's branch is the same either
+# timestamp, an out-of-range limit, an unknown enum value — under one type, since
+# the per-field detail is in ``detail`` and a client's branch is the same either
 # way: fix the request.
-INVALID_REQUEST_CODE = "invalid_request"
+INVALID_REQUEST_TYPE = "invalid_request"
+INVALID_REQUEST_TITLE = "Invalid request"
+
+# The status every body on this surface reports. RFC 9457 makes the member advisory
+# and requires it to agree with the response's own code when present.
+REJECTION_STATUS = 422
 
 
 class ApiRejectionError(Exception):
@@ -44,21 +55,33 @@ class ApiRejectionError(Exception):
     wire under a schema that promises this model.
     """
 
-    def __init__(self, message: str, *, error_code: str = INVALID_REQUEST_CODE) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_type: str = INVALID_REQUEST_TYPE,
+        title: str = INVALID_REQUEST_TITLE,
+    ) -> None:
         super().__init__(message)
-        self.error_code = error_code
+        self.error_type = error_type
+        self.title = title
 
 
 class ApiErrorResponse(BaseModel):
-    """The body of every ``422`` on the surface.
+    """The body of every ``422`` on the surface, as an RFC 9457 problem detail.
 
-    The suggestion fields are populated on a max-points rejection and absent
-    otherwise, so a client can branch on ``error_code`` and read only what that
-    code promises.
+    The extension members below are populated on a max-points rejection and absent
+    otherwise, so a client can branch on ``type`` and read only what that type
+    promises.
     """
 
-    error_code: str = Field(description="Stable, machine-readable rejection code.", examples=["max_points_exceeded"])
-    message: str = Field(description="Human-readable explanation. Never the only signal.")
+    type: str = Field(description="Stable, machine-readable rejection identifier.", examples=["max_points_exceeded"])
+    title: str = Field(
+        description="Short static label for the `type`. Same across every occurrence of one type.",
+        examples=["Too many points"],
+    )
+    status: int = Field(default=REJECTION_STATUS, description="HTTP status of the response carrying this body.")
+    detail: str = Field(description="Human-readable explanation of this occurrence. Never the only signal.")
     point_count: int | None = Field(
         default=None, description="Observations the request would return. Max-points rejections only."
     )
@@ -95,28 +118,29 @@ class ApiErrorResponse(BaseModel):
 # FastAPI's default `HTTPValidationError` 422 so the schema matches what the
 # handlers below actually return.
 API_ERROR_RESPONSES: dict[int | str, dict] = {
-    422: {"model": ApiErrorResponse, "description": "Request rejected; branch on `error_code`."}
+    422: {"model": ApiErrorResponse, "description": "Request rejected; branch on `type`."}
 }
 
 
 def error_response(error: ApiErrorResponse) -> JSONResponse:
-    """Serialize an error body, omitting the fields its code does not promise."""
+    """Serialize a problem detail, omitting the extension members its type does not promise."""
     return JSONResponse(status_code=422, content=error.model_dump(mode="json", exclude_none=True))
 
 
 def time_series_error(exc: TimeSeriesQueryError) -> ApiErrorResponse:
-    """The body for a domain rejection, carrying suggestions where the code has them."""
+    """The body for a domain rejection, carrying suggestions where the type has them."""
     if isinstance(exc, MaxPointsExceededError):
         return ApiErrorResponse(
-            error_code=exc.error_code,
-            message=str(exc),
+            type=exc.error_type,
+            title=exc.title,
+            detail=str(exc),
             point_count=exc.point_count,
             max_points=exc.max_points,
             suggested_from_timestamp=exc.suggested_from_timestamp,
             suggested_to_timestamp=exc.suggested_to_timestamp,
             suggested_frequency=exc.suggested_frequency,
         )
-    return ApiErrorResponse(error_code=exc.error_code, message=str(exc))
+    return ApiErrorResponse(type=exc.error_type, title=exc.title, detail=str(exc))
 
 
 def _validation_message(exc: RequestValidationError) -> str:
@@ -151,13 +175,13 @@ def register_error_handlers(application: FastAPI) -> None:
 
     @application.exception_handler(ApiRejectionError)
     async def api_rejection_handler(request: Request, exc: ApiRejectionError) -> JSONResponse:
-        return error_response(ApiErrorResponse(error_code=exc.error_code, message=str(exc)))
+        return error_response(ApiErrorResponse(type=exc.error_type, title=exc.title, detail=str(exc)))
 
     @application.exception_handler(TimeSeriesQueryError)
     async def time_series_query_error_handler(request: Request, exc: TimeSeriesQueryError) -> JSONResponse:
         logger.warning(
             "Time-series query rejected",
-            extra={"path": request.url.path, "method": request.method, "error_code": exc.error_code},
+            extra={"path": request.url.path, "method": request.method, "error_type": exc.error_type},
         )
         return error_response(time_series_error(exc))
 
@@ -173,4 +197,6 @@ def register_error_handlers(application: FastAPI) -> None:
             },
         )
         _log_validation_inputs(request, exc)
-        return error_response(ApiErrorResponse(error_code=INVALID_REQUEST_CODE, message=_validation_message(exc)))
+        return error_response(
+            ApiErrorResponse(type=INVALID_REQUEST_TYPE, title=INVALID_REQUEST_TITLE, detail=_validation_message(exc))
+        )

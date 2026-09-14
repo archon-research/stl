@@ -127,13 +127,15 @@ def test_an_oversized_request_is_rejected_with_the_typed_body(client: TestClient
 
     assert response.status_code == 422
     body = response.json()
-    assert body["error_code"] == "max_points_exceeded"
+    assert body["type"] == "max_points_exceeded"
+    assert body["title"] == "Too many points"
+    assert body["status"] == 422
     assert body["point_count"] == MAX_POINTS * 4
     assert body["max_points"] == MAX_POINTS
     assert body["suggested_to_timestamp"] == "2026-03-06T00:00:00Z"
     assert body["suggested_from_timestamp"] == "2026-03-05T18:00:00Z"
     assert body["suggested_frequency"] == "PT5M"
-    assert body["message"]
+    assert body["detail"]
 
 
 def test_an_oversized_request_is_rejected_rather_than_truncated(client: TestClient) -> None:
@@ -151,8 +153,8 @@ def test_a_domain_rejection_carries_no_suggestion_fields(client: TestClient) -> 
 
     assert response.status_code == 422
     body = response.json()
-    assert body["error_code"] == "window_too_large"
-    assert set(body) == {"error_code", "message"}
+    assert body["type"] == "window_too_large"
+    assert set(body) == {"type", "title", "status", "detail"}
 
 
 def test_a_validation_failure_uses_the_same_model(client: TestClient) -> None:
@@ -160,8 +162,8 @@ def test_a_validation_failure_uses_the_same_model(client: TestClient) -> None:
 
     assert response.status_code == 422
     body = response.json()
-    assert body["error_code"] == "invalid_request"
-    assert "to_timestamp" in body["message"]
+    assert body["type"] == "invalid_request"
+    assert "to_timestamp" in body["detail"]
     assert ApiErrorResponse.model_validate(body)
 
 
@@ -169,7 +171,7 @@ def test_a_rejected_enum_value_uses_the_same_model(client: TestClient) -> None:
     response = _history(client, aggregation_method="period-mean")
 
     assert response.status_code == 422
-    assert response.json()["error_code"] == "invalid_request"
+    assert response.json()["type"] == "invalid_request"
 
 
 def test_a_validation_failure_does_not_echo_what_was_sent(client: TestClient) -> None:

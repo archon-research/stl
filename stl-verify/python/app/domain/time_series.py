@@ -85,40 +85,46 @@ MAX_POINTS = 50_000
 class TimeSeriesQueryError(Exception):
     """A caller-fixable rejection of a time-series query.
 
-    ``error_code`` is the stable, machine-readable slug the HTTP layer puts on the
-    wire; the message is human-readable and never the only signal. Deliberately not
-    a ``ValueError``: repository code raises these, and the routes wrap their reads
-    in ``except ValueError`` to report a database failure — inheriting would let a
-    422 carrying suggestions be downgraded to an opaque 500. Abstract here: only
-    concrete subclasses carry a code, so reading ``.error_code`` off a bare instance
-    fails loudly rather than leaking an undocumented slug into a response.
+    ``error_type`` is the stable, machine-readable slug the HTTP layer puts on the
+    wire and ``title`` its short static label; both are per-class, while the message
+    describes the one occurrence. Deliberately not a ``ValueError``: repository code
+    raises these, and the routes wrap their reads in ``except ValueError`` to report
+    a database failure — inheriting would let a 422 carrying suggestions be
+    downgraded to an opaque 500. Abstract here: only concrete subclasses carry a
+    type, so reading ``.error_type`` off a bare instance fails loudly rather than
+    leaking an undocumented slug into a response.
     """
 
-    error_code: ClassVar[str]
+    error_type: ClassVar[str]
+    title: ClassVar[str]
 
 
 class InvalidTimeRangeError(TimeSeriesQueryError):
     """The requested bounds are inverted."""
 
-    error_code = "invalid_time_range"
+    error_type = "invalid_time_range"
+    title = "Invalid time range"
 
 
 class WindowTooLargeError(TimeSeriesQueryError):
     """The requested window exceeds the ceiling for the request."""
 
-    error_code = "window_too_large"
+    error_type = "window_too_large"
+    title = "Window too large"
 
 
 class FrequencyTooFineError(TimeSeriesQueryError):
     """The requested frequency is finer than the window's floor allows."""
 
-    error_code = "frequency_too_fine"
+    error_type = "frequency_too_fine"
+    title = "Frequency too fine"
 
 
 class FrequencyWithoutAggregationMethodError(TimeSeriesQueryError):
     """A frequency was supplied with no aggregation method to cut on it."""
 
-    error_code = "frequency_requires_aggregation_method"
+    error_type = "frequency_requires_aggregation_method"
+    title = "Frequency requires an aggregation method"
 
 
 class MaxPointsExceededError(TimeSeriesQueryError):
@@ -130,7 +136,8 @@ class MaxPointsExceededError(TimeSeriesQueryError):
     clustered in the suggested span is rejected again. See ``enforce_max_points``.
     """
 
-    error_code = "max_points_exceeded"
+    error_type = "max_points_exceeded"
+    title = "Too many points"
 
     def __init__(
         self,

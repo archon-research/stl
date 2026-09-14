@@ -57,7 +57,7 @@ def test_rejects_the_two_parameters_when_they_disagree(client: TestClient):
     response = client.get("/probe?source=indexed&reference=true")
 
     assert response.status_code == 422
-    assert "conflicts" in response.json()["message"]
+    assert "conflicts" in response.json()["detail"]
 
 
 def test_narrows_the_default_to_the_only_provenance_available(client: TestClient):
@@ -68,4 +68,4 @@ def test_refuses_a_provenance_the_endpoint_cannot_serve(client: TestClient):
     response = client.get("/indexed-only?source=reference")
 
     assert response.status_code == 422
-    assert "not available here" in response.json()["message"]
+    assert "not available here" in response.json()["detail"]

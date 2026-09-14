@@ -1083,34 +1083,34 @@ export interface components {
     };
     /**
      * ApiErrorResponse
-     * @description The body of every ``422`` on the surface.
+     * @description The body of every ``422`` on the surface, as an RFC 9457 problem detail.
      *
-     *     The suggestion fields are populated on a max-points rejection and absent
-     *     otherwise, so a client can branch on ``error_code`` and read only what that
-     *     code promises.
+     *     The extension members below are populated on a max-points rejection and absent
+     *     otherwise, so a client can branch on ``type`` and read only what that type
+     *     promises.
      */
     ApiErrorResponse: {
       /**
-       * Error Code
-       * @description Stable, machine-readable rejection code.
-       * @example max_points_exceeded
+       * Detail
+       * @description Human-readable explanation of this occurrence. Never the only signal.
        */
-      error_code: string;
+      detail: string;
       /**
        * Max Points
        * @description Ceiling the request exceeded. Max-points rejections only.
        */
       max_points?: number | null;
       /**
-       * Message
-       * @description Human-readable explanation. Never the only signal.
-       */
-      message: string;
-      /**
        * Point Count
        * @description Observations the request would return. Max-points rejections only.
        */
       point_count?: number | null;
+      /**
+       * Status
+       * @description HTTP status of the response carrying this body.
+       * @default 422
+       */
+      status: number;
       /** @description A frequency that fits the requested window as asked, with `aggregation_method=end-period`; unlike the window suggestion it needs no second round trip. Max-points rejections only. */
       suggested_frequency?: components['schemas']['TimeSeriesFrequency'] | null;
       /**
@@ -1123,6 +1123,18 @@ export interface components {
        * @description Upper bound of the narrower window to retry — the requested upper bound. Max-points rejections only, and absent with `suggested_from_timestamp`.
        */
       suggested_to_timestamp?: string | null;
+      /**
+       * Title
+       * @description Short static label for the `type`. Same across every occurrence of one type.
+       * @example Too many points
+       */
+      title: string;
+      /**
+       * Type
+       * @description Stable, machine-readable rejection identifier.
+       * @example max_points_exceeded
+       */
+      type: string;
     };
     /**
      * BadDebtResponse
@@ -2595,7 +2607,7 @@ export interface operations {
           'application/json': components['schemas']['AllocationActivityEnvelope'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -2624,7 +2636,7 @@ export interface operations {
           'application/json': components['schemas']['ChainResponse'][];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -2653,7 +2665,7 @@ export interface operations {
           'application/json': components['schemas']['DataSourcesResponse'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -2682,7 +2694,7 @@ export interface operations {
           'application/json': components['schemas']['PrimeResponse'][];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -2722,7 +2734,7 @@ export interface operations {
           'application/json': components['schemas']['AllocationResponse'][];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -2772,7 +2784,7 @@ export interface operations {
           'application/json': components['schemas']['PrimeDebtEnvelope'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -2822,7 +2834,7 @@ export interface operations {
           'application/json': components['schemas']['ExposureEnvelope'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -2862,7 +2874,7 @@ export interface operations {
           'application/json': components['schemas']['PrimeRiskCapitalResponse'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -2912,7 +2924,7 @@ export interface operations {
           'application/json': components['schemas']['TotalCapitalEnvelope'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -2956,7 +2968,7 @@ export interface operations {
           'application/json': components['schemas']['ProtocolEventsEnvelope'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -2985,7 +2997,7 @@ export interface operations {
           'application/json': components['schemas']['ProtocolResponse'][];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -3014,7 +3026,7 @@ export interface operations {
           'application/json': components['schemas']['ProvenanceAvailabilityResponse'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -3043,7 +3055,7 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -3083,7 +3095,7 @@ export interface operations {
           'application/json': components['schemas']['RrcEnvelope'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -3116,7 +3128,7 @@ export interface operations {
           'application/json': components['schemas']['RrcEnvelope'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -3153,7 +3165,7 @@ export interface operations {
           'application/json': components['schemas']['BadDebtResponse'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -3190,7 +3202,7 @@ export interface operations {
           'application/json': components['schemas']['RiskBreakdownResponse'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -3224,7 +3236,7 @@ export interface operations {
           'application/json': components['schemas']['BadDebtResponse'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -3258,7 +3270,7 @@ export interface operations {
           'application/json': components['schemas']['RiskBreakdownResponse'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -3287,7 +3299,7 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -3323,7 +3335,7 @@ export interface operations {
           'application/json': components['schemas']['TokenResponse'][];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -3357,7 +3369,7 @@ export interface operations {
           'application/json': components['schemas']['TokenResponse'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -3391,7 +3403,7 @@ export interface operations {
           'application/json': components['schemas']['TokenPriceResponse'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -3422,7 +3434,7 @@ export interface operations {
           'application/json': components['schemas']['TokenResponse'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -3453,7 +3465,7 @@ export interface operations {
           'application/json': components['schemas']['TokenPriceResponse'];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
@@ -3485,7 +3497,7 @@ export interface operations {
           'application/json': components['schemas']['ProtocolEventResponse'][];
         };
       };
-      /** @description Request rejected; branch on `error_code`. */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;

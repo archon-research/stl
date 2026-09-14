@@ -897,14 +897,11 @@
         "type": "object"
       },
       "ApiErrorResponse": {
-        "description": "The body of every ``422`` on the surface.\n\nThe suggestion fields are populated on a max-points rejection and absent\notherwise, so a client can branch on ``error_code`` and read only what that\ncode promises.",
+        "description": "The body of every ``422`` on the surface, as an RFC 9457 problem detail.\n\nThe extension members below are populated on a max-points rejection and absent\notherwise, so a client can branch on ``type`` and read only what that type\npromises.",
         "properties": {
-          "error_code": {
-            "description": "Stable, machine-readable rejection code.",
-            "examples": [
-              "max_points_exceeded"
-            ],
-            "title": "Error Code",
+          "detail": {
+            "description": "Human-readable explanation of this occurrence. Never the only signal.",
+            "title": "Detail",
             "type": "string"
           },
           "max_points": {
@@ -919,11 +916,6 @@
             "description": "Ceiling the request exceeded. Max-points rejections only.",
             "title": "Max Points"
           },
-          "message": {
-            "description": "Human-readable explanation. Never the only signal.",
-            "title": "Message",
-            "type": "string"
-          },
           "point_count": {
             "anyOf": [
               {
@@ -935,6 +927,12 @@
             ],
             "description": "Observations the request would return. Max-points rejections only.",
             "title": "Point Count"
+          },
+          "status": {
+            "default": 422,
+            "description": "HTTP status of the response carrying this body.",
+            "title": "Status",
+            "type": "integer"
           },
           "suggested_frequency": {
             "anyOf": [
@@ -972,11 +970,28 @@
             ],
             "description": "Upper bound of the narrower window to retry \u2014 the requested upper bound. Max-points rejections only, and absent with `suggested_from_timestamp`.",
             "title": "Suggested To Timestamp"
+          },
+          "title": {
+            "description": "Short static label for the `type`. Same across every occurrence of one type.",
+            "examples": [
+              "Too many points"
+            ],
+            "title": "Title",
+            "type": "string"
+          },
+          "type": {
+            "description": "Stable, machine-readable rejection identifier.",
+            "examples": [
+              "max_points_exceeded"
+            ],
+            "title": "Type",
+            "type": "string"
           }
         },
         "required": [
-          "error_code",
-          "message"
+          "type",
+          "title",
+          "detail"
         ],
         "title": "ApiErrorResponse",
         "type": "object"
@@ -3626,7 +3641,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Allocation activity feed",
@@ -3662,7 +3677,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List supported chains",
@@ -3694,7 +3709,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List registered data sources",
@@ -3730,7 +3745,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List all primes",
@@ -3817,7 +3832,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List a prime's current allocations",
@@ -3988,7 +4003,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List prime debt snapshots",
@@ -4160,7 +4175,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Prime exposure time series",
@@ -4244,7 +4259,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Self-computed prime risk capital",
@@ -4419,7 +4434,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Prime total-capital (treasury) time series",
@@ -4578,7 +4593,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List protocol events",
@@ -4614,7 +4629,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List supported protocols",
@@ -4646,7 +4661,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Provenance coverage per prime",
@@ -4676,7 +4691,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Readiness probe",
@@ -4786,7 +4801,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Risk capital (RRC) at default stress",
@@ -4828,7 +4843,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Risk capital (RRC) with scenario overrides",
@@ -4913,7 +4928,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Estimate bad debt at a collateral gap (by chain id and receipt-token address)",
@@ -4997,7 +5012,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Risk-enriched collateral breakdown (by chain id and receipt-token address)",
@@ -5063,7 +5078,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Estimate bad debt at a collateral gap (deprecated)",
@@ -5129,7 +5144,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Risk-enriched collateral breakdown (deprecated)",
@@ -5159,7 +5174,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Liveness probe",
@@ -5253,7 +5268,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List tokens",
@@ -5316,7 +5331,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Get a token by chain id and address",
@@ -5379,7 +5394,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Get latest token price by chain id and address",
@@ -5423,7 +5438,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Get a token by id (deprecated)",
@@ -5467,7 +5482,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Get latest token price (deprecated)",
@@ -5516,7 +5531,7 @@
                 }
               }
             },
-            "description": "Request rejected; branch on `error_code`."
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Get all events for a transaction",

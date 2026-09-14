@@ -302,7 +302,7 @@ def test_max_points_rejects_a_count_above_the_ceiling() -> None:
     with pytest.raises(MaxPointsExceededError) as exc_info:
         enforce_max_points(MAX_POINTS + 1, query=_window(timedelta(hours=24)))
 
-    assert exc_info.value.error_code == "max_points_exceeded"
+    assert exc_info.value.error_type == "max_points_exceeded"
     assert exc_info.value.point_count == MAX_POINTS + 1
     assert exc_info.value.max_points == MAX_POINTS
 
@@ -385,21 +385,28 @@ def test_latest_normalizes_a_naive_bound_to_utc() -> None:
     assert resolved.to_timestamp == datetime(2026, 3, 5, 12, 0, tzinfo=UTC)
 
 
-# --- error codes ----------------------------------------------------------
+# --- error types ----------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "error,expected_code",
+    "error,expected_type,expected_title",
     [
-        (InvalidTimeRangeError, "invalid_time_range"),
-        (WindowTooLargeError, "window_too_large"),
-        (FrequencyTooFineError, "frequency_too_fine"),
-        (FrequencyWithoutAggregationMethodError, "frequency_requires_aggregation_method"),
-        (MaxPointsExceededError, "max_points_exceeded"),
+        (InvalidTimeRangeError, "invalid_time_range", "Invalid time range"),
+        (WindowTooLargeError, "window_too_large", "Window too large"),
+        (FrequencyTooFineError, "frequency_too_fine", "Frequency too fine"),
+        (
+            FrequencyWithoutAggregationMethodError,
+            "frequency_requires_aggregation_method",
+            "Frequency requires an aggregation method",
+        ),
+        (MaxPointsExceededError, "max_points_exceeded", "Too many points"),
     ],
 )
-def test_every_rejection_carries_a_stable_code(error: type[TimeSeriesQueryError], expected_code: str) -> None:
-    assert error.error_code == expected_code
+def test_every_rejection_carries_a_stable_type_and_title(
+    error: type[TimeSeriesQueryError], expected_type: str, expected_title: str
+) -> None:
+    assert error.error_type == expected_type
+    assert error.title == expected_title
 
 
 def test_a_rejection_is_not_a_value_error_so_a_read_failure_handler_cannot_swallow_it() -> None:
