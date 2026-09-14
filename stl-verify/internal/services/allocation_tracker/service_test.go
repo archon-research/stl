@@ -3,6 +3,7 @@ package allocation_tracker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -767,6 +768,642 @@ func TestMatchTransfers_SameContractDifferentWallets(t *testing.T) {
 	matched := svc.matchTransfers(transfers)
 	if len(matched) != 2 {
 		t.Fatalf("same contract with different wallets should match 2 entries, got %d", len(matched))
+	}
+}
+
+// ── centrifuge share aliases ──
+
+// Real mainnet addresses, because the shape that matters is real: grove holds
+// JTRSY through a vault whose share() IS spark's own entry address.
+var (
+	groveJAAAVault  = common.HexToAddress("0x4880799ee5200fc58da299e965df644fbf46780b")
+	groveJAAAShare  = common.HexToAddress("0x5a0F93D0AaE5A7Bb9Ca7a8E6A1e6b1E2b6C0Fb11")
+	groveJTRSYVault = common.HexToAddress("0xfe6920eb6c421f1179ca8c8d4170530cdbdfd77a")
+	sparkJTRSYShare = common.HexToAddress("0x8c213ee79581ff4984583c6a801e5263418c4b86")
+	groveProxy      = common.HexToAddress("0x491edfb0b8b608044e227225c715981a30f3a44e")
+	sparkProxy      = common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+
+	centrifugeCounterparty = common.HexToAddress("0x9999999999999999999999999999999999999999")
+	centrifugeTxHash       = common.HexToHash("0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c")
+)
+
+const centrifugeFirstBlock int64 = 21000000
+
+// centrifugeShape is one entry the fixture builds: the address the entry is keyed
+// on, the token its share() names (itself for a direct share), and the holder.
+type centrifugeShape struct {
+	contract common.Address
+	share    common.Address
+	wallet   common.Address
+}
+
+func groveVaultShape(contract, share common.Address) centrifugeShape {
+	return centrifugeShape{contract: contract, share: share, wallet: groveProxy}
+}
+
+func sparkDirectShareShape(share common.Address) centrifugeShape {
+	return centrifugeShape{contract: share, share: share, wallet: sparkProxy}
+}
+
+// mockShareSource is a mockSource that also names its entries' share tokens, the
+// shape ERC7540Source has for ERC-7540 vaults.
+type mockShareSource struct {
+	*mockSource
+	shares    map[common.Address]common.Address
+	sharesErr error
+
+	resolveCalls int
+	askedFor     []common.Address
+}
+
+func (m *mockShareSource) shareTokens(_ context.Context, entries []*TokenEntry, _ common.Hash) (map[common.Address]common.Address, error) {
+	m.resolveCalls++
+	for _, entry := range entries {
+		m.askedFor = append(m.askedFor, entry.ContractAddress)
+	}
+	if m.sharesErr != nil {
+		return nil, m.sharesErr
+	}
+	return m.shares, nil
+}
+
+type centrifugeFixture struct {
+	svc     *Service
+	cache   *testutil.MockBlockCache
+	handler *testHandler
+	source  *mockShareSource
+	block   int64
+	metrics sdkmetric.Reader
+}
+
+// newCentrifugeTracker wires a tracker over one centrifuge entry per shape, each
+// holding 500 of the token that shape's share() names.
+func newCentrifugeTracker(t *testing.T, shapes []centrifugeShape, sweepEveryN int) *centrifugeFixture {
+	t.Helper()
+
+	entries := make([]*TokenEntry, 0, len(shapes))
+	shares := make(map[common.Address]common.Address, len(shapes))
+	result := NewFetchResult()
+	for _, shape := range shapes {
+		entry := &TokenEntry{
+			ContractAddress: shape.contract,
+			WalletAddress:   shape.wallet,
+			Star:            "grove",
+			Chain:           "mainnet",
+			Protocol:        "centrifuge",
+			TokenType:       TokenTypeCentrifuge,
+		}
+		entries = append(entries, entry)
+		shares[shape.contract] = shape.share
+		result.Balances[entry.Key()] = &PositionBalance{
+			Balance:       big.NewInt(500),
+			ScaledBalance: big.NewInt(500),
+			ShareToken:    &shape.share,
+		}
+	}
+
+	source := &mockShareSource{
+		mockSource: &mockSource{
+			name:       "erc7540",
+			tokenTypes: map[string]bool{TokenTypeCentrifuge: true},
+			result:     result,
+		},
+		shares: shares,
+	}
+	return newCentrifugeTrackerWithSource(t, entries, source, sweepEveryN)
+}
+
+// newCentrifugeTrackerWithSource is the seam for a registry whose source cannot
+// name a share, and for entries the default factory does not build.
+func newCentrifugeTrackerWithSource(t *testing.T, entries []*TokenEntry, source *mockShareSource, sweepEveryN int) *centrifugeFixture {
+	t.Helper()
+
+	logger := quietLogger()
+	registry := NewSourceRegistry(logger)
+	if source != nil {
+		registry.Register(source)
+	} else {
+		registry.Register(&mockSource{
+			name:       "no-share-resolver",
+			tokenTypes: map[string]bool{TokenTypeCentrifuge: true},
+			result:     NewFetchResult(),
+		})
+	}
+
+	proxies := make([]ProxyConfig, 0, 2)
+	for _, wallet := range []common.Address{groveProxy, sparkProxy} {
+		proxies = append(proxies, ProxyConfig{Star: "grove", Chain: "mainnet", Address: wallet})
+	}
+
+	cache := testutil.NewMockBlockCache()
+	handler := &testHandler{}
+	tel, reader := newRecordingTelemetry(t)
+	svc, err := NewService(
+		Config{ChainID: 1, SweepEveryNBlocks: sweepEveryN, Logger: logger, Telemetry: tel},
+		nil,
+		cache,
+		registry,
+		entries,
+		handler,
+		proxies,
+	)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	return &centrifugeFixture{svc: svc, cache: cache, handler: handler, source: source, block: centrifugeFirstBlock, metrics: reader}
+}
+
+// consume drives the next block, whose single receipt carries the given logs.
+func (f *centrifugeFixture) consume(t *testing.T, logs ...gethtypes.Log) error {
+	t.Helper()
+	f.block++
+	f.cache.SetReceipts(1, f.block, 0, mustMarshalReceipts(t, []TransactionReceipt{{Logs: logs}}))
+	return f.svc.processBlock(context.Background(), outbound.BlockEvent{
+		ChainID:        1,
+		BlockNumber:    f.block,
+		Version:        0,
+		BlockTimestamp: 1700000000,
+		BlockHash:      testBlockHash.Hex(),
+	})
+}
+
+// redeliver drives the block consume last processed again, as SQS does after a NACK.
+func (f *centrifugeFixture) redeliver(t *testing.T, logs ...gethtypes.Log) error {
+	t.Helper()
+	f.block--
+	return f.consume(t, logs...)
+}
+
+// seedRoute names an entry's emitter up front, the state a block that re-points a
+// share starts from.
+func (f *centrifugeFixture) seedRoute(t *testing.T, emitter common.Address, entry *TokenEntry) {
+	t.Helper()
+	routes, err := f.svc.nextTransferRoutes(context.Background(), []namedEmitter{{entry: entry, emitter: emitter}}, centrifugeFirstBlock)
+	if err != nil {
+		t.Fatalf("seed the route for %s: %v", entry.ContractAddress.Hex(), err)
+	}
+	f.svc.transferAliases = routes
+}
+
+// repointShare makes the next fetch report a different share for one entry, the
+// shape a re-pointed vault (or a reverting share()) takes on the read path.
+func (f *centrifugeFixture) repointShare(t *testing.T, contract, share common.Address) {
+	t.Helper()
+	for _, entry := range f.svc.entries {
+		if entry.ContractAddress != contract {
+			continue
+		}
+		bal, ok := f.source.result.Balances[entry.Key()]
+		if !ok {
+			t.Fatalf("no seeded balance for %s", contract.Hex())
+		}
+		bal.ShareToken = &share
+		return
+	}
+	t.Fatalf("no entry keyed on %s", contract.Hex())
+}
+
+// snapshotFor returns the snapshot the handler received for one entry key.
+func (f *centrifugeFixture) snapshotFor(contract, wallet common.Address) *PositionSnapshot {
+	for _, batch := range f.handler.batches {
+		for _, snap := range batch.Snapshots {
+			if snap.Entry.ContractAddress == contract && snap.Entry.WalletAddress == wallet {
+				return snap
+			}
+		}
+	}
+	return nil
+}
+
+// transferLog is a Transfer of the emitting token into a proxy, carrying a real
+// transaction hash so an event row is distinguishable from a sweep row.
+func transferLog(token common.Address, to common.Address, amount *big.Int, index uint) gethtypes.Log {
+	log := makeTransferLog(token, centrifugeCounterparty, to, amount, index)
+	log.TxHash = centrifugeTxHash
+	return log
+}
+
+// TestProcessBlock_ShareTransferSnapshotsTheVaultEntry: the share token emits the
+// Transfer, the entry is keyed on the vault, so without the alias the log matches
+// nothing and the position only ever moves on the periodic sweep.
+func TestProcessBlock_ShareTransferSnapshotsTheVaultEntry(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1000)
+
+	if err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(250), 7)); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	snap := f.snapshotFor(groveJAAAVault, groveProxy)
+	if snap == nil {
+		t.Fatal("no snapshot for the vault entry; the share transfer matched nothing")
+	}
+	if snap.TxHash != centrifugeTxHash.Hex() {
+		t.Errorf("TxHash = %q, want %q", snap.TxHash, centrifugeTxHash.Hex())
+	}
+	if snap.TxAmount == nil || snap.TxAmount.Cmp(big.NewInt(250)) != 0 {
+		t.Errorf("TxAmount = %v, want 250", snap.TxAmount)
+	}
+	if snap.Direction != DirectionIn {
+		t.Errorf("Direction = %q, want %q", snap.Direction, DirectionIn)
+	}
+}
+
+// TestProcessBlock_OneShareHeldTwoWaysKeepsBothPositions is the real mainnet
+// shape: grove's JTRSY vault resolves to the very address spark's entry is keyed
+// on, so an emitter-keyed alias would drop whichever entry lost the write.
+func TestProcessBlock_OneShareHeldTwoWaysKeepsBothPositions(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{
+		groveVaultShape(groveJTRSYVault, sparkJTRSYShare),
+		sparkDirectShareShape(sparkJTRSYShare),
+	}, 1000)
+
+	err := f.consume(t,
+		transferLog(sparkJTRSYShare, groveProxy, big.NewInt(250), 7),
+		transferLog(sparkJTRSYShare, sparkProxy, big.NewInt(400), 8),
+	)
+	if err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		contract common.Address
+		wallet   common.Address
+		amount   int64
+	}{
+		{"grove holds it through the vault", groveJTRSYVault, groveProxy, 250},
+		{"spark holds the share directly", sparkJTRSYShare, sparkProxy, 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := f.snapshotFor(tc.contract, tc.wallet)
+			if snap == nil {
+				t.Fatalf("no snapshot for %s/%s", tc.contract.Hex(), tc.wallet.Hex())
+			}
+			if snap.TxAmount == nil || snap.TxAmount.Cmp(big.NewInt(tc.amount)) != 0 {
+				t.Errorf("TxAmount = %v, want %d", snap.TxAmount, tc.amount)
+			}
+		})
+	}
+}
+
+// TestProcessBlock_ResolvesEachShareOnlyOnce: an entry left unaliased is resolved
+// again on every block carrying any transfer, which is a share() multicall per
+// block forever. The direct share is the risky half — it aliases to itself.
+func TestProcessBlock_ResolvesEachShareOnlyOnce(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{
+		groveVaultShape(groveJTRSYVault, sparkJTRSYShare),
+		sparkDirectShareShape(sparkJTRSYShare),
+	}, 1000)
+
+	for range 3 {
+		if err := f.consume(t, transferLog(sparkJTRSYShare, groveProxy, big.NewInt(1), 0)); err != nil {
+			t.Fatalf("processBlock: %v", err)
+		}
+	}
+
+	if f.source.resolveCalls != 1 {
+		t.Errorf("share resolution ran %d times over 3 blocks, want 1", f.source.resolveCalls)
+	}
+}
+
+// TestProcessBlock_ResolvesOnlyTheEntriesAwaitingAnAlias: a mixed chain is the
+// normal case, and asking a resolver about an entry keyed on the token it holds
+// would spend a multicall on an answer nothing reads.
+func TestProcessBlock_ResolvesOnlyTheEntriesAwaitingAnAlias(t *testing.T) {
+	plain := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1000)
+	f.svc.entries = append(f.svc.entries, &TokenEntry{
+		ContractAddress: plain,
+		WalletAddress:   groveProxy,
+		Star:            "grove",
+		Chain:           "mainnet",
+		TokenType:       "erc20",
+	})
+
+	if err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(1), 0)); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	if want := []common.Address{groveJAAAVault}; !slices.Equal(f.source.askedFor, want) {
+		t.Errorf("resolver asked for %v, want only the centrifuge entry %v", f.source.askedFor, want)
+	}
+}
+
+// TestProcessBlock_ShareResolutionFailure_ReturnsError: VEC-188 — an unresolved
+// share leaves every share transfer unmatched, so the block must NACK rather than
+// persist a block that silently saw no activity.
+func TestProcessBlock_ShareResolutionFailure_ReturnsError(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1000)
+	f.source.sharesErr = fmt.Errorf("rpc timeout")
+
+	err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(250), 7))
+	if err == nil {
+		t.Fatal("expected the share resolution failure to be returned")
+	}
+	if !strings.Contains(err.Error(), "resolve transfer aliases") {
+		t.Errorf("error = %q, want it to name the alias resolution", err)
+	}
+	if len(f.handler.batches) != 0 {
+		t.Errorf("HandleBatch called %d times, want 0", len(f.handler.batches))
+	}
+}
+
+// TestProcessBlock_UnnameableShare_ReturnsError: an entry whose source cannot name
+// its token would sit unaliased forever, so it fails the block instead of being
+// skipped into permanent silence.
+func TestProcessBlock_UnnameableShare_ReturnsError(t *testing.T) {
+	entry := &TokenEntry{
+		ContractAddress: groveJAAAVault,
+		WalletAddress:   groveProxy,
+		Star:            "grove",
+		Chain:           "mainnet",
+		Protocol:        "centrifuge",
+		TokenType:       TokenTypeCentrifuge,
+	}
+	f := newCentrifugeTrackerWithSource(t, []*TokenEntry{entry}, nil, 1000)
+
+	err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(250), 7))
+	if err == nil {
+		t.Fatal("expected an entry with no share resolver to fail the block")
+	}
+	if !strings.Contains(err.Error(), "cannot name one") {
+		t.Errorf("error = %q, want it to name the missing resolver", err)
+	}
+}
+
+// TestProcessBlock_ShareResolvedForOnlySomeEntries_ReturnsError: a resolver that
+// answers for one entry and omits another leaves the omitted one unmatched, which
+// is the silent half-fix this path exists to prevent.
+func TestProcessBlock_ShareResolvedForOnlySomeEntries_ReturnsError(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{
+		groveVaultShape(groveJAAAVault, groveJAAAShare),
+		groveVaultShape(groveJTRSYVault, sparkJTRSYShare),
+	}, 1000)
+	delete(f.source.shares, groveJTRSYVault)
+
+	err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(250), 7))
+	if err == nil {
+		t.Fatal("expected a partially answered resolution to fail the block")
+	}
+	if !strings.Contains(err.Error(), "no share token named") {
+		t.Errorf("error = %q, want it to name the unresolved entry", err)
+	}
+}
+
+// TestSweep_ReplacesTheAliasOfARepointedShare: the alias set is a function of the
+// latest resolution, so a re-pointed share must both take effect and displace the
+// old one — a transfer of the retired token is not this position's activity.
+func TestSweep_ReplacesTheAliasOfARepointedShare(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1)
+	stale := common.HexToAddress("0x0000000000000000000000000000000000005747")
+	f.seedRoute(t, stale, f.svc.entries[0])
+
+	if err := f.consume(t); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	vaultKey := EntryKey{ContractAddress: groveJAAAVault, WalletAddress: groveProxy}
+	if got := f.svc.entryKeyFor(&TransferEvent{TokenAddress: groveJAAAShare, ProxyAddress: groveProxy}); got != vaultKey {
+		t.Errorf("entryKeyFor(new share) = %v, want %v — the sweep did not adopt the alias", got, vaultKey)
+	}
+	staleKey := EntryKey{ContractAddress: stale, WalletAddress: groveProxy}
+	if got := f.svc.entryKeyFor(&TransferEvent{TokenAddress: stale, ProxyAddress: groveProxy}); got != staleKey {
+		t.Errorf("entryKeyFor(stale share) = %v, want the identity %v — the old alias was not dropped", got, staleKey)
+	}
+}
+
+// TestSweep_RepointedShareRecordsMetric: pruneDisplacedRoutes records one
+// allocation.share_repoints.total sample beside the Warn, so the follow-up
+// alert has a series to read.
+func TestSweep_RepointedShareRecordsMetric(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1)
+	stale := common.HexToAddress("0x0000000000000000000000000000000000005747")
+	f.seedRoute(t, stale, f.svc.entries[0])
+
+	if err := f.consume(t); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	m := collectMetric(t, f.metrics, "allocation.share_repoints.total")
+	sum, ok := m.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("allocation.share_repoints.total is %T, want Sum[int64]", m.Data)
+	}
+	if len(sum.DataPoints) != 1 {
+		t.Fatalf("got %d data points, want 1", len(sum.DataPoints))
+	}
+
+	dp := sum.DataPoints[0]
+	if dp.Value != 1 {
+		t.Errorf("value = %d, want 1", dp.Value)
+	}
+	if entry, ok := dp.Attributes.Value("entry"); !ok || entry.AsString() != groveJAAAVault.Hex() {
+		t.Errorf("entry attribute = %v, want %s", entry, groveJAAAVault.Hex())
+	}
+	if wallet, ok := dp.Attributes.Value("wallet"); !ok || wallet.AsString() != groveProxy.Hex() {
+		t.Errorf("wallet attribute = %v, want %s", wallet, groveProxy.Hex())
+	}
+}
+
+// TestProcessBlock_EventPathAdoptsARepointedShare: the event fetch resolves shares
+// too, so a re-point seen there must not wait for the next sweep.
+func TestProcessBlock_EventPathAdoptsARepointedShare(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1000)
+	stale := common.HexToAddress("0x0000000000000000000000000000000000005747")
+	f.seedRoute(t, stale, f.svc.entries[0])
+
+	if err := f.consume(t, transferLog(stale, groveProxy, big.NewInt(250), 7)); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	snap := f.snapshotFor(groveJAAAVault, groveProxy)
+	if snap == nil {
+		t.Fatal("no snapshot for the vault entry; the re-point dropped the block's own transfer")
+	}
+	if snap.Direction != DirectionIn || snap.TxHash != centrifugeTxHash.Hex() ||
+		snap.TxAmount == nil || snap.TxAmount.Cmp(big.NewInt(250)) != 0 {
+		t.Errorf("snapshot = (%q, %q, %v), want the event row (in, %s, 250) — the route swapped before buildSnapshots read it",
+			snap.Direction, snap.TxHash, snap.TxAmount, centrifugeTxHash.Hex())
+	}
+
+	vaultKey := EntryKey{ContractAddress: groveJAAAVault, WalletAddress: groveProxy}
+	if got := f.svc.entryKeyFor(&TransferEvent{TokenAddress: groveJAAAShare, ProxyAddress: groveProxy}); got != vaultKey {
+		t.Errorf("entryKeyFor(new share) = %v, want %v — the event path did not adopt the alias", got, vaultKey)
+	}
+}
+
+// TestSweep_TwoEntriesSwappingSharesKeepBothRoutes: both entries must release
+// before either claims, or the batch fails or passes on entry order — and a
+// failing sweep never resets the counter, so the worker wedges.
+func TestSweep_TwoEntriesSwappingSharesKeepBothRoutes(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{
+		groveVaultShape(groveJAAAVault, groveJAAAShare),
+		groveVaultShape(groveJTRSYVault, sparkJTRSYShare),
+	}, 1)
+	if err := f.consume(t); err != nil {
+		t.Fatalf("first sweep: %v", err)
+	}
+
+	f.repointShare(t, groveJAAAVault, sparkJTRSYShare)
+	f.repointShare(t, groveJTRSYVault, groveJAAAShare)
+
+	if err := f.consume(t); err != nil {
+		t.Fatalf("a swap between two entries must not fail: %v", err)
+	}
+	for _, tc := range []struct {
+		emitter  common.Address
+		contract common.Address
+	}{
+		{sparkJTRSYShare, groveJAAAVault},
+		{groveJAAAShare, groveJTRSYVault},
+	} {
+		want := EntryKey{ContractAddress: tc.contract, WalletAddress: groveProxy}
+		if got := f.svc.entryKeyFor(&TransferEvent{TokenAddress: tc.emitter, ProxyAddress: groveProxy}); got != want {
+			t.Errorf("entryKeyFor(%s) = %v, want %v", tc.emitter.Hex(), got, want)
+		}
+	}
+}
+
+// TestSweep_ShareDowngradedToTheEntryItself_ReturnsError: share() reverting is how
+// a direct share is detected, so a transient failure reads as one and would re-key
+// the position onto its vault, where no price attaches.
+func TestSweep_ShareDowngradedToTheEntryItself_ReturnsError(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1)
+	if err := f.consume(t); err != nil {
+		t.Fatalf("first sweep: %v", err)
+	}
+	batchesBefore := len(f.handler.batches)
+
+	f.repointShare(t, groveJAAAVault, groveJAAAVault)
+
+	err := f.consume(t)
+	if err == nil {
+		t.Fatal("a vault reporting itself as its own share must fail the block")
+	}
+	if !strings.Contains(err.Error(), "cannot become its own share") {
+		t.Errorf("error = %q, want it to name the downgrade", err)
+	}
+	if len(f.handler.batches) != batchesBefore {
+		t.Errorf("HandleBatch ran %d more times, want 0", len(f.handler.batches)-batchesBefore)
+	}
+}
+
+// TestSweep_CentrifugeBalanceWithoutAShare_ReturnsError: a centrifuge source that
+// stops naming the share would freeze the aliases at their last good value while
+// every liveness signal stayed green.
+func TestSweep_CentrifugeBalanceWithoutAShare_ReturnsError(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1)
+	for _, bal := range f.source.result.Balances {
+		bal.ShareToken = nil
+	}
+
+	err := f.consume(t)
+	if err == nil {
+		t.Fatal("expected a centrifuge balance with no share token to fail the block")
+	}
+	if !strings.Contains(err.Error(), "no share token") {
+		t.Errorf("error = %q, want it to name the missing share token", err)
+	}
+}
+
+// TestProcessBlock_HandlerFailureKeepsTheRoutesForTheRedelivery: the fetch of a
+// block that re-points a share yields new routes, but they take effect only once
+// the block has been persisted — SQS redelivers the same block, and it must match
+// the same transfers it matched the first time.
+func TestProcessBlock_HandlerFailureKeepsTheRoutesForTheRedelivery(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1000)
+	stale := common.HexToAddress("0x0000000000000000000000000000000000005747")
+	f.seedRoute(t, stale, f.svc.entries[0])
+	staleTransfer := transferLog(stale, groveProxy, big.NewInt(250), 7)
+
+	f.handler.err = errors.New("db down")
+	if err := f.consume(t, staleTransfer); err == nil {
+		t.Fatal("a failing handler must fail the block")
+	}
+	f.handler.batches = nil
+	f.handler.err = nil
+
+	if err := f.redeliver(t, staleTransfer); err != nil {
+		t.Fatalf("redelivery: %v", err)
+	}
+	snap := f.snapshotFor(groveJAAAVault, groveProxy)
+	if snap == nil {
+		t.Fatal("the redelivered block matched nothing: the routes advanced past a block that never persisted")
+	}
+	if snap.TxHash != centrifugeTxHash.Hex() || snap.TxAmount == nil || snap.TxAmount.Cmp(big.NewInt(250)) != 0 {
+		t.Errorf("snapshot = (%q, %v), want the event row (%s, 250)", snap.TxHash, snap.TxAmount, centrifugeTxHash.Hex())
+	}
+
+	// Persisted now, so the re-point applies: the new share's transfers match next.
+	f.handler.batches = nil
+	if err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(9), 1)); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if snap := f.snapshotFor(groveJAAAVault, groveProxy); snap == nil || snap.TxAmount == nil || snap.TxAmount.Cmp(big.NewInt(9)) != 0 {
+		t.Errorf("snapshot after the persisted re-point = %v, want the new share's transfer of 9", snap)
+	}
+}
+
+// TestProcessBlock_EventPath_CentrifugeBalanceWithoutAShare_ReturnsError is the
+// event-path twin of the sweep test: the guard sits on the fetch every path shares,
+// and the block's own transfer must not be persisted past it.
+func TestProcessBlock_EventPath_CentrifugeBalanceWithoutAShare_ReturnsError(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1000)
+	if err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(1), 0)); err != nil {
+		t.Fatalf("first block: %v", err)
+	}
+	batchesBefore := len(f.handler.batches)
+	for _, bal := range f.source.result.Balances {
+		bal.ShareToken = nil
+	}
+
+	err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(250), 7))
+	if err == nil {
+		t.Fatal("expected a centrifuge balance with no share token to fail the block")
+	}
+	if !strings.Contains(err.Error(), "read the share tokens of block") {
+		t.Errorf("error = %q, want the event path's wrapper", err)
+	}
+	if len(f.handler.batches) != batchesBefore {
+		t.Errorf("HandleBatch ran %d more times, want 0", len(f.handler.batches)-batchesBefore)
+	}
+}
+
+// TestProcessBlock_EventPath_ShareDowngradedToTheEntryItself_ReturnsError is the
+// event-path twin of the sweep test for the ratchet.
+func TestProcessBlock_EventPath_ShareDowngradedToTheEntryItself_ReturnsError(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1000)
+	if err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(1), 0)); err != nil {
+		t.Fatalf("first block: %v", err)
+	}
+	batchesBefore := len(f.handler.batches)
+	f.repointShare(t, groveJAAAVault, groveJAAAVault)
+
+	err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(250), 7))
+	if err == nil {
+		t.Fatal("a vault reporting itself as its own share must fail the block")
+	}
+	if !strings.Contains(err.Error(), "route transfers for block") || !strings.Contains(err.Error(), "cannot become its own share") {
+		t.Errorf("error = %q, want the event path's wrapper around the downgrade", err)
+	}
+	if len(f.handler.batches) != batchesBefore {
+		t.Errorf("HandleBatch ran %d more times, want 0", len(f.handler.batches)-batchesBefore)
+	}
+}
+
+func TestProcessBlock_RejectsTwoEntriesClaimingOneShare(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{
+		groveVaultShape(groveJAAAVault, groveJAAAShare),
+		groveVaultShape(groveJTRSYVault, groveJAAAShare),
+	}, 1000)
+
+	err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(250), 7))
+
+	if err == nil {
+		t.Fatal("two vaults fronting one share for one wallet must fail; tracking both double counts")
+	}
+	if !strings.Contains(err.Error(), "double count") {
+		t.Errorf("error = %q, want it to name the double count", err)
 	}
 }
 

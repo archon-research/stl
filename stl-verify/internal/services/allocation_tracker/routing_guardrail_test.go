@@ -94,13 +94,34 @@ func TestCentrifugeRoutesToERC7540(t *testing.T) {
 		Chain:           "mainnet",
 		Star:            "grove",
 		Protocol:        "centrifuge",
-		TokenType:       "centrifuge",
+		TokenType:       TokenTypeCentrifuge,
 	})
 	if source == nil {
 		t.Fatal("centrifuge entry routes to no source")
 	}
 	if got := source.Name(); got != "erc7540" {
 		t.Errorf("centrifuge routed to %q, want %q", got, "erc7540")
+	}
+}
+
+// TestCentrifugeRoutesToAShareResolver: the alias path locates the source by type
+// assertion through the real registry, so a source that stopped satisfying
+// shareResolver would fail every block on the chain; this pins it at build time.
+func TestCentrifugeRoutesToAShareResolver(t *testing.T) {
+	registry, err := BuildSourceRegistry(nil, quietLogger())
+	if err != nil {
+		t.Fatalf("build source registry: %v", err)
+	}
+
+	entry := &TokenEntry{
+		ContractAddress: common.HexToAddress("0x4880799ee5200fc58da299e965df644fbf46780b"),
+		Chain:           "mainnet",
+		Star:            "grove",
+		Protocol:        "centrifuge",
+		TokenType:       TokenTypeCentrifuge,
+	}
+	if _, err := registry.shareResolvers([]*TokenEntry{entry}); err != nil {
+		t.Fatalf("centrifuge entry has no share resolver in the production registry: %v", err)
 	}
 }
 

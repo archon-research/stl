@@ -34,7 +34,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/prime_debt"
 )
 
-// Build-time variables - can be set via ldflags, otherwise populated from Go's build info.
 var (
 	GitCommit string
 	GitBranch string
@@ -42,7 +41,7 @@ var (
 )
 
 func init() {
-	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
+	buildinfo.Populate(&GitCommit, &GitBranch, &BuildTime)
 }
 
 func main() {

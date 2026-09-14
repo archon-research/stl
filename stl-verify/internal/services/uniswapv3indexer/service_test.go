@@ -40,6 +40,7 @@ type fakeUniswapRepo struct {
 	// A pointer, not a plain int64, so a test can stage an explicit 0 — the
 	// idempotent ON CONFLICT DO NOTHING replay — distinctly from "unset".
 	stateRowsReturn *int64
+	tickRowsReturn  *int64
 	err             error
 
 	priorTicks        map[fakePoolBlockKey][]int32
@@ -72,11 +73,15 @@ func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.Unis
 	}
 	r.lastWrites = w
 	counts := outbound.StateRowCounts{
-		Attempted: int64(len(w.States)),
-		Persisted: int64(len(w.States)),
+		Attempted:      int64(len(w.States)),
+		Persisted:      int64(len(w.States)),
+		TicksPersisted: int64(len(w.Ticks)),
 	}
 	if r.stateRowsReturn != nil {
 		counts.Persisted = *r.stateRowsReturn
+	}
+	if r.tickRowsReturn != nil {
+		counts.TicksPersisted = *r.tickRowsReturn
 	}
 	return counts, nil
 }
@@ -1330,6 +1335,29 @@ func TestBlockHandler_RecordsPoolsTouchedOnZeroRowReplay(t *testing.T) {
 	// this test is staging the alert's firing condition and not a healthy block.
 	if rows, ok := sumCounter(t, &rm, "uniswap_v3.state.rows.written"); ok {
 		t.Errorf("uniswap_v3.state.rows.written = %d, want the counter to be absent (0 rows inserted is a no-op)", rows)
+	}
+}
+
+// uniswap_v3_tick is a plain append-on-change table; the growth tripwire on
+// it reads this counter as table growth, so it must be what SaveBlock persisted.
+func TestBlockHandler_RecordsTickRowsTheRepositoryPersisted(t *testing.T) {
+	pool := uniswapTestPool()
+	svc, repo, reader := newTelemetryService(t, []RegisteredPool{pool})
+
+	twoTicks := int64(2)
+	repo.tickRowsReturn = &twoTicks
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{swapLog(t, pool, "0x0")}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if rows, ok := sumCounter(t, &rm, "uniswap_v3.tick.rows.written"); !ok || rows != 2 {
+		t.Errorf("uniswap_v3.tick.rows.written = %d (present=%t), want 2 (what the repository persisted)", rows, ok)
 	}
 }
 
