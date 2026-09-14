@@ -24,9 +24,9 @@ const (
 // positive quantity to 0. A market whose collateral token is its loan token emits the loan leg only.
 // One behaviour per function, each seeding its own database.
 
-// seedMorphoMarket gives a test its own migrated database, seeds the fixture and runs the projection
+// materializeMorphoMarketFixture gives a test its own migrated database, seeds the fixture and runs the projection
 // once, returning what it reported written.
-func seedMorphoMarket(t *testing.T) (context.Context, *pgxpool.Pool, int64) {
+func materializeMorphoMarketFixture(t *testing.T) (context.Context, *pgxpool.Pool, int64) {
 	t.Helper()
 	ctx := context.Background()
 	pool, cleanup := setupPostgres(ctx, t)
@@ -163,7 +163,7 @@ END $$;`
 // Total 25 over 15 distinct positions: the 12 above plus M-loan-M2, N-loan and O-loan. L nets to zero
 // on its first observation, so it has none.
 func TestMaterializeMorphoMarketProjectionShape(t *testing.T) {
-	ctx, pool, written := seedMorphoMarket(t)
+	ctx, pool, written := materializeMorphoMarketFixture(t)
 	var rows, distinctPositions, collisions, badLen int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*),
@@ -192,7 +192,7 @@ func TestMaterializeMorphoMarketProjectionShape(t *testing.T) {
 
 // Per-holder results, located by the native instrument_key + holder_id.
 func TestMaterializeMorphoMarketPerPosition(t *testing.T) {
-	ctx, pool, _ := seedMorphoMarket(t)
+	ctx, pool, _ := materializeMorphoMarketFixture(t)
 	for _, c := range []struct {
 		name          string
 		instrument    string
@@ -246,7 +246,7 @@ func TestMaterializeMorphoMarketPerPosition(t *testing.T) {
 
 // A second run re-derives the same observations and appends nothing.
 func TestMaterializeMorphoMarketIsIdempotent(t *testing.T) {
-	ctx, pool, _ := seedMorphoMarket(t)
+	ctx, pool, _ := materializeMorphoMarketFixture(t)
 	var second int64
 	if err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(&second); err != nil {
 		t.Fatalf("second materialize: %v", err)
@@ -267,7 +267,7 @@ func TestMaterializeMorphoMarketIsIdempotent(t *testing.T) {
 // negative one (collateral -50 stored as quantity 50, silently), and a negative borrow makes the sum
 // MORE positive, so the spine's own check cannot see it either. The wrapper refuses it by name.
 func TestMaterializeMorphoMarketNegativeSourceAmountAborts(t *testing.T) {
-	ctx, pool, _ := seedMorphoMarket(t)
+	ctx, pool, _ := materializeMorphoMarketFixture(t)
 	for _, c := range []struct {
 		name                            string
 		supply, borrow, collateral, mkt string
@@ -277,7 +277,7 @@ func TestMaterializeMorphoMarketNegativeSourceAmountAborts(t *testing.T) {
 		{"negative borrow", "0", "-70", "0", `\x1234`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			ctx2, pool2, _ := seedMorphoMarket(t)
+			ctx2, pool2, _ := materializeMorphoMarketFixture(t)
 			_ = ctx
 			_ = pool
 			if _, err := pool2.Exec(ctx2, `
@@ -311,7 +311,7 @@ func TestMaterializeMorphoMarketNegativeSourceAmountAborts(t *testing.T) {
 // every row this projection appends is provenance-free (ADR-0006 §2). The run record is the witness:
 // its run_id can only have arrived through the wrapper's own parameter.
 func TestMaterializeMorphoMarketForwardsTheWriterRun(t *testing.T) {
-	ctx, pool, _ := seedMorphoMarket(t)
+	ctx, pool, _ := materializeMorphoMarketFixture(t)
 	if _, err := pool.Exec(ctx, `SELECT materialize_morpho_market(7, 9182)`); err != nil {
 		t.Fatalf("materialize_morpho_market with a run: %v", err)
 	}
