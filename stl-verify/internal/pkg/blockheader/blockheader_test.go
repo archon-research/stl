@@ -1,6 +1,7 @@
 package blockheader
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -82,5 +83,37 @@ func assertUTCUnix(t *testing.T, err error, got time.Time, wantUnix int64) {
 	}
 	if loc := got.Location(); loc != nil && loc.String() != "UTC" {
 		t.Errorf("timestamp not in UTC: %s", loc)
+	}
+}
+
+// A corrupt object can parse to 0 or a negative — ParseInt64 accepts a leading sign — and from a
+// batched INSERT that arrives as a CHECK violation whose DETAIL pgx drops, naming no block and
+// re-read on every retry. The bound is checked here so the payload is refused where it is read.
+func TestParseTimestamp_RefusesInstantsOutsideTheStoredWindow(t *testing.T) {
+	for _, c := range []struct{ name, hex string }{
+		{"genesis zero", "0x0"},
+		{"negative", "-0x1"},
+		{"far future", "0xFFFFFFFFFF"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := ParseTimestamp(fmt.Appendf(nil, `{"timestamp":%q}`, c.hex))
+			if err == nil {
+				t.Fatalf("timestamp %s was accepted; it violates block_meta_ts_sane_chk", c.hex)
+			}
+			if !strings.Contains(err.Error(), c.hex) {
+				t.Errorf("error %q does not name the offending value", err)
+			}
+		})
+	}
+}
+
+// The ordinary case still passes, so the bound cannot be satisfied by refusing everything.
+func TestParseTimestamp_AcceptsARealHeaderTime(t *testing.T) {
+	ts, err := ParseTimestamp([]byte(`{"timestamp":"0x67c00000"}`))
+	if err != nil {
+		t.Fatalf("ParseTimestamp: %v", err)
+	}
+	if ts.Unix() != 0x67c00000 {
+		t.Errorf("timestamp = %d, want %d", ts.Unix(), 0x67c00000)
 	}
 }
