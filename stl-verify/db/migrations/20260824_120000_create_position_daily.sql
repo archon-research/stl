@@ -38,11 +38,11 @@ ALTER TABLE position_daily ADD COLUMN IF NOT EXISTS run_id bigint;
 ALTER TABLE position_daily ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT '-infinity';
 ALTER TABLE position_daily ALTER COLUMN created_at SET DEFAULT now();
 
--- A plain table, not a hypertable: reads are PK point lookups per (position, date) and holder series, and
--- both writers upsert, so there is no time-ordered scan for chunk exclusion to prune and no append-only
--- tail for compression to close behind. Indexes are built after the backfill, at the foot of this file.
+-- Created plain, per AGENTS.md: converted later if measurement says to. Both writers upsert in place, so
+-- there is no append-only tail for compression or tiering to close behind, and the reads are PK point
+-- lookups and holder series. Indexes are built after the backfill, at the foot of this file.
 
-COMMENT ON TABLE position_daily IS '[Operational] One row per (position, UTC date): the winning observation for that position on that day (VEC-636). Only OBSERVED dates get a row -- no carry-forward, so a query for one date may correctly return nothing. Rebuildable with CALL rebuild_position_daily(), a FORWARD-ONLY merge: it raises a row and never lowers or removes one. A plain table, not a hypertable, and carrying no compression or tiering policy: both writers upsert, so it has no append-only tail. Point-in-time questions are answered from position_state.';
+COMMENT ON TABLE position_daily IS '[Operational] One row per (position, UTC date): the winning observation for that position on that day (VEC-636). Only OBSERVED dates get a row -- no carry-forward, so a query for one date may correctly return nothing. Rebuildable with CALL rebuild_position_daily(), a FORWARD-ONLY merge: it raises a row and never lowers or removes one. Plain, not a hypertable, and carrying no compression or tiering policy: both writers upsert in place, so there is no append-only tail for either to close behind. What would change that is measurement -- a date-range scan across positions becoming a hot read, or a row count outgrowing a plain table, though that count is bounded by position_state (one row per position per OBSERVED date, never more). Point-in-time questions are answered from position_state.';
 COMMENT ON COLUMN position_daily.position_id IS 'Roles: PK. The bytea(32) native position identity from position_id() (VEC-400).';
 COMMENT ON COLUMN position_daily.as_of_date IS 'Roles: PK. UTC date of the winning observation''s block_timestamp, pinned to it by a CHECK.';
 COMMENT ON COLUMN position_daily.chain_id IS 'Roles: Derived (copy of position_state.chain_id). NULL is a materializer convention for an off-chain source, not missing data.';
@@ -163,6 +163,10 @@ CREATE TRIGGER trigger_upsert_position_daily
     REFERENCING NEW TABLE AS newrows
     FOR EACH STATEMENT
 EXECUTE FUNCTION upsert_position_daily();
+
+-- KNOWN GAP, as on position_current (20260819_150000): TimescaleDB refuses ENABLE ALWAYS on a hypertable
+-- trigger, so this stays at ORIGIN and does not fire under session_replication_role = 'replica'
+-- (pg_restore --disable-triggers). CALL rebuild_position_daily() repairs what the bypass skipped.
 
 CALL rebuild_position_daily();
 

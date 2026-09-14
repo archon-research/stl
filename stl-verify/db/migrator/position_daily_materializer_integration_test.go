@@ -95,6 +95,51 @@ func cachedDays(t *testing.T, f *psFixture, ik string) []string {
 	return out
 }
 
+// cacheDisagreement reports every position where position_current is not the position_daily row on that
+// position's latest observed date. The two caches read the same spine through two triggers on the same
+// statement, and their agreement is what the block_time_inverts_height refusal exists to protect: they
+// order by block and date by timestamp, so an inverted pair makes them name different winners.
+func cacheDisagreement(t *testing.T, f *psFixture) []string {
+	t.Helper()
+	rows, err := f.pool.Query(f.ctx, `
+		WITH latest_day AS (
+		    SELECT DISTINCT ON (position_id) position_id, as_of_date, instrument_key, quantity, deal_type,
+		           block_number, block_version, processing_version, block_timestamp, projection, build_id, run_id
+		      FROM position_daily ORDER BY position_id, as_of_date DESC
+		)
+		SELECT format('ik=%s daily(%s)=%s current=%s',
+		              coalesce(d.instrument_key, c.instrument_key), d.as_of_date::text,
+		              coalesce(to_jsonb(d) - 'position_id' - 'instrument_key', 'null'::jsonb)::text,
+		              coalesce(to_jsonb(c) - 'position_id' - 'created_at' - 'instrument_key', 'null'::jsonb)::text)
+		  FROM latest_day d
+		  FULL OUTER JOIN position_current c ON c.position_id = d.position_id
+		 WHERE d.position_id IS NULL OR c.position_id IS NULL
+		    OR (d.quantity, d.block_number, d.block_version, d.processing_version, d.block_timestamp,
+		        d.projection, d.build_id)
+		       IS DISTINCT FROM
+		       (c.quantity, c.block_number, c.block_version, c.processing_version, c.block_timestamp,
+		        c.projection, c.build_id)
+		    OR d.deal_type IS DISTINCT FROM c.deal_type
+		    OR d.run_id IS DISTINCT FROM c.run_id
+		 ORDER BY 1`)
+	if err != nil {
+		t.Fatalf("read the cross-cache disagreement: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("cross-cache disagreement iteration: %v", err)
+	}
+	return out
+}
+
 // TestPositionDailyThroughTheMaterializer shares one migrated schema across its cases, per
 // stl-verify/AGENTS.md ("Share setup, don't repeat it"); each uses its own instrument_keys.
 func TestPositionDailyThroughTheMaterializer(t *testing.T) {
@@ -255,6 +300,57 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 			t.Errorf("the cache diverges from the spine argmax: %s", strings.Join(d, " | "))
 		}
 	})
+}
+
+// The two caches are fed by two triggers on the same INSERT, from the same spine. position_current holds
+// the newest observation outright; position_daily's latest date must be that same observation, or one of
+// them is telling a consumer something the other denies.
+func TestPositionCurrentAndPositionDailyNameTheSameWinner(t *testing.T) {
+	f, cleanup := newPositionStateFixture(t)
+	defer cleanup()
+
+	// Multi-day history per position, with a reorg re-observation and a correction on the newest day --
+	// the coordinates where the two orderings could pick differently.
+	body := valuesOf(
+		mppRow("agree-a", 10, 400, 0, 0, "2026-05-01T02:00:00Z", "LOAN"),
+		mppRow("agree-a", 20, 500, 0, 0, "2026-05-02T02:00:00Z", "LOAN"),
+		mppRow("agree-a", 30, 600, 0, 0, "2026-05-03T02:00:00Z", "BORROW"),
+		mppRow("agree-a", 35, 600, 1, 0, "2026-05-03T02:00:00Z", "BORROW"),
+		mppRow("agree-a", 40, 600, 1, 1, "2026-05-03T02:00:00Z", "LOAN"),
+		// A position whose newest day carries several observations, so the within-day pick matters.
+		mppRow("agree-b", 5, 410, 0, 0, "2026-05-01T03:00:00Z", "LOAN"),
+		mppRow("agree-b", 6, 610, 0, 0, "2026-05-03T01:00:00Z", "LOAN"),
+		mppRow("agree-b", 7, 620, 0, 0, "2026-05-03T23:00:00Z", "LOAN"),
+		// A single-observation position: its only day is also its newest.
+		mppRow("agree-c", 99, 700, 0, 0, "2026-05-04T00:00:00Z", "BORROW"),
+	)
+	if n := f.mppN(t, "pv_agree", body, "a multi-day history"); n != 9 {
+		t.Fatalf("the materializer appended %d observations, want 9", n)
+	}
+
+	// Positive control: both caches are actually populated, so an empty-vs-empty comparison cannot pass.
+	var daily, current int
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT (SELECT count(*) FROM position_daily), (SELECT count(*) FROM position_current)`).
+		Scan(&daily, &current); err != nil {
+		t.Fatal(err)
+	}
+	if daily != 6 || current != 3 {
+		t.Fatalf("position_daily holds %d rows and position_current %d; want 6 observed days across 3 positions", daily, current)
+	}
+	if d := cacheDisagreement(t, f); len(d) != 0 {
+		t.Errorf("the two caches name different winners for %d position(s): %s", len(d), strings.Join(d, " | "))
+	}
+
+	// And after a rebuild of each from the spine alone, which is the other writer.
+	for _, proc := range []string{"CALL rebuild_position_daily()", "CALL rebuild_position_current()"} {
+		if _, err := f.pool.Exec(f.ctx, proc); err != nil {
+			t.Fatalf("%s: %v", proc, err)
+		}
+	}
+	if d := cacheDisagreement(t, f); len(d) != 0 {
+		t.Errorf("the two caches disagree after a rebuild from the spine: %s", strings.Join(d, " | "))
+	}
 }
 
 // dealTypeOf reads one cached day's deal_type, "NULL" when it is absent.
