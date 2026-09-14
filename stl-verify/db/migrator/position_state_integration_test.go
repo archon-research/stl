@@ -163,6 +163,8 @@ func TestPositionState(t *testing.T) {
 	// --- off-chain observations: chain NULL, block_number = epoch of the instant, never mixed ---
 	psTestClosure(t, f)
 	psTestOffChainObservations(t, f)
+	// --- run_id provenance: every row the spine writes names its writer run (ADR-0006 §2) ---
+	psTestRunIDProvenance(t, f)
 }
 
 // psTestRecencyGuard covers: recency guard
@@ -2428,14 +2430,34 @@ func (f *psFixture) refDealTypeCodes(t *testing.T) []string {
 // guarded except ADD CONSTRAINT, which Postgres offers no IF NOT EXISTS for -- so it failed with
 // SQLSTATE 42710 until the DO block went in. #752 carries the same test for the same reason.
 func psTestDealTypeCodeMigrationIsReRunnable(t *testing.T, f *psFixture) {
-	t.Run("the migration re-applies cleanly", func(t *testing.T) {
-		raw, err := os.ReadFile(filepath.Join(getMigrationsPath(),
-			"20260818_140000_add_position_state_deal_type.sql"))
+	apply := func(t *testing.T, name string) {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(getMigrationsPath(), name))
 		if err != nil {
 			t.Fatalf("read migration: %v", err)
 		}
 		if _, err := f.pool.Exec(f.ctx, string(raw)); err != nil {
-			t.Errorf("re-applying the migration failed: %v", err)
+			t.Errorf("re-applying %s failed: %v", name, err)
+		}
+	}
+
+	t.Run("the migration re-applies cleanly", func(t *testing.T) {
+		apply(t, "20260818_140000_add_position_state_deal_type.sql")
+	})
+
+	// Re-running one old file leaves the schema at that file's state, so it restores the two-argument
+	// spine this PR replaced. Both then exist and every two-argument call is ambiguous, which is why a
+	// partial re-apply has to be followed by the later files -- the operator's own order.
+	t.Run("re-applying the later files restores the current spine, and the old overload is gone", func(t *testing.T) {
+		apply(t, "20260818_150000_add_run_id_to_position_stack.sql")
+		apply(t, "20260909_160000_fix_offchain_check_before_closure.sql")
+		var n int
+		if err := f.pool.QueryRow(f.ctx, `
+			SELECT count(*) FROM pg_proc WHERE proname = 'materialize_position_projection'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Errorf("materialize_position_projection has %d definitions after the re-apply, want 1", n)
 		}
 	})
 }
