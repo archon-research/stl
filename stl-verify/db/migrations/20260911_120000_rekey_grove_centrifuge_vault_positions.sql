@@ -9,8 +9,8 @@
 -- Re-keyed, not deleted: these rows are the only record of the positions between the two
 -- switches (seven weeks, 114,734 rows on staging), and on the share key they are exactly
 -- what the tracker would have written. No vault row shares its natural key with an existing
--- share row (the two key ranges abut: share rows end at block 25602782, vault rows run
--- 25602930..25953063, share rows resume at 25953193), and token_id is in the primary key,
+-- share row (on staging the two key ranges abut: share rows end at block 25602782, vault rows
+-- run 25602930..25953063, share rows resume at 25953193), and token_id is in the primary key,
 -- so an overlap would fail the UPDATE instead of duplicating a row.
 --
 -- Precondition: the allocation trackers on the target environment already run #904
@@ -26,8 +26,8 @@
 
 SET LOCAL lock_timeout = '10s';
 
--- The UPDATE decompresses the touched columnstore batches; the default cap of 100,000
--- tuples per transaction is below the row count on staging.
+-- The cap counts decompressed tuples per UPDATE statement (default 100,000); staging's
+-- largest pair is 52,779 rows, so this is headroom for a longer or denser vault window.
 SET LOCAL timescaledb.max_tuples_decompressed_per_dml_transaction = 500000;
 
 DO $$
