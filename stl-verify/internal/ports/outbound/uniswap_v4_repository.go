@@ -36,6 +36,14 @@ type UniswapV4BlockWrites struct {
 	LiquidityEvents []*entity.UniswapV4LiquidityEvent
 	Ticks           []*entity.UniswapV4Tick
 	PoolEvents      []*entity.UniswapV4PoolEvent
+	Positions       []*entity.UniswapV4Position
+}
+
+// UniswapV4PositionWriter is the position bootstrap's one write: position rows
+// alone, through the same append-on-change path SaveBlock's position phase takes.
+type UniswapV4PositionWriter interface {
+	// Returns how many rows it inserted — zero when every slot's stored state already matches.
+	SavePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) (insertedRows int64, err error)
 }
 
 type UniswapV4Repository interface {
@@ -51,6 +59,10 @@ type UniswapV4Repository interface {
 	// Tick positions already written for pool at blockNumber, so a reorg
 	// redelivery re-reads them; reads committed rows outside any transaction.
 	TicksForPoolAtBlock(ctx context.Context, chainID int64, poolID int64, blockNumber int64) ([]int32, error)
+	// PositionsForPoolAtBlock returns the position keys stored for pool at
+	// blockNumber (superseded registry surrogates resolved), in Compare order: a
+	// position is discovered only from a log, so a reorg redelivery cannot name it.
+	PositionsForPoolAtBlock(ctx context.Context, chainID int64, poolID int64, blockNumber int64) ([]entity.UniswapV4PositionKey, error)
 	// Pools on chainID that ever wrote a state or tick row, ascending. Read once
 	// at construction to rebuild the never-indexed and already-baselined sets.
 	PoolIDsEverSnapshotted(ctx context.Context, chainID int64) ([]int64, error)

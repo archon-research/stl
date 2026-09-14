@@ -73,6 +73,58 @@ _ALLOCATION_ACTIVITY_LIMIT = 1000
 # emit a telemetry warning while still serving the honestly-stale data.
 _ANCHORAGE_STALE_AFTER = timedelta(hours=1)
 
+# The identity of an allocation_position row: allocation_position_pkey minus
+# processing_version, and minus created_at. created_at is the block timestamp and
+# a correction copies it unchanged, so it does NOT distinguish one version from
+# another -- which is precisely what makes the last()/locf reads below unsafe.
+#
+# The table is append-only: a correction is a new row sharing this identity and
+# created_at but differing in a value column (balance, underlying_value, ...) --
+# an identical row would be pointless. Several single-row reads already guard
+# against a second version with ORDER BY ... processing_version DESC LIMIT 1
+# (get_latest_total_capital_usd, the direct-holdings and USD-exposure CTEs, the
+# tier-2 nearest-ratio laterals). The reads below are the ones that see MULTIPLE
+# rows per identity before that tiebreak can apply: a SUM over raw history
+# double-counts, and a last()-by-time tie-breaks arbitrarily between the original
+# and the correction. Both are fixed by collapsing to the newest version per
+# identity first (VEC-758).
+#
+# The column order is the leading 9-column prefix of allocation_position_pkey and
+# of idx_allocation_position_pv_lookup, but that index sorts created_at ahead of
+# processing_version, so this order still costs an Incremental Sort for the
+# trailing processing_version DESC -- and every call site here also filters a
+# created_at window, which the index can't serve either, so the plan is a Seq
+# Scan plus a full Sort in practice (verified on PG 18.6). Keep the column list
+# in step if the primary key ever changes.
+_IDENTITY_COLUMNS = (
+    "chain_id",
+    "token_id",
+    "prime_id",
+    "proxy_address",
+    "block_number",
+    "block_version",
+    "tx_hash",
+    "log_index",
+    "direction",
+)
+
+
+def _latest_version_only(alias: str) -> tuple[str, str]:
+    """Return ``(distinct_on, order_by)`` keeping one row per identity.
+
+    PostgreSQL requires a DISTINCT ON query's ORDER BY to lead with exactly the
+    DISTINCT ON expressions, so the two are produced together rather than left
+    for each call site to keep in sync.
+    """
+    keys = ", ".join(f"{alias}.{column}" for column in _IDENTITY_COLUMNS)
+    return f"DISTINCT ON ({keys})", f"{keys}, {alias}.processing_version DESC"
+
+
+# Precomputed for the module-level query strings below, which interpolate these
+# at import time rather than calling _latest_version_only() per query build.
+_DISTINCT_ON_D, _VERSION_ORDER_D = _latest_version_only("d")
+_DISTINCT_ON_AP, _VERSION_ORDER_AP = _latest_version_only("ap")
+
 
 def _escape_like_pattern(value: str) -> str:
     r"""Escape LIKE metacharacters to prevent pattern injection.
@@ -825,13 +877,29 @@ class AllocationRepository:
         value forward; leading buckets before the first observation are ``None``.
         """
         subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
+        distinct_on, version_order = _DISTINCT_ON_AP, _VERSION_ORDER_AP
+        time_window = required_time_window_clause("ap.created_at")
         query = text(
-            """
+            f"""
             WITH target AS (
                 SELECT prime_id
                 FROM prime_proxy
                 WHERE proxy_address = decode(:address_hex, 'hex')
                 LIMIT 1
+            ),
+            -- One row per identity, newest processing_version, BEFORE the
+            -- bucketing below picks a per-bucket winner by time. A correction
+            -- shares its original's created_at exactly, so last() cannot break
+            -- that tie and would otherwise return either row arbitrarily.
+            latest AS (
+                SELECT {distinct_on} ap.balance, ap.created_at
+                FROM allocation_position ap
+                JOIN token t ON t.id = ap.token_id
+                WHERE ap.prime_id = (SELECT prime_id FROM target)
+                  AND ap.proxy_address IN :subproxy_addrs
+                  AND t.address = decode(:usds_hex, 'hex')
+                  {time_window}
+                ORDER BY {version_order}
             )
             SELECT
                 time_bucket_gapfill(
@@ -841,14 +909,7 @@ class AllocationRepository:
                     CAST(:to_timestamp AS TIMESTAMPTZ)
                 ) AS bucket_start,
                 locf(last(ap.balance, ap.created_at)) AS total_capital_usd
-            FROM allocation_position ap
-            JOIN token t ON t.id = ap.token_id
-            WHERE ap.prime_id = (SELECT prime_id FROM target)
-              AND ap.proxy_address IN :subproxy_addrs
-              AND t.address = decode(:usds_hex, 'hex')
-            """
-            + required_time_window_clause("ap.created_at")
-            + """
+            FROM latest ap
             GROUP BY bucket_start
             ORDER BY bucket_start DESC
             LIMIT :limit
@@ -1054,8 +1115,8 @@ class AllocationRepository:
         ``_RECEIPT_TOKEN_POSITIONS_SQL``) is carried forward and valued at the
         *latest* underlying oracle price (via the protocol-bound oracle), then
         summed across positions. The position size is the historical driver;
-        the price is held at its latest value because ``onchain_token_price``
-        is change-only, so a bucketed price-LOCF would drop stable assets whose
+        the price is held at its latest value because the price history is
+        change-only, so a bucketed price-LOCF would drop stable assets whose
         last price change predates the window. This is exact for the
         dollar-pegged positions that dominate the book; for volatile
         underlyings (e.g. WETH) historical buckets use the current price (a
@@ -1068,83 +1129,6 @@ class AllocationRepository:
         balance, later ones the redeemable value, which is frozen at the last
         position event until the next one.
         """
-        query = text(
-            f"""
-            WITH position_buckets AS (
-                SELECT
-                    rt.id AS receipt_token_id,
-                    rt.underlying_token_id,
-                    rt.protocol_id,
-                    time_bucket_gapfill(
-                        make_interval(secs => :bucket_seconds),
-                        ap.created_at,
-                        CAST(:from_timestamp AS TIMESTAMPTZ),
-                        CAST(:to_timestamp AS TIMESTAMPTZ)
-                    ) AS bucket,
-                    locf(last(
-                        CASE
-                            WHEN ap.underlying_token_id IS NOT NULL
-                             AND ap.underlying_token_id <> rt.underlying_token_id
-                            THEN NULL
-                            ELSE COALESCE(ap.underlying_value, ap.balance)
-                        END,
-                        ap.created_at)) AS valuation_units
-                FROM allocation_position ap
-                JOIN token t ON t.id = ap.token_id
-                JOIN receipt_token rt
-                    ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
-                -- Prime-wide, like the headline figure beside it: a prime holds
-                -- receipt tokens through one proxy per chain, so scoping to one
-                -- address prices a single chain against a prime-wide total.
-                WHERE ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[]))
-                  AND ap.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
-                  AND ap.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
-                GROUP BY rt.id, rt.underlying_token_id, rt.protocol_id, bucket
-            ),
-            -- The latest price is bucket-independent, so it is resolved once per
-            -- (underlying, protocol) pair instead of inside the per-bucket join:
-            -- the lateral would otherwise re-scan onchain_token_price per bucket
-            -- per token (~1,600x on a 24h/PT15M window; ~17s per request).
-            price_keys AS (
-                SELECT DISTINCT underlying_token_id, protocol_id
-                FROM position_buckets
-            ),
-            latest_price AS (
-                SELECT pk.underlying_token_id, pk.protocol_id, px.price_usd
-                FROM price_keys pk
-                LEFT JOIN LATERAL (
-                    SELECT otp.price_usd
-                    FROM onchain_token_price otp
-                    JOIN protocol_oracle po
-                        ON po.oracle_id = otp.oracle_id AND po.protocol_id = pk.protocol_id
-                    WHERE otp.token_id = pk.underlying_token_id
-                    -- enabled-mapping filter (rationale on _DIRECT_ASSET_HOLDINGS_SQL):
-                    -- a retired source's tail must not serve any bucket after
-                    -- retirement (nor, given the one-instant-per-query tradeoff
-                    -- recorded there, before).
-                      AND EXISTS (
-                          SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
-                          WHERE oa.oracle_id = otp.oracle_id
-                            AND oa.token_id = otp.token_id
-                            AND oa.enabled
-                      )
-                    ORDER BY otp.block_number DESC, otp.block_version DESC,
-                             otp.processing_version DESC, otp.oracle_id DESC
-                    LIMIT 1
-                ) px ON TRUE
-            )
-            SELECT
-                b.bucket AS bucket_start,
-                SUM(b.valuation_units * COALESCE(lp.price_usd, 0)) AS exposure_usd
-            FROM position_buckets b
-            LEFT JOIN latest_price lp
-                ON lp.underlying_token_id = b.underlying_token_id
-               AND lp.protocol_id = b.protocol_id
-            GROUP BY b.bucket
-            ORDER BY b.bucket DESC
-            LIMIT :limit
-            """
-        )
         params = {
             "proxy_addrs": [a.to_bytes() for a in proxy_addresses],
             "from_timestamp": from_timestamp,
@@ -1155,7 +1139,7 @@ class AllocationRepository:
 
         try:
             async with self._engine.connect() as conn:
-                result = await conn.execute(query, self._reference.params(**params))
+                result = await conn.execute(_EXPOSURE_BUCKETS_SQL, self._reference.params(**params))
                 rows = result.fetchall()
         except asyncio.CancelledError:
             raise
@@ -1637,7 +1621,7 @@ WHERE p.balance > 0
 """)
 
 
-_ALLOCATION_ACTIVITY_SQL = text("""
+_ALLOCATION_ACTIVITY_SQL = text(f"""
 SELECT
     ap.chain_id,
     encode(ap.proxy_address, 'hex') AS prime_address,
@@ -1653,7 +1637,29 @@ SELECT
     ap.block_number,
     ap.block_version,
     ap.created_at
-FROM allocation_position ap
+FROM (
+    -- Newest processing_version per identity. This read is not aggregated, so
+    -- an un-deduped correction surfaces as a DUPLICATE ROW in the feed -- there
+    -- is no OFFSET/cursor here, only a LIMIT, so the real harm is dropping the
+    -- oldest row of the truncated window, not "shifting" a page (VEC-758).
+    -- Safe to push into this subquery: a filter on an _IDENTITY_COLUMNS column
+    -- (chain_id, proxy_address, direction, tx_hash, ...) -- identity is exactly
+    -- what a correction shares with its original. Unsafe: a filter on a VALUE
+    -- column (balance, underlying_value, ...), which could exclude the
+    -- correction before DISTINCT ON resolves it and resurrect the row it
+    -- superseded. Predicates needing prime/token/protocol joins stay in the
+    -- outer WHERE regardless.
+    SELECT {_DISTINCT_ON_D}
+        d.chain_id, d.proxy_address, d.prime_id, d.token_id, d.direction,
+        d.tx_amount, d.balance, d.tx_hash, d.log_index, d.block_number,
+        d.block_version, d.created_at
+    FROM allocation_position d
+    WHERE (CAST(:proxy_addrs AS BYTEA[]) IS NULL OR d.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[])))
+        AND (CAST(:chain_id AS INTEGER) IS NULL OR d.chain_id = CAST(:chain_id AS INTEGER))
+        AND (CAST(:from_timestamp AS TIMESTAMPTZ) IS NULL OR d.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ))
+        AND (CAST(:to_timestamp AS TIMESTAMPTZ) IS NULL OR d.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ))
+    ORDER BY {_VERSION_ORDER_D}
+) ap
 JOIN prime p ON p.id = ap.prime_id
 JOIN token t ON t.id = ap.token_id
 LEFT JOIN LATERAL (
@@ -1766,7 +1772,14 @@ _ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
 WITH window_rows AS MATERIALIZED (
     -- The activity rows this read aggregates. Fenced so the hypertable is
     -- scanned once; token_context and the outer query both read this set.
-    SELECT
+    --
+    -- DISTINCT ON keeps only the newest processing_version per identity. The
+    -- outer query SUMs over this set, so without it a correction row is added
+    -- to the total alongside the row it corrects (VEC-758). The mandatory
+    -- created_at window below defeats the pv-lookup index either way, so this
+    -- is a Seq Scan plus a full Sort, not an index-served one (see
+    -- _IDENTITY_COLUMNS).
+    SELECT {_DISTINCT_ON_AP}
         ap.chain_id,
         ap.token_id,
         ap.prime_id,
@@ -1791,6 +1804,7 @@ WITH window_rows AS MATERIALIZED (
              LIKE '%' || LOWER(CAST(:token_symbol AS TEXT)) || '%' ESCAPE '\\')
         AND (CAST(:tx_hash AS TEXT) IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(CAST(:tx_hash AS TEXT)))
         {required_time_window_clause("ap.created_at")}
+    ORDER BY {_VERSION_ORDER_AP}
 ),
 token_context AS MATERIALIZED (
     -- Everything the aggregate needs per token (a handful of rows): protocol
@@ -1919,5 +1933,98 @@ WHERE
          LIKE '%' || LOWER(CAST(:protocol_name AS TEXT)) || '%' ESCAPE '\\')
 GROUP BY bucket_start
 ORDER BY bucket_start DESC
+LIMIT :limit
+""")
+
+
+# Priced receipt-token exposure per time bucket; semantics on
+# ``AllocationRepository.list_exposure_buckets``.
+_EXPOSURE_BUCKETS_SQL = text(f"""
+WITH position_buckets AS (
+    SELECT
+        rt.id AS receipt_token_id,
+        rt.underlying_token_id,
+        rt.protocol_id,
+        time_bucket_gapfill(
+            make_interval(secs => :bucket_seconds),
+            ap.created_at,
+            CAST(:from_timestamp AS TIMESTAMPTZ),
+            CAST(:to_timestamp AS TIMESTAMPTZ)
+        ) AS bucket,
+        locf(last(
+            CASE
+                WHEN ap.underlying_token_id IS NOT NULL
+                 AND ap.underlying_token_id <> rt.underlying_token_id
+                THEN NULL
+                ELSE COALESCE(ap.underlying_value, ap.balance)
+            END,
+            ap.created_at)) AS valuation_units
+    FROM (
+        -- Newest processing_version per identity, before last() picks a
+        -- per-bucket winner. A correction copies its original's created_at
+        -- exactly, so last() has no tie to break and would return either row
+        -- arbitrarily -- the correction silently not applying, or flipping
+        -- between plans (VEC-758).
+        SELECT {_DISTINCT_ON_D}
+            d.chain_id, d.token_id, d.created_at, d.balance,
+            d.underlying_value, d.underlying_token_id
+        FROM allocation_position d
+        -- Prime-wide, like the headline figure beside it: a prime holds
+        -- receipt tokens through one proxy per chain, so scoping to one
+        -- address prices a single chain against a prime-wide total.
+        WHERE d.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[]))
+          AND d.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
+          AND d.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
+        ORDER BY {_VERSION_ORDER_D}
+    ) ap
+    JOIN token t ON t.id = ap.token_id
+    JOIN receipt_token rt
+        ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
+    GROUP BY rt.id, rt.underlying_token_id, rt.protocol_id, bucket
+),
+-- The latest price does not vary by bucket, so it is resolved once per
+-- (underlying, protocol) pair instead of inside the per-bucket join.
+price_keys AS (
+    SELECT DISTINCT underlying_token_id, protocol_id
+    FROM position_buckets
+),
+latest_price AS (
+    SELECT pk.underlying_token_id, pk.protocol_id, px.price_usd
+    FROM price_keys pk
+    LEFT JOIN LATERAL (
+        -- Reads the trigger-maintained cache, not the onchain_token_price
+        -- hypertable behind it: the cache keeps the per-(oracle, token) winner
+        -- under the same newer-wins tuple, so the ORDER BY below only picks
+        -- between oracles. Same rows the other latest-price reads in this file
+        -- resolve (VEC-712).
+        SELECT tpc.price_usd
+        FROM token_price_current tpc
+        JOIN protocol_oracle po
+            ON po.oracle_id = tpc.oracle_id AND po.protocol_id = pk.protocol_id
+        WHERE tpc.token_id = pk.underlying_token_id
+        -- enabled-mapping filter (rationale on _DIRECT_ASSET_HOLDINGS_SQL):
+        -- a retired source's tail must not serve any bucket after
+        -- retirement (nor, given the one-instant-per-query tradeoff
+        -- recorded there, before).
+          AND EXISTS (
+              SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
+              WHERE oa.oracle_id = tpc.oracle_id
+                AND oa.token_id = tpc.token_id
+                AND oa.enabled
+          )
+        ORDER BY tpc.block_number DESC, tpc.block_version DESC,
+                 tpc.processing_version DESC, tpc.oracle_id DESC
+        LIMIT 1
+    ) px ON TRUE
+)
+SELECT
+    b.bucket AS bucket_start,
+    SUM(b.valuation_units * COALESCE(lp.price_usd, 0)) AS exposure_usd
+FROM position_buckets b
+LEFT JOIN latest_price lp
+    ON lp.underlying_token_id = b.underlying_token_id
+   AND lp.protocol_id = b.protocol_id
+GROUP BY b.bucket
+ORDER BY b.bucket DESC
 LIMIT :limit
 """)

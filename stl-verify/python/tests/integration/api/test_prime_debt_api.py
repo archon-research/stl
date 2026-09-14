@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.adapters.postgres.prime_debt_repository import DEBT_BUCKETS_SQL, DEBT_SNAPSHOTS_SQL
 from app.config import Settings
 from app.main import create_app
+from tests.integration.explain import plan_nodes
 
 _SPARK_VAULT_ADDR = "0x691a6c29e9e96dd897718305427ad5d534db16ba"
 _SPARK_PROXY_ADDR = "0x" + "3c" * 20
@@ -150,16 +151,6 @@ def test_unknown_address_is_not_found(client: TestClient) -> None:
     assert response.json()["detail"] == "Prime not found"
 
 
-def _plan_nodes(node: object) -> list[dict]:
-    """Flatten every plan node in an ``EXPLAIN (FORMAT JSON)`` tree."""
-    if isinstance(node, list):
-        return [found for item in node for found in _plan_nodes(item)]
-    if isinstance(node, dict):
-        nested = [found for value in node.values() for found in _plan_nodes(value)]
-        return [node, *nested] if "Node Type" in node else nested
-    return []
-
-
 async def _explain(async_url: str, sql: str) -> tuple[list[dict], set[str]]:
     """Return *sql*'s plan nodes, plus every relation name ``allocation_position`` spans.
 
@@ -195,7 +186,7 @@ async def _explain(async_url: str, sql: str) -> tuple[list[dict], set[str]]:
     finally:
         await engine.dispose()
 
-    return _plan_nodes(json.loads(plan) if isinstance(plan, str) else plan), {"allocation_position", *chunks}
+    return plan_nodes(json.loads(plan) if isinstance(plan, str) else plan), {"allocation_position", *chunks}
 
 
 @pytest.mark.parametrize("sql", [DEBT_SNAPSHOTS_SQL, DEBT_BUCKETS_SQL], ids=["snapshots", "buckets"])
