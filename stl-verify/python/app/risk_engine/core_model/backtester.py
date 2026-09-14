@@ -42,6 +42,7 @@ class Backtester:
 
     @staticmethod
     def kupiec_test(hits, alpha):
+        """Unconditional coverage test; `alpha` is the VaR tail probability (e.g. 0.05)."""
         n = len(hits)
         x = sum(hits)
         pi_hat = x / n
@@ -59,6 +60,7 @@ class Backtester:
 
     @staticmethod
     def christoffersen_test(hits, alpha):
+        """Independence and conditional coverage tests; `alpha` is the VaR tail probability (e.g. 0.05)."""
         n = len(hits)
         hits = np.array(hits)
         n00 = n01 = n10 = n11 = 0
@@ -76,7 +78,7 @@ class Backtester:
         pi = (n01 + n11) / (n - 1)
 
         # Each probability is the MLE of the counts it multiplies, so a nonzero
-        # count always has a strictly interior probability: no clipping needed.
+        # count always has a strictly interior probability.
         log_L0 = Backtester._bernoulli_log_likelihood(n00 + n10, n01 + n11, pi)
         log_L1 = Backtester._bernoulli_log_likelihood(n00, n01, pi0) + Backtester._bernoulli_log_likelihood(
             n10, n11, pi1
@@ -102,9 +104,7 @@ class Backtester:
     def hit_backtest(self, i: int, use_log_returns: bool, alpha: float) -> np.ndarray:
         """
         Computes hits for rolling window i.
-        `alpha` is the VaR tail probability (e.g. 0.05), matching the Kupiec/Christoffersen alpha.
-        Both arguments are required so the caller's return-type and tail conventions
-        cannot silently diverge from the ones the hits are tested against.
+        `alpha` is the VaR tail probability (e.g. 0.05).
         Returns an array of 0/1 hits for each forecasted step.
         """
 

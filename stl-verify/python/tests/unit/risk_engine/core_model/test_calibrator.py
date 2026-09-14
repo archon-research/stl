@@ -1,4 +1,4 @@
-"""Unit test for the calibrator's backtest plumbing (VEC-766 / Known Issue #3).
+"""Unit test for the calibrator's backtest plumbing.
 
 total_fitter must pass its own return-type and tail-probability conventions
 through to every rolling hit_backtest call, instead of letting the backtest

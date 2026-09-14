@@ -1,4 +1,4 @@
-"""Unit tests for the VaR backtest statistics (VEC-766 / audit C-06, C-07).
+"""Unit tests for the VaR backtest statistics.
 
 Kupiec must reject boundary exceedance rates instead of returning p=1, and
 the Christoffersen independence statistic must survive long series without
@@ -55,8 +55,6 @@ def test_kupiec_interior_case_matches_the_direct_formula():
 
 def test_christoffersen_rejects_clustered_hits_on_a_long_series():
     # 64 consecutive hits in 1280 observations: the textbook clustering case.
-    # The pre-fix product formula underflowed both likelihoods past the 1e-10
-    # clip on any series past ~440 observations and returned p=1 here.
     hits = np.zeros(1280, dtype=int)
     hits[600:664] = 1
 
