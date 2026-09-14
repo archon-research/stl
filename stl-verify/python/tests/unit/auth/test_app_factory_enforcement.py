@@ -26,9 +26,10 @@ from fastapi import APIRouter, FastAPI
 # itself walks, and its contexts merge router-level and route-level
 # dependencies. Imported at module level so a FastAPI upgrade that removes it
 # breaks collection loudly instead of letting the walk go vacuous.
-from fastapi.routing import APIRoute, iter_route_contexts
+from fastapi.routing import APIRoute, APIWebSocketRoute, iter_route_contexts
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from starlette.routing import Mount
 
 from app.adapters.postgres.reference_as_of import utc_now
 from app.api import deps
@@ -293,3 +294,72 @@ def test_the_route_walk_catches_a_bare_router() -> None:
     app.include_router(router, prefix="/v1")
 
     assert _walk_v1_routes(app) == [("/v1/naked", set())]
+
+
+def test_the_walk_covers_every_documented_v1_path() -> None:
+    """A completeness floor. The walk above only ever reports what it managed
+    to reach, so a FastAPI change that makes iter_route_contexts yield a subset
+    leaves every assertion green while whole routers drop out of scope.
+    app.openapi() reaches the same routes by an independent code path."""
+    app = create_app(_settings(auth_enabled=True))
+
+    documented = {p for p in app.openapi()["paths"] if p.startswith("/v1")}
+    missed = sorted(documented - {path for path, _ in _walk_v1_routes(app)})
+
+    assert not missed, f"/v1 paths the role-gate walk never saw: {missed}"
+
+
+def _unclassifiable_routes(app: FastAPI) -> list[str]:
+    """Route entries under /v1 that the role-gate model cannot express.
+
+    A Mount hands the request to another ASGI app, which inherits none of the
+    including router's dependencies; an APIWebSocketRoute reaches
+    iter_route_contexts with an empty path and no merged dependencies, so the
+    walk above cannot see either its path or its gates. Both are therefore
+    invisible to _walk_v1_routes rather than reported ungated by it, which is
+    the one failure mode a fail-closed test must not have.
+    """
+    found = []
+    for rc in iter_route_contexts(app.routes):
+        route = rc.original_route
+        if not isinstance(route, (APIWebSocketRoute, Mount)):
+            continue
+        # rc.path is the mount path for a Mount and empty for a websocket, so
+        # fall back to the undecorated path rather than reporting "".
+        path = rc.path or getattr(rc.route, "path", "") or "?"
+        if isinstance(route, Mount) and not path.startswith("/v1"):
+            continue
+        found.append(f"{type(route).__name__} {path}")
+    return sorted(found)
+
+
+def test_no_v1_route_type_the_walk_cannot_classify() -> None:
+    """Extending the app past plain HTTP routes has to be a deliberate act that
+    also extends this enforcement, not something that ships gate-free because
+    the walk silently skipped it."""
+    unclassifiable = _unclassifiable_routes(create_app(_settings(auth_enabled=True)))
+
+    assert not unclassifiable, (
+        "route types the /v1 role-gate walk cannot classify: "
+        f"{unclassifiable} — gate them explicitly and teach _walk_v1_routes about them"
+    )
+
+
+def test_the_unclassifiable_check_catches_a_websocket_and_a_mount() -> None:
+    """Self-test, same reason as the bare-router one above."""
+    ws_app = FastAPI()
+    router = APIRouter()
+
+    @router.websocket("/socket")
+    async def socket(websocket) -> None:  # pragma: no cover — never called
+        return None
+
+    ws_app.include_router(router, prefix="/v1")
+
+    mount_app = FastAPI()
+    mount_app.mount("/v1/sub", FastAPI())
+
+    assert _unclassifiable_routes(ws_app) == ["APIWebSocketRoute /socket"]
+    assert _unclassifiable_routes(mount_app) == ["Mount /v1/sub"]
+    assert _walk_v1_routes(ws_app) == []
+    assert _walk_v1_routes(mount_app) == []
