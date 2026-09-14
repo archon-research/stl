@@ -233,3 +233,239 @@ func TestStreamHarness_MorphoAgreesWithAnIndependentOracle(t *testing.T) {
 		})
 	}
 }
+
+// TestStreamHarness_CachesAgreeWithTheSpine drives both trigger-fed caches over the same randomised
+// world. They are fed by AFTER INSERT statement triggers on position_state, so whichever projection
+// wrote the spine, the caches must follow it: position_current holds each position's newest
+// observation, position_daily the winner per (position, UTC date). The oracle is computed here from
+// position_state by an expression written independently of either cache's own SQL.
+func TestStreamHarness_CachesAgreeWithTheSpine(t *testing.T) {
+	for _, seed := range []int64{2, 11, 23, 47, 97} {
+		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
+			ctx, pool, w := streamHarness(t, seed)
+			w.seedMorphoWorld(t, ctx, pool)
+			if _, err := pool.Exec(ctx, `SELECT materialize_morpho_market()`); err != nil {
+				t.Fatalf("materialize: %v", err)
+			}
+
+			var spineRows, currentRows, dailyRows int
+			if err := pool.QueryRow(ctx, `
+				SELECT (SELECT count(*) FROM position_state),
+				       (SELECT count(*) FROM position_current),
+				       (SELECT count(*) FROM position_daily)`).Scan(&spineRows, &currentRows, &dailyRows); err != nil {
+				t.Fatal(err)
+			}
+			if spineRows == 0 || currentRows == 0 || dailyRows == 0 {
+				t.Fatalf("seed %d: spine=%d current=%d daily=%d; a zero makes every comparison below vacuous",
+					seed, spineRows, currentRows, dailyRows)
+			}
+
+			// position_current: one row per position, equal to the newest observation on every column
+			// the two share. Written as a correlated lookup rather than the cache's own DISTINCT ON, so
+			// the two do not agree merely because they are the same expression.
+			var currentWrong int
+			if err := pool.QueryRow(ctx, `
+				SELECT count(*) FROM position_current c
+				 WHERE (c.quantity, c.block_number, c.block_version, c.processing_version, c.block_timestamp)
+				       IS DISTINCT FROM
+				       (SELECT (p.quantity, p.block_number, p.block_version, p.processing_version, p.block_timestamp)
+				          FROM position_state p WHERE p.position_id = c.position_id
+				         ORDER BY p.block_number DESC, p.block_version DESC,
+				                  p.processing_version DESC, p.block_timestamp DESC LIMIT 1)`).Scan(&currentWrong); err != nil {
+				t.Fatal(err)
+			}
+			if currentWrong != 0 {
+				t.Errorf("seed %d: position_current disagrees with the spine's newest observation on %d position(s)", seed, currentWrong)
+			}
+
+			// Every position in the spine must have a cache row, and the cache must invent none.
+			var missing, extra int
+			if err := pool.QueryRow(ctx, `
+				SELECT (SELECT count(DISTINCT p.position_id) FROM position_state p
+				         WHERE NOT EXISTS (SELECT 1 FROM position_current c WHERE c.position_id = p.position_id)),
+				       (SELECT count(*) FROM position_current c
+				         WHERE NOT EXISTS (SELECT 1 FROM position_state p WHERE p.position_id = c.position_id))`).
+				Scan(&missing, &extra); err != nil {
+				t.Fatal(err)
+			}
+			if missing != 0 || extra != 0 {
+				t.Errorf("seed %d: position_current is missing %d position(s) and invents %d", seed, missing, extra)
+			}
+
+			// position_daily: one row per (position, UTC date), the winner within that date.
+			var dailyWrong int
+			if err := pool.QueryRow(ctx, `
+				SELECT count(*) FROM position_daily d
+				 WHERE (d.quantity, d.block_number, d.block_version, d.processing_version, d.block_timestamp)
+				       IS DISTINCT FROM
+				       (SELECT (p.quantity, p.block_number, p.block_version, p.processing_version, p.block_timestamp)
+				          FROM position_state p
+				         WHERE p.position_id = d.position_id
+				           AND (p.block_timestamp AT TIME ZONE 'utc')::date = d.as_of_date
+				         ORDER BY p.block_number DESC, p.block_version DESC,
+				                  p.processing_version DESC, p.block_timestamp DESC LIMIT 1)`).Scan(&dailyWrong); err != nil {
+				t.Fatal(err)
+			}
+			if dailyWrong != 0 {
+				t.Errorf("seed %d: position_daily disagrees with the spine's winner for that date on %d row(s)", seed, dailyWrong)
+			}
+
+			// Only OBSERVED dates get a row, and every observed date gets one.
+			var dateMissing, dateExtra int
+			if err := pool.QueryRow(ctx, `
+				SELECT (SELECT count(*) FROM (SELECT DISTINCT position_id, (block_timestamp AT TIME ZONE 'utc')::date d
+				                                FROM position_state) s
+				         WHERE NOT EXISTS (SELECT 1 FROM position_daily x
+				                            WHERE x.position_id = s.position_id AND x.as_of_date = s.d)),
+				       (SELECT count(*) FROM position_daily x
+				         WHERE NOT EXISTS (SELECT 1 FROM position_state p
+				                            WHERE p.position_id = x.position_id
+				                              AND (p.block_timestamp AT TIME ZONE 'utc')::date = x.as_of_date))`).
+				Scan(&dateMissing, &dateExtra); err != nil {
+				t.Fatal(err)
+			}
+			if dateMissing != 0 || dateExtra != 0 {
+				t.Errorf("seed %d: position_daily is missing %d observed (position, date) pair(s) and holds %d for dates never observed",
+					seed, dateMissing, dateExtra)
+			}
+		})
+	}
+}
+
+// seedVaultWorld generates a randomised Morpho vault history, a second projection over the same
+// spine, so the stream is exercised with more than one writer.
+func (w *streamWorld) seedVaultWorld(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int {
+	t.Helper()
+	var protocolID, assetTok, vaultID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO protocol (chain_id, address, name, protocol_type)
+		VALUES (1, decode($1,'hex'), 'stream-metamorpho', 'morpho_vault') RETURNING id`, w.addr(0x7100)).Scan(&protocolID); err != nil {
+		t.Fatalf("seed vault protocol: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO token (chain_id, address, symbol, decimals)
+		VALUES (1, decode($1,'hex'), 'VLT', 6) RETURNING id`, w.addr(0x7101)).Scan(&assetTok); err != nil {
+		t.Fatalf("seed vault token: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO morpho_vault (chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block)
+		VALUES (1, $1, decode($2,'hex'), 'Stream Vault', 'SV', $3, 1, 1) RETURNING id`,
+		protocolID, w.addr(0x7102), assetTok).Scan(&vaultID); err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	rows := 0
+	for h := 0; h < 2+w.rng.Intn(3); h++ {
+		var userID int64
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO "user" (chain_id, address) VALUES (1, decode($1,'hex')) RETURNING id`,
+			w.addr(0x8000+h)).Scan(&userID); err != nil {
+			t.Fatalf("seed vault user: %v", err)
+		}
+		block := int64(2000 + w.rng.Intn(50))
+		var assets int64
+		for o := 0; o < 2+w.rng.Intn(4); o++ {
+			block += int64(1 + w.rng.Intn(30))
+			assets += int64(w.rng.Intn(500))
+			ver := 0
+			if w.rng.Intn(6) == 0 {
+				ver = 1
+			}
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, timestamp, shares, assets)
+				VALUES ($1,$2,$3,$4,$5::timestamptz,$6,$6) ON CONFLICT DO NOTHING`,
+				userID, vaultID, block, ver, streamBlockTime(block), assets); err != nil {
+				t.Fatalf("seed vault position: %v", err)
+			}
+			rows++
+		}
+	}
+	return rows
+}
+
+// TestStreamHarness_EveryWrapperRunsInOneDatabase is what #739's runner actually does: call every
+// materialize_<projection>() wrapper in turn, against one database, in one process. Nothing else
+// tests that composition. A wrapper that leaves state behind, takes a lock another needs, or claims
+// a position another owns shows up here and nowhere else -- the per-projection suites each get a
+// fresh database and run exactly one.
+func TestStreamHarness_EveryWrapperRunsInOneDatabase(t *testing.T) {
+	ctx, pool, w := streamHarness(t, 4242)
+	w.seedMorphoWorld(t, ctx, pool)
+	if n := w.seedVaultWorld(t, ctx, pool); n == 0 {
+		t.Fatal("the vault world seeded nothing")
+	}
+
+	// Every wrapper on the branch, in the order the runner would call them.
+	wrappers := []string{
+		"materialize_morpho_market", "materialize_morpho_vault", "materialize_aave_lending",
+		"materialize_sky_prime_debt", "materialize_prime_allocation", "materialize_maple_loan",
+		"materialize_anchorage_custody",
+	}
+	appended := map[string]int64{}
+	for _, fn := range wrappers {
+		var n int64
+		if err := pool.QueryRow(ctx, `SELECT `+fn+`()`).Scan(&n); err != nil {
+			t.Errorf("%s: %v", fn, err)
+			continue
+		}
+		appended[fn] = n
+		t.Logf("%-32s appended %d", fn, n)
+	}
+	if len(appended) != len(wrappers) {
+		t.Fatalf("only %d of %d wrappers ran; the stream cannot be driven as one", len(appended), len(wrappers))
+	}
+	if appended["materialize_morpho_market"] == 0 || appended["materialize_morpho_vault"] == 0 {
+		t.Fatalf("the two seeded projections appended %d and %d; the run proves nothing about composition",
+			appended["materialize_morpho_market"], appended["materialize_morpho_vault"])
+	}
+
+	// Cross-view disjointness: the spine refuses a position claimed by two projections, so every
+	// stored position must name exactly one.
+	var shared int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM (SELECT position_id FROM position_state
+		                       GROUP BY position_id HAVING count(DISTINCT projection) > 1) z`).Scan(&shared); err != nil {
+		t.Fatal(err)
+	}
+	if shared != 0 {
+		t.Errorf("%d position(s) are claimed by more than one projection", shared)
+	}
+
+	// A second full pass must append nothing: every wrapper is idempotent, which is what makes the
+	// runner safe on a schedule.
+	for _, fn := range wrappers {
+		var n int64
+		if err := pool.QueryRow(ctx, `SELECT `+fn+`()`).Scan(&n); err != nil {
+			t.Errorf("%s on the second pass: %v", fn, err)
+			continue
+		}
+		if n != 0 {
+			t.Errorf("%s appended %d on an unchanged source; a scheduled run would write duplicates", fn, n)
+		}
+	}
+
+	// And the caches still agree after every projection has written.
+	var currentWrong, dailyWrong int
+	if err := pool.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM position_current c
+		         WHERE (c.quantity, c.block_number, c.block_version, c.processing_version, c.block_timestamp)
+		               IS DISTINCT FROM
+		               (SELECT (p.quantity, p.block_number, p.block_version, p.processing_version, p.block_timestamp)
+		                  FROM position_state p WHERE p.position_id = c.position_id
+		                 ORDER BY p.block_number DESC, p.block_version DESC,
+		                          p.processing_version DESC, p.block_timestamp DESC LIMIT 1)),
+		       (SELECT count(*) FROM position_daily d
+		         WHERE (d.quantity, d.block_number, d.block_version, d.processing_version, d.block_timestamp)
+		               IS DISTINCT FROM
+		               (SELECT (p.quantity, p.block_number, p.block_version, p.processing_version, p.block_timestamp)
+		                  FROM position_state p
+		                 WHERE p.position_id = d.position_id
+		                   AND (p.block_timestamp AT TIME ZONE 'utc')::date = d.as_of_date
+		                 ORDER BY p.block_number DESC, p.block_version DESC,
+		                          p.processing_version DESC, p.block_timestamp DESC LIMIT 1))`).
+		Scan(&currentWrong, &dailyWrong); err != nil {
+		t.Fatal(err)
+	}
+	if currentWrong != 0 || dailyWrong != 0 {
+		t.Errorf("after the full stream: position_current wrong on %d, position_daily wrong on %d", currentWrong, dailyWrong)
+	}
+}
