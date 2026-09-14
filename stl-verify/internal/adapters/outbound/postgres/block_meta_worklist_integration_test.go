@@ -84,9 +84,7 @@ func TestWorkListWindowsCoverEveryReferencedBlock(t *testing.T) {
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM (
 		  SELECT sr.block_number FROM sparklend_reserve_data sr
-		    JOIN protocol p ON p.id = sr.protocol_id WHERE p.chain_id = 1
-		  UNION
-		  SELECT pd.block_number FROM prime_debt pd) s`).Scan(&want); err != nil {
+		    JOIN protocol p ON p.id = sr.protocol_id WHERE p.chain_id = 1) s`).Scan(&want); err != nil {
 		t.Fatalf("count referenced blocks: %v", err)
 	}
 	got := openList(t, ctx, pool, 1)
@@ -132,42 +130,6 @@ func TestWorkListExcludesBlocksAlreadyLoaded(t *testing.T) {
 	}
 }
 
-// prime_debt has no chain column, so its arm asserts chain 1. On any other chain it must contribute
-// nothing at all -- asserted against the work-list TABLE rather than the cursor, because the cursor
-// filters by chain and would hide rows the Sky arm wrongly wrote under chain 1 during another chain's run.
-func TestWorkListSkipsPrimeDebtOffChainOne(t *testing.T) {
-	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
-	defer cleanup()
-	seedWorkListSources(t, ctx, pool)
-
-	var before int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM block_meta_worklist`).Scan(&before); err != nil {
-		t.Fatalf("count the work list before: %v", err)
-	}
-	if got := openList(t, ctx, pool, 8453); len(got) != 0 {
-		t.Errorf("chain 8453 enumerated %d blocks; nothing in the fixture belongs to it", len(got))
-	}
-	var sky int
-	if err := pool.QueryRow(ctx, `
-		SELECT count(*) FROM block_meta_worklist
-		 WHERE block_number BETWEEN 7000000 AND 7000005`).Scan(&sky); err != nil {
-		t.Fatalf("count Sky rows in the work list: %v", err)
-	}
-	if sky != 0 {
-		t.Errorf("a chain 8453 run wrote %d prime_debt block(s) into the work list; the Sky arm must not run off chain 1", sky)
-	}
-	var after int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM block_meta_worklist`).Scan(&after); err != nil {
-		t.Fatalf("count the work list after: %v", err)
-	}
-	if after != before {
-		t.Errorf("a chain 8453 run changed the work list from %d rows to %d; it must write nothing", before, after)
-	}
-}
-
-// The reason the work list is a committed table rather than a temp one: a transaction open across the
-// run pins VACUUM's removable cutoff database-wide. Paging must leave no transaction open at all.
 func TestWorkListHoldsNoOpenTransactionWhilePaging(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
@@ -199,10 +161,11 @@ func TestWorkListHoldsNoOpenTransactionWhilePaging(t *testing.T) {
 	}
 }
 
-// Resume, both halves. A pass that reached the end clears its chain, so the next run enumerates
-// fresh. A pass that was interrupted leaves its rows, and the next Open must USE them rather than
-// re-enumerate — the enumeration is the expensive half and the whole reason the table is committed.
-func TestWorkListResumesAnInterruptedPassAndClearsACompletedOne(t *testing.T) {
+// Every open re-enumerates. The work list is scratch, not state: rows surviving a previous run say
+// nothing about whether that run's enumeration finished, because windows commit one at a time. Resuming
+// the expensive half -- the S3 reads -- is the anti-join against block_meta, which works whether or not
+// this table survived. So the chain is cleared at the start of every run and the arms all run again.
+func TestWorkListClearsAndReEnumeratesOnEveryOpen(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
@@ -214,7 +177,6 @@ func TestWorkListResumesAnInterruptedPassAndClearsACompletedOne(t *testing.T) {
 		t.Fatalf("build the repository: %v", err)
 	}
 
-	// An interrupted pass: one page read, then closed without reaching the end.
 	list, err := repo.OpenWorkList(ctx, 1, 0)
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -224,59 +186,26 @@ func TestWorkListResumesAnInterruptedPassAndClearsACompletedOne(t *testing.T) {
 	}
 	list.Close(ctx)
 
-	var survived int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM block_meta_worklist WHERE chain_id = 1`).Scan(&survived); err != nil {
-		t.Fatal(err)
-	}
-	if survived == 0 {
-		t.Fatal("an interrupted pass cleared its work list; the next run would re-enumerate the chain")
-	}
-
-	// The next Open must REUSE those rows rather than run the arms again. A brand-new source block is
-	// what makes that observable: re-enumeration would pick it up, resuming cannot. Counting rows
-	// cannot tell the two apart, because a re-enumeration re-inserts exactly what is already there.
-	const newBlock = 7009999
+	// A source block added between the two opens is the probe: only a re-enumeration can see it.
+	const addedBetweenRuns = 1150000
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at)
-		SELECT (SELECT id FROM prime WHERE name='wl-prime'), 'WL-A', 1, $1, 0, TIMESTAMPTZ '2026-02-01'`,
-		newBlock); err != nil {
-		t.Fatalf("add a source row: %v", err)
+		INSERT INTO sparklend_reserve_data (protocol_id, token_id, block_number, block_version)
+		SELECT (SELECT id FROM protocol WHERE address='\x9001'),
+		       (SELECT id FROM token WHERE address='\x9002'), $1, 0`, addedBetweenRuns); err != nil {
+		t.Fatalf("add a source row between runs: %v", err)
 	}
-	resumed, err := repo.OpenWorkList(ctx, 1, 0)
-	if err != nil {
+	if _, err := repo.OpenWorkList(ctx, 1, 0); err != nil {
 		t.Fatalf("re-open: %v", err)
 	}
 	var sawNew int
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM block_meta_worklist WHERE chain_id = 1 AND block_number = $1`, newBlock).Scan(&sawNew); err != nil {
+		`SELECT count(*) FROM block_meta_worklist WHERE chain_id = 1 AND block_number = $1`, addedBetweenRuns).Scan(&sawNew); err != nil {
 		t.Fatal(err)
 	}
-	if sawNew != 0 {
-		t.Errorf("resuming picked up a block added after the interrupted pass; it re-enumerated instead of resuming")
-	}
-
-	// Page it to the end; a completed pass clears the chain.
-	for {
-		refs, err := resumed.Next(ctx, 50)
-		if err != nil {
-			t.Fatalf("page the resumed list: %v", err)
-		}
-		if len(refs) == 0 {
-			break
-		}
-	}
-	resumed.Close(ctx)
-	var afterComplete int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM block_meta_worklist WHERE chain_id = 1`).Scan(&afterComplete); err != nil {
-		t.Fatal(err)
-	}
-	if afterComplete != 0 {
-		t.Errorf("a completed pass left %d rows; the next run would resume a list with nothing left to do", afterComplete)
+	if sawNew != 1 {
+		t.Errorf("a block added between runs is absent from the second run's work list; the open did not re-enumerate")
 	}
 }
-
-// build_id is what ADR-0006 reads to tell a tracked write from pre-tracking data, and the column
-// COMMENT promises the loader's build. It defaulted to 0 on every row until the repository carried it.
 func TestBlockMetaUpsertStampsBuildAndRun(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
@@ -550,6 +479,9 @@ func TestHeadMarginMeasuresFromTheChainHeadNotThePendingSet(t *testing.T) {
 // is only the column it carries today. A table declaring a fill for a column added later is covered
 // here by construction, with no change to this test.
 //
+// The two lists are now exactly equal. prime_debt was the one arm with no fill and is no longer an
+// arm: it renames synced_at to block_timestamp by transform, so it answers its own event time.
+//
 // This is the answer to "should the loader look at every data table": no — at every table that cannot
 // answer a block-level column for itself, which is exactly this set.
 func TestWorkListArmsCoverEveryBlockMetaFill(t *testing.T) {
@@ -581,14 +513,65 @@ func TestWorkListArmsCoverEveryBlockMetaFill(t *testing.T) {
 		}
 	}
 	for table := range armed {
-		// prime_debt is the one arm with no fill, and deliberately: it carries block_number but answers
-		// its own event time, so it is loaded for other consumers of block_meta rather than for itself.
-		if table == "prime_debt" {
-			continue
-		}
 		if !declared[table] {
 			t.Errorf("the work list enumerates %s, but nothing in schema_master.json says it needs block_meta; "+
 				"either it should declare the fill or the arm is loading blocks no one resolves", table)
 		}
+	}
+}
+
+// Enumeration commits per window, so a run killed PART WAY through it leaves rows for the arms that
+// finished and none for the arms that never ran. "Rows survive" then reads as a complete work list:
+// the next Open skips every arm, pages the partial list to the end, clears the chain and reports
+// success, and the blocks the unrun arms would have found are never loaded. Nothing says so.
+//
+// Simulated by leaving rows for the chain with no completion marker, which is exactly the state a
+// killed enumeration leaves. The new source row is the probe: a resume cannot see it, a re-enumeration
+// must, and here re-enumerating is the only correct behaviour because the list was never finished.
+func TestWorkListReEnumeratesAfterAnInterruptedEnumeration(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+
+	// The state a killed enumeration leaves: some rows, no marker.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
+		VALUES (1, 7000001, 0) ON CONFLICT DO NOTHING`); err != nil {
+		t.Fatalf("leave a partial work list: %v", err)
+	}
+	var partial int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM block_meta_worklist WHERE chain_id = 1`).Scan(&partial); err != nil {
+		t.Fatal(err)
+	}
+	if partial == 0 {
+		t.Fatal("the partial work list did not survive; this case is not being exercised")
+	}
+
+	const unrunArmBlock = 1175000
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sparklend_reserve_data (protocol_id, token_id, block_number, block_version)
+		SELECT (SELECT id FROM protocol WHERE address='\x9001'),
+		       (SELECT id FROM token WHERE address='\x9002'), $1, 0`, unrunArmBlock); err != nil {
+		t.Fatalf("add the block an unrun arm would find: %v", err)
+	}
+
+	if _, err := repo.OpenWorkList(ctx, 1, 0); err != nil {
+		t.Fatalf("open over a partial work list: %v", err)
+	}
+	var found int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM block_meta_worklist WHERE chain_id = 1 AND block_number = $1`, unrunArmBlock).Scan(&found); err != nil {
+		t.Fatal(err)
+	}
+	if found == 0 {
+		t.Error("a work list left by an interrupted ENUMERATION was resumed as if it were complete: the arms " +
+			"that never ran were skipped, so their blocks are absent and the run will report success without them")
 	}
 }

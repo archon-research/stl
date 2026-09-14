@@ -49,10 +49,11 @@ func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID bui
 // Each referencing table contributes one arm. Chain resolution per table, verified against the schemas:
 //   - borrower, borrower_collateral, sparklend_reserve_data carry protocol_id -> protocol.chain_id.
 //   - allocation_position, protocol_event carry chain_id natively.
-//   - prime_debt (Sky) has no chain column at all, so its arm is used ONLY for chain 1 and is skipped
-//     otherwise. If prime_debt ever takes rows from another chain the constant would attribute them to
-//     Ethereum and the loader would write wrong timestamps, so the gate is explicit rather than
-//     incidental and TestWorkListSkipsPrimeDebtOffChainOne pins it.
+//
+// Membership follows schema_master.json: an arm exists for a table that resolves a column by joining
+// block_meta, and for no other. prime_debt was an arm and is not one now -- it renames synced_at to
+// block_timestamp by transform, so it answers its own event time and declares no block_meta fill.
+// TestWorkListArmsCoverEveryBlockMetaFill holds the two in step.
 //
 // Arms are populated one at a time, each in its own short transaction, and each is windowed on its OWN
 // partition column. A block-number bound prunes nothing on a table partitioned by insert time, so the
@@ -93,11 +94,6 @@ var workListArms = []workListArm{
 		SELECT p.chain_id, sr.block_number, sr.block_version
 		  FROM sparklend_reserve_data sr JOIN protocol p ON p.id = sr.protocol_id
 		 WHERE p.chain_id = $1 AND %s
-		ON CONFLICT DO NOTHING`},
-	{"prime_debt", "pd.synced_at", `
-		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
-		SELECT 1, pd.block_number, pd.block_version FROM prime_debt pd
-		 WHERE $1 = 1 AND %s
 		ON CONFLICT DO NOTHING`},
 }
 
@@ -190,9 +186,6 @@ type blockWorkList struct {
 	logger  *slog.Logger
 	chainID int64
 	after   outbound.BlockRef
-	// exhausted records that Next returned an empty page, i.e. the pass covered the
-	// whole list. Only then may Close clear the chain.
-	exhausted bool
 }
 
 // OpenWorkList enumerates the blocks chainID references that block_meta lacks, once, into
@@ -202,21 +195,15 @@ type blockWorkList struct {
 // run because its temp table was ON COMMIT DROP, and that transaction's backend_xid pins VACUUM's
 // removable cutoff database-wide even with no snapshot held -- for chain 1 that is hours.
 func (r *BlockMetaRepository) OpenWorkList(ctx context.Context, chainID int64, headMargin int64) (outbound.BlockWorkList, error) {
-	// Rows left by a previous run ARE the resume: enumerating the arms is the expensive half. The
-	// anti-join below still runs, so anything the killed run loaded is dropped before paging resumes.
-	// A completed run clears the chain itself (see Close).
-	var resumed int64
-	if err := r.pool.QueryRow(ctx,
-		`SELECT count(*) FROM block_meta_worklist WHERE chain_id = $1`, chainID).Scan(&resumed); err != nil {
-		return nil, fmt.Errorf("checking the work list for chain %d: %w", chainID, err)
+	// Every run enumerates from scratch. Rows surviving a previous run say nothing about whether its
+	// enumeration FINISHED -- windows commit one at a time, so a run killed part way leaves the arms it
+	// reached and none of the rest, and resuming that reads a partial list as a complete one. Resuming
+	// the expensive half is the anti-join's job below, and it works whether or not this table survived.
+	if _, err := r.pool.Exec(ctx,
+		`DELETE FROM block_meta_worklist WHERE chain_id = $1`, chainID); err != nil {
+		return nil, fmt.Errorf("clearing the work list for chain %d: %w", chainID, err)
 	}
 	for _, arm := range workListArms {
-		if resumed > 0 {
-			break
-		}
-		if arm.table == "prime_debt" && chainID != 1 {
-			continue
-		}
 		windows, err := r.windowPredicates(ctx, arm.table, arm.partCol)
 		if err != nil {
 			return nil, err
@@ -285,22 +272,15 @@ func (w *blockWorkList) Next(ctx context.Context, limit int) ([]outbound.BlockRe
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating the work list: %w", err)
 	}
-	if len(out) == 0 {
-		w.exhausted = true
-	} else {
+	if len(out) > 0 {
 		w.after = out[len(out)-1]
 	}
 	return out, nil
 }
 
 func (w *blockWorkList) Close(ctx context.Context) {
-	// A pass that reached the end clears its chain, so surviving rows mean an interrupted run and the
-	// next Open resumes them. An interrupted pass leaves them deliberately.
-	if w.pool != nil && w.exhausted {
-		if _, err := w.pool.Exec(ctx, `DELETE FROM block_meta_worklist WHERE chain_id = $1`, w.chainID); err != nil {
-			w.logger.Error("clearing the completed work list", "chain", w.chainID, "error", err)
-		}
-	}
+	// Nothing to clear: the chain is cleared at the start of every run, which is the one boundary, so
+	// rows left here are scratch the next Open discards rather than state anything depends on.
 	w.pool = nil
 }
 
