@@ -704,6 +704,8 @@ groups:
         labels:
           team: vector
           severity: warning
+          component: position-materializer
+          namespace: vector
         annotations:
           summary: "position-materializer is withholding positions in {{ $labels.projection }}"
           description: >-
