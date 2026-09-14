@@ -132,10 +132,34 @@ def test_an_oversized_request_is_rejected_with_the_typed_body(client: TestClient
     assert body["status"] == 422
     assert body["point_count"] == MAX_POINTS * 4
     assert body["max_points"] == MAX_POINTS
-    assert body["suggested_to_timestamp"] == "2026-03-06T00:00:00Z"
-    assert body["suggested_from_timestamp"] == "2026-03-05T18:00:00Z"
-    assert body["suggested_frequency"] == "PT5M"
+    assert body["suggestions"]["narrower_window"] == {
+        "from_timestamp": "2026-03-05T18:00:00Z",
+        "to_timestamp": "2026-03-06T00:00:00Z",
+    }
+    assert body["suggestions"]["resampled"] == {"frequency": "PT5M", "aggregation_method": "end-period"}
     assert body["detail"]
+
+
+def test_the_resampled_suggestion_merges_into_the_request_it_was_sent_for(client: TestClient) -> None:
+    # What grouping the suggestions buys: the keys match the query parameters, so a
+    # retry is a merge. `aggregation_method` rides along because a frequency without
+    # one is itself a rejection.
+    sent = {"from_timestamp": "2026-03-05T00:00:00Z", "to_timestamp": "2026-03-06T00:00:00Z"}
+    rejection = _history(client, **sent, point_count=MAX_POINTS * 4).json()
+
+    retried = _history(client, **(sent | rejection["suggestions"]["resampled"]))
+
+    assert retried.status_code == 200
+
+
+def test_the_narrower_window_suggestion_merges_into_the_request_it_was_sent_for(client: TestClient) -> None:
+    sent = {"from_timestamp": "2026-03-05T00:00:00Z", "to_timestamp": "2026-03-06T00:00:00Z"}
+    rejection = _history(client, **sent, point_count=MAX_POINTS * 4).json()
+
+    retried = _history(client, **(sent | rejection["suggestions"]["narrower_window"]))
+
+    assert retried.status_code == 200
+    assert retried.json()["window"]["from_timestamp"] == "2026-03-05T18:00:00Z"
 
 
 def test_an_oversized_request_is_rejected_rather_than_truncated(client: TestClient) -> None:
@@ -258,5 +282,5 @@ def test_a_rejection_that_cannot_suggest_a_window_still_suggests_a_frequency(cli
         point_count=MAX_POINTS * 1000,
     ).json()
 
-    assert "suggested_from_timestamp" not in body
-    assert body["suggested_frequency"] == "PT1M"
+    assert "narrower_window" not in body["suggestions"]
+    assert body["suggestions"]["resampled"]["frequency"] == "PT1M"

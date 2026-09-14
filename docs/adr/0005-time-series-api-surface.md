@@ -248,9 +248,10 @@ naming the actual count and a window that would fit.
 
 Rejecting, not truncating and not paginating.
 
-Rejections are structured. The 422 body carries a stable error code, the actual point count, the
-max-points limit, and a suggested `from_timestamp`/`to_timestamp` — or a `frequency` — that would
-fit, as fields, with the human-readable message alongside. Because rejection replaces the
+Rejections are structured, as an RFC 9457 problem detail: a stable `type` and its static `title`,
+the occurrence in `detail`, and the rest as extension members — the actual point count, the
+max-points limit, and the ways out grouped under `suggestions`, a narrower window or a frequency,
+each keyed like the query parameters so a client merges one in rather than renaming fields. Because rejection replaces the
 truncation flag, this body is the only signal a caller gets that a request was too big, so it has
 to be machine-readable rather than prose: a client re-tiles the window or drops to a fitting
 frequency without parsing an error message. One model serves every 422 on the surface, not only

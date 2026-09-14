@@ -1111,18 +1111,8 @@ export interface components {
        * @default 422
        */
       status: number;
-      /** @description A frequency that fits the requested window as asked, with `aggregation_method=end-period`; unlike the window suggestion it needs no second round trip. Max-points rejections only. */
-      suggested_frequency?: components['schemas']['TimeSeriesFrequency'] | null;
-      /**
-       * Suggested From Timestamp
-       * @description Lower bound of a narrower window to retry. Scaled by the requested window's average density, so it is exact only for evenly spaced observations: a series clustered in this span is rejected again, with a further-narrowed suggestion. Max-points rejections only, and absent once the scaled span rounds below a second.
-       */
-      suggested_from_timestamp?: string | null;
-      /**
-       * Suggested To Timestamp
-       * @description Upper bound of the narrower window to retry — the requested upper bound. Max-points rejections only, and absent with `suggested_from_timestamp`.
-       */
-      suggested_to_timestamp?: string | null;
+      /** @description Ways out of the rejection. Max-points rejections only. */
+      suggestions?: components['schemas']['RejectionSuggestions'] | null;
       /**
        * Title
        * @description Short static label for the `type`. Same across every occurrence of one type.
@@ -1416,6 +1406,28 @@ export interface components {
        * @enum {string}
        */
       risk_model: 'gap_sweep';
+    };
+    /**
+     * NarrowerWindow
+     * @description A window to retry the same request over, keyed like the query parameters.
+     *
+     *     Scaled by the requested window's average density, so it is exact only for evenly
+     *     spaced observations: a series clustered in this span is rejected again, with a
+     *     further-narrowed suggestion.
+     */
+    NarrowerWindow: {
+      /**
+       * From Timestamp
+       * Format: date-time
+       * @description Lower bound to retry with (UTC).
+       */
+      from_timestamp: string;
+      /**
+       * To Timestamp
+       * Format: date-time
+       * @description Upper bound to retry with — the requested one (UTC).
+       */
+      to_timestamp: string;
     };
     /**
      * PrimeDebtBucketResponse
@@ -2011,6 +2023,34 @@ export interface components {
       mode: 'raw';
       /** @description The window applied to this response. */
       window: components['schemas']['TimeSeriesWindow'];
+    };
+    /**
+     * RejectionSuggestions
+     * @description The ways out of a max-points rejection, each a complete set of query parameters.
+     *
+     *     Grouped and keyed to match the request so a client merges one of them into the
+     *     parameters it sent, with no key to rename or trim. The two are alternatives, not
+     *     a set: taking both narrows a window that the frequency alone would have served
+     *     in full.
+     */
+    RejectionSuggestions: {
+      /** @description Absent once the scaled span rounds below a second. */
+      narrower_window?: components['schemas']['NarrowerWindow'] | null;
+      /** @description Always present on a max-points rejection. */
+      resampled?: components['schemas']['ResampledRetry'] | null;
+    };
+    /**
+     * ResampledRetry
+     * @description A frequency to retry the same window on, keyed like the query parameters.
+     *
+     *     Fits the window as asked, so unlike ``narrower_window`` it needs no second round
+     *     trip and returns the whole span the caller requested.
+     */
+    ResampledRetry: {
+      /** @description Method to cut on that grid. A frequency without one is itself a rejection. */
+      aggregation_method: components['schemas']['AggregationMethod'];
+      /** @description Grid to resample onto. */
+      frequency: components['schemas']['TimeSeriesFrequency'];
     };
     /**
      * ResampledTimeSeriesWindow

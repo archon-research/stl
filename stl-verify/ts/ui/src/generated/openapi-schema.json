@@ -934,42 +934,16 @@
             "title": "Status",
             "type": "integer"
           },
-          "suggested_frequency": {
+          "suggestions": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/TimeSeriesFrequency"
+                "$ref": "#/components/schemas/RejectionSuggestions"
               },
               {
                 "type": "null"
               }
             ],
-            "description": "A frequency that fits the requested window as asked, with `aggregation_method=end-period`; unlike the window suggestion it needs no second round trip. Max-points rejections only."
-          },
-          "suggested_from_timestamp": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Lower bound of a narrower window to retry. Scaled by the requested window's average density, so it is exact only for evenly spaced observations: a series clustered in this span is rejected again, with a further-narrowed suggestion. Max-points rejections only, and absent once the scaled span rounds below a second.",
-            "title": "Suggested From Timestamp"
-          },
-          "suggested_to_timestamp": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Upper bound of the narrower window to retry \u2014 the requested upper bound. Max-points rejections only, and absent with `suggested_from_timestamp`.",
-            "title": "Suggested To Timestamp"
+            "description": "Ways out of the rejection. Max-points rejections only."
           },
           "title": {
             "description": "Short static label for the `type`. Same across every occurrence of one type.",
@@ -1466,6 +1440,29 @@
           "loss_usd"
         ],
         "title": "GapSweepDetails",
+        "type": "object"
+      },
+      "NarrowerWindow": {
+        "description": "A window to retry the same request over, keyed like the query parameters.\n\nScaled by the requested window's average density, so it is exact only for evenly\nspaced observations: a series clustered in this span is rejected again, with a\nfurther-narrowed suggestion.",
+        "properties": {
+          "from_timestamp": {
+            "description": "Lower bound to retry with (UTC).",
+            "format": "date-time",
+            "title": "From Timestamp",
+            "type": "string"
+          },
+          "to_timestamp": {
+            "description": "Upper bound to retry with \u2014 the requested one (UTC).",
+            "format": "date-time",
+            "title": "To Timestamp",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from_timestamp",
+          "to_timestamp"
+        ],
+        "title": "NarrowerWindow",
         "type": "object"
       },
       "PrimeDebtBucketResponse": {
@@ -2487,6 +2484,54 @@
           "data"
         ],
         "title": "RawProtocolEventsEnvelope",
+        "type": "object"
+      },
+      "RejectionSuggestions": {
+        "description": "The ways out of a max-points rejection, each a complete set of query parameters.\n\nGrouped and keyed to match the request so a client merges one of them into the\nparameters it sent, with no key to rename or trim. The two are alternatives, not\na set: taking both narrows a window that the frequency alone would have served\nin full.",
+        "properties": {
+          "narrower_window": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NarrowerWindow"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Absent once the scaled span rounds below a second."
+          },
+          "resampled": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResampledRetry"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Always present on a max-points rejection."
+          }
+        },
+        "title": "RejectionSuggestions",
+        "type": "object"
+      },
+      "ResampledRetry": {
+        "description": "A frequency to retry the same window on, keyed like the query parameters.\n\nFits the window as asked, so unlike ``narrower_window`` it needs no second round\ntrip and returns the whole span the caller requested.",
+        "properties": {
+          "aggregation_method": {
+            "$ref": "#/components/schemas/AggregationMethod",
+            "description": "Method to cut on that grid. A frequency without one is itself a rejection."
+          },
+          "frequency": {
+            "$ref": "#/components/schemas/TimeSeriesFrequency",
+            "description": "Grid to resample onto."
+          }
+        },
+        "required": [
+          "frequency",
+          "aggregation_method"
+        ],
+        "title": "ResampledRetry",
         "type": "object"
       },
       "ResampledTimeSeriesWindow": {

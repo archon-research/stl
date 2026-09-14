@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.domain.time_series import (
+    AggregationMethod,
     MaxPointsExceededError,
     TimeSeriesFrequency,
     TimeSeriesQueryError,
@@ -67,6 +68,46 @@ class ApiRejectionError(Exception):
         self.title = title
 
 
+class NarrowerWindow(BaseModel):
+    """A window to retry the same request over, keyed like the query parameters.
+
+    Scaled by the requested window's average density, so it is exact only for evenly
+    spaced observations: a series clustered in this span is rejected again, with a
+    further-narrowed suggestion.
+    """
+
+    from_timestamp: datetime = Field(description="Lower bound to retry with (UTC).")
+    to_timestamp: datetime = Field(description="Upper bound to retry with — the requested one (UTC).")
+
+
+class ResampledRetry(BaseModel):
+    """A frequency to retry the same window on, keyed like the query parameters.
+
+    Fits the window as asked, so unlike ``narrower_window`` it needs no second round
+    trip and returns the whole span the caller requested.
+    """
+
+    frequency: TimeSeriesFrequency = Field(description="Grid to resample onto.")
+    aggregation_method: AggregationMethod = Field(
+        description="Method to cut on that grid. A frequency without one is itself a rejection."
+    )
+
+
+class RejectionSuggestions(BaseModel):
+    """The ways out of a max-points rejection, each a complete set of query parameters.
+
+    Grouped and keyed to match the request so a client merges one of them into the
+    parameters it sent, with no key to rename or trim. The two are alternatives, not
+    a set: taking both narrows a window that the frequency alone would have served
+    in full.
+    """
+
+    narrower_window: NarrowerWindow | None = Field(
+        default=None, description="Absent once the scaled span rounds below a second."
+    )
+    resampled: ResampledRetry | None = Field(default=None, description="Always present on a max-points rejection.")
+
+
 class ApiErrorResponse(BaseModel):
     """The body of every ``422`` on the surface, as an RFC 9457 problem detail.
 
@@ -88,29 +129,8 @@ class ApiErrorResponse(BaseModel):
     max_points: int | None = Field(
         default=None, description="Ceiling the request exceeded. Max-points rejections only."
     )
-    suggested_from_timestamp: datetime | None = Field(
-        default=None,
-        description=(
-            "Lower bound of a narrower window to retry. Scaled by the requested window's "
-            "average density, so it is exact only for evenly spaced observations: a series "
-            "clustered in this span is rejected again, with a further-narrowed suggestion. "
-            "Max-points rejections only, and absent once the scaled span rounds below a second."
-        ),
-    )
-    suggested_to_timestamp: datetime | None = Field(
-        default=None,
-        description=(
-            "Upper bound of the narrower window to retry — the requested upper bound. "
-            "Max-points rejections only, and absent with `suggested_from_timestamp`."
-        ),
-    )
-    suggested_frequency: TimeSeriesFrequency | None = Field(
-        default=None,
-        description=(
-            "A frequency that fits the requested window as asked, with "
-            "`aggregation_method=end-period`; unlike the window suggestion it needs no "
-            "second round trip. Max-points rejections only."
-        ),
+    suggestions: RejectionSuggestions | None = Field(
+        default=None, description="Ways out of the rejection. Max-points rejections only."
     )
 
 
@@ -127,6 +147,19 @@ def error_response(error: ApiErrorResponse) -> JSONResponse:
     return JSONResponse(status_code=422, content=error.model_dump(mode="json", exclude_none=True))
 
 
+def _suggestions(exc: MaxPointsExceededError) -> RejectionSuggestions:
+    """Group a rejection's ways out into request-shaped parameter sets."""
+    window = (
+        NarrowerWindow(from_timestamp=exc.suggested_from_timestamp, to_timestamp=exc.suggested_to_timestamp)
+        if exc.suggested_from_timestamp is not None and exc.suggested_to_timestamp is not None
+        else None
+    )
+    return RejectionSuggestions(
+        narrower_window=window,
+        resampled=ResampledRetry(frequency=exc.suggested_frequency, aggregation_method=AggregationMethod.END_PERIOD),
+    )
+
+
 def time_series_error(exc: TimeSeriesQueryError) -> ApiErrorResponse:
     """The body for a domain rejection, carrying suggestions where the type has them."""
     if isinstance(exc, MaxPointsExceededError):
@@ -136,9 +169,7 @@ def time_series_error(exc: TimeSeriesQueryError) -> ApiErrorResponse:
             detail=str(exc),
             point_count=exc.point_count,
             max_points=exc.max_points,
-            suggested_from_timestamp=exc.suggested_from_timestamp,
-            suggested_to_timestamp=exc.suggested_to_timestamp,
-            suggested_frequency=exc.suggested_frequency,
+            suggestions=_suggestions(exc),
         )
     return ApiErrorResponse(type=exc.error_type, title=exc.title, detail=str(exc))
 
