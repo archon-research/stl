@@ -17,15 +17,23 @@ package block_meta_loader
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockheader"
+	"golang.org/x/sync/errgroup"
+
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 // maxBatchSize bounds rows per Upsert transaction. See the clamp in New for why it is bounded.
 const maxBatchSize = 5000
+
+// defaultConcurrency is how many header reads are in flight per batch when the
+// caller sets none. Ten takes chain 1's first pass from hours to under one.
+const defaultConcurrency = 10
 
 // Config for a single-chain run.
 type Config struct {
@@ -38,6 +46,19 @@ type Config struct {
 	// than a bare liveness ping; a run that reports nothing for its whole duration
 	// is indistinguishable from a hung one. Optional: nil means no reporting.
 	OnProgress func(total int64)
+
+	// Concurrency bounds how many block headers are read from S3 at once within a
+	// batch. Each read is a GetObject plus gunzip plus a JSON decode of the whole
+	// block, so sequentially this dominates the run by three orders of magnitude
+	// over enumeration: at 982k pending blocks and 25 ms an object, one at a time
+	// is 6.8 hours. Defaults to defaultConcurrency.
+	Concurrency int
+
+	// HeadMargin excludes the newest blocks of the chain from a run, counted back
+	// from the highest block the work list holds. The archive trails the indexers
+	// at the head, so without it every repeated run reports normal lag as missing
+	// objects. Zero means no margin.
+	HeadMargin int64
 }
 
 // Service reads block headers from S3 and upserts block_meta for one chain.
@@ -52,6 +73,9 @@ type Service struct {
 func New(cfg Config, repo outbound.BlockMetaRepository, reader outbound.S3Reader, logger *slog.Logger) (*Service, error) {
 	if cfg.ChainID <= 0 {
 		return nil, fmt.Errorf("chain id must be positive, got %d", cfg.ChainID)
+	}
+	if cfg.Concurrency <= 0 {
+		cfg.Concurrency = defaultConcurrency
 	}
 	if cfg.Bucket == "" {
 		return nil, fmt.Errorf("bucket is required")
@@ -83,7 +107,8 @@ func New(cfg Config, repo outbound.BlockMetaRepository, reader outbound.S3Reader
 // A block newly referenced mid-run is picked up by the next run, which is what a backfill needs.
 func (s *Service) Run(ctx context.Context) (int64, error) {
 	var total int64
-	work, err := s.repo.OpenWorkList(ctx, s.cfg.ChainID)
+	var misses []string
+	work, err := s.repo.OpenWorkList(ctx, s.cfg.ChainID, s.cfg.HeadMargin)
 	if err != nil {
 		return total, fmt.Errorf("opening the work list: %w", err)
 	}
@@ -97,23 +122,22 @@ func (s *Service) Run(ctx context.Context) (int64, error) {
 			return total, fmt.Errorf("loading pending blocks: %w", err)
 		}
 		if len(refs) == 0 {
+			// One hole used to stop the whole chain, because the list is paged in
+			// ascending order and the read returned on the first missing object, so
+			// every later block went unloaded until the archive was repaired. The
+			// misses are carried to the end instead: the rows that could be read are
+			// committed, and the run still fails, naming what was absent.
+			if len(misses) > 0 {
+				return total, fmt.Errorf("chain %d: %d referenced block(s) absent from the archive: %s",
+					s.cfg.ChainID, len(misses), strings.Join(cappedMisses(misses), ", "))
+			}
 			return total, nil
 		}
-		rows := make([]outbound.BlockMetaRow, 0, len(refs))
-		for _, r := range refs {
-			ts, err := blockheader.ReadTimestampFromS3(ctx, s.reader, s.cfg.Bucket, r.Number, r.Version)
-			if err != nil {
-				// Fail hard: a referenced block missing from the archive is the deep-tail gap and
-				// must be surfaced (bulk-download it), not silently skipped.
-				return total, fmt.Errorf("chain %d block %d/%d: %w", s.cfg.ChainID, r.Number, r.Version, err)
-			}
-			rows = append(rows, outbound.BlockMetaRow{
-				ChainID:        s.cfg.ChainID,
-				BlockNumber:    r.Number,
-				BlockVersion:   r.Version,
-				BlockTimestamp: ts,
-			})
+		rows, batchMisses, err := s.readBatch(ctx, refs)
+		if err != nil {
+			return total, err
 		}
+		misses = append(misses, batchMisses...)
 
 		n, err := s.repo.Upsert(ctx, rows)
 		if err != nil {
@@ -126,4 +150,72 @@ func (s *Service) Run(ctx context.Context) (int64, error) {
 		}
 		s.logger.Info("block_meta batch", "chain", s.cfg.ChainID, "upserted", n, "total", total)
 	}
+}
+
+// maxNamedMisses bounds how many absent blocks the final error names. The list is
+// a lead for a bulk-download, not a manifest; the count carries the scale.
+const maxNamedMisses = 20
+
+func cappedMisses(misses []string) []string {
+	if len(misses) <= maxNamedMisses {
+		return misses
+	}
+	return append(misses[:maxNamedMisses:maxNamedMisses], "...")
+}
+
+// readBatch reads one batch's headers from S3 with bounded concurrency, returning
+// the rows it could build and the blocks the archive did not hold.
+//
+// An absent object is a miss, not a failure: the caller carries them to the end so
+// one deep-tail hole cannot stop every later block on the chain. Anything else —
+// a cancelled context, a transport error, a corrupt payload — is returned as is,
+// because it says nothing about whether the block exists.
+func (s *Service) readBatch(ctx context.Context, refs []outbound.BlockRef) ([]outbound.BlockMetaRow, []string, error) {
+	rows := make([]outbound.BlockMetaRow, len(refs))
+	found := make([]bool, len(refs))
+	misses := make([]string, len(refs))
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(s.cfg.Concurrency)
+	for i, r := range refs {
+		if gctx.Err() != nil {
+			break
+		}
+		g.Go(func() error {
+			if gctx.Err() != nil {
+				return nil
+			}
+			ts, err := blockheader.ReadTimestampFromS3(gctx, s.reader, s.cfg.Bucket, r.Number, r.Version)
+			if err != nil {
+				if errors.Is(err, outbound.ErrObjectNotFound) {
+					misses[i] = fmt.Sprintf("%d/%d", r.Number, r.Version)
+					return nil
+				}
+				return fmt.Errorf("chain %d block %d/%d: %w", s.cfg.ChainID, r.Number, r.Version, err)
+			}
+			rows[i] = outbound.BlockMetaRow{
+				ChainID:        s.cfg.ChainID,
+				BlockNumber:    r.Number,
+				BlockVersion:   r.Version,
+				BlockTimestamp: ts,
+			}
+			found[i] = true
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, nil, err
+	}
+
+	// Compacted in index order, so a run reads the same regardless of completion order.
+	out := rows[:0]
+	var absent []string
+	for i := range refs {
+		if found[i] {
+			out = append(out, rows[i])
+		} else if misses[i] != "" {
+			absent = append(absent, misses[i])
+		}
+	}
+	return out, absent, nil
 }

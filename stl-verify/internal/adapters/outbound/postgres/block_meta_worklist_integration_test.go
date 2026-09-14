@@ -5,9 +5,11 @@ package postgres
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -42,12 +44,12 @@ func seedWorkListSources(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 
 func openList(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64) []int64 {
 	t.Helper()
-	_, runID := testutil.OpenTestRun(t, ctx, pool)
-	repo, err := NewBlockMetaRepository(pool, nil, runID)
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
 	if err != nil {
 		t.Fatalf("build the repository: %v", err)
 	}
-	list, err := repo.OpenWorkList(ctx, chainID)
+	list, err := repo.OpenWorkList(ctx, chainID, 0)
 	if err != nil {
 		t.Fatalf("open the work list for chain %d: %v", chainID, err)
 	}
@@ -170,12 +172,12 @@ func TestWorkListHoldsNoOpenTransactionWhilePaging(t *testing.T) {
 	defer cleanup()
 	seedWorkListSources(t, ctx, pool)
 
-	_, runID := testutil.OpenTestRun(t, ctx, pool)
-	repo, err := NewBlockMetaRepository(pool, nil, runID)
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
 	if err != nil {
 		t.Fatalf("build the repository: %v", err)
 	}
-	list, err := repo.OpenWorkList(ctx, 1)
+	list, err := repo.OpenWorkList(ctx, 1, 0)
 	if err != nil {
 		t.Fatalf("open the work list: %v", err)
 	}
@@ -195,20 +197,112 @@ func TestWorkListHoldsNoOpenTransactionWhilePaging(t *testing.T) {
 	}
 }
 
-// A run killed by its deadline must leave the enumeration behind, so the next one resumes instead of
-// spending hours rebuilding it.
-func TestWorkListSurvivesClose(t *testing.T) {
+// Resume, both halves. A pass that reached the end clears its chain, so the next run enumerates
+// fresh. A pass that was interrupted leaves its rows, and the next Open must USE them rather than
+// re-enumerate — the enumeration is the expensive half and the whole reason the table is committed.
+func TestWorkListResumesAnInterruptedPassAndClearsACompletedOne(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	seedWorkListSources(t, ctx, pool)
 
-	n := len(openList(t, ctx, pool, 1)) // opens, pages to exhaustion, closes
-	var rows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM block_meta_worklist WHERE chain_id = 1`).Scan(&rows); err != nil {
-		t.Fatalf("count surviving rows: %v", err)
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
 	}
-	if rows != n {
-		t.Errorf("%d rows survive the close, want %d; a killed run must be able to resume", rows, n)
+
+	// An interrupted pass: one page read, then closed without reaching the end.
+	list, err := repo.OpenWorkList(ctx, 1, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := list.Next(ctx, 2); err != nil {
+		t.Fatalf("page: %v", err)
+	}
+	list.Close(ctx)
+
+	var survived int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM block_meta_worklist WHERE chain_id = 1`).Scan(&survived); err != nil {
+		t.Fatal(err)
+	}
+	if survived == 0 {
+		t.Fatal("an interrupted pass cleared its work list; the next run would re-enumerate the chain")
+	}
+
+	// The next Open must REUSE those rows rather than run the arms again. A brand-new source block is
+	// what makes that observable: re-enumeration would pick it up, resuming cannot. Counting rows
+	// cannot tell the two apart, because a re-enumeration re-inserts exactly what is already there.
+	const newBlock = 7009999
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at)
+		SELECT (SELECT id FROM prime WHERE name='wl-prime'), 'WL-A', 1, $1, 0, TIMESTAMPTZ '2026-02-01'`,
+		newBlock); err != nil {
+		t.Fatalf("add a source row: %v", err)
+	}
+	resumed, err := repo.OpenWorkList(ctx, 1, 0)
+	if err != nil {
+		t.Fatalf("re-open: %v", err)
+	}
+	var sawNew int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM block_meta_worklist WHERE chain_id = 1 AND block_number = $1`, newBlock).Scan(&sawNew); err != nil {
+		t.Fatal(err)
+	}
+	if sawNew != 0 {
+		t.Errorf("resuming picked up a block added after the interrupted pass; it re-enumerated instead of resuming")
+	}
+
+	// Page it to the end; a completed pass clears the chain.
+	for {
+		refs, err := resumed.Next(ctx, 50)
+		if err != nil {
+			t.Fatalf("page the resumed list: %v", err)
+		}
+		if len(refs) == 0 {
+			break
+		}
+	}
+	resumed.Close(ctx)
+	var afterComplete int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM block_meta_worklist WHERE chain_id = 1`).Scan(&afterComplete); err != nil {
+		t.Fatal(err)
+	}
+	if afterComplete != 0 {
+		t.Errorf("a completed pass left %d rows; the next run would resume a list with nothing left to do", afterComplete)
+	}
+}
+
+// build_id is what ADR-0006 reads to tell a tracked write from pre-tracking data, and the column
+// COMMENT promises the loader's build. It defaulted to 0 on every row until the repository carried it.
+func TestBlockMetaUpsertStampsBuildAndRun(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO chain (chain_id, name) VALUES (1, 'ethereum') ON CONFLICT DO NOTHING`); err != nil {
+		t.Fatalf("seed chain: %v", err)
+	}
+	if _, err := repo.Upsert(ctx, []outbound.BlockMetaRow{{
+		ChainID: 1, BlockNumber: 4242, BlockVersion: 0, BlockTimestamp: time.Unix(1_700_000_000, 0).UTC(),
+	}}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	var gotBuild, gotRun int64
+	if err := pool.QueryRow(ctx, `
+		SELECT build_id, run_id FROM block_meta WHERE chain_id = 1 AND block_number = 4242`).Scan(&gotBuild, &gotRun); err != nil {
+		t.Fatalf("read the row back: %v", err)
+	}
+	if gotBuild != int64(buildID) || gotBuild == 0 {
+		t.Errorf("build_id = %d, want %d (0 means the column default, which ADR-0006 reads as pre-tracking)", gotBuild, buildID)
+	}
+	if gotRun != int64(runID) {
+		t.Errorf("run_id = %d, want %d", gotRun, runID)
 	}
 }

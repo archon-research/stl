@@ -105,11 +105,11 @@ func (a *loadActivities) LoadBlockMeta(ctx context.Context, params LoadParams) (
 
 	// A fresh writer run per attempt, so rows carry the attempt that wrote them
 	// rather than the one that opened the worker.
-	_, runID, err := writerrun.Open(ctx, a.pool)
+	buildReg, runID, err := writerrun.Open(ctx, a.pool)
 	if err != nil {
 		return out, err
 	}
-	repo, err := postgres.NewBlockMetaRepository(a.pool, a.logger, runID)
+	repo, err := postgres.NewBlockMetaRepository(a.pool, a.logger, buildReg.BuildID(), runID)
 	if err != nil {
 		return out, fmt.Errorf("creating block_meta repository: %w", err)
 	}

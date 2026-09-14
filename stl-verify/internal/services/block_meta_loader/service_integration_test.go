@@ -210,8 +210,8 @@ func TestRunIntegration_FillsBlockMetaFromS3(t *testing.T) {
 	uploadBlock(t, ctx, s3Client, bucket, 600, 0, b600v0Hex)
 	uploadBlock(t, ctx, s3Client, bucket, 600, 1, b600v1Hex)
 
-	_, runID := testutil.OpenTestRun(t, ctx, pool)
-	repo, err := postgres.NewBlockMetaRepository(pool, logger, runID)
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo, err := postgres.NewBlockMetaRepository(pool, logger, buildID, runID)
 	if err != nil {
 		t.Fatalf("NewBlockMetaRepository: %v", err)
 	}

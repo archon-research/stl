@@ -19,14 +19,16 @@ var _ outbound.BlockMetaRepository = (*BlockMetaRepository)(nil)
 
 // BlockMetaRepository is a PostgreSQL implementation of the outbound.BlockMetaRepository port.
 type BlockMetaRepository struct {
-	pool   *pgxpool.Pool
-	logger *slog.Logger
-	runID  buildregistry.RunID
+	pool    *pgxpool.Pool
+	logger  *slog.Logger
+	buildID buildregistry.BuildID
+	runID   buildregistry.RunID
 }
 
-// NewBlockMetaRepository creates a new PostgreSQL block_meta repository. runID is the writer run
+// NewBlockMetaRepository creates a new PostgreSQL block_meta repository. buildID and runID are the
+// build and the writer run
 // opened by the process; it stamps every row the loader writes (ADR-0006 §2).
-func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger, runID buildregistry.RunID) (*BlockMetaRepository, error) {
+func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, runID buildregistry.RunID) (*BlockMetaRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -36,7 +38,7 @@ func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger, runID build
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &BlockMetaRepository{pool: pool, logger: logger, runID: runID}, nil
+	return &BlockMetaRepository{pool: pool, logger: logger, buildID: buildID, runID: runID}, nil
 }
 
 // Each referencing table contributes one arm. Chain resolution per table, verified against the schemas:
@@ -150,12 +152,16 @@ func quoteTimestamp(t time.Time) string {
 
 // blockWorkList pages the run's work list. The list is a committed table, so nothing is held open
 // between batches: each page is its own pooled query, and a run that dies leaves the list behind for
-// the next one to resume from rather than discarding hours of enumeration.
+// the next one to resume from rather than discarding hours of enumeration; a pass that reaches the
+// end clears its own chain, so surviving rows always mean an interrupted run.
 type blockWorkList struct {
 	pool    *pgxpool.Pool
 	logger  *slog.Logger
 	chainID int64
 	after   outbound.BlockRef
+	// exhausted records that Next returned an empty page, i.e. the pass covered the
+	// whole list. Only then may Close clear the chain.
+	exhausted bool
 }
 
 // OpenWorkList enumerates the blocks chainID references that block_meta lacks, once, into
@@ -164,11 +170,20 @@ type blockWorkList struct {
 // Every statement here commits on its own. The previous shape held one transaction open for the whole
 // run because its temp table was ON COMMIT DROP, and that transaction's backend_xid pins VACUUM's
 // removable cutoff database-wide even with no snapshot held -- for chain 1 that is hours.
-func (r *BlockMetaRepository) OpenWorkList(ctx context.Context, chainID int64) (outbound.BlockWorkList, error) {
-	if _, err := r.pool.Exec(ctx, `DELETE FROM block_meta_worklist WHERE chain_id = $1`, chainID); err != nil {
-		return nil, fmt.Errorf("clearing the work list for chain %d: %w", chainID, err)
+func (r *BlockMetaRepository) OpenWorkList(ctx context.Context, chainID int64, headMargin int64) (outbound.BlockWorkList, error) {
+	// Rows left by a previous run ARE the resume: enumerating the six arms is the expensive half, so a
+	// run killed by a cancel or a timeout picks up that work rather than redoing it. The anti-join below
+	// still runs either way, so anything the killed run did load is dropped before paging resumes.
+	// A completed run clears the chain itself (see Close), so surviving rows always mean an interrupted one.
+	var resumed int64
+	if err := r.pool.QueryRow(ctx,
+		`SELECT count(*) FROM block_meta_worklist WHERE chain_id = $1`, chainID).Scan(&resumed); err != nil {
+		return nil, fmt.Errorf("checking the work list for chain %d: %w", chainID, err)
 	}
 	for _, arm := range workListArms {
+		if resumed > 0 {
+			break
+		}
 		if arm.table == "prime_debt" && chainID != 1 {
 			continue
 		}
@@ -194,6 +209,18 @@ func (r *BlockMetaRepository) OpenWorkList(ctx context.Context, chainID int64) (
 		                  AND m.block_number = w.block_number
 		                  AND m.block_version = w.block_version)`, chainID); err != nil {
 		return nil, fmt.Errorf("removing already-loaded blocks for chain %d: %w", chainID, err)
+	}
+	// The head margin is applied last, so it trims whatever the arms found rather than
+	// racing them. Rows it removes are not lost: the next run re-enumerates them once
+	// the archive has caught up, because a completed run clears its chain.
+	if headMargin > 0 {
+		if _, err := r.pool.Exec(ctx, `
+			DELETE FROM block_meta_worklist w
+			 WHERE w.chain_id = $1
+			   AND w.block_number > (SELECT max(block_number) - $2 FROM block_meta_worklist WHERE chain_id = $1)`,
+			chainID, headMargin); err != nil {
+			return nil, fmt.Errorf("applying the head margin for chain %d: %w", chainID, err)
+		}
 	}
 	return &blockWorkList{pool: r.pool, logger: r.logger, chainID: chainID,
 		after: outbound.BlockRef{Number: -1, Version: -1}}, nil
@@ -224,16 +251,22 @@ func (w *blockWorkList) Next(ctx context.Context, limit int) ([]outbound.BlockRe
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating the work list: %w", err)
 	}
-	if len(out) > 0 {
+	if len(out) == 0 {
+		w.exhausted = true
+	} else {
 		w.after = out[len(out)-1]
 	}
 	return out, nil
 }
 
-func (w *blockWorkList) Close(_ context.Context) {
-	// Nothing is held between batches, and the rows are deliberately left behind: a run killed by a
-	// deadline or a restart resumes from them instead of re-enumerating, and the next run clears its
-	// own chain first.
+func (w *blockWorkList) Close(ctx context.Context) {
+	// A pass that reached the end clears its chain, so surviving rows mean an interrupted run and the
+	// next Open resumes them. An interrupted pass leaves them deliberately.
+	if w.pool != nil && w.exhausted {
+		if _, err := w.pool.Exec(ctx, `DELETE FROM block_meta_worklist WHERE chain_id = $1`, w.chainID); err != nil {
+			w.logger.Error("clearing the completed work list", "chain", w.chainID, "error", err)
+		}
+	}
 	w.pool = nil
 }
 
@@ -283,9 +316,9 @@ func (r *BlockMetaRepository) Upsert(ctx context.Context, rows []outbound.BlockM
 	}
 
 	ct, err := tx.Exec(ctx, `
-INSERT INTO block_meta (chain_id, block_number, block_version, processing_version, block_timestamp, run_id)
-SELECT chain_id, block_number, block_version, 0, block_timestamp, $1 FROM block_meta_stage
-ON CONFLICT (chain_id, block_number, block_version, processing_version) DO NOTHING`, int64(r.runID))
+INSERT INTO block_meta (chain_id, block_number, block_version, processing_version, block_timestamp, build_id, run_id)
+SELECT chain_id, block_number, block_version, 0, block_timestamp, $1, $2 FROM block_meta_stage
+ON CONFLICT (chain_id, block_number, block_version, processing_version) DO NOTHING`, int32(r.buildID), int64(r.runID))
 	if err != nil {
 		return 0, fmt.Errorf("insert from stage: %w", err)
 	}

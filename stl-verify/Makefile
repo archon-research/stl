@@ -2422,12 +2422,12 @@ _docker-release-morpho-vault-backfill-internal:
 # block-meta-loader: a per-chain on-demand Temporal worker that fills the block_meta dimension from a
 # chain's S3 raw-block archive. Ships in the shared cronjob ECR repo with a name-prefixed tag.
 docker-build-block-meta-loader:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/block-meta-loader --build-arg BIN=block-meta-loader -t stl-block-meta-loader:$(LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/cronjobs/block-meta-loader --build-arg BIN=block-meta-loader -t stl-block-meta-loader:$(LOCAL_TAG) -f Dockerfile.common .
 
 docker-release-block-meta-loader: ecr-login _docker-release-block-meta-loader-internal
 
 _docker-release-block-meta-loader-internal:
-	@$(MAKE) _docker-release-go-service GO_NAME="Block Meta Loader" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/block-meta-loader GO_BIN=block-meta-loader GO_CACHE_KEY="cronjob-block-meta-loader" GO_TAG="block-meta-loader-$(IMAGE_TAG)" GO_LATEST_TAG="block-meta-loader-latest"
+	@$(MAKE) _docker-release-go-service GO_NAME="Block Meta Loader" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/cronjobs/block-meta-loader GO_BIN=block-meta-loader GO_CACHE_KEY="cronjob-block-meta-loader" GO_TAG="block-meta-loader-$(IMAGE_TAG)" GO_LATEST_TAG="block-meta-loader-latest"
 
 # block-republisher (ARCT-383): the on-demand repair that re-publishes a block
 # under a new version. Same lifecycle as the two backfillers above — a

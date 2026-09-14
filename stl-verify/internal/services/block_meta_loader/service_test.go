@@ -7,7 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -61,7 +63,7 @@ type mockWorkList struct {
 	after outbound.BlockRef
 }
 
-func (m *mockBlockMetaRepo) OpenWorkList(_ context.Context, _ int64) (outbound.BlockWorkList, error) {
+func (m *mockBlockMetaRepo) OpenWorkList(_ context.Context, _ int64, _ int64) (outbound.BlockWorkList, error) {
 	if m.openErr != nil {
 		return nil, m.openErr
 	}
@@ -307,5 +309,109 @@ func TestRunReportsAWorkListOpenFailure(t *testing.T) {
 	}
 	if repo.closed != 0 {
 		t.Errorf("closed %d work lists after a failed open, want 0", repo.closed)
+	}
+}
+
+// A hole no longer stops the chain. The list is paged ascending and the read used to return on the
+// first absent object, so one deep-tail hole left every later block unloaded and every re-run
+// stopped in the same place. The misses are carried to the end instead: what could be read is
+// committed, and the run still fails naming what was absent.
+func TestRun_AbsentObjectsAreCarriedToTheEndNotFatalMidRun(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
+		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0}, {Number: 40, Version: 0},
+	}}
+	// Block 20 is the hole; everything after it must still load.
+	reader := &mockS3Reader{streamFn: func(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+		parsed, ok := s3key.Parse(key)
+		if !ok {
+			return nil, fmt.Errorf("unparseable key %q", key)
+		}
+		if parsed.BlockNumber == 20 {
+			return nil, outbound.ErrObjectNotFound
+		}
+		return streamTimestampByBlock(ctx, bucket, key)
+	}}
+	svc := newTestService(t, repo, reader, 2)
+
+	total, err := svc.Run(context.Background())
+	if err == nil {
+		t.Fatal("want a failure naming the absent block, got none")
+	}
+	if !strings.Contains(err.Error(), "20/0") {
+		t.Errorf("error %q does not name the absent block", err)
+	}
+	if total != 3 {
+		t.Errorf("loaded %d rows, want 3 — the blocks after the hole must still be committed", total)
+	}
+	for _, r := range repo.upserted {
+		if r.BlockNumber == 20 {
+			t.Error("the absent block was upserted")
+		}
+	}
+}
+
+// A transport error is not a miss: it says nothing about whether the block exists, so it must fail
+// the run rather than be recorded as an absent object and leave a real hole hidden in a list.
+func TestRun_TransportErrorFailsRatherThanCountingAsAMiss(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 10, Version: 0}}}
+	reader := &mockS3Reader{streamFn: func(context.Context, string, string) (io.ReadCloser, error) {
+		return nil, fmt.Errorf("connection reset")
+	}}
+	svc := newTestService(t, repo, reader, 2)
+
+	if _, err := svc.Run(context.Background()); err == nil || strings.Contains(err.Error(), "absent from the archive") {
+		t.Fatalf("want the transport error surfaced, got %v", err)
+	}
+}
+
+// Concurrency is the reason the run fits in an hour rather than seven, so the reads have to actually
+// overlap. Asserted by holding every read until the expected number are in flight at once: a
+// sequential implementation never reaches the barrier and the test times out on its own context.
+func TestRun_ReadsWithinABatchOverlap(t *testing.T) {
+	const batch = 8
+	universe := make([]outbound.BlockRef, 0, batch)
+	for i := range batch {
+		universe = append(universe, outbound.BlockRef{Number: int64(10 + i), Version: 0})
+	}
+	repo := &mockBlockMetaRepo{universe: universe}
+
+	var mu sync.Mutex
+	inFlight, peak := 0, 0
+	release := make(chan struct{})
+	reader := &mockS3Reader{streamFn: func(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+		mu.Lock()
+		inFlight++
+		if inFlight > peak {
+			peak = inFlight
+		}
+		reached := inFlight >= batch
+		mu.Unlock()
+		if reached {
+			close(release) // everyone is in flight; let them all finish
+		}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return streamTimestampByBlock(ctx, bucket, key)
+	}}
+
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: batch, Concurrency: batch}, repo, reader, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v (a sequential reader never reaches the barrier)", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if peak < batch {
+		t.Errorf("peak concurrent reads = %d, want %d", peak, batch)
 	}
 }

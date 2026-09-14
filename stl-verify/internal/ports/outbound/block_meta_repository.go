@@ -35,7 +35,11 @@ type BlockWorkList interface {
 type BlockMetaRepository interface {
 	// OpenWorkList materializes, once, the set of blocks chainID references that block_meta lacks,
 	// and returns a cursor over it.
-	OpenWorkList(ctx context.Context, chainID int64) (BlockWorkList, error)
+	//
+	// headMargin excludes that many blocks below the highest the list holds. The archive trails the
+	// indexers at the head, so without it a repeated run reports normal lag as an absent object.
+	// Zero means no margin.
+	OpenWorkList(ctx context.Context, chainID int64, headMargin int64) (BlockWorkList, error)
 	// Upsert appends the batch, skipping blocks already present.
 	Upsert(ctx context.Context, rows []BlockMetaRow) (int64, error)
 }

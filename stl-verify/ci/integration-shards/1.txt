@@ -61,5 +61,5 @@
 ./internal/pkg/tickbitmap
 ./internal/pkg/blockheader
 ./internal/services/block_meta_loader
-./cmd/backfillers/block-meta-loader
+./cmd/cronjobs/block-meta-loader
 ./internal/pkg/blockversion
