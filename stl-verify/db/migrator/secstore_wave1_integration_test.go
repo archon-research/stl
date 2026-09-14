@@ -67,13 +67,29 @@ func TestSecStoreClosingRowSupersedesRatherThanResurrects(t *testing.T) {
 	defer cleanup()
 
 	const id = "em-t-supersede"
-	insertNode(ctx, t, pool, id, "ACTIVE", "2026-01-01", "'infinity'", "open the first window")
-	insertNode(ctx, t, pool, id, "ACTIVE", "2026-01-01", "'2026-06-01'", "close it")
-	insertNode(ctx, t, pool, id, "INACTIVE", "2026-06-01", "'infinity'", "open the next window")
+	// All three rows set processing_version = 0 explicitly so the assertion tests
+	// that a close lands at 0 without a PK collision, not what the DEFAULT is.
+	for _, r := range []struct {
+		validTo, reason string
+	}{
+		{"'infinity'", "open the first window"},
+		{"'2026-06-01'", "close it"},
+	} {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, processing_version, `+secstoreSpine+`)
+			VALUES ($1, 'ENTITY', 'ACTIVE', '2026-01-01', `+r.validTo+`, 0, 'test', 'SEED_LOAD', $2, 'test')`, id, r.reason)
+		if err != nil {
+			t.Fatalf("insert %s: %v", r.reason, err)
+		}
+	}
+	_, err := pool.Exec(ctx, `
+		INSERT INTO sec_node (id, record_type, status, valid_from, processing_version, `+secstoreSpine+`)
+		VALUES ($1, 'ENTITY', 'INACTIVE', '2026-06-01', 0, 'test', 'SEED_LOAD', 'open the next window', 'test')`, id)
+	if err != nil {
+		t.Fatalf("insert open the next window: %v", err)
+	}
 
 	t.Run("close_and_open_lands_at_processing_version_0", func(t *testing.T) {
-		// min and max, not count(DISTINCT): the assertion is that the version is 0, and
-		// "they all agree" is satisfied by any uniform value.
 		var rows, lo, hi int
 		if err := pool.QueryRow(ctx, `
 			SELECT count(*), min(processing_version), max(processing_version)
@@ -223,21 +239,13 @@ func TestSecStoreClosingRowSupersedesRatherThanResurrects(t *testing.T) {
 	})
 }
 
-// TestSecStoreRejectsAnIllegalRelTypeTriple is acceptance item 2, as far as wave 1 can carry it.
+// TestSecStoreRejectsAnIllegalRelTypeTriple is acceptance item 2.
 //
-// The engine half is real and asserted: an endpoint kind outside the closed record_type set and
-// a rel_type outside the governed vocabulary are both refused at the write boundary.
-//
-// The triple itself — (rel_type, src_kind, dst_kind) against rel_type_vocabulary.src_kinds /
-// dst_kinds — lives in two array columns that no FK or CHECK on sec_edge can consult, so
-// ADR-0007 §3 assigns it to the loader/validator (GQ-11), which is VEC-622's. The last subtest
-// pins today's boundary: the vocabulary holds everything needed to decide the triple, and the
-// write is accepted.
-//
-// When VEC-622 lands the validator — or when the vocabulary grows the legal-pairs table that
-// would turn this into a composite FK, which is also what SAME_AS and SUPERSEDES need before
-// they ratify — invert that subtest. It is deliberately written so it fails the moment the gap
-// closes, because a skipped test would go quiet instead.
+// Three layers: a rel_type outside the governed vocabulary is refused by the FK (GQ-01);
+// an endpoint kind outside the closed record_type set is refused by the CHECK (GQ-03/04);
+// and the (rel_type, src_kind, dst_kind) triple is guard-enforced (GQ-11,
+// sec_store_append_guard reads the vocabulary row for cluster_key and checks the triple
+// as a predicate on that same read).
 func TestSecStoreRejectsAnIllegalRelTypeTriple(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -289,19 +297,8 @@ func TestSecStoreRejectsAnIllegalRelTypeTriple(t *testing.T) {
 		}
 	})
 
-	t.Run("the_vocabulary_can_decide_the_triple", func(t *testing.T) {
-		// ISSUED_BY is SECURITY -> ENTITY. A SECURITY -> CONCEPT edge of that type is illegal,
-		// and this is the query that says so — the one a validator resolves per write.
-		var legal bool
-		if err := pool.QueryRow(ctx, `
-			SELECT 'CONCEPT' = ANY (dst_kinds) FROM rel_type_vocabulary WHERE rel_type = 'ISSUED_BY'`,
-		).Scan(&legal); err != nil {
-			t.Fatalf("read endpoint rule for ISSUED_BY: %v", err)
-		}
-		if legal {
-			t.Error("rel_type_vocabulary says ISSUED_BY may point at a CONCEPT; the seeded rule is SECURITY -> ENTITY (ADR-0007 §5)")
-		}
-	})
+	// "the_vocabulary_can_decide_the_triple" dropped: it duplicates
+	// illegal_rel_type_triple_is_rejected below, which exercises the guard end-to-end.
 
 	t.Run("illegal_rel_type_triple_is_rejected", func(t *testing.T) {
 		// ISSUED_BY is declared SECURITY -> ENTITY, so a CONCEPT destination is illegal. The
@@ -643,8 +640,13 @@ func TestSecStoreAppendGuardChainsAndRejectsForgedProvenance(t *testing.T) {
 			WHERE n.id = 'em-t-run-good'`).Scan(&gitHash); err != nil {
 			t.Fatalf("resolve the row to its artefact: %v", err)
 		}
-		if gitHash == "" {
-			t.Error("empty git_hash from the provenance join")
+		// Assert the joined hash equals the build_registry seed row directly.
+		var expectedHash string
+		if err := pool.QueryRow(ctx, `SELECT git_hash FROM build_registry WHERE id = 0`).Scan(&expectedHash); err != nil {
+			t.Fatalf("read build_registry seed row: %v", err)
+		}
+		if gitHash != expectedHash {
+			t.Errorf("git_hash from provenance join: got %q, want %q (build_registry row 0)", gitHash, expectedHash)
 		}
 	})
 
