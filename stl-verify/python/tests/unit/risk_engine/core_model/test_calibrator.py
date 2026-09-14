@@ -10,7 +10,6 @@ import pandas as pd
 
 import app.risk_engine.core_model.calibrator as calibrator_module
 from app.risk_engine.core_model.backtester import Backtester
-from app.risk_engine.core_model.calibrator import Calibrator
 
 
 class _SequentialParallel:
@@ -27,14 +26,18 @@ class _SequentialParallel:
 def test_total_fitter_passes_its_return_type_and_alpha_to_the_backtest(monkeypatch):
     rng = np.random.default_rng(0)
     prices = pd.Series(100.0 * np.exp(np.cumsum(rng.normal(0, 0.02, 30))), name="TKN")
-    calibrator = Calibrator(price_series=prices, seed=0)
+    calibrator = calibrator_module.Calibrator(price_series=prices, seed=0)
     calibrator.list_models = ["GARCH"]
 
-    monkeypatch.setattr(Calibrator, "check_stationarity", staticmethod(lambda *a, **k: True))
-    monkeypatch.setattr(Calibrator, "check_arch_effects", staticmethod(lambda *a, **k: True))
+    monkeypatch.setattr(calibrator_module.Calibrator, "check_stationarity", staticmethod(lambda *a, **k: True))
+    monkeypatch.setattr(calibrator_module.Calibrator, "check_arch_effects", staticmethod(lambda *a, **k: True))
     fake_model = type("M", (), {"volatility": object()})()
-    monkeypatch.setattr(Calibrator, "find_best_vol_model", lambda self, **_kw: (object(), fake_model, "Normal"))
-    monkeypatch.setattr(Calibrator, "check_garch_residuals", staticmethod(lambda *a, **k: (True, None)))
+    monkeypatch.setattr(
+        calibrator_module.Calibrator, "find_best_vol_model", lambda self, **_kw: (object(), fake_model, "Normal")
+    )
+    monkeypatch.setattr(
+        calibrator_module.Calibrator, "check_garch_residuals", staticmethod(lambda *a, **k: (True, None))
+    )
     monkeypatch.setattr(calibrator_module, "Parallel", _SequentialParallel)
 
     recorded_kwargs: list[dict] = []
