@@ -25,6 +25,33 @@ import (
 type streamWorld struct {
 	rng  *rand.Rand
 	seed int64
+	// facts records, per projection, the (holder, instrument) pairs and quantities the harness
+	// generated. The oracle checks the spine against these rather than against the views' own SQL.
+	holders     map[string]map[string]bool
+	instruments map[string]map[string]bool
+	quantities  map[string]map[int64]bool
+}
+
+// record notes one generated fact for a projection.
+func (w *streamWorld) record(projection, instrument, holder string, qty int64) {
+	if w.holders == nil {
+		w.holders = map[string]map[string]bool{}
+		w.instruments = map[string]map[string]bool{}
+		w.quantities = map[string]map[int64]bool{}
+	}
+	for _, m := range []struct {
+		dst map[string]map[string]bool
+		key string
+	}{{w.holders, holder}, {w.instruments, instrument}} {
+		if m.dst[projection] == nil {
+			m.dst[projection] = map[string]bool{}
+		}
+		m.dst[projection][m.key] = true
+	}
+	if w.quantities[projection] == nil {
+		w.quantities[projection] = map[int64]bool{}
+	}
+	w.quantities[projection][qty] = true
 }
 
 // streamObs is one fact the harness generated. The oracle is built from these alone.
@@ -144,6 +171,8 @@ func (w *streamWorld) seedMorphoWorld(t *testing.T, ctx context.Context, pool *p
 			if supply-borrow < 0 {
 				deal = "BORROW"
 			}
+			w.record("public.position_morpho_market", "5200:"+w.addr(0x5101), w.addr(0x6000+h), net)
+			w.record("public.position_morpho_market", "5200:"+w.addr(0x5102), w.addr(0x6000+h), supply/2)
 			out = append(out, streamObs{
 				projection: "public.position_morpho_market",
 				instrument: "5200:" + w.addr(0x5101)[24:],
@@ -376,6 +405,9 @@ func (w *streamWorld) seedVaultWorld(t *testing.T, ctx context.Context, pool *pg
 				userID, vaultID, block, ver, streamBlockTime(block), assets); err != nil {
 				t.Fatalf("seed vault position: %v", err)
 			}
+			// instrument_key is the vault contract address alone, per the view's COMMENT -- not
+			// vault:asset. The harness assumed the compound form the market projection uses.
+			w.record("public.position_morpho_vault", w.addr(0x7102), w.addr(0x8000+h), assets)
 			rows++
 		}
 	}
@@ -550,6 +582,8 @@ func (w *streamWorld) seedAaveWorld(t *testing.T, ctx context.Context, pool *pgx
 				w.rng.Intn(4) != 0, streamBlockTime(block)); err != nil {
 				t.Fatalf("seed borrower_collateral: %v", err)
 			}
+			w.record("public.position_aave_lending", w.addr(0x9201), w.addr(0xA000+h), debt)
+			w.record("public.position_aave_lending", w.addr(0x9202), w.addr(0xA000+h), coll)
 			rows += 2
 		}
 	}
@@ -584,6 +618,7 @@ func (w *streamWorld) seedSkyWorld(t *testing.T, ctx context.Context, pool *pgxp
 				primeID, vatID, ilk, debt, block+int64(i), streamBlockTime(block)); err != nil {
 				t.Fatalf("seed prime_debt: %v", err)
 			}
+			w.record("public.position_sky_prime_debt", ilk, w.addr(0xB101), debt)
 			rows++
 		}
 	}
@@ -621,6 +656,7 @@ func (w *streamWorld) seedAllocationWorld(t *testing.T, ctx context.Context, poo
 			tok, primeID, proxy, balance, block, fmt.Sprintf("%08x", block*13), o, 1, dir, streamBlockTime(block)); err != nil {
 			t.Fatalf("seed allocation_position: %v", err)
 		}
+		w.record("public.position_prime_allocation", proxy+":"+w.addr(0xC101), w.addr(0xC102), balance)
 		rows++
 	}
 	return rows
@@ -678,6 +714,7 @@ func (w *streamWorld) seedMapleWorld(t *testing.T, ctx context.Context, pool *pg
 			loanID, streamBlockTime(block+int64(o*5)), owed); err != nil {
 			t.Fatalf("seed maple_loan_state: %v", err)
 		}
+		w.record("public.position_maple_loan", w.addr(0xD104), w.addr(0xD103), owed)
 		rows++
 	}
 	return rows
@@ -710,8 +747,76 @@ func (w *streamWorld) seedAnchorageWorld(t *testing.T, ctx context.Context, pool
 				ON CONFLICT DO NOTHING`, primeID, pkg, qty, ts); err != nil {
 				t.Fatalf("seed anchorage snapshot: %v", err)
 			}
+			w.record("public.position_anchorage_custody", "anchorage:"+pkg+":BTC", w.addr(0xE101), qty)
 			rows++
 		}
 	}
 	return rows
+}
+
+// TestStreamHarness_EveryProjectionAgreesWithTheGeneratedFacts is the oracle for all seven, checked
+// on the dimensions that are projection-independent: identity and value. Each seeder records the
+// (holder, instrument, quantity) it generated, using the keying rule from that view's own COMMENT,
+// and the spine is then required to hold nothing outside those sets.
+//
+// It deliberately does NOT re-derive each projection's netting, closure or block-resolution logic in
+// Go. An oracle written from the same understanding as the code agrees with it by construction,
+// including where both are wrong -- which is how these suites came to share their blind spots. What
+// it does catch is a projection mis-keying a position, claiming a holder that is not its own, or
+// emitting a quantity that appears in no source row.
+func TestStreamHarness_EveryProjectionAgreesWithTheGeneratedFacts(t *testing.T) {
+	for _, seed := range []int64{3, 19, 61} {
+		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
+			ctx, pool, w := streamHarness(t, seed)
+			w.seedMorphoWorld(t, ctx, pool)
+			w.seedVaultWorld(t, ctx, pool)
+			w.seedAaveWorld(t, ctx, pool)
+			w.seedSkyWorld(t, ctx, pool)
+			w.seedAllocationWorld(t, ctx, pool)
+			w.seedMapleWorld(t, ctx, pool)
+			w.seedAnchorageWorld(t, ctx, pool)
+
+			for _, fn := range []string{
+				"materialize_morpho_market", "materialize_morpho_vault", "materialize_aave_lending",
+				"materialize_sky_prime_debt", "materialize_prime_allocation", "materialize_maple_loan",
+				"materialize_anchorage_custody",
+			} {
+				if _, err := pool.Exec(ctx, `SELECT `+fn+`()`); err != nil {
+					t.Fatalf("seed %d: %s: %v", seed, fn, err)
+				}
+			}
+
+			rows, err := pool.Query(ctx, `
+				SELECT projection, holder_id, instrument_key, quantity::text FROM position_state`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			checked := map[string]int{}
+			for rows.Next() {
+				var proj, holder, instrument, qty string
+				if err := rows.Scan(&proj, &holder, &instrument, &qty); err != nil {
+					t.Fatal(err)
+				}
+				checked[proj]++
+				if w.holders[proj] != nil && !w.holders[proj][holder] {
+					t.Errorf("seed %d: %s stored holder %s, which the harness never generated for it",
+						seed, proj, holder)
+				}
+				if w.instruments[proj] != nil && !w.instruments[proj][instrument] {
+					t.Errorf("seed %d: %s stored instrument_key %q, which the harness never generated for it",
+						seed, proj, instrument)
+				}
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			// Every projection must have been exercised, or an empty set passes the loop above vacuously.
+			for proj := range w.holders {
+				if checked[proj] == 0 {
+					t.Errorf("seed %d: %s stored nothing, so its identity checks proved nothing", seed, proj)
+				}
+			}
+		})
+	}
 }
