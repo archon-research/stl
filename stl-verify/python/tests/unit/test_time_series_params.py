@@ -151,7 +151,7 @@ def test_the_resampled_dependency_resamples_a_query_that_named_no_method() -> No
     assert query.is_bucketed is True
 
 
-def test_apply_cache_control_sets_public_max_age_for_pinned_window() -> None:
+def test_apply_cache_control_sets_private_max_age_for_a_settled_pinned_window() -> None:
     query = get_time_series_query_params(
         from_timestamp=datetime(2026, 3, 5, 6, 0, tzinfo=UTC),
         to_timestamp=datetime(2026, 3, 5, 12, 0, tzinfo=UTC),
@@ -160,7 +160,7 @@ def test_apply_cache_control_sets_public_max_age_for_pinned_window() -> None:
     )
     response = Response()
     apply_cache_control(response, query)
-    assert response.headers["Cache-Control"] == "public, max-age=300"
+    assert response.headers["Cache-Control"] == "private, max-age=300"
 
 
 def test_apply_cache_control_sets_no_store_when_to_defaulted() -> None:
@@ -243,7 +243,7 @@ def test_latest_dependency_defaults_its_bound_to_now() -> None:
 def test_apply_cache_control_caches_a_latest_request_with_an_explicit_bound() -> None:
     response = Response()
     apply_cache_control(response, get_latest_query_params(to_timestamp=datetime(2026, 3, 5, 12, 0, tzinfo=UTC)))
-    assert response.headers["Cache-Control"] == "public, max-age=300"
+    assert response.headers["Cache-Control"] == "private, max-age=300"
 
 
 def test_apply_cache_control_does_not_cache_a_latest_request_defaulted_to_now() -> None:

@@ -74,11 +74,8 @@ class AggregationMethod(StrEnum):
     END_PERIOD = "end-period"
 
 
-# Ceiling on the points a default-frequency response may carry. The frequency
-# floor bounds a resampled response by construction but constrains row counts not
-# at all, so one legal request against a dense series can ask for millions of
-# stored observations. Sized above every window/floor pairing, so the floor is
-# always a frequency the rejection can suggest.
+# Ceiling on the points a default-frequency response may carry: the frequency floor
+# bounds buckets, not rows, so a dense series can hold millions inside a legal window.
 MAX_POINTS = 50_000
 
 
@@ -104,6 +101,13 @@ class InvalidTimeRangeError(TimeSeriesQueryError):
 
     error_type = "invalid_time_range"
     title = "Invalid time range"
+
+
+class OutOfRangeTimestampError(TimeSeriesQueryError):
+    """A bound sits outside the range a window can be resolved over."""
+
+    error_type = "timestamp_out_of_range"
+    title = "Timestamp out of range"
 
 
 class WindowTooLargeError(TimeSeriesQueryError):
@@ -179,13 +183,12 @@ class TimeWindow:
     from_timestamp: datetime
     to_timestamp: datetime
     bounds_pinned: bool = False
-    """True when the caller pinned the window rather than letting a bound default
-    to ``now``. Pinned windows are deterministic and therefore cacheable."""
+    """True when the caller pinned both bounds and the upper one has passed. Such a
+    window answers identically on every later request, and is therefore cacheable."""
 
     def __post_init__(self) -> None:
-        # Plain ValueErrors: these are invariants on the type, so a breach is a
-        # bug in whatever computed the bounds. The resolvers reject caller input
-        # before construction, with the codes a client can act on.
+        # Plain ValueErrors: invariants on the type, so a breach is a bug in whatever
+        # computed the bounds, not caller input — the resolvers reject that first.
         if self.from_timestamp.tzinfo is None or self.to_timestamp.tzinfo is None:
             raise ValueError("time-series bounds must be timezone-aware")
         if self.from_timestamp > self.to_timestamp:
@@ -234,12 +237,6 @@ def minimum_frequency(window: timedelta) -> TimeSeriesFrequency:
     return TimeSeriesFrequency.PT6H
 
 
-# The earliest instant a window may reach back to. Stepping back from a bound
-# close to it raises OverflowError, which is no rejection type and would surface
-# as a 500 on an otherwise well-formed request.
-_EARLIEST = datetime.min.replace(tzinfo=UTC)
-
-
 def _to_utc(value: datetime) -> datetime:
     """Normalize a datetime to timezone-aware UTC, assuming naive inputs are UTC."""
     if value.tzinfo is None:
@@ -247,15 +244,15 @@ def _to_utc(value: datetime) -> datetime:
     try:
         return value.astimezone(UTC)
     except OverflowError as exc:
-        raise InvalidTimeRangeError(f"timestamp {value.isoformat()} is outside the representable range") from exc
+        raise OutOfRangeTimestampError("a supplied timestamp is outside the representable range") from exc
 
 
 def _step_back(moment: datetime, span: timedelta) -> datetime:
-    """Step back by ``span``, stopping at the earliest representable instant."""
+    """Step back by ``span``, rejecting a bound too early to carry the lookback."""
     try:
         return moment - span
-    except OverflowError:
-        return _EARLIEST
+    except OverflowError as exc:
+        raise OutOfRangeTimestampError(f"to_timestamp is too early to apply the {span} lookback behind it") from exc
 
 
 def resolve_time_series_query(
@@ -281,8 +278,8 @@ def resolve_time_series_query(
     than the window's minimum.
     """
     effective_method = aggregation_method or default_aggregation_method
-    # A frequency names the grid a method cuts on, so without one it would be
-    # validated and then dropped — the silent no-op the echo cannot report.
+    # A frequency names the grid a method cuts on: without one it would be validated
+    # and then dropped, a silent no-op the echo cannot report.
     if frequency is not None and effective_method is None:
         raise FrequencyWithoutAggregationMethodError(
             "frequency names the grid an aggregation_method cuts on; "
@@ -290,7 +287,9 @@ def resolve_time_series_query(
         )
     resolved_to = _to_utc(to_timestamp) if to_timestamp is not None else _to_utc(now)
     resolved_from = _to_utc(from_timestamp) if from_timestamp is not None else _step_back(resolved_to, default_window)
-    bounds_pinned = from_timestamp is not None and to_timestamp is not None
+    # Pinned means settled, not merely supplied: rows still land inside a window whose
+    # upper bound has not passed, so such a window is no more cacheable than a defaulted one.
+    bounds_pinned = from_timestamp is not None and resolved_to < _to_utc(now)
 
     if resolved_from > resolved_to:
         raise InvalidTimeRangeError("from_timestamp must be less than or equal to to_timestamp")
@@ -334,7 +333,7 @@ def resolve_latest_query(
     return TimeWindow(
         from_timestamp=_step_back(resolved_to, max_window),
         to_timestamp=resolved_to,
-        bounds_pinned=to_timestamp is not None,
+        bounds_pinned=resolved_to < _to_utc(now),
     )
 
 
@@ -361,10 +360,8 @@ def enforce_max_points(point_count: int, *, query: TimeWindow, max_points: int =
     if point_count <= max_points:
         return
     fitting_span = timedelta(seconds=int(query.window.total_seconds() * max_points / point_count))
-    # Below a second the proportional window rounds to nothing, and suggesting a
-    # window no narrower than the rejected one sends a re-tiling client round a
-    # loop. Such a series is too dense to serve unresampled at any width, so the
-    # frequency is the only honest way out and the window suggestion is omitted.
+    # Below a second the proportional window rounds to nothing, and a suggestion no
+    # narrower than the rejected window loops a re-tiling client; the frequency stands alone.
     fits = fitting_span >= timedelta(seconds=1)
     raise MaxPointsExceededError(
         point_count=point_count,

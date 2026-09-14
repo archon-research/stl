@@ -333,7 +333,7 @@ def test_list_protocol_events_allows_wide_window_with_tx_hash_filter():
     service.list_events.assert_awaited_once()
 
 
-def test_list_protocol_events_sets_public_cache_control_on_pinned_window():
+def test_list_protocol_events_sets_private_cache_control_on_a_settled_pinned_window():
     from app.api.v1 import protocol_events
 
     service = _make_service(events=[])
@@ -350,7 +350,7 @@ def test_list_protocol_events_sets_public_cache_control_on_pinned_window():
     )
 
     assert response.status_code == 200
-    assert response.headers["cache-control"] == "public, max-age=300"
+    assert response.headers["cache-control"] == "private, max-age=300"
 
 
 def test_list_protocol_events_sets_no_store_when_bounds_not_pinned():

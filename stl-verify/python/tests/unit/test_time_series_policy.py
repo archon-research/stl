@@ -12,6 +12,7 @@ from app.domain.time_series import (
     FrequencyWithoutAggregationMethodError,
     InvalidTimeRangeError,
     MaxPointsExceededError,
+    OutOfRangeTimestampError,
     TimeSeriesFrequency,
     TimeSeriesQuery,
     TimeSeriesQueryError,
@@ -238,9 +239,20 @@ def test_query_derives_frequency_ms_and_bucket_from_frequency() -> None:
 # --- bounds_pinned ---------------------------------------------------------
 
 
-def test_bounds_pinned_true_when_both_bounds_supplied() -> None:
-    query = _resolve(from_timestamp=_NOW - timedelta(hours=3), to_timestamp=_NOW)
+def test_bounds_pinned_true_when_both_bounds_are_supplied_and_the_upper_one_has_passed() -> None:
+    query = _resolve(from_timestamp=_NOW - timedelta(hours=3), to_timestamp=_NOW - timedelta(hours=1))
     assert query.bounds_pinned is True
+
+
+@pytest.mark.parametrize("to_timestamp", [_NOW, _NOW + timedelta(hours=1)])
+def test_bounds_pinned_false_when_the_upper_bound_has_not_passed(to_timestamp: datetime) -> None:
+    query = _resolve(from_timestamp=_NOW - timedelta(hours=3), to_timestamp=to_timestamp)
+    assert query.bounds_pinned is False
+
+
+@pytest.mark.parametrize("to_timestamp", [_NOW, _NOW + timedelta(hours=1)])
+def test_latest_is_unpinned_when_its_bound_has_not_passed(to_timestamp: datetime) -> None:
+    assert resolve_latest_query(to_timestamp=to_timestamp, now=_NOW).bounds_pinned is False
 
 
 def test_bounds_pinned_false_when_to_defaulted_to_now() -> None:
@@ -317,11 +329,8 @@ def test_max_points_scales_the_suggested_window_by_the_average_density() -> None
 
 
 def test_the_suggested_window_narrows_on_every_round_until_it_bottoms_out() -> None:
-    # The suggestion is scaled by the average density, so a series clustered in
-    # the suggested span is rejected again. What keeps a re-tiling client off a
-    # loop is that the span shrinks by the same ratio each round and eventually
-    # drops out entirely, leaving the frequency. Worst case: the count never
-    # falls, i.e. every observation sits inside the span just suggested.
+    # Worst case for the density estimate: the count never falls, i.e. every
+    # observation sits inside the span just suggested.
     span = timedelta(hours=24)
     for _ in range(20):
         with pytest.raises(MaxPointsExceededError) as exc_info:
@@ -392,6 +401,7 @@ def test_latest_normalizes_a_naive_bound_to_utc() -> None:
     "error,expected_type,expected_title",
     [
         (InvalidTimeRangeError, "invalid_time_range", "Invalid time range"),
+        (OutOfRangeTimestampError, "timestamp_out_of_range", "Timestamp out of range"),
         (WindowTooLargeError, "window_too_large", "Window too large"),
         (FrequencyTooFineError, "frequency_too_fine", "Frequency too fine"),
         (
@@ -410,8 +420,6 @@ def test_every_rejection_carries_a_stable_type_and_title(
 
 
 def test_a_rejection_is_not_a_value_error_so_a_read_failure_handler_cannot_swallow_it() -> None:
-    # The repository reads wrap themselves in `except ValueError` to report a
-    # database failure; a rejection caught there would 500 with its suggestions lost.
     with pytest.raises(TimeSeriesQueryError):
         _resolve(from_timestamp=_NOW, to_timestamp=_NOW - timedelta(hours=1))
     assert not issubclass(TimeSeriesQueryError, ValueError)
@@ -420,27 +428,29 @@ def test_a_rejection_is_not_a_value_error_so_a_read_failure_handler_cannot_swall
 # --- bounds near the edge of representable time ---------------------------
 
 
-def test_latest_clamps_its_lookback_at_the_earliest_representable_instant() -> None:
-    resolved = resolve_latest_query(to_timestamp=datetime(1, 1, 1, tzinfo=UTC), now=_NOW)
-
-    assert resolved.from_timestamp == datetime.min.replace(tzinfo=UTC)
-    assert resolved.to_timestamp == datetime(1, 1, 1, tzinfo=UTC)
+def test_latest_rejects_a_bound_too_early_to_carry_its_lookback() -> None:
+    with pytest.raises(OutOfRangeTimestampError):
+        resolve_latest_query(to_timestamp=datetime(1, 1, 1, tzinfo=UTC), now=_NOW)
 
 
-def test_history_clamps_its_default_window_at_the_earliest_representable_instant() -> None:
-    resolved = _resolve(to_timestamp=datetime(1, 1, 1, tzinfo=UTC))
-
-    assert resolved.from_timestamp == datetime.min.replace(tzinfo=UTC)
+def test_history_rejects_a_bound_too_early_to_carry_its_default_window() -> None:
+    with pytest.raises(OutOfRangeTimestampError):
+        _resolve(to_timestamp=datetime(1, 1, 1, tzinfo=UTC))
 
 
 def test_a_bound_whose_utc_form_is_unrepresentable_is_rejected() -> None:
-    with pytest.raises(InvalidTimeRangeError):
+    with pytest.raises(OutOfRangeTimestampError):
         resolve_latest_query(to_timestamp=datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=5))), now=_NOW)
 
 
+def test_an_out_of_range_rejection_does_not_echo_the_bound_it_rejected() -> None:
+    with pytest.raises(OutOfRangeTimestampError) as exc_info:
+        resolve_latest_query(to_timestamp=datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=5))), now=_NOW)
+
+    assert "0001-01-01" not in str(exc_info.value)
+
+
 def test_max_points_omits_a_window_suggestion_it_cannot_narrow() -> None:
-    # A series dense enough that the proportional window rounds below a second:
-    # suggesting it would send a re-tiling client round a loop.
     with pytest.raises(MaxPointsExceededError) as exc_info:
         enforce_max_points(MAX_POINTS * 1000, query=_window(timedelta(minutes=10)))
 

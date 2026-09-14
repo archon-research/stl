@@ -21,10 +21,8 @@ from app.domain.time_series import (
     resolve_time_series_query,
 )
 
-# Public cache lifetime for responses with a pinned window. A pinned window can
-# still change — a correction or a backfill writes inside a window already served
-# — but only those two can, and they are rare, so bounded staleness on a copy we
-# cannot recall is the accepted trade.
+# Cache lifetime for a response over a pinned window. Only a correction or a
+# backfill can still change one, and both are rare enough to trade for staleness.
 _PINNED_WINDOW_CACHE_MAX_AGE_SECONDS = 300
 
 # Shared by both dependencies below, which differ only in how they default the
@@ -184,13 +182,16 @@ def build_resampled_window(query: TimeSeriesQuery) -> ResampledTimeSeriesWindow:
 
 
 def apply_cache_control(response: Response, query: TimeWindow) -> None:
-    """Set ``Cache-Control`` on responses whose window is fully pinned by the caller.
+    """Set ``Cache-Control`` on responses whose window is settled and pinned by the caller.
 
-    When a bound is defaulted to ``now``, two requests one second apart answer
-    over different windows, so the response must not be cached. A pinned window
-    is deterministic and is cached publicly for a short period.
+    An unpinned window moves with ``now``, so two requests a second apart answer
+    over different windows and neither may be stored. A pinned one is deterministic
+    and cacheable — but only ``private``: these routes are ``Authorization``-gated and
+    their bodies are filtered per principal, and ``public`` is the one directive that
+    lets a shared cache store a response to a request carrying ``Authorization``
+    (RFC 9111 §3.5), which would serve one tenant's rows to another.
     """
     if query.bounds_pinned:
-        response.headers["Cache-Control"] = f"public, max-age={_PINNED_WINDOW_CACHE_MAX_AGE_SECONDS}"
+        response.headers["Cache-Control"] = f"private, max-age={_PINNED_WINDOW_CACHE_MAX_AGE_SECONDS}"
     else:
         response.headers["Cache-Control"] = "no-store"
