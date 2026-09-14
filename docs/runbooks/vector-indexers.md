@@ -2948,9 +2948,9 @@ query it penalises. The conversion is only finished when that read prunes chunks
    read-latest query shorter than the tiering horizon. `timescaledb.enable_tiered_reads`
    is off, so a prior row past the horizon is invisible to `readLatestPositionsV4`
    and the writer appends a change that never happened: the wrong-data failure
-   `db/migrations/AGENTS.md` describes. Its rule that every hypertable gets
-   compression and tiering in its creating migration does not apply here; the
-   table `COMMENT` records the exception, keep it that way.
+   `db/migrations/AGENTS.md` describes. Its rule that a conversion migration
+   lands with compression and tiering policies does not apply here; the table
+   `COMMENT` records the exception, keep it that way.
 
 Do **not** pin `block_timestamp` by equality in `PositionsForPoolAtBlock` /
 `TicksForPoolAtBlock`: a reorged block at the same height carries a *different*
