@@ -30,11 +30,11 @@ CREATE TABLE IF NOT EXISTS position_daily (
 );
 
 -- CREATE TABLE IF NOT EXISTS adds no column to a table an earlier revision of this file created, so both
--- columns added after the first revision get an idempotent ALTER: the procedure below reads run_id and must
--- parse, and created_at is added -infinity then re-defaulted, per ADR-0006's add-nullable-then-default rule.
+-- columns the writers below name get an idempotent ALTER: the LANGUAGE sql procedure reads run_id and
+-- created_at, and must parse. Reached by a hand re-apply only; the migrator refuses an applied file.
 ALTER TABLE position_daily ADD COLUMN IF NOT EXISTS run_id bigint;
--- A row written before the column existed has no known write time. -infinity says so and reads as
--- maximally stale; now() would fabricate one and make a stale cache report itself fresh.
+-- A row written before the column existed has no known write time. -infinity records that; now() would
+-- invent one and advance max(created_at), the staleness reading, past what was actually written.
 ALTER TABLE position_daily ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT '-infinity';
 ALTER TABLE position_daily ALTER COLUMN created_at SET DEFAULT now();
 
@@ -42,7 +42,7 @@ ALTER TABLE position_daily ALTER COLUMN created_at SET DEFAULT now();
 -- there is no append-only tail for compression or tiering to close behind, and the reads are PK point
 -- lookups and holder series. Indexes are built after the backfill, at the foot of this file.
 
-COMMENT ON TABLE position_daily IS '[Operational] One row per (position, UTC date): the winning observation for that position on that day (VEC-636). Only OBSERVED dates get a row -- no carry-forward, so a query for one date may correctly return nothing. Rebuildable with CALL rebuild_position_daily(), a FORWARD-ONLY merge: it raises a row and never lowers or removes one. Plain, not a hypertable, and carrying no compression or tiering policy: both writers upsert in place, so there is no append-only tail for either to close behind. What would change that is measurement -- a date-range scan across positions becoming a hot read, or a row count outgrowing a plain table, though that count is bounded by position_state (one row per position per OBSERVED date, never more). Point-in-time questions are answered from position_state.';
+COMMENT ON TABLE position_daily IS '[Operational] One row per (position, UTC date): the winning observation for that position on that day (VEC-636). Only OBSERVED dates get a row -- no carry-forward, so a query for one date may correctly return nothing. Rebuildable with CALL rebuild_position_daily(), a FORWARD-ONLY merge: it raises a row and never lowers or removes one. Plain, not a hypertable, and carrying no compression or tiering policy: both writers upsert in place, so there is no append-only tail for either to close behind. What would change that is measurement -- a date-range scan across positions becoming a hot read, or a row count outgrowing a plain table, though it holds at most one row per position per OBSERVED date, so it can never exceed position_state -- a ratio, not a ceiling, since the spine grows with blocks. Point-in-time questions are answered from position_state.';
 COMMENT ON COLUMN position_daily.position_id IS 'Roles: PK. The bytea(32) native position identity from position_id() (VEC-400).';
 COMMENT ON COLUMN position_daily.as_of_date IS 'Roles: PK. UTC date of the winning observation''s block_timestamp, pinned to it by a CHECK.';
 COMMENT ON COLUMN position_daily.chain_id IS 'Roles: Derived (copy of position_state.chain_id). NULL is a materializer convention for an off-chain source, not missing data.';
@@ -154,7 +154,7 @@ AS $proc$
         > (position_daily.block_number, position_daily.block_version, position_daily.processing_version, position_daily.block_timestamp);
 $proc$;
 
-COMMENT ON PROCEDURE rebuild_position_daily() IS '[Operational] Rebuilds position_daily from position_state (VEC-636): CALL rebuild_position_daily(). Forward-only, so it raises a stale row and never lowers or removes one; it cannot repair a row ahead of history or a row whose position has no history left. Pins enable_tiered_reads so newest-per-key is computed over the whole spine, its tiered chunks included. Requires a quiet window on position_state.';
+COMMENT ON PROCEDURE rebuild_position_daily() IS '[Operational] Rebuilds position_daily from position_state (VEC-636): CALL rebuild_position_daily(). Forward-only, so it raises a stale row and never lowers or removes one; it cannot repair a row ahead of history, a row whose position has no history left, or a DATE whose observations a correction moved to another date (the position keeps its other days). Pins enable_tiered_reads so newest-per-key is computed over the whole spine, its tiered chunks included. Requires a quiet window on position_state.';
 
 -- Guarded like every other DDL statement here, so a re-run does not fail with "trigger already exists".
 DROP TRIGGER IF EXISTS trigger_upsert_position_daily ON position_state;
@@ -173,8 +173,8 @@ CALL rebuild_position_daily();
 -- Built AFTER the backfill: created first, every backfilled row pays a random btree insert with its own
 -- WAL instead of one bulk build. The holder index serves the filter the PK cannot, as_of_date trailing so
 -- a holder's series is ordered by it; the date index answers the whole book on one date, which is the
--- query this grain exists for and the one the PK cannot serve -- chunk exclusion did it before VEC-636
--- made the table plain.
+-- query this grain exists for and the one the PK cannot serve -- chunk exclusion answered it while this
+-- table was still a hypertable.
 CREATE INDEX IF NOT EXISTS position_daily_holder_idx ON public.position_daily (holder_id, as_of_date);
 CREATE INDEX IF NOT EXISTS position_daily_as_of_date_idx ON public.position_daily (as_of_date);
 

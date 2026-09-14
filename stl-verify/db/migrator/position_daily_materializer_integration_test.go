@@ -305,6 +305,11 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 // The two caches are fed by two triggers on the same INSERT, from the same spine. position_current holds
 // the newest observation outright; position_daily's latest date must be that same observation, or one of
 // them is telling a consumer something the other denies.
+//
+// This holds while a position's newest observation also falls on its latest observed date, which the
+// block_time_inverts_height refusal secures across DIFFERENT blocks. It does NOT hold when a correction
+// at the SAME block carries an instant on an earlier date -- see
+// TestPositionDailyKeepsADayACorrectionMovedAway, which pins that gap.
 func TestPositionCurrentAndPositionDailyNameTheSameWinner(t *testing.T) {
 	f, cleanup := newPositionStateFixture(t)
 	defer cleanup()
@@ -377,4 +382,48 @@ func (f *psFixture) cacheCtid(t *testing.T, ik, date string) string {
 		t.Fatalf("cacheCtid(%s, %s): %v", ik, date, err)
 	}
 	return v
+}
+
+// A correction at the SAME block_number carrying an earlier instant, crossing UTC midnight. Nothing
+// refuses it: block_time_inverts_height compares a higher block against an earlier instant, and this
+// pair shares a block. The correction lands on the EARLIER date, and position_daily -- forward-only,
+// so it can raise a row but never remove one -- keeps the superseded observation standing on the later
+// date forever. That later date is then its newest, so the two caches name different winners.
+//
+// Pinned rather than fixed: removing the stale day means giving the rebuild a delete, which is a
+// deliberate change to the forward-only contract in the table's COMMENT (VEC-636), not a patch. This
+// test fails the day that changes, which is when the COMMENT and this comment must change too.
+func TestPositionDailyKeepsADayACorrectionMovedAway(t *testing.T) {
+	f, cleanup := newPositionStateFixture(t)
+	defer cleanup()
+
+	const ik = "moved-day"
+	if n := f.mppN(t, "pv_moved", valuesOf(
+		mppRow(ik, 100, 1000, 0, 0, "2026-06-02T00:00:05Z", "LOAN")), "the original, just after midnight"); n != 1 {
+		t.Fatalf("seeding appended %d, want 1", n)
+	}
+	if n := f.mppN(t, "pv_moved", valuesOf(
+		mppRow(ik, 555, 1000, 0, 1, "2026-06-01T23:59:58Z", "LOAN")), "the correction, just before it"); n != 1 {
+		t.Fatalf("the correction appended %d, want 1: same block, so nothing refuses it", n)
+	}
+	// Nothing was withheld -- this is the sanctioned correction path, not a refusal case.
+	var refused int
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT count(*) FROM position_projection_refusal WHERE detail LIKE 'ik=' || $1 || ' %'`, ik).Scan(&refused); err != nil {
+		t.Fatal(err)
+	}
+	if refused != 0 {
+		t.Fatalf("the correction was refused %d time(s); this case is about the path that is NOT refused", refused)
+	}
+
+	if got := cachedDays(t, f, ik); len(got) != 2 ||
+		got[0] != "2026-06-01=555" || got[1] != "2026-06-02=100" {
+		t.Errorf("position_daily holds %v; want the correction on 2026-06-01 and the superseded row still on 2026-06-02", got)
+	}
+	// The known consequence: position_daily's newest day is NOT the position's newest observation.
+	if d := cacheDisagreement(t, f); len(d) != 1 {
+		t.Errorf("the caches disagree on %d position(s), want exactly 1 -- if this is now 0 the gap is fixed "+
+			"and the forward-only COMMENT plus this test must be updated; more than 1 means something else broke: %s",
+			len(d), strings.Join(d, " | "))
+	}
 }

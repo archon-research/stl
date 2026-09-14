@@ -171,8 +171,16 @@ func TestPositionDailyMigrationAddsItsLaterColumnsInPlace(t *testing.T) {
 		if pre != "-infinity" {
 			t.Errorf("the pre-ALTER row carries created_at = %s; want -infinity, which reads as maximally stale rather than a fabricated write time", pre)
 		}
+		// What the sentinel actually buys: the ALTER does not ADVANCE the reading. It does not make the
+		// row detectable -- max() over the table is dominated by rows carrying real timestamps, so a
+		// second row hides this one. The property is "does not fabricate freshness", not "reads stale".
 		if !f.cacheLagsSpine() {
-			t.Error("the staleness reading is level after a re-apply over a row with no known write time; -infinity must leave it lagging")
+			t.Error("the reading is level over a single row carrying -infinity; the sentinel must not read as freshly written")
+		}
+		f.observe("second", dailyObs{qty: 3, block: 60, ts: "2026-01-03T10:00:00Z", dealType: "LOAN"})
+		if f.cacheLagsSpine() {
+			t.Error("a real write elsewhere in the table left the reading lagging; max() is dominated by real " +
+				"timestamps, so this would mean the sentinel is still setting the level")
 		}
 
 		// A day observed after the re-apply takes a real write time, so the re-default is in force.

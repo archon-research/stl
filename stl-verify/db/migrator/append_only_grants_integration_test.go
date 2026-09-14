@@ -182,6 +182,8 @@ var triggerOnlyCacheTables = []string{
 	"allocation_position_current",
 	// VEC-409: written only by its SECURITY DEFINER trigger and rebuild_position_current().
 	"position_current",
+	// VEC-636: the same pattern at the per-(position, date) grain.
+	"position_daily",
 	"morpho_market_position_current",
 	// VEC-659: the two Morpho state caches the backed-breakdown read joins beside it.
 	"morpho_vault_state_current",
