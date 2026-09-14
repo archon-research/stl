@@ -28,7 +28,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// maxBatchSize bounds rows per Upsert transaction. See the clamp in New for why it is bounded.
+// maxBatchSize bounds rows per Upsert statement. See the clamp in New for why it is bounded.
 const maxBatchSize = 5000
 
 // defaultConcurrency is how many header reads are in flight per batch when the

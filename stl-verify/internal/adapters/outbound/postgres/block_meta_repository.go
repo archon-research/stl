@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/data_quality/schemamaster"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -46,74 +49,134 @@ func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID bui
 	return &BlockMetaRepository{pool: pool, logger: logger, buildID: buildID, runID: runID}, nil
 }
 
-// Each referencing table contributes one arm. Chain resolution per table, verified against the schemas:
-//   - borrower, borrower_collateral, sparklend_reserve_data carry protocol_id -> protocol.chain_id.
-//   - allocation_position, protocol_event carry chain_id natively.
+// The arms are DERIVED from schema_master.json, not listed here. Its block_meta fills are the declared
+// answer to "which tables resolve a column by joining block_meta", and a hand-kept second list drifts
+// from it silently: a table gaining a fill and no arm is never enumerated, every one of its values
+// resolves NULL, and the conformance check still passes because the declaration alone satisfies it.
 //
-// Membership follows schema_master.json: an arm exists for a table that resolves a column by joining
-// block_meta, and for no other. prime_debt was an arm and is not one now -- it renames synced_at to
-// block_timestamp by transform, so it answers its own event time and declares no block_meta fill.
-// TestWorkListArmsCoverEveryBlockMetaFill holds the two in step.
-//
-// Arms are populated one at a time, each in its own short transaction, and each is windowed on its OWN
-// partition column. A block-number bound prunes nothing on a table partitioned by insert time, so the
-// whole six-arm union opened every chunk of all six tables at once: measured against staging at
-// allocated_by_plan=8016399kB over 1,319 chunk relations, against a mem_guard.limit of 4757 MB with
-// block=on, which refuses the statement outright rather than merely running it slowly.
+// Chain resolution comes from the same register. A table with a chain_id fill reaches chain through its
+// parent (borrower -> protocol.chain_id); one without carries chain_id natively. The partition column
+// is read from the live catalogue rather than declared, so a window can never be expressed on a column
+// the table is no longer partitioned by.
 type workListArm struct {
 	table   string // the referencing table, and the hypertable whose chunks give the windows
-	partCol string // its partition column; the window is expressed on this and nothing else
+	partCol string // its partition column, read from the catalogue; the window is expressed on it alone
 	sql     string // $1 = chain id; %s = the window predicate on partCol
 }
 
-var workListArms = []workListArm{
-	{"borrower", "b.created_at", `
+// armSQL builds one arm. parent is empty for a table carrying chain_id natively; otherwise the arm
+// joins parent on parentRef = table.parentKey and takes chain from there.
+func armSQL(table, parent, parentKey, parentRef string) string {
+	const shape = `
 		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
-		SELECT p.chain_id, b.block_number, b.block_version
-		  FROM borrower b JOIN protocol p ON p.id = b.protocol_id
-		 WHERE p.chain_id = $1 AND %s
-		ON CONFLICT DO NOTHING`},
-	{"borrower_collateral", "bc.created_at", `
-		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
-		SELECT p.chain_id, bc.block_number, bc.block_version
-		  FROM borrower_collateral bc JOIN protocol p ON p.id = bc.protocol_id
-		 WHERE p.chain_id = $1 AND %s
-		ON CONFLICT DO NOTHING`},
-	{"allocation_position", "ap.created_at", `
-		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
-		SELECT ap.chain_id, ap.block_number, ap.block_version FROM allocation_position ap
-		 WHERE ap.chain_id = $1 AND %s
-		ON CONFLICT DO NOTHING`},
-	{"protocol_event", "pe.created_at", `
-		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
-		SELECT pe.chain_id, pe.block_number, pe.block_version FROM protocol_event pe
-		 WHERE pe.chain_id = $1 AND %s
-		ON CONFLICT DO NOTHING`},
-	{"sparklend_reserve_data", "sr.block_number", `
-		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
-		SELECT p.chain_id, sr.block_number, sr.block_version
-		  FROM sparklend_reserve_data sr JOIN protocol p ON p.id = sr.protocol_id
-		 WHERE p.chain_id = $1 AND %s
-		ON CONFLICT DO NOTHING`},
+		SELECT %s.chain_id, t.block_number, t.block_version
+		  FROM %s t%s
+		 WHERE %s.chain_id = $1 AND %%s
+		ON CONFLICT DO NOTHING`
+	src, join := "t", ""
+	if parent != "" {
+		src = "p"
+		join = fmt.Sprintf(" JOIN %s p ON p.%s = t.%s", quoteIdent(parent), quoteIdent(parentRef), quoteIdent(parentKey))
+	}
+	return fmt.Sprintf(shape, src, quoteIdent(table), join, src)
+}
+
+// quoteIdent quotes a catalogue identifier. Every value reaching it comes from schema_master.json or
+// the live catalogue rather than a caller, but the arms are built by string formatting, so an
+// identifier that ever stops being a bare word must not change the shape of the statement.
+func quoteIdent(name string) string {
+	return pgx.Identifier{name}.Sanitize()
+}
+
+// workListArms derives the arms for one run. The partition column is looked up per table, so a table
+// that is not a hypertable, or whose dimension changed, fails loudly here rather than enumerating on a
+// column that no longer partitions it.
+func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, error) {
+	register, err := schemamaster.Load()
+	if err != nil {
+		return nil, fmt.Errorf("loading the column register: %w", err)
+	}
+	chainParent := map[string]schemamaster.Fill{}
+	var tables []string
+	for _, f := range register.Fills {
+		if f.BlockMeta {
+			tables = append(tables, f.Table)
+		}
+	}
+	for _, f := range register.Fills {
+		if f.Column == "chain_id" && f.Parent != "" {
+			chainParent[f.Table] = f
+		}
+	}
+	if len(tables) == 0 {
+		return nil, fmt.Errorf("no table declares a block_meta fill; the register did not load as expected")
+	}
+	slices.Sort(tables)
+	tables = slices.Compact(tables)
+
+	arms := make([]workListArm, 0, len(tables))
+	for _, table := range tables {
+		partCol, err := r.partitionColumn(ctx, table)
+		if err != nil {
+			return nil, err
+		}
+		f := chainParent[table]
+		arms = append(arms, workListArm{
+			table:   table,
+			partCol: "t." + quoteIdent(partCol),
+			sql:     armSQL(table, f.Parent, f.Key, f.Ref),
+		})
+	}
+	return arms, nil
+}
+
+// partitionColumn reads a hypertable's primary dimension from the catalogue.
+func (r *BlockMetaRepository) partitionColumn(ctx context.Context, table string) (string, error) {
+	var col string
+	if err := r.pool.QueryRow(ctx, `
+		SELECT column_name FROM timescaledb_information.dimensions
+		 WHERE hypertable_name = $1 AND dimension_number = 1`, table).Scan(&col); err != nil {
+		return "", fmt.Errorf("reading %s's partition column: %w", table, err)
+	}
+	return col, nil
 }
 
 // chunksPerWindow bounds how many of a table's chunks one statement may open. Planning cost tracks
 // chunks opened at roughly 6 MB each, so this is the knob that keeps a statement under the guard.
 const chunksPerWindow = 16
 
-// windowPredicates returns one predicate per window over table's chunks, expressed on partCol.
+// chunkRangeSQL reads the windows' bounds. timescaledb_information.chunks lists LOCAL chunks only: a
+// tiered chunk leaves it, so once tiering starts the oldest bound visible here jumps forward to the
+// oldest untiered chunk and no window is ever built over the range below it. Those blocks then drop out
+// of the work list with no error, and enable_tiered_reads cannot rescue a range no statement scans.
+// timescaledb_osm.tiered_chunks carries the same four range columns for the tiered ones.
 //
-// The bounds are read from TimescaleDB's chunk catalog and interpolated as SQL LITERALS. A bound
-// parameter is not constified at plan time, so the planner would build paths for every chunk and the
-// pruning this exists for would not happen (db/migrations/AGENTS.md). The values come from the
-// catalog, not from a caller, so interpolating them is the sanctioned form rather than a risk.
-// A table with no chunks yields no windows and the arm is skipped entirely.
-func (r *BlockMetaRepository) windowPredicates(ctx context.Context, table, partCol string) ([]string, error) {
-	rows, err := r.pool.Query(ctx, `
+// The OSM view is absent wherever the tiering extension is not installed, including the local harness,
+// and a missing relation is a parse error rather than an empty result — hence the probe rather than a
+// LEFT JOIN or a to_regclass inside the query.
+const chunkRangeSQL = `
 		SELECT range_start_integer, range_end_integer, range_start, range_end
 		  FROM timescaledb_information.chunks
-		 WHERE hypertable_name = $1
-		 ORDER BY range_start_integer NULLS LAST, range_start NULLS LAST`, table)
+		 WHERE hypertable_name = $1`
+
+const chunkRangeWithTieredSQL = chunkRangeSQL + `
+		 UNION ALL
+		SELECT range_start_integer, range_end_integer, range_start, range_end
+		  FROM timescaledb_osm.tiered_chunks
+		 WHERE hypertable_name = $1`
+
+func (r *BlockMetaRepository) windowPredicates(ctx context.Context, table, partCol string) ([]string, error) {
+	var tieredVisible bool
+	if err := r.pool.QueryRow(ctx,
+		`SELECT to_regclass('timescaledb_osm.tiered_chunks') IS NOT NULL`).Scan(&tieredVisible); err != nil {
+		return nil, fmt.Errorf("probing for the tiered-chunk catalogue: %w", err)
+	}
+	query := chunkRangeSQL
+	if tieredVisible {
+		query = chunkRangeWithTieredSQL
+	}
+	rows, err := r.pool.Query(ctx,
+		query+` ORDER BY 1 NULLS LAST, 3 NULLS LAST`, table)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s chunk ranges: %w", table, err)
 	}
@@ -203,7 +266,11 @@ func (r *BlockMetaRepository) OpenWorkList(ctx context.Context, chainID int64, h
 		`DELETE FROM block_meta_worklist WHERE chain_id = $1`, chainID); err != nil {
 		return nil, fmt.Errorf("clearing the work list for chain %d: %w", chainID, err)
 	}
-	for _, arm := range workListArms {
+	arms, err := r.workListArms(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, arm := range arms {
 		windows, err := r.windowPredicates(ctx, arm.table, arm.partCol)
 		if err != nil {
 			return nil, err

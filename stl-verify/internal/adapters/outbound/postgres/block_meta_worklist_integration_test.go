@@ -4,6 +4,9 @@ package postgres
 
 import (
 	"context"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -280,9 +283,9 @@ func TestWorkListEnumeratesWithTieredReadsOn(t *testing.T) {
 	}
 
 	// One arm over sparklend_reserve_data, which the fixture gives chunks, so windows exist and the
-	// statement runs. It writes the observed setting instead of work-list rows.
-	original := workListArms
-	workListArms = []workListArm{{
+	// statement runs. It writes the observed setting instead of work-list rows. Driven through
+	// enumerateWindow directly: the arms are derived from the register, so there is no list to swap.
+	probe := workListArm{
 		table:   "sparklend_reserve_data",
 		partCol: "sr.block_number",
 		sql: `INSERT INTO tiered_probe (setting)
@@ -290,16 +293,24 @@ func TestWorkListEnumeratesWithTieredReadsOn(t *testing.T) {
 		        FROM sparklend_reserve_data sr
 		       WHERE $1::bigint > 0 AND %s
 		       LIMIT 1`,
-	}}
-	t.Cleanup(func() { workListArms = original })
+	}
 
 	buildID, runID := testutil.OpenTestRun(t, ctx, lowered)
 	repo, err := NewBlockMetaRepository(lowered, nil, buildID, runID)
 	if err != nil {
 		t.Fatalf("build the repository: %v", err)
 	}
-	if _, err := repo.OpenWorkList(ctx, 1, 0); err != nil {
-		t.Fatalf("open the work list: %v", err)
+	windows, err := repo.windowPredicates(ctx, probe.table, probe.partCol)
+	if err != nil {
+		t.Fatalf("build the probe's windows: %v", err)
+	}
+	if len(windows) == 0 {
+		t.Fatal("no windows over the fixture's chunks; the probe would never run")
+	}
+	for _, where := range windows {
+		if err := repo.enumerateWindow(ctx, probe, where, 1); err != nil {
+			t.Fatalf("run the probe window: %v", err)
+		}
 	}
 
 	var observed []string
@@ -469,54 +480,50 @@ func TestHeadMarginMeasuresFromTheChainHeadNotThePendingSet(t *testing.T) {
 	}
 }
 
-// The arms decide which tables' blocks ever get a block_meta row, and schema_master.json's block_meta
-// fills declare which tables resolve a column by joining block_meta. A table in the register but not in
-// the arms is never enumerated, so every one of its rows resolves to NULL and the conformance check
-// still passes — the register is satisfied by the declaration alone. The two lists agreed by hand until
-// this test; now a table that gains a fill fails here until it gains an arm.
+// The arms are derived from the register, so this pins the derivation: exactly the tables declaring a
+// block_meta fill become arms, and nothing else. A filter that drops one would enumerate fewer tables
+// than the register says need block_meta, and every value on the missing one would resolve NULL.
 //
 // Matched on the fill's TABLE, not its column: block_meta is the block dimension, and block_timestamp
-// is only the column it carries today. A table declaring a fill for a column added later is covered
-// here by construction, with no change to this test.
-//
-// The two lists are now exactly equal. prime_debt was the one arm with no fill and is no longer an
-// arm: it renames synced_at to block_timestamp by transform, so it answers its own event time.
-//
-// This is the answer to "should the loader look at every data table": no — at every table that cannot
-// answer a block-level column for itself, which is exactly this set.
-func TestWorkListArmsCoverEveryBlockMetaFill(t *testing.T) {
+// is only the column it carries today, so a fill for a column added later is covered unchanged.
+func TestWorkListArmsAreExactlyTheRegistersBlockMetaFills(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+
 	register, err := schemamaster.Load()
 	if err != nil {
 		t.Fatalf("load schema_master.json: %v", err)
 	}
-
-	declared := map[string]bool{}
+	var want []string
 	for _, f := range register.Fills {
 		if f.BlockMeta {
-			declared[f.Table] = true
+			want = append(want, f.Table)
 		}
 	}
-	// Positive control: a register that parsed but declared nothing would make the loop below vacuous.
-	if len(declared) == 0 {
-		t.Fatal("no table declares a block_meta fill; the register did not load as expected and the comparison proves nothing")
+	if len(want) == 0 {
+		t.Fatal("no table declares a block_meta fill; the register did not load as expected")
 	}
+	slices.Sort(want)
+	want = slices.Compact(want)
 
-	armed := map[string]bool{}
-	for _, a := range workListArms {
-		armed[a.table] = true
+	arms, err := repo.workListArms(ctx)
+	if err != nil {
+		t.Fatalf("derive the arms: %v", err)
 	}
-
-	for table := range declared {
-		if !armed[table] {
-			t.Errorf("%s resolves a column through block_meta (schema_master.json fills) but no work-list arm "+
-				"enumerates it, so its blocks never get a row and every such value resolves NULL", table)
-		}
+	var got []string
+	for _, a := range arms {
+		got = append(got, a.table)
 	}
-	for table := range armed {
-		if !declared[table] {
-			t.Errorf("the work list enumerates %s, but nothing in schema_master.json says it needs block_meta; "+
-				"either it should declare the fill or the arm is loading blocks no one resolves", table)
-		}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Errorf("the arms are %v, the register's block_meta fills are %v; the derivation is not the register", got, want)
 	}
 }
 
@@ -573,5 +580,78 @@ func TestWorkListReEnumeratesAfterAnInterruptedEnumeration(t *testing.T) {
 	if found == 0 {
 		t.Error("a work list left by an interrupted ENUMERATION was resumed as if it were complete: the arms " +
 			"that never ran were skipped, so their blocks are absent and the run will report success without them")
+	}
+}
+
+// The deep tail this loader exists to cover is exactly what tiers first, and a tiered chunk LEAVES
+// timescaledb_information.chunks. Reading windows from that view alone, the oldest visible bound jumps
+// forward to the oldest untiered chunk the day tiering starts, no window is built below it, and the
+// blocks down there drop out of the work list silently — enable_tiered_reads cannot help a range no
+// statement scans.
+//
+// Asserted on the predicates rather than end to end: a tiered chunk cannot be created locally, and
+// simply inserting a row far below the live range does not reproduce it, because the insert CREATES a
+// local chunk there and the bound becomes visible the ordinary way. The local harness has no tiering
+// extension, so the OSM catalogue is stood up here with the four range columns the real one carries,
+// which is what the code probes for.
+func TestWindowPredicatesCoverTieredChunkRanges(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+
+	// Control: with no OSM catalogue the loader still builds windows, which is every environment
+	// without tiering, the local harness included.
+	before, err := repo.windowPredicates(ctx, "sparklend_reserve_data", "sr.block_number")
+	if err != nil {
+		t.Fatalf("windows with no tiered-chunk catalogue present: %v", err)
+	}
+	if len(before) == 0 {
+		t.Fatal("no windows at all over the live chunks; the comparison below would prove nothing")
+	}
+
+	// A tiered range far below every live chunk: the fixture seeds 900,000 upwards, so nothing local
+	// covers this and only the OSM catalogue can put it in range.
+	const tieredLo, tieredHi = 100000, 200000
+	for _, ddl := range []string{
+		`CREATE SCHEMA IF NOT EXISTS timescaledb_osm`,
+		`CREATE TABLE IF NOT EXISTS timescaledb_osm.tiered_chunks (
+		    hypertable_name      text,
+		    range_start_integer  bigint,
+		    range_end_integer    bigint,
+		    range_start          timestamptz,
+		    range_end            timestamptz)`,
+	} {
+		if _, err := pool.Exec(ctx, ddl); err != nil {
+			t.Fatalf("stand up the tiered-chunk catalogue: %v", err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO timescaledb_osm.tiered_chunks
+		    (hypertable_name, range_start_integer, range_end_integer)
+		VALUES ('sparklend_reserve_data', $1, $2)`, tieredLo, tieredHi); err != nil {
+		t.Fatalf("seed the tiered chunk range: %v", err)
+	}
+
+	after, err := repo.windowPredicates(ctx, "sparklend_reserve_data", "sr.block_number")
+	if err != nil {
+		t.Fatalf("windows with a tiered chunk present: %v", err)
+	}
+	covered := false
+	for _, w := range after {
+		if strings.Contains(w, strconv.Itoa(tieredLo)) {
+			covered = true
+			break
+		}
+	}
+	if !covered {
+		t.Errorf("the tiered range [%d, %d) is in no window (%d windows: %v); the loader would never scan "+
+			"the tiered tail and would report success having skipped it", tieredLo, tieredHi, len(after), after)
 	}
 }
