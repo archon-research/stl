@@ -1141,10 +1141,6 @@ BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 # file is unreachable, but a stale value here silently builds images on an older
 # toolchain — 1.26.3 shipped the stdlib CVEs that vulncheck flags.
 GO_VERSION ?= $(shell cat ../.go-version 2>/dev/null || cat .go-version 2>/dev/null || echo "1.26.5")
-# Read from ../.python-version (patch-pinned; also drives uv and CI setup-python).
-# Keep the literal fallback in step with that file — it feeds the python-api image
-# base tag, and Docker Hub needs the full patch version.
-PYTHON_VERSION ?= $(shell cat ../.python-version 2>/dev/null || cat .python-version 2>/dev/null || echo "3.12.14")
 
 # Image tag (default to git sha, can override)
 IMAGE_TAG ?= $(GIT_COMMIT)
@@ -1162,7 +1158,6 @@ docker-build:
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
 	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -1253,8 +1248,8 @@ _docker-release-image:
 	fi
 
 # Build a Go service/cronjob from the unified Dockerfile.common. Fills in the
-# parts every Go image shares (Dockerfile, the GO_VERSION build-arg, full git
-# metadata) so callers pass only what differs. Required: GO_NAME, GO_REPO,
+# parts every Go image shares (Dockerfile, full git metadata) so callers pass
+# only what differs. Required: GO_NAME, GO_REPO,
 # GO_CMD_PATH, GO_BIN, GO_CACHE_KEY. Optional: GO_TAG / GO_LATEST_TAG (cronjobs
 # use name-prefixed tags; services default to IMAGE_TAG / latest).
 _docker-release-go-service:
@@ -1262,7 +1257,7 @@ _docker-release-go-service:
 		IMG_NAME="$(GO_NAME)" \
 		IMG_REPO="$(GO_REPO)" \
 		IMG_DOCKERFILE=Dockerfile.common \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=$(GO_CMD_PATH) --build-arg BIN=$(GO_BIN)" \
+		IMG_EXTRA_ARGS="--build-arg CMD_PATH=$(GO_CMD_PATH) --build-arg BIN=$(GO_BIN)" \
 		IMG_GIT_ARGS=full \
 		IMG_CACHE_KEY="$(GO_CACHE_KEY)" \
 		$(if $(GO_TAG),IMG_TAG="$(GO_TAG)") \
@@ -1271,7 +1266,7 @@ _docker-release-go-service:
 _docker-build-go-service:
 ifdef GO_LOCAL_TAG
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=$(GO_CMD_PATH) --build-arg BIN=$(GO_BIN) -t $(GO_LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=$(GO_CMD_PATH) --build-arg BIN=$(GO_BIN) -t $(GO_LOCAL_TAG) -f Dockerfile.common .
 else
 	@echo "==> Building $(GO_NAME) Docker image for ARM64..."
 	@echo "    Repository: $(GO_REPO)"
@@ -1279,7 +1274,6 @@ else
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
 	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -1297,7 +1291,6 @@ else
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
 	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -1362,7 +1355,7 @@ ecs-deploy-watcher:
 # Named aliases for consistency with other service targets
 docker-build-watcher:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/base/watcher --build-arg BIN=watcher -t stl-watcher:$(LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/base/watcher --build-arg BIN=watcher -t stl-watcher:$(LOCAL_TAG) -f Dockerfile.common .
 else
 	@$(MAKE) docker-build
 endif
@@ -1815,7 +1808,6 @@ _docker-release-migrate-internal:
 		IMG_NAME="Migrate" \
 		IMG_REPO="$(ECR_REPO_MIGRATE)" \
 		IMG_DOCKERFILE=Dockerfile.migrate \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION)" \
 		IMG_CACHE_KEY=migrate
 
 # Sentinelstaging Migrate Docker Shortcuts
@@ -2205,7 +2197,7 @@ kind-secrets:
 	  --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 
 docker-build-migrate:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-migrate:$(LOCAL_TAG) -f Dockerfile.migrate .
+	docker build -t stl-migrate:$(LOCAL_TAG) -f Dockerfile.migrate .
 
 kind-load-images:
 	@test -n "$(IMAGES)" || { echo "ERROR: IMAGES is required."; exit 1; }
@@ -2362,7 +2354,7 @@ build_of = $(if $(filter curve-indexer uniswap-v3-indexer uniswap-v4-indexer,$(1
 
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/cronjobs/$* --build-arg BIN=cronjob -t stl-$*:$(LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/cronjobs/$* --build-arg BIN=cronjob -t stl-$*:$(LOCAL_TAG) -f Dockerfile.common .
 
 # Pattern rule: release a cronjob image to ECR (build + push).
 # All cronjobs share a single ECR repo; the cronjob name is part of the tag.
@@ -2386,7 +2378,7 @@ _docker-release-transform-bootstrap-internal:
 # schedule) so it is not auto-discovered; ships in the shared cronjob ECR repo
 # with a name-prefixed tag and runs as a one-off k8s Job.
 docker-build-reference-capital-backfill:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/reference-capital-backfill --build-arg BIN=reference-capital-backfill -t stl-reference-capital-backfill:$(LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/reference-capital-backfill --build-arg BIN=reference-capital-backfill -t stl-reference-capital-backfill:$(LOCAL_TAG) -f Dockerfile.common .
 
 docker-release-reference-capital-backfill: ecr-login _docker-release-reference-capital-backfill-internal
 
@@ -2399,7 +2391,7 @@ _docker-release-reference-capital-backfill-internal:
 # and waits for a run to be started from the Temporal UI. Ships in the shared cronjob
 # ECR repo with a name-prefixed tag.
 docker-build-offchain-price-backfill:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/offchain-price-backfill --build-arg BIN=offchain-price-backfill -t stl-offchain-price-backfill:$(LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/offchain-price-backfill --build-arg BIN=offchain-price-backfill -t stl-offchain-price-backfill:$(LOCAL_TAG) -f Dockerfile.common .
 
 docker-release-offchain-price-backfill: ecr-login _docker-release-offchain-price-backfill-internal
 
@@ -2411,7 +2403,7 @@ _docker-release-offchain-price-backfill-internal:
 # worker Deployment that polls its task queue and waits for a run to be started
 # from the Temporal UI — so it needs the same explicit release wiring.
 docker-build-morpho-vault-backfill:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/morpho-vault-backfill --build-arg BIN=morpho-vault-backfill -t stl-morpho-vault-backfill:$(LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/morpho-vault-backfill --build-arg BIN=morpho-vault-backfill -t stl-morpho-vault-backfill:$(LOCAL_TAG) -f Dockerfile.common .
 
 docker-release-morpho-vault-backfill: ecr-login _docker-release-morpho-vault-backfill-internal
 
@@ -2423,7 +2415,7 @@ _docker-release-morpho-vault-backfill-internal:
 # long-running worker Deployment polling its task queue — so it needs the same
 # explicit release wiring.
 docker-build-block-republisher:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/block-republisher --build-arg BIN=block-republisher -t stl-block-republisher:$(LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/block-republisher --build-arg BIN=block-republisher -t stl-block-republisher:$(LOCAL_TAG) -f Dockerfile.common .
 
 docker-release-block-republisher: ecr-login _docker-release-block-republisher-internal
 
@@ -2553,7 +2545,6 @@ ECR_REPO_PYTHON_API = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-
 docker-build-python-api:
 ifdef LOCAL
 	docker buildx build --load \
-		--build-arg PYTHON_VERSION=$(PYTHON_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		-t stl-python-api:$(LOCAL_TAG) -f python/Dockerfile .
 else
@@ -2562,7 +2553,6 @@ else
 	@echo "    Tag: $(IMAGE_TAG)"
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	docker buildx build --platform linux/arm64 \
-		--build-arg PYTHON_VERSION=$(PYTHON_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		-f python/Dockerfile \
 		-t $(ECR_REPO_PYTHON_API):$(IMAGE_TAG) \
@@ -2584,7 +2574,6 @@ _docker-release-python-api-internal:
 		IMG_NAME="Python API" \
 		IMG_REPO="$(ECR_REPO_PYTHON_API)" \
 		IMG_DOCKERFILE=python/Dockerfile \
-		IMG_EXTRA_ARGS="--build-arg PYTHON_VERSION=$(PYTHON_VERSION)" \
 		IMG_GIT_ARGS=commit \
 		IMG_CACHE_KEY=python-api
 
