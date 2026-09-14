@@ -49,6 +49,7 @@ resources:
   # On-demand CoinGecko backfill worker (VEC-540). No Temporal schedule: idles on
   # its task queue until a run is started by hand from the Temporal UI.
   - ../../base/offchain-price-backfill
+  - ../../base/allocation-underlying-value-backfill
   - ../../base/reference-capital-indexer
   - ../../base/reference-capital-backfill
   - ../../base/core-model-runner

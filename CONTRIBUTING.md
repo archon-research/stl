@@ -230,7 +230,7 @@ Pick the language **before** you start, and when in doubt, ask first.
   Python is a fully supported second option.
 - **Anything outside Go or Python needs prior discussion.** Open an
   issue or start a thread with
-  `@archon-research/vector-engineers` **before** writing code. PRs
+  `@archon-research/stl-engineers` **before** writing code. PRs
   introducing a new runtime (Rust, TypeScript, Java, …) without
   a prior design conversation **may be rejected** regardless of code
   quality — every new language adds build infrastructure, observability
@@ -987,7 +987,7 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 1. **Branch off `main`.** Name the branch after the Linear ticket if
    there is one (`VEC-123-short-slug`).
 2. **Open a PR early** — drafts are fine. The `CODEOWNERS` file
-   auto-requests review from `@archon-research/vector-engineers`.
+   auto-requests review from `@archon-research/stl-engineers`.
 3. **Before you push**, run:
    ```bash
    cd stl-verify
@@ -1070,7 +1070,7 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 
 ## 16. Getting help
 
-- **Code questions / design review:** `@archon-research/vector-engineers`
+- **Code questions / design review:** `@archon-research/stl-engineers`
   on GitHub, or [`#proj-verify-beacon`](https://sentinel-0rx1449.slack.com/archives/C0AN04V9NGZ)
   on Laniakea Slack (review is required anyway — ask early).
 - **Protocol specs:** see `docs/` — `aave_v3_spec.md`, `morpho_spec.md`,

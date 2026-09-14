@@ -8,7 +8,7 @@ include lint.mk
 	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-secrets dev-env-files dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service _docker-build-go-service _docker-push-go-service \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-dex-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-transform-bootstrap-internal _docker-release-cronjob-%-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-dex-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-allocation-underlying-value-backfill-internal _docker-release-python-api-internal _docker-release-transform-bootstrap-internal _docker-release-cronjob-%-internal \
 		docker-build-offchain-price-backfill docker-release-offchain-price-backfill _docker-release-offchain-price-backfill-internal \
 		docker-build-reference-capital-backfill docker-release-reference-capital-backfill _docker-release-reference-capital-backfill-internal \
 		docker-build-morpho-vault-backfill docker-release-morpho-vault-backfill _docker-release-morpho-vault-backfill-internal \
@@ -1155,10 +1155,6 @@ BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 # file is unreachable, but a stale value here silently builds images on an older
 # toolchain — 1.26.3 shipped the stdlib CVEs that vulncheck flags.
 GO_VERSION ?= $(shell cat ../.go-version 2>/dev/null || cat .go-version 2>/dev/null || echo "1.26.5")
-# Read from ../.python-version (patch-pinned; also drives uv and CI setup-python).
-# Keep the literal fallback in step with that file — it feeds the python-api image
-# base tag, and Docker Hub needs the full patch version.
-PYTHON_VERSION ?= $(shell cat ../.python-version 2>/dev/null || cat .python-version 2>/dev/null || echo "3.12.14")
 
 # Image tag (default to git sha, can override)
 IMAGE_TAG ?= $(GIT_COMMIT)
@@ -1176,7 +1172,6 @@ docker-build:
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
 	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -1267,8 +1262,8 @@ _docker-release-image:
 	fi
 
 # Build a Go service/cronjob from the unified Dockerfile.common. Fills in the
-# parts every Go image shares (Dockerfile, the GO_VERSION build-arg, full git
-# metadata) so callers pass only what differs. Required: GO_NAME, GO_REPO,
+# parts every Go image shares (Dockerfile, full git metadata) so callers pass
+# only what differs. Required: GO_NAME, GO_REPO,
 # GO_CMD_PATH, GO_BIN, GO_CACHE_KEY. Optional: GO_TAG / GO_LATEST_TAG (cronjobs
 # use name-prefixed tags; services default to IMAGE_TAG / latest).
 _docker-release-go-service:
@@ -1276,7 +1271,7 @@ _docker-release-go-service:
 		IMG_NAME="$(GO_NAME)" \
 		IMG_REPO="$(GO_REPO)" \
 		IMG_DOCKERFILE=Dockerfile.common \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=$(GO_CMD_PATH) --build-arg BIN=$(GO_BIN)" \
+		IMG_EXTRA_ARGS="--build-arg CMD_PATH=$(GO_CMD_PATH) --build-arg BIN=$(GO_BIN)" \
 		IMG_GIT_ARGS=full \
 		IMG_CACHE_KEY="$(GO_CACHE_KEY)" \
 		$(if $(GO_TAG),IMG_TAG="$(GO_TAG)") \
@@ -1285,7 +1280,7 @@ _docker-release-go-service:
 _docker-build-go-service:
 ifdef GO_LOCAL_TAG
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=$(GO_CMD_PATH) --build-arg BIN=$(GO_BIN) -t $(GO_LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=$(GO_CMD_PATH) --build-arg BIN=$(GO_BIN) -t $(GO_LOCAL_TAG) -f Dockerfile.common .
 else
 	@echo "==> Building $(GO_NAME) Docker image for ARM64..."
 	@echo "    Repository: $(GO_REPO)"
@@ -1293,7 +1288,6 @@ else
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
 	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -1311,7 +1305,6 @@ else
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
 	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -1376,7 +1369,7 @@ ecs-deploy-watcher:
 # Named aliases for consistency with other service targets
 docker-build-watcher:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/base/watcher --build-arg BIN=watcher -t stl-watcher:$(LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/base/watcher --build-arg BIN=watcher -t stl-watcher:$(LOCAL_TAG) -f Dockerfile.common .
 else
 	@$(MAKE) docker-build
 endif
@@ -1451,6 +1444,8 @@ docker-release-all:
 	@$(MAKE) _docker-release-block-republisher-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-uniswap-v4-position-bootstrap-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-allocation-underlying-value-backfill-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
 		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
@@ -1831,7 +1826,6 @@ _docker-release-migrate-internal:
 		IMG_NAME="Migrate" \
 		IMG_REPO="$(ECR_REPO_MIGRATE)" \
 		IMG_DOCKERFILE=Dockerfile.migrate \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION)" \
 		IMG_CACHE_KEY=migrate
 
 # Sentinelstaging Migrate Docker Shortcuts
@@ -2221,7 +2215,7 @@ kind-secrets:
 	  --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 
 docker-build-migrate:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-migrate:$(LOCAL_TAG) -f Dockerfile.migrate .
+	docker build -t stl-migrate:$(LOCAL_TAG) -f Dockerfile.migrate .
 
 kind-load-images:
 	@test -n "$(IMAGES)" || { echo "ERROR: IMAGES is required."; exit 1; }
@@ -2378,7 +2372,7 @@ build_of = $(if $(filter curve-indexer uniswap-v3-indexer uniswap-v4-indexer,$(1
 
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/cronjobs/$* --build-arg BIN=cronjob -t stl-$*:$(LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/cronjobs/$* --build-arg BIN=cronjob -t stl-$*:$(LOCAL_TAG) -f Dockerfile.common .
 
 # Pattern rule: release a cronjob image to ECR (build + push).
 # All cronjobs share a single ECR repo; the cronjob name is part of the tag.
@@ -2402,7 +2396,7 @@ _docker-release-transform-bootstrap-internal:
 # schedule) so it is not auto-discovered; ships in the shared cronjob ECR repo
 # with a name-prefixed tag and runs as a one-off k8s Job.
 docker-build-reference-capital-backfill:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/reference-capital-backfill --build-arg BIN=reference-capital-backfill -t stl-reference-capital-backfill:$(LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/reference-capital-backfill --build-arg BIN=reference-capital-backfill -t stl-reference-capital-backfill:$(LOCAL_TAG) -f Dockerfile.common .
 
 docker-release-reference-capital-backfill: ecr-login _docker-release-reference-capital-backfill-internal
 
@@ -2419,13 +2413,26 @@ docker-release-uniswap-v4-position-bootstrap: ecr-login _docker-release-uniswap-
 _docker-release-uniswap-v4-position-bootstrap-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Uniswap V4 Position Bootstrap" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/uniswap-v4-position-bootstrap GO_BIN=uniswap-v4-position-bootstrap GO_CACHE_KEY="cronjob-uniswap-v4-position-bootstrap" GO_TAG="uniswap-v4-position-bootstrap-$(IMAGE_TAG)" GO_LATEST_TAG="uniswap-v4-position-bootstrap-latest"
 
+# allocation-underlying-value-backfill (VEC-759): the on-demand backfill for
+# allocation_position.underlying_value. Like offchain-price-backfill it registers no
+# Temporal schedule, so it is not auto-discovered as a cronjob, but it is a
+# long-running worker Deployment that polls its task queue. Ships in the shared
+# cronjob ECR repo with a name-prefixed tag.
+docker-build-allocation-underlying-value-backfill:
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/allocation-underlying-value-backfill --build-arg BIN=allocation-underlying-value-backfill -t stl-allocation-underlying-value-backfill:$(LOCAL_TAG) -f Dockerfile.common .
+
+docker-release-allocation-underlying-value-backfill: ecr-login _docker-release-allocation-underlying-value-backfill-internal
+
+_docker-release-allocation-underlying-value-backfill-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Allocation Underlying Value Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/allocation-underlying-value-backfill GO_BIN=allocation-underlying-value-backfill GO_CACHE_KEY="cronjob-allocation-underlying-value-backfill" GO_TAG="allocation-underlying-value-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="allocation-underlying-value-backfill-latest"
+
 # offchain-price-backfill (VEC-540): the on-demand CoinGecko history backfill. Not a
 # cronjob (it registers no Temporal schedule) so it is not auto-discovered, but it is
 # a long-running worker Deployment rather than a one-off Job — it polls its task queue
 # and waits for a run to be started from the Temporal UI. Ships in the shared cronjob
 # ECR repo with a name-prefixed tag.
 docker-build-offchain-price-backfill:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/offchain-price-backfill --build-arg BIN=offchain-price-backfill -t stl-offchain-price-backfill:$(LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/offchain-price-backfill --build-arg BIN=offchain-price-backfill -t stl-offchain-price-backfill:$(LOCAL_TAG) -f Dockerfile.common .
 
 docker-release-offchain-price-backfill: ecr-login _docker-release-offchain-price-backfill-internal
 
@@ -2437,7 +2444,7 @@ _docker-release-offchain-price-backfill-internal:
 # worker Deployment that polls its task queue and waits for a run to be started
 # from the Temporal UI — so it needs the same explicit release wiring.
 docker-build-morpho-vault-backfill:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/morpho-vault-backfill --build-arg BIN=morpho-vault-backfill -t stl-morpho-vault-backfill:$(LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/morpho-vault-backfill --build-arg BIN=morpho-vault-backfill -t stl-morpho-vault-backfill:$(LOCAL_TAG) -f Dockerfile.common .
 
 docker-release-morpho-vault-backfill: ecr-login _docker-release-morpho-vault-backfill-internal
 
@@ -2449,7 +2456,7 @@ _docker-release-morpho-vault-backfill-internal:
 # long-running worker Deployment polling its task queue — so it needs the same
 # explicit release wiring.
 docker-build-block-republisher:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/block-republisher --build-arg BIN=block-republisher -t stl-block-republisher:$(LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/block-republisher --build-arg BIN=block-republisher -t stl-block-republisher:$(LOCAL_TAG) -f Dockerfile.common .
 
 docker-release-block-republisher: ecr-login _docker-release-block-republisher-internal
 
@@ -2579,7 +2586,6 @@ ECR_REPO_PYTHON_API = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-
 docker-build-python-api:
 ifdef LOCAL
 	docker buildx build --load \
-		--build-arg PYTHON_VERSION=$(PYTHON_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		-t stl-python-api:$(LOCAL_TAG) -f python/Dockerfile .
 else
@@ -2588,7 +2594,6 @@ else
 	@echo "    Tag: $(IMAGE_TAG)"
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	docker buildx build --platform linux/arm64 \
-		--build-arg PYTHON_VERSION=$(PYTHON_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		-f python/Dockerfile \
 		-t $(ECR_REPO_PYTHON_API):$(IMAGE_TAG) \
@@ -2610,7 +2615,6 @@ _docker-release-python-api-internal:
 		IMG_NAME="Python API" \
 		IMG_REPO="$(ECR_REPO_PYTHON_API)" \
 		IMG_DOCKERFILE=python/Dockerfile \
-		IMG_EXTRA_ARGS="--build-arg PYTHON_VERSION=$(PYTHON_VERSION)" \
 		IMG_GIT_ARGS=commit \
 		IMG_CACHE_KEY=python-api
 
