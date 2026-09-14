@@ -188,6 +188,12 @@ jobs:
       - name: Layer comparator reports failures as failures
         run: scripts/deploy/compare-image-layers.test.sh
 
+      # VEC-783: the Dockerfiles pin base-image tag+digest together rather than
+      # interpolating the tag from .go-version/.python-version, so nothing else
+      # keeps them in step with a version-file bump.
+      - name: Base-image tags match .go-version / .python-version
+        run: scripts/deploy/check-base-image-version-consistency.sh
+
   ci-passed:
     name: Success
     needs:

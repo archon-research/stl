@@ -52,5 +52,5 @@ Root repo map and cross-cutting rules: [../AGENTS.md](../AGENTS.md).
 - Merging to `main` deploys to staging via ArgoCD, then prod after manual approval.
 - **OS patches come from a base-image bump, nothing else.** Images carry no per-commit value above the
   OS-update layer (ORB-366), so a warm cache replays those layers until a `FROM` line changes. Base
-  images are not yet digest-pinned and no bot bumps them, so today nothing refreshes them: VEC-783.
+  images are digest-pinned and Dependabot raises the bump PR when a pinned digest moves (VEC-783).
 - AWS resources (SQS queues, SNS subscriptions, IAM, secrets) live in a separate private infrastructure repo and must land **before** the code that needs them.

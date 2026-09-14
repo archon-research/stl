@@ -224,12 +224,9 @@ run_build() {
 build() {
   local suffix="$1" commit="$2" build_time="$3"
   local tag="${TAG_PREFIX}:${suffix}"
-  local go_version python_version
 
   if [ "$IMAGE" = "go" ]; then
-    go_version="$(cat "${REPO_ROOT}/.go-version")"
     run_build --platform linux/arm64 \
-      --build-arg GO_VERSION="$go_version" \
       --build-arg CMD_PATH="$SERVICE_CMD_PATH" \
       --build-arg BIN="$SERVICE_BIN" \
       --build-arg GIT_COMMIT="$commit" \
@@ -238,19 +235,14 @@ build() {
       $BUILD_EXTRA_ARGS \
       -f "${BUILD_DIR}/Dockerfile.common" -t "$tag" --load "$BUILD_DIR"
   elif [ "$IMAGE" = "migrate" ]; then
-    # Dockerfile.migrate takes only GO_VERSION -- no CMD_PATH/BIN (its build
-    # target is hardcoded) and no versioning args (it stamps nothing, see
-    # ADR-0008), so commit/build_time are accepted for a uniform build()
+    # Dockerfile.migrate's build target is hardcoded and it stamps nothing
+    # (ADR-0008), so commit/build_time are accepted for build()'s uniform
     # signature but unused here.
-    go_version="$(cat "${REPO_ROOT}/.go-version")"
     run_build --platform linux/arm64 \
-      --build-arg GO_VERSION="$go_version" \
       $BUILD_EXTRA_ARGS \
       -f "${BUILD_DIR}/Dockerfile.migrate" -t "$tag" --load "$BUILD_DIR"
   else
-    python_version="$(cat "${REPO_ROOT}/.python-version")"
     run_build --platform linux/arm64 \
-      --build-arg PYTHON_VERSION="$python_version" \
       --build-arg GIT_COMMIT="$commit" \
       $BUILD_EXTRA_ARGS \
       -f "${BUILD_DIR}/python/Dockerfile" -t "$tag" --load "$BUILD_DIR"
