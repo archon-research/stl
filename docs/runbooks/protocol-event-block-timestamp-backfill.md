@@ -3,7 +3,7 @@
 `protocol_event.block_timestamp` is added by
 `20260911_120000_add_block_timestamp_to_protocol_event.sql` as a nullable column. Population runs
 **out of band on staging, then prod** — a 14M-row `UPDATE` over compressed chunks does not belong in
-the migrator's single transaction, the same reason VEC-491 kept `block_time` DDL-only.
+the migrator's single transaction, the same reason VEC-491 kept `block_meta` DDL-only.
 
 Every step below is an in-place `UPDATE` on an ingest table, which `stl-verify/db/migrations/AGENTS.md`
 requires the team to sanction before it runs. It is a one-time operator repair of a column that
@@ -63,31 +63,37 @@ WHERE created_at >= '2026-04-15' AND created_at < '2026-05-01'   -- advance one 
 
 Record wall-clock and chunk count per window; that is the cost the ticket asks for.
 
-## Step 2 — the pre-boundary rows (needs `block_time`)
+## Step 2 — the pre-boundary rows (needs `block_meta`)
 
 These carry ingest time in `created_at`, so their event time has to come from
-`block_time (chain_id, block_number) -> block_timestamp`. `block_time` is **empty** — populating it
-is `docs/runbooks/block-time-backfill.md` (VEC-491) and is a prerequisite of this step, not part of
-it. `block_states` alone cannot serve: it is a rolling ~1-month reorg window and holds none of these
-blocks.
+`block_meta (chain_id, block_number, block_version) -> block_timestamp` (VEC-491). `block_meta` is
+loaded out of band from the block headers in the S3 raw-block archive; covering these blocks is that
+loader's work and a prerequisite of this step, not part of it. `block_states` alone cannot serve: it
+is a rolling ~1-month reorg window and holds none of these blocks.
 
-Size the residual first — it is the distinct-block count VEC-491 has to cover:
+Size the residual first — it is the distinct-block count the `block_meta` load has to cover:
 
 ```sql
 SELECT chain_id, count(*) AS distinct_blocks
-FROM (SELECT DISTINCT chain_id, block_number FROM protocol_event
+FROM (SELECT DISTINCT chain_id, block_number, block_version FROM protocol_event
       WHERE created_at < '2026-04-15'
         AND created_at <> date_trunc('second', created_at)) x
 GROUP BY 1 ORDER BY 1;
 ```
 
-Once `block_time` covers them, date the rows from it, again one window at a time:
+Once `block_meta` covers them, date the rows from it, again one window at a time. `block_meta` is
+append-only and versioned on `processing_version`, so a corrected header time is a second row for
+the same block: take the highest one, or a known-bad time wins.
 
 ```sql
 UPDATE protocol_event pe
-SET block_timestamp = bt.block_timestamp
-FROM block_time bt
-WHERE bt.chain_id = pe.chain_id AND bt.block_number = pe.block_number
+SET block_timestamp = bm.block_timestamp
+FROM (SELECT DISTINCT ON (chain_id, block_number, block_version)
+             chain_id, block_number, block_version, block_timestamp
+      FROM block_meta
+      ORDER BY chain_id, block_number, block_version, processing_version DESC) bm
+WHERE bm.chain_id = pe.chain_id AND bm.block_number = pe.block_number
+  AND bm.block_version = pe.block_version
   AND pe.created_at >= '2026-02-01' AND pe.created_at < '2026-03-01'   -- advance one month per run
   AND pe.block_timestamp IS NULL;
 ```
