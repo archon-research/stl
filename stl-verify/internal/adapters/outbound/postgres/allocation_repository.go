@@ -187,17 +187,6 @@ func (r *AllocationRepository) buildInsertArgs(
 		underlyingValue = toNumeric(pos.Underlying.Value, pos.Underlying.AssetDecimals)
 	}
 
-	query := `
-		INSERT INTO allocation_position (
-			chain_id, token_id, prime_id, proxy_address,
-			balance, scaled_balance,
-			block_number, block_version,
-			tx_hash, log_index, tx_amount, direction, created_at, build_id, run_id,
-			underlying_value, underlying_token_id, from_address, to_address
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-		ON CONFLICT (chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, processing_version, created_at) DO NOTHING
-	`
-
 	args := []any{
 		pos.ChainID,
 		tokenID,
@@ -220,8 +209,42 @@ func (r *AllocationRepository) buildInsertArgs(
 		encodeAddress(pos.ToAddress),
 	}
 
+	query := insertPositionSQL
+	if pos.CorrectsVersion != nil {
+		query = insertCorrectionSQL
+		args = append(args, *pos.CorrectsVersion+1)
+	}
 	return query, args, nil
 }
+
+// The correction variant supplies processing_version rather than leaving it to
+// the column default. The default is 0, which is the version the row being
+// corrected already holds, and TimescaleDB resolves the conflict against the
+// columnstore before the trigger can replace it (VEC-759).
+const (
+	insertPositionSQL = `
+		INSERT INTO allocation_position (
+			chain_id, token_id, prime_id, proxy_address,
+			balance, scaled_balance,
+			block_number, block_version,
+			tx_hash, log_index, tx_amount, direction, created_at, build_id, run_id,
+			underlying_value, underlying_token_id, from_address, to_address
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+		` + onConflictPositionKeyDoNothing
+
+	insertCorrectionSQL = `
+		INSERT INTO allocation_position (
+			chain_id, token_id, prime_id, proxy_address,
+			balance, scaled_balance,
+			block_number, block_version,
+			tx_hash, log_index, tx_amount, direction, created_at, build_id, run_id,
+			underlying_value, underlying_token_id, from_address, to_address,
+			processing_version
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		` + onConflictPositionKeyDoNothing
+
+	onConflictPositionKeyDoNothing = `ON CONFLICT (chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, processing_version, created_at) DO NOTHING`
+)
 
 // encodeAddress keeps a nil address NULL, distinct from the zero address, which
 // is a genuine mint/burn party and must persist as 20 zero bytes.

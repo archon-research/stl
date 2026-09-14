@@ -76,6 +76,15 @@ func newAllocCompressedFixture(t *testing.T, ctx context.Context) allocCompresse
 	return f
 }
 
+// correction builds the observation at the fixture's natural key carrying both
+// the underlying valuation and the version it supersedes — the shape a backfill
+// writes.
+func (f allocCompressedFixture) correction(correctsVersion int) *entity.AllocationPosition {
+	pos := f.position(big.NewInt(5))
+	pos.CorrectsVersion = &correctsVersion
+	return pos
+}
+
 // position builds the observation at the fixture's natural key, optionally
 // carrying the underlying valuation a correction adds.
 func (f allocCompressedFixture) position(underlyingValue *big.Int) *entity.AllocationPosition {
@@ -162,13 +171,34 @@ func compressAllocationPositionChunks(t *testing.T, ctx context.Context, pool *p
 	}
 }
 
-// TestSavePositions_ReportsZeroInsertedWhenTheTargetChunkIsCompressed pins the
-// mechanism behind VEC-759. TimescaleDB resolves the key conflict against the
-// columnstore before the BEFORE INSERT trigger runs, so the tuple still carries
-// processing_version 0 — the version the original row holds — and ON CONFLICT
-// DO NOTHING drops it. No error is raised, which is why the count, not
-// len(positions), is what a caller has to believe.
-func TestSavePositions_ReportsZeroInsertedWhenTheTargetChunkIsCompressed(t *testing.T) {
+// TestSavePositions_CorrectionLandsInACompressedChunk is the mechanism behind
+// VEC-759, from the write side. TimescaleDB resolves the key conflict against
+// the columnstore before the BEFORE INSERT trigger runs, so a correction only
+// gets through if it arrives already carrying a processing_version the
+// columnstore does not hold.
+func TestSavePositions_CorrectionLandsInACompressedChunk(t *testing.T) {
+	ctx := context.Background()
+	f := newAllocCompressedFixture(t, ctx)
+	compressAllocationPositionChunks(t, ctx, allocCompressedPool)
+
+	inserted, err := saveAllocationPositions(ctx, allocCompressedPool, f.repo, f.correction(0))
+	if err != nil {
+		t.Fatalf("SavePositions: %v", err)
+	}
+	if inserted != 1 {
+		t.Fatalf("inserted = %d, want 1", inserted)
+	}
+	if n := correctionRowCount(t, ctx); n != 1 {
+		t.Errorf("correction rows = %d, want 1", n)
+	}
+}
+
+// TestSavePositions_ReportsZeroInsertedWhenACompressedChunkDiscardsTheWrite is
+// the control that keeps the line above honest: the identical write without a
+// supplied version is discarded by the columnstore, raising no error. That is
+// what shipped, and it is why the caller has to believe the count rather than
+// len(positions).
+func TestSavePositions_ReportsZeroInsertedWhenACompressedChunkDiscardsTheWrite(t *testing.T) {
 	ctx := context.Background()
 	f := newAllocCompressedFixture(t, ctx)
 	compressAllocationPositionChunks(t, ctx, allocCompressedPool)
@@ -178,18 +208,16 @@ func TestSavePositions_ReportsZeroInsertedWhenTheTargetChunkIsCompressed(t *test
 		t.Fatalf("SavePositions: %v", err)
 	}
 	if inserted != 0 {
-		t.Fatalf("inserted = %d, want 0: TimescaleDB discards this write, and a count that claimed "+
-			"otherwise would be the silent data loss VEC-759 shipped", inserted)
+		t.Fatalf("inserted = %d, want 0", inserted)
 	}
 	if n := correctionRowCount(t, ctx); n != 0 {
 		t.Errorf("correction rows = %d, want 0", n)
 	}
 }
 
-// TestSavePositions_ReportsEveryRowInsertedWhenTheTargetChunkIsRowstore is the
-// control: the same correction against the same key lands once the chunk is not
-// in the columnstore, so the zero above is the compression, not the fixture.
-func TestSavePositions_ReportsEveryRowInsertedWhenTheTargetChunkIsRowstore(t *testing.T) {
+// TestSavePositions_UnversionedWriteStillLandsInARowstoreChunk is the live
+// tracker's path: it supplies no version and must keep relying on the trigger.
+func TestSavePositions_UnversionedWriteStillLandsInARowstoreChunk(t *testing.T) {
 	ctx := context.Background()
 	f := newAllocCompressedFixture(t, ctx)
 
