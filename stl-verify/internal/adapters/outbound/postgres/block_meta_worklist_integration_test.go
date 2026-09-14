@@ -541,13 +541,17 @@ func TestHeadMarginMeasuresFromTheChainHeadNotThePendingSet(t *testing.T) {
 }
 
 // The arms decide which tables' blocks ever get a block_meta row, and schema_master.json's block_meta
-// fills declare which tables RESOLVE block_timestamp by joining block_meta. A table in the register but
-// not in the arms is never enumerated, so every one of its rows resolves to a NULL timestamp and the
-// conformance check still passes — the register is satisfied by the declaration alone. The two lists
-// agreed by hand until this test; now a table that gains the fill fails here until it gains an arm.
+// fills declare which tables resolve a column by joining block_meta. A table in the register but not in
+// the arms is never enumerated, so every one of its rows resolves to NULL and the conformance check
+// still passes — the register is satisfied by the declaration alone. The two lists agreed by hand until
+// this test; now a table that gains a fill fails here until it gains an arm.
+//
+// Matched on the fill's TABLE, not its column: block_meta is the block dimension, and block_timestamp
+// is only the column it carries today. A table declaring a fill for a column added later is covered
+// here by construction, with no change to this test.
 //
 // This is the answer to "should the loader look at every data table": no — at every table that cannot
-// answer block_timestamp for itself, which is exactly this set.
+// answer a block-level column for itself, which is exactly this set.
 func TestWorkListArmsCoverEveryBlockMetaFill(t *testing.T) {
 	register, err := schemamaster.Load()
 	if err != nil {
@@ -572,13 +576,13 @@ func TestWorkListArmsCoverEveryBlockMetaFill(t *testing.T) {
 
 	for table := range declared {
 		if !armed[table] {
-			t.Errorf("%s resolves block_timestamp through block_meta (schema_master.json fills) but no work-list arm "+
-				"enumerates it, so its blocks never get a row and every one of its timestamps resolves NULL", table)
+			t.Errorf("%s resolves a column through block_meta (schema_master.json fills) but no work-list arm "+
+				"enumerates it, so its blocks never get a row and every such value resolves NULL", table)
 		}
 	}
 	for table := range armed {
-		// prime_debt is the one arm with no fill, and deliberately: it carries block_number but resolves
-		// its own time, so it is loaded for consumers of block_meta rather than for its own sake.
+		// prime_debt is the one arm with no fill, and deliberately: it carries block_number but answers
+		// its own event time, so it is loaded for other consumers of block_meta rather than for itself.
 		if table == "prime_debt" {
 			continue
 		}
