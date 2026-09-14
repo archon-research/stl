@@ -45,6 +45,10 @@
 # scope; verify-ecr-images.sh covers those.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib/overlay-tag-parser.sh
+source "${SCRIPT_DIR}/lib/overlay-tag-parser.sh"
+
 if [ $# -gt 0 ]; then
   FILES=("$@")
 else
@@ -54,8 +58,9 @@ else
   )
 fi
 
-# Emit every newTag value in the file, one per line: quoted or unquoted, with or
-# without a trailing comment.
+# Emit every newTag value in the file, one per line, via the shared scalar
+# parser (lib/overlay-tag-parser.sh) — the same one render-overlay-images.sh
+# uses, so quoting and trailing comments are handled identically everywhere.
 #
 # Matching a narrow shape and dropping the rest is the one thing this function
 # must not do. An unmatched line vanishes, so the check reports success having
@@ -64,11 +69,9 @@ fi
 # reports that as malformed. A hand-pinned tag is likelier than most to carry a
 # comment explaining the pin, which is exactly the line we cannot afford to miss.
 extract_tags() {
-  sed -nE 's/^[[:space:]]*newTag:[[:space:]]*(.*)$/\1/p' "$1" |
-    sed -E 's/[[:space:]]+#.*$//
-            s/^"([^"]*)"[[:space:]]*$/\1/
-            s/^'"'"'([^'"'"']*)'"'"'[[:space:]]*$/\1/
-            s/[[:space:]]+$//'
+  awk "$OVERLAY_SCALAR_AWK_FN"'
+    /^[[:space:]]*newTag:/ { print overlay_scalar_value($0) }
+  ' "$1"
 }
 
 FAILED=0
