@@ -111,15 +111,16 @@ func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context
 // this list ahead of its own migration, and a missing table must not fail the read for the rest.
 var positionStateCaches = []string{"position_current", "position_daily"}
 
-// CacheRowEstimates reads each cache's estimated row count from pg_class.
+// CacheRowEstimates reads each cache's estimated row count.
 //
-// reltuples, not count(*): these are the tables the tripwire watches for being large, so the read
-// must not scan them. The estimate is maintained by autovacuum's ANALYZE, and is -1 on a table
-// never analyzed since its creation, which is reported as 0 — the tripwire asks whether a table has
-// grown, and "not yet measured" is not evidence that it has.
+// approximate_row_count, not count(*): these are the tables the tripwire watches for being large, so
+// the read must not scan them. Not pg_class.reltuples either — that counts rows in the named relation,
+// and a hypertable's live in its chunks, so reltuples reads 0 the moment someone follows the runbook
+// and converts, leaving the tripwire silently reading empty (measured: 5,000 -> 0 on conversion, where
+// approximate_row_count stayed 5,000). It also reports 0 rather than -1 for a never-analyzed table.
 func (r *PositionMaterializerRepository) CacheRowEstimates(ctx context.Context) (map[string]int64, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT c.relname, GREATEST(c.reltuples, 0)::bigint
+		SELECT c.relname, approximate_row_count(c.oid)
 		  FROM pg_class c
 		  JOIN pg_namespace n ON n.oid = c.relnamespace
 		 WHERE n.nspname = 'public' AND c.relname = ANY($1)`, positionStateCaches)

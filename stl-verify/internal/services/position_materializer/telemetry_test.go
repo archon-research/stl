@@ -123,3 +123,9 @@ func TestRunOnce_CacheSizeReadFailureDoesNotFailTheRun(t *testing.T) {
 		t.Errorf("rows_changed = %d, want 5 -- the run's own metrics must survive the failed read", got)
 	}
 }
+
+// A nil Telemetry is the documented no-op, and the service passes nil when no meter is wired.
+func TestRecordCacheRows_NilTelemetryIsANoOp(t *testing.T) {
+	var tel *Telemetry
+	tel.RecordCacheRows(context.Background(), "position_daily", 42) // must not panic
+}

@@ -113,8 +113,12 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			"materializer", m, "rows_changed", changed, "duration", time.Since(start))
 		s.telemetry.RecordRun(ctx, m, "ok", changed)
 	}
-	s.publishWithheld(ctx)
-	s.publishCacheRows(ctx)
+	// Both reads are skipped on a cancelled context: the loop above has already recorded the abort,
+	// and a shutdown mid-run would otherwise log a spurious read failure on every deploy.
+	if ctx.Err() == nil {
+		s.publishWithheld(ctx)
+		s.publishCacheRows(ctx)
+	}
 	return errors.Join(errs...)
 }
 
@@ -124,8 +128,9 @@ func (s *Service) RunOnce(ctx context.Context) error {
 // run cannot count what they persisted — it reads their level instead, once per run.
 //
 // A failure here does not fail the run, for the same reason as publishWithheld: the projections
-// did their work and the rows are committed. A read that keeps failing shows as the gauge going
-// absent, which is what the alert's own absence handling is for.
+// did their work and the rows are committed. It is logged. Note it does NOT show as the gauge going
+// absent: the SDK exports cumulatively, so the last good level stands for the life of the pod. A
+// read that keeps failing is visible only in the logs until it gets its own signal.
 func (s *Service) publishCacheRows(ctx context.Context) {
 	estimates, err := s.materializer.CacheRowEstimates(ctx)
 	if err != nil {
