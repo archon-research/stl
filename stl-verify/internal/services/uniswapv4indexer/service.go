@@ -89,7 +89,7 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 	if _, err := eventsByID(); err != nil {
 		return nil, err
 	}
-	poolManager, err := poolManagerFor(deps.Pools)
+	poolManager, err := PoolManagerFor(deps.Pools)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +99,7 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 	}
 	baselineSeen := seenSet(everSnapshotted)
 	svc := &UniswapV4Service{
-		poolsByID:    indexPoolsByHash(deps.Pools),
+		poolsByID:    IndexPoolsByHash(deps.Pools),
 		poolsByRow:   indexPoolsByRowID(deps.Pools),
 		pools:        deps.Pools,
 		poolManager:  poolManager,
@@ -172,7 +172,9 @@ func (s *UniswapV4Service) reportExcludedFromSnapshots() {
 		"chainId", s.chainID, "count", len(ids), "poolRowIds", ids, "poolIds", hashes)
 }
 
-func poolManagerFor(pools []RegisteredPool) (common.Address, error) {
+// PoolManagerFor returns the one PoolManager address the registry shares; a
+// mixed registry is two deployments, which the log filter silently mis-handles.
+func PoolManagerFor(pools []RegisteredPool) (common.Address, error) {
 	first := pools[0]
 	for _, pool := range pools[1:] {
 		if pool.PoolManager != first.PoolManager {
@@ -186,7 +188,7 @@ func poolManagerFor(pools []RegisteredPool) (common.Address, error) {
 }
 
 // ValidatePoolKeys has already rejected duplicate PoolIds.
-func indexPoolsByHash(pools []RegisteredPool) map[common.Hash]RegisteredPool {
+func IndexPoolsByHash(pools []RegisteredPool) map[common.Hash]RegisteredPool {
 	byHash := make(map[common.Hash]RegisteredPool, len(pools))
 	for _, p := range pools {
 		byHash[p.PoolIDHash] = p
@@ -213,7 +215,9 @@ func (s *UniswapV4Service) BlockHandler() dexconsumer.BlockHandler {
 	}
 }
 
-// Every per-block value is local, so an SQS redelivery reprocesses from scratch.
+// handleBlock decodes every receipt and snapshots the due pools BEFORE opening
+// the transaction, then persists the block in one. A non-nil error leaves the
+// block for SQS redelivery, and all per-block state is local, so a replay is clean.
 func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.BlockEvent, receipts []shared.TransactionReceipt) error {
 	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
@@ -240,30 +244,37 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 		return err
 	}
 
-	states, ticks, baselined, err := s.snapshotDueSet(ctx, dueSet, acc, coords)
+	snaps, err := s.snapshotDueSet(ctx, dueSet, acc, coords)
 	if err != nil {
 		return err
 	}
 
-	if !acc.hasEvents() && len(states) == 0 && len(ticks) == 0 {
+	if !acc.hasEvents() && snaps.isEmpty() {
 		return nil
 	}
 
-	writes, capturedIns := s.buildBlockWrites(acc, states, ticks, coords.number, coords.version, coords.ts)
+	writes, capturedIns := s.buildBlockWrites(acc, snaps, coords)
 
 	stateRows, err := s.persistBlock(ctx, writes, capturedIns, coords.number)
 	if err != nil {
 		return err
 	}
 
-	s.markSnapshotted(dueSet, baselined, coords.number, coords.version)
+	s.markSnapshotted(dueSet, snaps.baselined, coords.number, coords.version)
 	s.markIndexed(ctx, dueSet)
-	// NotWritingState keys on attempted, not persisted: a healthy replay appends
-	// no rows and would otherwise look like a stall.
-	s.recordPoolsTouched(ctx, acc.touchedIDs)
-	s.telemetry.RecordStateRowsAttempted(ctx, int(stateRows.Attempted))
-	s.telemetry.RecordStateRows(ctx, int(stateRows.Persisted))
+	s.recordBlockMetrics(ctx, acc, stateRows)
 	return nil
+}
+
+// recordBlockMetrics runs only after a successful commit. Attempted is what
+// VectorUniswapV4IndexerNotWritingState keys on; the tick and position counts
+// are what the append-on-change writers persisted, i.e. real table growth.
+func (s *UniswapV4Service) recordBlockMetrics(ctx context.Context, acc blockAccumulators, rows outbound.StateRowCounts) {
+	s.recordPoolsTouched(ctx, acc.touchedIDs)
+	s.telemetry.RecordStateRowsAttempted(ctx, int(rows.Attempted))
+	s.telemetry.RecordStateRows(ctx, int(rows.Persisted))
+	s.telemetry.RecordTickRows(ctx, int(rows.TicksPersisted))
+	s.telemetry.RecordPositionRows(ctx, int(rows.PositionsPersisted))
 }
 
 // Only the snapshot_supported half reaches the due set, so only it may gate
@@ -388,30 +399,82 @@ func (s *UniswapV4Service) decodeBlockEvents(ctx context.Context, receipts []sha
 	return acc, nil
 }
 
-// Runs before the DB transaction opens, so archive-RPC latency never pins a pgx
-// connection.
-func (s *UniswapV4Service) snapshotDueSet(ctx context.Context, dueSet []RegisteredPool, acc blockAccumulators, coords blockCoords) ([]*entity.UniswapV4PoolState, []*entity.UniswapV4Tick, []int64, error) {
-	var states []*entity.UniswapV4PoolState
-	var ticks []*entity.UniswapV4Tick
-	var baselined []int64
+// blockSnapshots is one block's hash-pinned read output. baselined is returned
+// so the caller marks baselineSeen only after a successful persist.
+type blockSnapshots struct {
+	states    []*entity.UniswapV4PoolState
+	ticks     []*entity.UniswapV4Tick
+	positions []*entity.UniswapV4Position
+	baselined []int64
+}
+
+// isEmpty omits baselined: snapshotPool emits a state row for every due pool, so
+// a non-empty baselined implies a non-empty states.
+func (snaps blockSnapshots) isEmpty() bool {
+	return len(snaps.states) == 0 && len(snaps.ticks) == 0 && len(snaps.positions) == 0
+}
+
+func (snaps *blockSnapshots) appendPool(other blockSnapshots) {
+	snaps.states = append(snaps.states, other.states...)
+	snaps.ticks = append(snaps.ticks, other.ticks...)
+	snaps.positions = append(snaps.positions, other.positions...)
+	snaps.baselined = append(snaps.baselined, other.baselined...)
+}
+
+// snapshotDueSet reads the due pools at coords.hash, so no read can answer from
+// a post-reorg fork. It must run BEFORE the DB transaction opens, or archive-RPC
+// latency pins a pgx connection (pool exhaustion is a stall cause).
+func (s *UniswapV4Service) snapshotDueSet(ctx context.Context, dueSet []RegisteredPool, acc blockAccumulators, coords blockCoords) (blockSnapshots, error) {
+	var snaps blockSnapshots
 
 	for _, pool := range dueSet {
-		state, err := SnapshotState(ctx, s.multicaller, pool, coords.hash, coords.number, coords.version, coords.ts)
+		poolSnaps, err := s.snapshotPool(ctx, pool, coords, acc.liqByPool[pool.ID])
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("snapshotting pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
+			return blockSnapshots{}, err
 		}
-		states = append(states, state)
-
-		poolTicks, isFirstSeen, err := s.snapshotPoolTicks(ctx, pool, coords, acc.liqByPool[pool.ID])
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		ticks = append(ticks, poolTicks...)
-		if isFirstSeen {
-			baselined = append(baselined, pool.ID)
-		}
+		snaps.appendPool(poolSnaps)
 	}
-	return states, ticks, baselined, nil
+	return snaps, nil
+}
+
+func (s *UniswapV4Service) snapshotPool(ctx context.Context, pool RegisteredPool, coords blockCoords, liqEvents []*entity.UniswapV4LiquidityEvent) (blockSnapshots, error) {
+	state, err := SnapshotState(ctx, s.multicaller, pool, coords.hash, coords.number, coords.version, coords.ts)
+	if err != nil {
+		return blockSnapshots{}, fmt.Errorf("snapshotting pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
+	}
+
+	ticks, isFirstSeen, err := s.snapshotPoolTicks(ctx, pool, coords, liqEvents)
+	if err != nil {
+		return blockSnapshots{}, err
+	}
+
+	positions, err := s.snapshotPoolPositions(ctx, pool, coords, liqEvents)
+	if err != nil {
+		return blockSnapshots{}, err
+	}
+
+	snaps := blockSnapshots{states: []*entity.UniswapV4PoolState{state}, ticks: ticks, positions: positions}
+	if isFirstSeen {
+		snaps.baselined = []int64{pool.ID}
+	}
+	return snaps, nil
+}
+
+// snapshotPoolPositions has no baseline-enumeration counterpart to BaselineTicks:
+// V4 cannot list a pool's positions, so one is discovered only from a log — hence
+// the prior-version re-read, which reads a fork-orphaned position back as zeroed.
+func (s *UniswapV4Service) snapshotPoolPositions(ctx context.Context, pool RegisteredPool, coords blockCoords, liqEvents []*entity.UniswapV4LiquidityEvent) ([]*entity.UniswapV4Position, error) {
+	keys := TouchedPositions(liqEvents)
+
+	if coords.version > 0 {
+		prior, err := s.repo.PositionsForPoolAtBlock(ctx, s.chainID, pool.ID, coords.number)
+		if err != nil {
+			return nil, fmt.Errorf("reading prior-version positions for pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
+		}
+		keys = MergePositionKeys(keys, prior)
+	}
+
+	return ReadPositions(ctx, s.multicaller, pool, keys, coords.hash, coords.number, coords.version, coords.ts)
 }
 
 // A tick initialized only on an orphaned fork is invisible to the bitmap scan, so
@@ -484,33 +547,35 @@ func (s *UniswapV4Service) readTickChunk(ctx context.Context, pool RegisteredPoo
 	return rows, nil
 }
 
-func (s *UniswapV4Service) buildBlockWrites(acc blockAccumulators, states []*entity.UniswapV4PoolState, ticks []*entity.UniswapV4Tick, bn int64, ver int, ts time.Time) (outbound.UniswapV4BlockWrites, []dexconsumer.ProtocolEventInput) {
+// buildBlockWrites runs before the transaction opens, so any future conversion
+// error fails fast without holding a pooled connection.
+func (s *UniswapV4Service) buildBlockWrites(acc blockAccumulators, snaps blockSnapshots, coords blockCoords) (outbound.UniswapV4BlockWrites, []dexconsumer.ProtocolEventInput) {
 	writes := outbound.UniswapV4BlockWrites{
-		States:          states,
+		States:          snaps.states,
 		Swaps:           acc.swaps,
 		LiquidityEvents: acc.liquidity,
-		Ticks:           ticks,
+		Ticks:           snaps.ticks,
 		PoolEvents:      acc.poolEvts,
+		Positions:       snaps.positions,
 	}
-	return writes, dexconsumer.ToProtocolEventInputs(acc.captured, s.chainID, bn, ver, ts)
+	return writes, dexconsumer.ToProtocolEventInputs(acc.captured, s.chainID, coords.number, coords.version, coords.ts)
 }
 
-// PersistBlock carries only the persisted count back, so attempted rides the
-// closure.
+// PersistBlock carries only the persisted state count back, so the full counts
+// ride the closure.
 func (s *UniswapV4Service) persistBlock(ctx context.Context, writes outbound.UniswapV4BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (outbound.StateRowCounts, error) {
-	var attempted int64
-	persisted, err := dexconsumer.PersistBlock(ctx, s.txMgr, s.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {
+	var counts outbound.StateRowCounts
+	if _, err := dexconsumer.PersistBlock(ctx, s.txMgr, s.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {
 		rows, err := s.repo.SaveBlock(ctx, tx, writes)
 		if err != nil {
 			return 0, fmt.Errorf("persisting uniswap v4 block %d: %w", bn, err)
 		}
-		attempted = rows.Attempted
+		counts = rows
 		return rows.Persisted, nil
-	}, capturedIns, bn)
-	if err != nil {
+	}, capturedIns, bn); err != nil {
 		return outbound.StateRowCounts{}, err
 	}
-	return outbound.StateRowCounts{Attempted: attempted, Persisted: persisted}, nil
+	return counts, nil
 }
 
 // Called only after a successful persist: a failed block must leave its pools due

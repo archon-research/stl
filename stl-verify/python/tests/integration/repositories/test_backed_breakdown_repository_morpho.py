@@ -7,9 +7,11 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.adapters.postgres import backed_breakdown_repository_morpho as morpho_breakdown
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.reference_as_of import utc_now
 from app.domain.entities.backed_breakdown import BackedBreakdown
+from tests.integration.explain import explain_nodes, hypertable_relations
 from tests.integration.seed import (
     insert_morpho_adapter,
     insert_oracle_asset,
@@ -313,6 +315,9 @@ async def _seed_idle_vault(
 #     vault supplies 300,000 USDC (raw: 300_000_000_000)
 #     market utilization = 50% (borrow 500B / supply 1T)
 #
+#   Market C (EXIT/USDC):
+#     vault supplied 200,000 USDC then withdrew it all — newest position is 0
+#
 #   Idle capital = 1M - 400K - 300K = 300K USDC
 #
 # Expected breakdown:
@@ -344,6 +349,7 @@ _V2_VAULT_ADDRESS = b"\x5a" * 20  # VaultV2 (vault_version 3): positions sit on 
 _V2_ADAPTER_A_ADDRESS = b"\x5b" * 20  # member market adapter supplying to market A
 _V2_ADAPTER_B_ADDRESS = b"\x5c" * 20  # second member market adapter, also supplying to market A
 _V2_REMOVED_ADAPTER_ADDRESS = b"\x5d" * 20  # adapter removed from the set; its market B position must not count
+_EXIT_ADDRESS = b"\x6a" * 20  # collateral token of a market the main vault has fully exited
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
@@ -412,6 +418,15 @@ async def _seed_data(db_url: str) -> None:
         await _insert_morpho_market_state(conn, market_b_id, "1000000000000", "500000000000", block)
         # Vault supplies 300K USDC (raw) to market B
         await _insert_morpho_market_position(conn, vault_user_id, market_b_id, "300000000000", block)
+
+        # Market C: a market the vault has fully exited. Its newest position IS the
+        # zero, and the position cache keeps that row rather than pruning it, so the
+        # market still reaches the breakdown and must contribute nothing.
+        exited_token_id = await insert_token(conn, "EXIT", 18, _EXIT_ADDRESS)
+        market_c_id = await _insert_morpho_market(conn, protocol_id, b"\x03" * 32, usdc_id, exited_token_id)
+        await _insert_morpho_market_state(conn, market_c_id, "1000000000000", "900000000000", block)
+        await _insert_morpho_market_position(conn, vault_user_id, market_c_id, "200000000000", block)
+        await _insert_morpho_market_position(conn, vault_user_id, market_c_id, "0", block + 1)
 
         # Idle-only vault: 500K USDC total_assets, no market positions — exercises the
         # vault_idle path when the breakdown is empty.
@@ -698,6 +713,66 @@ async def test_token_ids_are_populated(
     assert by_symbol["USDC"].token_id == test_ids["usdc_id"]
     assert by_symbol["WETH"].token_id == test_ids["weth_id"]
     assert by_symbol["WBTC"].token_id == test_ids["wbtc_id"]
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_fully_exited_market_contributes_no_backing(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """A market the vault has withdrawn from entirely stays out of the breakdown.
+
+    The market is still reachable — the current-position cache keeps the zero row
+    rather than pruning it, so "which markets does this vault hold" still finds it.
+    What must not happen is its collateral token appearing, or its 90%-utilized
+    market state pulling backing away from the two live markets.
+    """
+    result = await repository.get_backed_breakdown(test_ids["vault_id"])
+
+    assert "EXIT" not in {item.symbol for item in result.items}
+    assert {item.symbol: item.backing_pct for item in result.items} == {
+        "USDC": Decimal("53.00"),
+        "WETH": Decimal("32.00"),
+        "WBTC": Decimal("15.00"),
+    }
+
+
+# The four hypertables the pre-VEC-659 query planned per request; each is now
+# reached only through its trigger-maintained *_current cache.
+_MORPHO_BREAKDOWN_HYPERTABLES = [
+    "morpho_vault_state",
+    "morpho_market_state",
+    "morpho_market_position",
+    "onchain_token_price",
+]
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_breakdown_plan_never_touches_a_hypertable(
+    async_db_url: str, repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """The breakdown must plan no chunk of the Morpho or price histories.
+
+    The value tests above pass whether the query reads the caches or reduces the
+    histories per request; only the plan shape distinguishes them, and the plan is
+    what /risk-capital pays for on every request. Plain EXPLAIN, so the assertion
+    does not depend on the seeded rows beyond the module seed having created at
+    least one chunk per history.
+    """
+    engine = create_async_engine(async_db_url)
+    try:
+        async with engine.connect() as conn:
+            nodes = await explain_nodes(
+                conn,
+                morpho_breakdown._MORPHO_BACKED_BREAKDOWN_SQL,
+                {"backed_asset_id": test_ids["vault_id"], "reference_effective_at": utc_now()},
+            )
+            history_relations = await hypertable_relations(conn, _MORPHO_BREAKDOWN_HYPERTABLES)
+    finally:
+        await engine.dispose()
+
+    assert nodes, "EXPLAIN returned no plan nodes"
+    assert len(history_relations) > len(_MORPHO_BREAKDOWN_HYPERTABLES), "the seed created no chunk to assert against"
+    assert not [node for node in nodes if node.get("Relation Name") in history_relations]
 
 
 async def _assert_single_idle_row(
