@@ -113,6 +113,40 @@ func TestProjectionWindowBoundedAfterBootstrapClosesAndIsIdempotent(t *testing.T
 	}
 }
 
+// The window must reach the planner as a SQL literal. A bound parameter is not constified at plan
+// time, so the planner builds paths for every chunk of the real (hypertable) sources and prunes
+// nothing -- 21.8 MB and 754 ms of planning on onchain_token_price when it was measured (VEC-672).
+//
+// Every other test here asserts row-level results, which a bound parameter does not change, so this is
+// the only thing that fails on that mutation. It reads pg_proc.prosrc because the property IS the
+// generated SQL: the predicate is built by format() at runtime and never exists as a plan this test
+// could EXPLAIN. The repo pins other whole-class properties off prosrc the same way
+// (20260818_130000_create_position_state.sql).
+func TestProjectionWindowIsInterpolatedAsALiteral(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	var src string
+	if err := pool.QueryRow(ctx, `
+		SELECT prosrc FROM pg_proc WHERE proname = 'materialize_position_projection'`).Scan(&src); err != nil {
+		t.Fatalf("read the function body: %v", err)
+	}
+	// Positive control: this is really the materializer's body, so the checks below cannot pass because
+	// prosrc came back empty or from some other function. Anchored on the batch table the window
+	// filters, which survives any rewrite of how the predicate itself is built.
+	if !strings.Contains(src, "CREATE TEMP TABLE _mpp_src") {
+		t.Fatalf("the function body does not build _mpp_src; this test is reading the wrong function")
+	}
+	if !strings.Contains(src, `format('WHERE block_timestamp > now() - interval %L', p_window::text)`) {
+		t.Error("the window predicate is not built with format(... %L ...); a bound window prunes no chunks (AGENTS.md, \"A time window on a hypertable is a SQL literal\")")
+	}
+	// USING is how a bound parameter would reach the EXECUTE, which is the mutation this guards.
+	if strings.Contains(src, "USING p_window") {
+		t.Error("the window is passed to EXECUTE with USING, so it reaches the planner as a bind parameter rather than a literal")
+	}
+}
+
 // A zero or negative window would silently select nothing at all, so it is refused rather than run.
 func TestProjectionWindowRefusesANonPositiveInterval(t *testing.T) {
 	ctx := context.Background()
