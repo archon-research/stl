@@ -42,7 +42,10 @@ var vec535Pairs = []vec535Pair{
 }
 
 const (
-	vec535RowsPerPair      = 30_000 // 120,000 rows over four pairs, a little above staging's 114,734
+	// Every seeded row fires allocation_position's two row triggers and the migrator package
+	// shares one ten-minute go test budget; at a ten-minute stride 2,000 rows still span 14 chunks.
+	vec535RowsPerPair      = 2_000
+	vec535VaultStride      = "10 minutes"
 	vec535VaultFirstBlock  = 1_000_001
 	vec535ShareAfterBlock  = 2_000_001
 	vec535ShareBeforeBlock = 900_000
@@ -75,7 +78,7 @@ func seedVec535(ctx context.Context, t *testing.T, pool *pgxpool.Pool, vaultRows
 		if p.preWindowShareRows {
 			insertVec535Sweeps(ctx, t, pool, vec535Sweeps{p.chainID, shareID, s.primeID, p.proxy, vec535ShareBeforeBlock, "2036-04-01 00:00:00+00", "1 hour", vec535PreWindowRows, vec535VaultBalance})
 		}
-		insertVec535Sweeps(ctx, t, pool, vec535Sweeps{p.chainID, vaultID, s.primeID, p.proxy, vec535VaultFirstBlock, "2036-05-01 00:00:00+00", "1 minute", vaultRowsPerPair, vec535VaultBalance})
+		insertVec535Sweeps(ctx, t, pool, vec535Sweeps{p.chainID, vaultID, s.primeID, p.proxy, vec535VaultFirstBlock, "2036-05-01 00:00:00+00", vec535VaultStride, vaultRowsPerPair, vec535VaultBalance})
 		insertVec535Sweeps(ctx, t, pool, vec535Sweeps{p.chainID, shareID, s.primeID, p.proxy, vec535ShareAfterBlock, "2036-06-01 00:00:00+00", "1 hour", vec535PostWindowRows, vec535AfterBalance})
 	}
 	return s
@@ -272,7 +275,7 @@ func assertRecoveryStatementIsInert(ctx context.Context, t *testing.T, pool *pgx
 	}
 }
 
-// TestVEC535Rekey_MovesVaultHistoryOntoTheShare seeds a staging-sized vault history across
+// TestVEC535Rekey_MovesVaultHistoryOntoTheShare seeds a vault history across several
 // compressed chunks and checks the file re-keys every row, drops the four cache rows and the
 // four vault tokens, lowers created_at_block only where the share had no earlier row, leaves
 // the cache in agreement with the recovery statement, and is a no-op on a second run.
@@ -304,8 +307,8 @@ func TestVEC535Rekey_MovesVaultHistoryOntoTheShare(t *testing.T) {
 }
 
 // TestVEC535Rekey_DecompressionCapCountsPerStatement pins down what the cap the file raises
-// counts. Four pairs of 30,000 compressed rows: 20,000 must trip, 50,000 must pass because
-// each UPDATE is counted on its own, and the file as written must pass.
+// counts: a cap below one pair's row count must trip, one above it must pass although the four
+// UPDATEs together exceed it, and the file as written must pass.
 func TestVEC535Rekey_DecompressionCapCountsPerStatement(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -323,12 +326,13 @@ func TestVEC535Rekey_DecompressionCapCountsPerStatement(t *testing.T) {
 		return "SET LOCAL timescaledb.max_tuples_decompressed_per_dml_transaction = " + strconv.Itoa(n) + ";\n" + stripped
 	}
 
-	err := probeAsMigrator(ctx, pool, withCap(20_000))
+	tripCap, passCap := vec535RowsPerPair/2, vec535RowsPerPair*3/2
+	err := probeAsMigrator(ctx, pool, withCap(tripCap))
 	if err == nil || !strings.Contains(err.Error(), "decompression limit") {
-		t.Fatalf("cap 20,000 under 30,000-row UPDATEs: got %v, want a tuple decompression limit error", err)
+		t.Fatalf("cap %d under %d-row UPDATEs: got %v, want a tuple decompression limit error", tripCap, vec535RowsPerPair, err)
 	}
-	if err := probeAsMigrator(ctx, pool, withCap(50_000)); err != nil {
-		t.Fatalf("cap 50,000 over four 30,000-row UPDATEs: %v (the cap no longer counts per statement)", err)
+	if err := probeAsMigrator(ctx, pool, withCap(passCap)); err != nil {
+		t.Fatalf("cap %d over four %d-row UPDATEs: %v (the cap no longer counts per statement)", passCap, vec535RowsPerPair, err)
 	}
 	if err := runAsMigrator(ctx, pool, migration); err != nil {
 		t.Fatalf("the file as written: %v", err)
