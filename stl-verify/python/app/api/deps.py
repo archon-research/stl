@@ -128,18 +128,27 @@ async def get_principal(request: Request) -> Principal | None:
         raise HTTPException(status_code=503, detail="token verification unavailable") from exc
 
 
-def require_role(role: str) -> Callable:
+class RequireRole:
     """Coarse RBAC gate (ADR-011 Plane 2, layer 1) — applied per ROUTER.
 
     Never as global middleware: kubelet probes hit /v1/status and /v1/ready
     directly and would 401 → CrashLoop. Keycloak expands composites, so an
     org:admin token also carries org:analyst and org:viewer.
+
+    A class rather than a closure so ``required_role`` is a typed attribute the
+    route walk in tests/unit/auth/test_app_factory_enforcement.py can read
+    (``_walk_v1_routes``), and so an ``isinstance`` check is what makes the
+    marker honest. Declare the gate in ``dependencies=`` on the router or route;
+    the walk reads that list and the endpoint signature, nothing else.
     """
 
-    async def _dep(request: Request, principal: Principal | None = Depends(get_principal)) -> None:
+    def __init__(self, role: str) -> None:
+        self.required_role = role
+
+    async def __call__(self, request: Request, principal: Principal | None = Depends(get_principal)) -> None:
         if principal is None:  # auth off
             return
-        if role not in principal.roles:
+        if self.required_role not in principal.roles:
             log_auth_event(
                 request,
                 gate="role",
@@ -147,16 +156,13 @@ def require_role(role: str) -> Callable:
                 reason="missing_role",
                 status=403,
                 principal=principal,
-                resource=f"role:{role}",
+                resource=f"role:{self.required_role}",
             )
-            raise HTTPException(status_code=403, detail=f"requires role {role}")
+            raise HTTPException(status_code=403, detail=f"requires role {self.required_role}")
 
-    # Route-walk contract (tests/unit/auth/test_app_factory_enforcement.py):
-    # the no-unclassified-route test recognises a role gate by this attribute.
-    # Set at the factory so every Depends site inherits it.
-    _dep.required_role = role  # ty: ignore[unresolved-attribute]
 
-    return _dep
+def require_role(role: str) -> RequireRole:
+    return RequireRole(role)
 
 
 require_viewer = require_role("org:viewer")

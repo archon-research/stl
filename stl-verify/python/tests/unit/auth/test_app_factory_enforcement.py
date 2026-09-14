@@ -17,22 +17,15 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 import pytest
-from fastapi import APIRouter, FastAPI
-
-# The route walk goes through iter_route_contexts because on FastAPI 0.141.x
-# include_router stores whole routers as _IncludedRouter entries in app.routes
-# without flattening APIRoute copies — iterating app.routes directly sees zero
-# /v1 routes and asserts nothing. iter_route_contexts is what get_openapi
-# itself walks, and its contexts merge router-level and route-level
-# dependencies. Imported at module level so a FastAPI upgrade that removes it
-# breaks collection loudly instead of letting the walk go vacuous.
-from fastapi.routing import APIRoute, APIWebSocketRoute, iter_route_contexts
+from fastapi import APIRouter, Depends, FastAPI
+from fastapi.routing import APIRoute, iter_route_contexts
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
-from starlette.routing import Mount
+from starlette.routing import Route
 
 from app.adapters.postgres.reference_as_of import utc_now
 from app.api import deps
+from app.api.deps import RequireRole
 from app.auth.jwt import Principal, TokenError
 from app.config import Settings
 from app.main import create_app
@@ -223,143 +216,204 @@ def test_the_same_blanks_are_fine_while_auth_is_dark() -> None:
     assert create_app(dark) is not None
 
 
-# The two kubelet-reached probes are the ONLY /v1 routes allowed to ship
-# without a role gate (see the include_router comment in create_app). Named
-# explicitly rather than pattern-matched so an addition here is a reviewed,
-# deliberate act.
-PROBE_PATHS = {"/v1/status", "/v1/ready"}
+# The pinned /v1 route table: every (path, method) create_app mounts and the
+# role each must carry (see the include_router block in create_app). Empty set =
+# the two kubelet probes, the only routes allowed to ship ungated.
+VIEWER = frozenset({"org:viewer"})
+ANALYST = frozenset({"org:analyst"})
+EXPECTED_V1_GATES: dict[tuple[str, str], frozenset[str]] = {
+    ("/v1/status", "GET"): frozenset(),
+    ("/v1/ready", "GET"): frozenset(),
+    ("/v1/allocations/activity", "GET"): VIEWER,
+    ("/v1/chains", "GET"): VIEWER,
+    ("/v1/data-sources", "GET"): VIEWER,
+    ("/v1/primes", "GET"): VIEWER,
+    ("/v1/primes/{prime_id}/allocations", "GET"): VIEWER,
+    ("/v1/primes/{prime_id}/debt", "GET"): VIEWER,
+    ("/v1/primes/{prime_id}/exposure", "GET"): VIEWER,
+    ("/v1/primes/{prime_id}/risk-capital", "GET"): VIEWER,
+    ("/v1/primes/{prime_id}/total-capital", "GET"): VIEWER,
+    ("/v1/protocol-events", "GET"): VIEWER,
+    ("/v1/protocols", "GET"): VIEWER,
+    ("/v1/provenance/available", "GET"): VIEWER,
+    ("/v1/tokens", "GET"): VIEWER,
+    ("/v1/tokens/{chain_id}/{token_address}", "GET"): VIEWER,
+    ("/v1/tokens/{chain_id}/{token_address}/price", "GET"): VIEWER,
+    ("/v1/tokens/{token_id}", "GET"): VIEWER,
+    ("/v1/tokens/{token_id}/price", "GET"): VIEWER,
+    ("/v1/tx/{tx_hash}/events", "GET"): VIEWER,
+    ("/v1/risk/rrc", "GET"): ANALYST,
+    ("/v1/risk/rrc", "POST"): ANALYST,
+    ("/v1/risk/rrc/scenario", "POST"): ANALYST,
+    ("/v1/risk/{chain_id}/{token_address}/bad-debt", "GET"): ANALYST,
+    ("/v1/risk/{chain_id}/{token_address}/breakdown", "GET"): ANALYST,
+    ("/v1/risk/{receipt_token_id}/bad-debt", "GET"): ANALYST,
+    ("/v1/risk/{receipt_token_id}/breakdown", "GET"): ANALYST,
+}
+
+# FastAPI's own documentation routes: plain Starlette Routes, outside /v1, the
+# only non-APIRoute entries the app is allowed to contain.
+FRAMEWORK_ROUTES = {
+    ("Route", "/openapi.json"),
+    ("Route", "/docs"),
+    ("Route", "/docs/oauth2-redirect"),
+    ("Route", "/redoc"),
+}
 
 
-def _walk_v1_routes(app: FastAPI) -> list[tuple[str, set[str]]]:
-    """Every /v1 APIRoute in the app, with the role-gate markers it carries."""
-    walked = []
+@pytest.fixture(scope="module")
+def enforced_app() -> FastAPI:
+    return create_app(_settings(auth_enabled=True))
+
+
+def _roles_of(rc) -> frozenset[str]:
+    """Gates on one route, whether declared in ``dependencies=`` or as an
+    endpoint parameter default; the merged context only carries the former."""
+    declared = (d.dependency for d in rc.dependencies)
+    in_signature = (d.call for d in rc.original_route.dependant.dependencies)
+    return frozenset(d.required_role for d in (*declared, *in_signature) if isinstance(d, RequireRole))
+
+
+def _walk_v1_routes(app: FastAPI) -> dict[tuple[str, str], frozenset[str]]:
+    """The live /v1 route table, keyed like EXPECTED_V1_GATES.
+
+    Walks iter_route_contexts, not app.routes: on FastAPI 0.141 include_router
+    stores whole routers as _IncludedRouter entries without flattening, so
+    app.routes holds zero /v1 APIRoutes. The contexts merge router-level and
+    route-level ``dependencies=``.
+    """
+    table = {}
     for rc in iter_route_contexts(app.routes):
-        if not isinstance(rc.original_route, APIRoute):
+        if not isinstance(rc.original_route, APIRoute) or not (rc.path or "").startswith("/v1"):
             continue
-        if not (rc.path or "").startswith("/v1"):
+        for method in rc.methods or ():
+            table[(rc.path, method)] = _roles_of(rc)
+    return table
+
+
+def _unclassifiable_routes(app: FastAPI) -> list[str]:
+    """Every route entry that is not an APIRoute, minus FastAPI's own docs.
+
+    Deny by default: a Mount serves a sub-app that inherits none of the
+    including router's gates, and a plain Route or websocket reaches the
+    contexts with an empty path, so a /v1 filter would let them through. Any
+    new route type therefore fails here until someone teaches the walk about it.
+    """
+    found = []
+    for rc in iter_route_contexts(app.routes):
+        route = rc.original_route
+        kind = type(route).__name__
+        if isinstance(route, APIRoute) or (kind, rc.path) in FRAMEWORK_ROUTES:
             continue
-        marks: set[str] = set()
-        for d in rc.dependencies:
-            role = getattr(d.dependency, "required_role", None)
-            if role is None:
-                continue
-            # The marker is only honest on the require_role factory's closure;
-            # stamped on anything else it would satisfy this walk without
-            # actually gating.
-            assert d.dependency.__qualname__ == "require_role.<locals>._dep"
-            assert isinstance(role, str) and role
-            marks.add(role)
-        walked.append((rc.path, marks))
-    return walked
+        found.append(f"{kind} {rc.path or getattr(route, 'path', '')}")
+    return sorted(found)
 
 
-def test_every_v1_route_carries_a_role_gate() -> None:
-    """ADR-015: an unclassified /v1 path fails closed — a router mounted
-    without dependencies= never authenticates at all, and the named-path tests
-    above cannot see a route they do not know about."""
-    walked = _walk_v1_routes(create_app(_settings(auth_enabled=True)))
-
-    ungated = sorted({path for path, marks in walked if not marks} - PROBE_PATHS)
-    assert not ungated, f"/v1 routes shipped without a role gate: {ungated}"
+def test_the_v1_route_table_is_exactly_the_pinned_one(enforced_app: FastAPI) -> None:
+    """One assertion covers three regressions: a route shipped ungated, a route
+    whose gate was downgraded, and a router dropping out of the walk entirely.
+    The last is why this is an equality and not a subset check."""
+    assert _walk_v1_routes(enforced_app) == EXPECTED_V1_GATES
 
 
-def test_the_probe_allow_list_matches_real_routes() -> None:
-    """An allow-list entry matching no route is rot — it would silently excuse
-    a future route of the same name."""
-    walked = _walk_v1_routes(create_app(_settings(auth_enabled=True)))
+def test_no_route_type_the_walk_cannot_classify(enforced_app: FastAPI) -> None:
+    unclassifiable = _unclassifiable_routes(enforced_app)
 
-    missing = PROBE_PATHS - {path for path, _ in walked}
-    assert not missing, f"allow-listed probe paths match no route: {sorted(missing)}"
+    assert not unclassifiable, f"route types the /v1 gate walk cannot classify: {unclassifiable}"
 
 
-def test_the_probes_carry_no_role_gate() -> None:
-    """The inverse regression: gating the status router 401s the kubelet's
-    direct probe requests and CrashLoops the pod."""
-    walked = _walk_v1_routes(create_app(_settings(auth_enabled=True)))
+def test_an_unknown_v1_path_is_not_served_by_the_spa(enforced_app: FastAPI) -> None:
+    """The static catch-all claims every unmatched URL; only a reserved-prefix
+    list keeps it off /v1. A route-table walk cannot see that, so probe it."""
+    response = TestClient(enforced_app).get("/v1/definitely-not-a-route")
 
-    gated = sorted(path for path, marks in walked if path in PROBE_PATHS and marks)
-    assert not gated, f"kubelet probe routes grew a role gate: {gated}"
+    assert response.status_code == 404
+    assert "text/html" not in response.headers.get("content-type", "")
 
 
-def test_the_route_walk_catches_a_bare_router() -> None:
-    """Self-test of the walk itself: a router mounted with no dependencies=
-    must surface as ungated, or every assertion above is vacuous."""
+# --- self-tests of the two helpers -------------------------------------------
+
+
+def _v1_app(router: APIRouter) -> FastAPI:
     app = FastAPI()
+    app.include_router(router, prefix="/v1")
+    return app
+
+
+def test_the_walk_reports_a_bare_router_as_ungated() -> None:
     router = APIRouter()
 
     @router.get("/naked")
     async def naked() -> dict:  # pragma: no cover — never called
         return {}
 
-    app.include_router(router, prefix="/v1")
-
-    assert _walk_v1_routes(app) == [("/v1/naked", set())]
+    assert _walk_v1_routes(_v1_app(router)) == {("/v1/naked", "GET"): frozenset()}
 
 
-def test_the_walk_covers_every_documented_v1_path() -> None:
-    """A completeness floor. The walk above only ever reports what it managed
-    to reach, so a FastAPI change that makes iter_route_contexts yield a subset
-    leaves every assertion green while whole routers drop out of scope.
-    app.openapi() reaches the same routes by an independent code path."""
-    app = create_app(_settings(auth_enabled=True))
+def test_the_walk_sees_a_gate_declared_as_a_parameter_default() -> None:
+    router = APIRouter()
 
-    documented = {p for p in app.openapi()["paths"] if p.startswith("/v1")}
-    missed = sorted(documented - {path for path, _ in _walk_v1_routes(app)})
+    @router.get("/in-signature")
+    async def gated(_: None = Depends(deps.require_viewer)) -> dict:  # pragma: no cover — never called
+        return {}
 
-    assert not missed, f"/v1 paths the role-gate walk never saw: {missed}"
+    assert _walk_v1_routes(_v1_app(router)) == {("/v1/in-signature", "GET"): VIEWER}
 
 
-def _unclassifiable_routes(app: FastAPI) -> list[str]:
-    """Route entries under /v1 that the role-gate model cannot express.
+class _Impostor:
+    """Carries the marker without being a gate."""
 
-    A Mount hands the request to another ASGI app, which inherits none of the
-    including router's dependencies; an APIWebSocketRoute reaches
-    iter_route_contexts with an empty path and no merged dependencies, so the
-    walk above cannot see either its path or its gates. Both are therefore
-    invisible to _walk_v1_routes rather than reported ungated by it, which is
-    the one failure mode a fail-closed test must not have.
-    """
-    found = []
-    for rc in iter_route_contexts(app.routes):
-        route = rc.original_route
-        if not isinstance(route, (APIWebSocketRoute, Mount)):
-            continue
-        # rc.path is the mount path for a Mount and empty for a websocket, so
-        # fall back to the undecorated path rather than reporting "".
-        path = rc.path or getattr(rc.route, "path", "") or "?"
-        if isinstance(route, Mount) and not path.startswith("/v1"):
-            continue
-        found.append(f"{type(route).__name__} {path}")
-    return sorted(found)
+    required_role = "org:viewer"
+
+    async def __call__(self) -> None:  # pragma: no cover — never called
+        return None
 
 
-def test_no_v1_route_type_the_walk_cannot_classify() -> None:
-    """Extending the app past plain HTTP routes has to be a deliberate act that
-    also extends this enforcement, not something that ships gate-free because
-    the walk silently skipped it."""
-    unclassifiable = _unclassifiable_routes(create_app(_settings(auth_enabled=True)))
+def test_the_walk_ignores_a_marker_that_is_not_a_gate() -> None:
+    router = APIRouter(dependencies=[Depends(_Impostor())])
 
-    assert not unclassifiable, (
-        "route types the /v1 role-gate walk cannot classify: "
-        f"{unclassifiable} — gate them explicitly and teach _walk_v1_routes about them"
-    )
+    @router.get("/faked")
+    async def faked() -> dict:  # pragma: no cover — never called
+        return {}
+
+    assert _walk_v1_routes(_v1_app(router)) == {("/v1/faked", "GET"): frozenset()}
 
 
-def test_the_unclassifiable_check_catches_a_websocket_and_a_mount() -> None:
-    """Self-test, same reason as the bare-router one above."""
-    ws_app = FastAPI()
+def test_a_websocket_under_v1_is_unclassifiable() -> None:
+    """A websocket does inherit router gates at runtime; they just are not
+    readable from the context, so the walk refuses rather than guesses."""
     router = APIRouter()
 
     @router.websocket("/socket")
     async def socket(websocket) -> None:  # pragma: no cover — never called
         return None
 
-    ws_app.include_router(router, prefix="/v1")
+    assert _unclassifiable_routes(_v1_app(router)) == ["APIWebSocketRoute /socket"]
 
-    mount_app = FastAPI()
-    mount_app.mount("/v1/sub", FastAPI())
 
-    assert _unclassifiable_routes(ws_app) == ["APIWebSocketRoute /socket"]
-    assert _unclassifiable_routes(mount_app) == ["Mount /v1/sub"]
-    assert _walk_v1_routes(ws_app) == []
-    assert _walk_v1_routes(mount_app) == []
+def test_a_top_level_mount_is_unclassifiable() -> None:
+    app = FastAPI()
+    app.mount("/v1/sub", FastAPI())
+
+    assert _unclassifiable_routes(app) == ["Mount /v1/sub"]
+
+
+def test_a_mount_inside_an_included_router_is_unclassifiable() -> None:
+    """The shape a /v1 filter would miss: the context carries an empty path."""
+    router = APIRouter()
+    router.mount("/sub", FastAPI())
+
+    assert _unclassifiable_routes(_v1_app(router)) == ["Mount /sub"]
+
+
+def test_a_plain_starlette_route_under_v1_is_unclassifiable() -> None:
+    router = APIRouter()
+    router.routes.append(Route("/plain", lambda request: None))  # pragma: no cover — never called
+
+    assert _unclassifiable_routes(_v1_app(router)) == ["Route /plain"]
+
+
+def test_a_new_app_contains_only_the_framework_routes() -> None:
+    """Pins FRAMEWORK_ROUTES to what FastAPI actually registers, so an upgrade
+    that adds a route type shows up here rather than being silently allowed."""
+    assert _unclassifiable_routes(FastAPI()) == []
