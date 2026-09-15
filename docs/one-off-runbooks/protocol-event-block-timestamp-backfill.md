@@ -6,6 +6,7 @@ applies_to: stl-verify
 ticket: VEC-711
 related_docs:
   - docs/adr/0005-time-series-api-surface.md   # why the series needs an event-time column
+retire: delete this file in the PR that records the completed run
 ---
 
 # Backfilling `protocol_event.block_timestamp`

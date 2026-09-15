@@ -14,6 +14,7 @@ Canonical guidance lives in these `AGENTS.md` files. Each directory also has a o
 - **stl-verify/** — main Go service (block watcher, backfill, backup worker). Ports and Adapters (Hexagonal).
 - **k8s/** — Kubernetes manifests (Kustomize) for all environments.
 - **alerts/**, **docs/runbooks/** — Prometheus alert rules and their matching runbooks.
+- **docs/one-off-runbooks/** — procedures that run a fixed number of times, then are deleted.
 - **docs/** — architecture diagrams and entity relations.
 
 Infrastructure code (Terraform/OpenTofu) lives in a separate repository for security reasons.

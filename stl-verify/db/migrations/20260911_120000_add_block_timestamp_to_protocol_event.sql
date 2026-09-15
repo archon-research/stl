@@ -8,7 +8,7 @@
 -- cannot be corrected in place. A separate column is the only way to date them.
 --
 -- DDL only. The backfill is out of band, per VEC-491's precedent for this table:
--- docs/protocol-event-block-timestamp-backfill.md. A whole-table UPDATE over
+-- docs/one-off-runbooks/protocol-event-block-timestamp-backfill.md. A whole-table UPDATE over
 -- compressed chunks does not belong in the migrator's single transaction.
 --
 -- Nullable until that backfill lands, and permanently for any row it cannot date;
