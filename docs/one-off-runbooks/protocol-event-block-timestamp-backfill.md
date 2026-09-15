@@ -50,17 +50,66 @@ history stays undated and VEC-735 flips the axis on a series that is still part 
 SET timescaledb.enable_tiered_reads = 'on';
 ```
 
-## Cost and headroom
+## What the run costs
 
-Each window decompresses the chunks it touches, rewrites every row in them, and leaves them
-uncompressed until `policy_compression` (`compress_after` 2 days) catches up. Two consequences to
-size before starting: the table needs disk headroom for its decompressed form (prod holds 2.0 GB
-compressed across 358 chunks, several times that uncompressed), and the recompression that follows
-is its own background load.
+Everything below was measured on prod on 2026-09-15 and is a snapshot, not an invariant. The
+`created_at` month is the Step 1 window; chunks and compressed size are what that window touches.
 
-Decompression itself is not the bottleneck — a warm prod read of 136k rows including `event_data`
-measured 149 ms. The write path is, and it cannot be measured without writing, so treat the first
-window as the calibration run and extrapolate from what it reports rather than from a guess.
+| Window | Rows | Step 1 (whole-second) | Step 2 (sub-second) | Chunks | Compressed |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2025-09 | 162 | 162 | — | 8 | 848 kB |
+| 2025-10 | 283 | 283 | — | 31 | 3.1 MB |
+| 2025-11 | 303 | 303 | — | 30 | 3.0 MB |
+| 2025-12 | 729 | 729 | — | 31 | 3.5 MB |
+| 2026-01 | 7,007 | 7,007 | — | 31 | 5.2 MB |
+| 2026-02 | 148,179 | 13,935 | 134,244 | 28 | 19 MB |
+| 2026-03 | 827,217 | 38,805 | 788,412 | 31 | 108 MB |
+| 2026-04 | 747,348 | 460,103 | 287,245 | 30 | 102 MB |
+| 2026-05 | 1,542,999 | 1,542,999 | — | 31 | 152 MB |
+| 2026-06 | 2,564,606 | 2,564,606 | — | 30 | 224 MB |
+| 2026-07 | 3,400,513 | 3,400,513 | — | 31 | 284 MB |
+| 2026-08 | 3,842,213 | 3,842,213 | — | 31 | 310 MB |
+| 2026-09 (partial) | 3,391,028 | 3,391,028 | — | 15 | 868 MB |
+| **Total** | **16,471,952** | **15,262,051** | **1,209,901** | **358** | **2.0 GB** |
+
+Two thirds of Step 1 is the last four months. The first five windows are rounding error and worth
+running first only because they are the ones the tiering clock reaches.
+
+Step 2's residual, once `block_meta` covers it: 242,328 mainnet and 57,233 Avalanche blocks.
+
+### Disk headroom
+
+An `UPDATE` decompresses each chunk it touches and leaves it that way until `policy_compression`
+(`compress_after` 2 days, job runs every 12h) catches up. Prod's current uncompressed chunks give
+the expansion factor directly — the three newest chunks average 216 MB against 12 MB for the
+compressed ones, and per row that is ~956 B against ~97 B, so call it **10x**:
+
+```sql
+SELECT c.is_compressed, count(*) AS chunks,
+       pg_size_pretty(sum(d.total_bytes)) AS total,
+       pg_size_pretty((sum(d.total_bytes) / count(*))::bigint) AS avg_chunk
+FROM timescaledb_information.chunks c
+JOIN chunks_detailed_size('protocol_event') d ON d.chunk_name = c.chunk_name
+WHERE c.hypertable_name = 'protocol_event' AND c.range_start >= date_trunc('month', now())
+GROUP BY 1;
+```
+
+One month at a time is what keeps that bounded: the heaviest window (2026-08, 310 MB) peaks around
+3 GB decompressed, against ~20 GB if the whole table were done in one statement. Confirm the
+instance has that headroom for the largest window before starting, and let recompression catch up
+between windows rather than queueing every month back to back.
+
+### Wall clock
+
+Not estimated here, deliberately. Decompression is not the bottleneck — a warm read of 136k rows
+including `event_data` measured 149 ms — and the write path that is cannot be measured without
+writing, which is what the sign-off gates. Any number produced before the first window would be a
+guess dressed as a figure.
+
+Run the smallest windows first (2025-09 through 2026-01, ~8.5k rows over 131 chunks): they
+establish the per-chunk overhead, which is what dominates them, while risking almost nothing. Then
+one mid-size window (2026-05, 1.5M rows over 31 chunks) gives the per-row rate. Those two numbers
+size the rest, and the ticket asks for them recorded either way.
 
 ## Where the two cohorts come from
 
@@ -70,8 +119,8 @@ value, so `created_at` on a row written today *is* event time. That has held sin
 `DEFAULT NOW()` and holds ingest time.
 
 The two are told apart without a join: a block-header timestamp is whole-second, `NOW()` is not.
-Re-measure both cohorts before running anything — the numbers below were measured on prod on
-2026-09-15, and are a measurement, not an invariant:
+Re-measure the split before running anything; the sizes it reported on prod are in
+[What the run costs](#what-the-run-costs):
 
 ```sql
 SELECT count(*) FILTER (WHERE created_at =  date_trunc('second', created_at)) AS whole_sec,
@@ -81,9 +130,9 @@ SELECT count(*) FILTER (WHERE created_at =  date_trunc('second', created_at)) AS
 FROM protocol_event;
 ```
 
-On prod that reported 15.3M whole-second rows of 16.5M, against 1.2M sub-second ones confined to
-`2026-02-18 14:23:15.93Z .. 2026-04-14 12:02:18.12Z`. Rows older than that window are whole-second
-too: they were written by backfillers that always supplied block time.
+The sub-second rows are confined to `2026-02-18 14:23:15.93Z .. 2026-04-14 12:02:18.12Z`. Rows
+older than that window are whole-second too: they were written by backfillers that always supplied
+block time.
 
 Spot-checked against mainnet before relying on the split:
 
@@ -132,9 +181,9 @@ its fill entry for exactly that reason, even though the column is native now —
 the loader stops enumerating this table's blocks, silently, and every value here resolves NULL. The
 entry goes when Step 3 reports zero, in the PR that retires this file.
 
-Size the residual first — it is the distinct-block count the `block_meta` load has to cover, and at
-the time of writing it was 242,328 mainnet and 57,233 Avalanche blocks, with `block_meta` still
-empty on prod:
+Size the residual first — it is the distinct-block count the `block_meta` load has to cover
+(counted in [What the run costs](#what-the-run-costs); `block_meta` was still empty on prod when
+this was written):
 
 ```sql
 SELECT chain_id, count(*) AS distinct_blocks
