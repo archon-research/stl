@@ -22,32 +22,6 @@ JOIN "user"       u ON u.id = o.user_id;
 
 COMMENT ON VIEW position_morpho_vault IS '[Operational] VEC-403 projection: Morpho vault positions as native position rows, one per vault deposit; instrument_key = vault contract address, holder_id = depositor address, quantity = assets in the vault asset''s native decimals, deal_type LOAN. Emits the position_state column contract; closure is applied by materialize_position_projection().';
 
--- Bounded source for a windowed run (VEC-566): the view's SELECT with the bound INSIDE the scan of
--- morpho_vault_position on timestamp, its partition column -- a bound outside the view does not pass the
--- DISTINCT ON. Single STABLE SELECT, so it inlines and a literal argument is constified at plan time.
-CREATE OR REPLACE FUNCTION position_morpho_vault_since(p_since timestamptz)
-    RETURNS SETOF position_morpho_vault
-    LANGUAGE sql STABLE AS $fn$
-SELECT v.chain_id, v.protocol_id,
-       encode(v.address, 'hex'),
-       encode(u.address, 'hex'),
-       o.quantity,
-       'LOAN'::text,
-       o.block_number, o.block_version, o.processing_version, o.block_timestamp
-FROM (
-    SELECT DISTINCT ON (p.user_id, p.morpho_vault_id, p.block_number, p.block_version, p.processing_version)
-           p.user_id, p.morpho_vault_id, p.assets AS quantity,
-           p.block_number, p.block_version, p.processing_version, p.timestamp AS block_timestamp
-    FROM morpho_vault_position p
-    WHERE p.timestamp > p_since
-    ORDER BY p.user_id, p.morpho_vault_id, p.block_number, p.block_version, p.processing_version, p.timestamp
-) o
-JOIN morpho_vault v ON v.id = o.morpho_vault_id
-JOIN "user"       u ON u.id = o.user_id;
-$fn$;
-
-COMMENT ON FUNCTION position_morpho_vault_since(timestamptz) IS '[Operational] VEC-566 bounded source of position_morpho_vault: the same rows as the view for observations with morpho_vault_position.timestamp after p_since, the bound inside the source scan so a windowed materialize_position_projection() run opens only the chunks after it. Must stay the view''s SELECT plus that one predicate.';
-
 -- Refuses first: holder_id is the depositor's address alone while chain_id comes from the vault, and
 -- morpho_vault_position constrains neither against the other. Dropped, not replaced: a surviving old
 -- signature makes a run-less call ambiguous.
