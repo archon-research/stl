@@ -943,9 +943,11 @@ carries only the task queue, so a
 [`VectorCronjobRunFailing`](#vectorcronjobrunfailing) for
 `uniswap-v4-position-bootstrap` names the worker, and the Temporal UI's execution
 list (namespace **`vector`**) names the type. The pod answers too:
-`kubectl -n vector logs deploy/uniswap-v4-position-bootstrap` — each run closes
-with its line from the table above, at Warn with the partial counters when the
-attempt failed.
+`kubectl -n vector logs deploy/uniswap-v4-position-bootstrap`. A run that
+completed closes with its line from the table above; a failed attempt logs
+`uniswap-v4 position bootstrap stopped with partial progress` or
+`uniswap-v4 posm transfer backfill stopped with partial progress` at Warn, carrying
+the counters it reached — grep for `stopped with partial progress` after a failure.
 
 When to run each, how to start a run, what each does and how a killed attempt
 resumes are in the indexer runbook:

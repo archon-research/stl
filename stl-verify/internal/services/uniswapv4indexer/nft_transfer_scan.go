@@ -92,10 +92,9 @@ func decodeScannedNFTTransfer(
 	return transfer, nil
 }
 
-// eth_getLogs carries no timestamp in the JSON-RPC spec; Alchemy returns one per
-// log, which is the only reason this backfill needs no per-block header read. An
-// absent or zero one is refused rather than defaulted: it would land the row in
-// 1970, outside the block_timestamp band every sibling read prunes chunks with.
+// Alchemy returns a timestamp per log where the JSON-RPC spec carries none, which
+// is why no header read is needed. A missing one is refused: 1970 lands the row
+// outside the band every sibling read prunes chunks with.
 func scannedBlockTimestamp(log shared.Log) (time.Time, error) {
 	if log.BlockTimestamp == "" {
 		return time.Time{}, fmt.Errorf("PositionManager Transfer (tx %s, index %s) carries no blockTimestamp: the provider must return it on eth_getLogs, or this scan needs a per-block header read", log.TransactionHash, log.LogIndex)

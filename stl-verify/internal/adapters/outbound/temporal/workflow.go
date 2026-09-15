@@ -221,10 +221,11 @@ func (t ActivityTimeouts) resolve() ActivityTimeouts {
 // cronjobWorkflow orchestrates a single cronjob activity execution.
 // cronjobActivityMethod is the exported method name the SDK derives
 // cronjobActivities' activity name from, and so the name a SCHEDULED cronjob's
-// workflow history already carries. RunCronjob keeps it bare; only RegisterRunner
-// prefixes it (RunnerJob.activityName).
+// workflow history already carries.
 const cronjobActivityMethod = "Execute"
 
+// cronjobWorkflow runs a scheduled cronjob's single activity under the bare method
+// name its existing histories replay against.
 func cronjobWorkflow(ctx workflow.Context, timeouts ActivityTimeouts) error {
 	return runActivityWorkflow(ctx, timeouts, cronjobActivityMethod)
 }

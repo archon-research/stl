@@ -168,17 +168,21 @@ func run(ctx context.Context) error {
 
 	return temporal.RunWorker(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
-	}, temporal.WorkerConfig{
-		Name:         taskQueueName,
-		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
-		Register:     bootstrap.register,
-	})
+	}, bootstrap.workerConfig(dbURL))
 }
 
 // bootstrapWorker owns process-scoped resources because WorkerConfig cannot
 // return cleanup from registration.
 type bootstrapWorker struct {
 	cleanup func()
+}
+
+func (b *bootstrapWorker) workerConfig(dbURL string) temporal.WorkerConfig {
+	return temporal.WorkerConfig{
+		Name:         taskQueueName,
+		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
+		Register:     b.register,
+	}
 }
 
 func (b *bootstrapWorker) close() {
@@ -335,10 +339,8 @@ func buildRunnerJobs(ctx context.Context, deps temporal.Dependencies, w runnerWi
 		return nil, err
 	}
 
-	// Deferred rather than returned: this job's refusals would otherwise fail the
-	// whole worker's registration and CrashLoop the Deployment, taking the
-	// unrelated position bootstrap with it. Its workflow type carries the refusal
-	// instead, so only a run of it fails.
+	// Deferred rather than returned: a refusal here would otherwise CrashLoop the
+	// Deployment the position bootstrap shares. Its own workflow type carries it.
 	transfers, transferErr := newTransferService(ctx, deps.Logger, w)
 	if transferErr != nil {
 		deps.Logger.Error("the uniswap-v4 posm transfer backfill is not runnable; its workflow type is registered but will refuse every run",
@@ -452,18 +454,16 @@ func newTransferService(ctx context.Context, logger *slog.Logger, w runnerWiring
 	if err != nil {
 		return nil, err
 	}
-	// A scanned log carries no block_version, so the archive supplies it. Opened
-	// here rather than in setupRunners because its failure must reach only this
-	// workflow type: the probe needs S3 credentials and a bucket the position
-	// bootstrap has no use for.
+	// Opened here rather than in setupRunners so a missing bucket or credential
+	// refuses this workflow type alone.
 	archive, err := openArchive(ctx, w.cfg.bootstrap.ChainID, logger)
 	if err != nil {
 		return nil, err
 	}
 	versions := blockversion.NewResolver(archive, "uniswap-v4 posm transfer backfill", logger)
-	// The prefix is the live indexer's, so both writers move one counter; the
-	// chain name comes from the chain id, as it does for every dex worker.
-	telemetry, err := dextelemetry.NewTelemetry(metricPrefix, w.cfg.bootstrap.ChainID)
+	// The prefix is the live indexer's, so both writers move one counter. Narrow,
+	// because the full set's seeded zeros would permanently sit on this worker.
+	telemetry, err := dextelemetry.NewNFTTransferRecorder(metricPrefix, w.cfg.bootstrap.ChainID)
 	if err != nil {
 		return nil, fmt.Errorf("creating uniswap-v4 transfer telemetry: %w", err)
 	}

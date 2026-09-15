@@ -14,13 +14,13 @@ const (
 	// The getPositionInfo multicall cap, so the default batch is one round trip;
 	// a larger batch is one transaction over several multicalls.
 	DefaultPositionBatch = 500
-	// One transaction per 1,000 decoded transfers. Each distinct log site in a
-	// batch is one transaction-scoped advisory lock held to commit, and the lock
-	// table is a cluster-wide budget: a stock instance sizes for ~12,800 entries,
-	// staging's max_locks_per_transaction=256 for ~76,800.
+	// One transaction per 1,000 decoded transfers. The table's
+	// assign_processing_version trigger takes one advisory lock per inserted row
+	// and holds it to commit, out of a cluster-wide table a stock instance sizes
+	// for ~12,800 entries and staging's max_locks_per_transaction=256 for ~76,800.
 	DefaultTransferBatch = 1_000
 	// MaxTransferBatch keeps a mis-set knob inside that budget with room for
-	// concurrent writers, rather than exhausting the lock table for every session.
+	// concurrent writers.
 	MaxTransferBatch = 10_000
 )
 

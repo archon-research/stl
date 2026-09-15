@@ -28,6 +28,19 @@ func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
 	}
 }
 
+// RunWorker hands WorkerConfig.Name to InitOTEL as the OTel service name, so this
+// literal is the service_name the alerts/vector-indexers.yaml selectors match.
+func TestWorkerConfig_NamesTheServiceTheAlertSelectorsMatch(t *testing.T) {
+	const serviceName = "uniswap-v4-position-bootstrap"
+
+	cfg := (&bootstrapWorker{}).workerConfig("postgres://unused/unused")
+
+	if cfg.Name != serviceName {
+		t.Errorf("WorkerConfig.Name = %q, want %q: the nft-transfer rules select this worker by an exact service_name",
+			cfg.Name, serviceName)
+	}
+}
+
 // Heartbeat details are readable only by a later attempt of the same activity,
 // so a single attempt would have nothing to resume into, and without a
 // heartbeat a killed worker goes unnoticed until StartToClose expires.

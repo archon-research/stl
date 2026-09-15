@@ -29,9 +29,8 @@ type NFTTransferRecorder interface {
 type TransferDeps struct {
 	PositionManager uniswapv4indexer.RegisteredPositionManager
 	LogScan         outbound.LogScanClient
-	// Versions answers which block_version each scanned height was indexed under,
-	// from the raw archive — block_states is the watchers' and cannot answer for a
-	// range older than its retention.
+	// Versions answers each scanned height's block_version from the raw archive;
+	// block_states is the watchers' and retains far less than this range.
 	Versions  uniswapv4indexer.BlockVersionResolver
 	Repo      outbound.UniswapV4NFTTransferWriter
 	TxManager outbound.TxManager
@@ -146,9 +145,8 @@ func (s *TransferService) Run(ctx context.Context) (TransferSummary, error) {
 	}
 	summary := TransferSummary{PinnedBlock: pin.number, PinnedHash: pin.hash, ResumedFromBlock: resumeFrom}
 
-	// A cursor past the pin means an earlier attempt finished the scan, so this one
-	// is done: resumePoint has just re-read that pin against the recorded hash,
-	// which is everything the closing check would have verified.
+	// A cursor past the pin means an earlier attempt finished the scan; resumePoint
+	// has just re-read that pin, which is all the closing check would verify.
 	if resumeFrom == pin.number+1 {
 		summary.FromBlock = resumeFrom
 		s.logger.Info("uniswap-v4 posm transfer backfill already scanned to its pin on an earlier attempt",
