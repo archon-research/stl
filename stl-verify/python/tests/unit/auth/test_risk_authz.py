@@ -12,7 +12,6 @@ exposure. They are covered below against a real service.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Iterable, Mapping
 from decimal import Decimal
 from types import SimpleNamespace
@@ -268,7 +267,7 @@ def test_a_permitted_pool_prime_is_the_one_the_figures_are_computed_from(resolve
 
 
 @pytest.mark.parametrize("path", POOL_ROUTES)
-def test_a_genuinely_pool_wide_share_is_not_gated(resolves_to_vault, path):
+def test_a_genuinely_pool_wide_share_is_not_gated(path):
     """Morpho's legacy share is a flat 1 and names no wallet, so there is no
     per-resource object and the role gate really is the whole control."""
     fga = _deny()
@@ -326,21 +325,29 @@ def test_openfga_outage_fails_closed_on_a_risk_route(resolves_to_vault):
 
 
 @pytest.mark.parametrize("path", POOL_ROUTES)
-def test_an_untracked_largest_holder_denies_with_its_own_reason(monkeypatch, caplog, path):
+def test_an_untracked_largest_holder_denies_with_its_own_reason(monkeypatch, authz_events, path):
     """A largest holder we do not track denies every caller until holdings
     shift — deliberate, but it presents as an outage. The decision event names
-    it so triage does not start at the database."""
+    it, and the holder, so triage does not start at the database."""
     monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=None))
     fga = _allow()
     client, _ = _pool_client(fga=fga, principal=_principal())
 
-    with caplog.at_level(logging.INFO, logger="app.api.deps"):
-        response = client.get(path)
+    response = client.get(path)
 
     assert response.status_code == 404
     fga.check.assert_not_awaited()
-    reasons = [r.reason for r in caplog.records if getattr(r, "event", None) == deps.AUTHZ_EVENT]
-    assert reasons == ["holder_untracked"]
+    assert authz_events() == [
+        {
+            "gate": "prime",
+            "decision": "deny",
+            "reason": "holder_untracked",
+            "principal": "user:u1",
+            "resource": path.split("?")[0],
+            "status": 404,
+            "requested_prime": str(POOL_HOLDER).lower(),
+        }
+    ]
 
 
 def test_an_untracked_holder_and_a_caller_named_unknown_prime_answer_identically(monkeypatch):
@@ -381,14 +388,28 @@ def test_the_two_denials_a_pool_caller_can_provoke_are_indistinguishable(monkeyp
 
 
 @pytest.mark.parametrize("path", POOL_ROUTES)
-def test_a_pool_wide_share_still_leaves_a_decision_event(resolves_to_vault, caplog, path):
-    """The only allow this gate grants without a check. Unlogged it would be
-    the one /v1 read with no decision event at all, which is worse than the
-    unnamed deny this ticket set out to fix."""
+def test_a_read_that_ran_no_check_still_leaves_a_decision_event(authz_events, path):
+    """No prime resolved, so no check ran, so nothing else would log."""
     client, _ = _pool_client(fga=_deny(), principal=_principal(), wallet=None)
 
-    with caplog.at_level(logging.INFO, logger="app.api.deps"):
-        assert client.get(path).status_code == 200
+    assert client.get(path).status_code == 200
+    assert authz_events() == [
+        {
+            "gate": "prime",
+            "decision": "allow",
+            "reason": "no_prime_resolved",
+            "principal": "user:u1",
+            "resource": path.split("?")[0],
+        }
+    ]
 
-    events = [r for r in caplog.records if getattr(r, "event", None) == deps.AUTHZ_EVENT]
-    assert [(r.decision, r.reason) for r in events] == [("allow", "pool_wide_share")]
+
+@pytest.mark.parametrize("path", POOL_ROUTES)
+def test_an_unresolved_prime_is_allowed_silently_while_auth_is_dark(monkeypatch, authz_events, path):
+    """Auth off means no gate ran, so no decision event may be written, and an
+    untracked holder must not 404: the pool read simply proceeds."""
+    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=None))
+    client, _ = _pool_client(fga=_deny(), principal=None)
+
+    assert client.get(path).status_code == 200
+    assert authz_events() == []

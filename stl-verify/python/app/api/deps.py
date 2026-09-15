@@ -194,8 +194,11 @@ async def check_prime_view(
 
     One implementation behind every caller — the prime id reaches us as a path
     segment, a query parameter, a body field, or the wallet a pool-level risk
-    read resolves to. The object id is always the VAULT address: the identity
-    shared by all of a prime's proxies, and what the reconciler writes.
+    read resolves to. When the input resolves, the object id is the VAULT
+    address: the identity shared by all of a prime's proxies, and what the
+    reconciler writes. When it does not, the event carries the unresolved input
+    as ``requested_prime`` and ``resource`` stays the request path, so
+    ``resource`` is always an OpenFGA object id or a path, never a proxy.
 
     An unknown prime and one the caller may not view answer the same 404. A
     distinct code tells an unauthorized caller which primes exist, the fact the
@@ -238,8 +241,8 @@ async def check_prime_view(
         )
         raise HTTPException(status_code=503, detail="prime lookup unavailable") from exc
     if vault is None:
-        # Name the prime: it parsed as an address above, and without it triage
-        # has to re-run the resolution to learn which holder was untracked.
+        # The address that resolved to nothing, so triage need not re-run the
+        # resolution. Not `resource`: that field is an FGA object id or a path.
         log_auth_event(
             request,
             gate="prime",
@@ -247,7 +250,7 @@ async def check_prime_view(
             reason=not_found_reason,
             status=404,
             principal=principal,
-            resource=f"prime:{str(address).lower()}",
+            fields={"requested_prime": address.lower()},
         )
         raise HTTPException(status_code=404, detail=PRIME_DENIED_DETAIL)
     resource = f"prime:{vault.lower()}"

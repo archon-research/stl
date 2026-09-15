@@ -169,18 +169,13 @@ async def _authorized_pool_prime(
     """
     pool_prime = await service.resolve_pool_prime(receipt_token_id)
     if pool_prime is not None:
-        # holder_untracked, not prime_not_found: WE resolved this address, the
-        # caller never named it. An untracked largest holder denies everyone
-        # until holdings shift, and without its own reason that reads as an
-        # outage (ORB-402). Response body unchanged — unknown ≡ unpermitted.
+        # WE resolved this address, the caller never named it; the reason says
+        # so in the event (see check_prime_view). Body unchanged.
         await check_prime_view(request, principal, str(pool_prime), not_found_reason="holder_untracked")
     elif principal is not None:
-        # The one path through this gate that allows without a check. Left
-        # silent it is the only /v1 read with no decision event at all, and the
-        # argument for naming the deny applies harder to an unlogged allow.
-        log_auth_event(
-            request, gate="prime", decision="allow", reason="pool_wide_share", status=200, principal=principal
-        )
+        # A read that ran no check still gets a decision event. No status: the
+        # gate cannot know it, and None here also covers an unknown asset.
+        log_auth_event(request, gate="prime", decision="allow", reason="no_prime_resolved", principal=principal)
     return pool_prime
 
 
