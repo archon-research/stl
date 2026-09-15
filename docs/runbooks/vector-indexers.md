@@ -2014,16 +2014,20 @@ or non-existent token.
   read `transfersWritten` together with the build, not on its own.
 - **Row volume and runtime.** Mainnet, measured 2026-09-14: **487,908 Transfer
   logs over 4,286,968 blocks in 68 `eth_getLogs` windows with 25 narrowings**,
-  about two minutes of RPC; the writes dominate the rest. The default
-  `INITIAL_WINDOW` of 500,000 is right — measured against 50,000 and 100,000, all
-  three land within 68–75 windows and 106–114 s, because the adaptive window
-  self-tunes to the provider's ~10,000-log response cap within a few narrowings.
+  about two minutes of RPC. A whole-history run still takes **~7.5h**, because
+  the archive reads that stamp `block_version` dominate it: one `ListObjectsV2`
+  per distinct height plus a ranged GET for that height's block hash, ~250k of
+  each. The default `INITIAL_WINDOW` of 500,000 is right — measured against
+  50,000 and 100,000, all three land within 68–75 windows and 106–114 s, because
+  the adaptive window self-tunes to the provider's ~10,000-log response cap
+  within a few narrowings.
 - **It does NOT trip the live indexers' growth tripwire; it has its own.**
-  487,908 rows in minutes is ~22 rows/s over a 6h window, eight times
+  487,908 rows over ~7.5h is ~18 rows/s, six times
   [`VectorUniswapV4NFTTransferGrowthHigh`](#vectoruniswapv4nfttransfergrowthhigh)'s
-  budget, so both `uniswap_v4_position_nft_transfer` rules exclude this worker's
-  `service_name`: its bulk load is neither a growth regime nor evidence the live
-  decoder is healthy. The run still records through the same `dextelemetry`
+  budget and sustained past its `for: 6h`, so both
+  `uniswap_v4_position_nft_transfer` rules exclude this worker's `service_name`:
+  its bulk load is neither a growth regime nor evidence the live decoder is
+  healthy. The run still records through the same `dextelemetry`
   counters, so its rows stay visible on
   `uniswap_v4_nft_transfer_rows_written_total{service_name="uniswap-v4-position-bootstrap"}`,
   and
@@ -3077,9 +3081,9 @@ nothing (every INSERT conflicts away) still keeps it alive;
 `uniswap_v4_nft_transfer_rows_written_total` is the growth counter.
 
 **Zero, not absent.** Unlike its siblings in this group, the rule requires the
-counter's series to exist. `dextelemetry` seeds it at construction, so it is
-present from the boot of any build carrying the posm decoder and absent from one
-that predates it. That distinction is load-bearing: the alert rules sync to Mimir
+counter's series to exist. The indexer's `dextelemetry` set seeds it at
+construction, so it is present from the boot of any build carrying the posm
+decoder and absent from one that predates it. That distinction is load-bearing: the alert rules sync to Mimir
 the moment a PR merges, while the image reaches the cluster minutes later, and
 the blocks-processed terms are satisfied by the old build throughout. Written as
 `unless … > 0` this fired on every rollout of the feature rather than only when
@@ -3088,14 +3092,13 @@ decoding was broken. A pod that dies before exporting anything is
 
 **The live indexers only.** The selector excludes
 `service_name="uniswap-v4-position-bootstrap"`, whose posm transfer backfill moves
-this same counter under the same `chain`. That matters in both directions. A run
-would lift the sum off zero on the live indexer's behalf and hold this alert quiet
-for the run plus the 6h the window remembers it, precisely while a wrong
-PositionManager address in the LIVE path went unnoticed. And because that worker
-constructs the same `dextelemetry` set, its *seeded* zero would satisfy the
-existence requirement above for a chain whose indexer carries no decoder yet —
-bringing back the rollout false positive `== 0` exists to prevent. So a backfill
-running, or merely deployed, changes nothing about what this alert says.
+this same counter under the same `chain`. A run would lift the sum off zero on the
+live indexer's behalf and hold this alert quiet for the run plus the 6h the window
+remembers it, precisely while a wrong PositionManager address in the LIVE path went
+unnoticed. The exclusion also keeps the existence requirement above the live
+indexer's own, so the backfill worker's series can never stand in for an indexer
+that carries no decoder yet. A backfill running, or merely deployed, changes
+nothing about what this alert says.
 
 `uniswap_v4_position_nft_transfer` is the only source of posm token holders, so
 while this fires "who holds token T" answers with stale data and no query can
@@ -3226,8 +3229,8 @@ real table growth.
 **The rule reads the live indexers only.** It excludes
 `service_name="uniswap-v4-position-bootstrap"`, because that worker hosts the
 VEC-790 posm transfer backfill, and one hand-started run bulk-loads a chain's
-whole posm history — 487,908 rows on mainnet, ~22 rows/s over this window, eight
-times the budget — for a load that is bounded, known, and not a growth regime.
+whole posm history — 487,908 rows on mainnet over ~7.5h, ~18 rows/s, six times
+the budget — for a load that is bounded, known, and not a growth regime.
 So a firing rule is never the backfill, and the row count in step 1 will exceed
 what this rate alone implies by one posm history per chain backfilled.
 
@@ -3388,12 +3391,12 @@ volume signal on a plain table, not a fault.
 Why the threshold is so much higher than the live rule's 2.9 rows/s: the two
 measure different things. A live indexer's rate is a *regime* that continues; the
 backfill's is a **bounded burst that ends**. One chain's whole posm history is
-~490k rows (487,908 on mainnet, 2026-09) and lands in minutes, which is 5.7
-rows/s averaged over the 24h window. A rerun on the same build adds close to
-nothing, because the insert conflicts away and this counter counts rows
-*persisted* — so **a backfill looping on one build cannot fire this**. A rerun from
-a new build re-records the range, which is one history's worth per run and still
-well inside the budget; several of those in a day is what the threshold is set for.
+~490k rows (487,908 on mainnet, 2026-09) and takes ~7.5h, which is 5.7 rows/s
+averaged over the 24h window. A rerun on the same build adds close to nothing,
+because the insert conflicts away and this counter counts rows *persisted* — so
+**a backfill looping on one build cannot fire this**. A rerun from a new build
+re-records the range, which is one history's worth per run and still well inside
+the budget; several of those in a day is what the threshold is set for.
 
 | | |
 |---|---|
@@ -3438,9 +3441,10 @@ well inside the budget; several of those in a day is what the threshold is set f
 - **A chain with far more posm history than mainnet.** Legitimate, and exactly
   the measurement the plain-table decision was deferred to: take the row count
   from step 3 to the conversion path below.
-- **A rerun writing real rows** where you expected a no-op. That means the sites
-  were genuinely absent, so it closed a real gap — check `transfersWritten` in the
-  run's closing log line against what you expected.
+- **A rerun from a different `build_id`** where you expected a no-op. Every deploy
+  is a new build, and a rerun on one re-records the whole history as new
+  `processing_version` rows: the row count moves, the holder answers do not. Only a
+  same-build rerun conflicts away to `transfersWritten=0`.
 
 ### Remediation
 

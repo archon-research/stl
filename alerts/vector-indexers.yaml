@@ -2948,19 +2948,17 @@ groups:
         # blocks-processed terms above are satisfied by the old build throughout
         # that window, so `unless` fired on every rollout (observed on staging
         # 2026-09-14, ~10 min after #854 merged). `== 0` needs the series to
-        # exist, and dextelemetry seeds it at construction, so it exists exactly
-        # when a build that can decode transfers is running. A pod that dies
-        # before it exports is VectorUniswapV4IndexerDown's case, not this one.
+        # exist, and the indexer's dextelemetry set seeds it at construction, so it
+        # exists exactly when a build that can decode transfers is running. A pod
+        # that dies before it exports is VectorUniswapV4IndexerDown's case, not
+        # this one.
         #
         # The selector excludes uniswap-v4-position-bootstrap, whose posm transfer
-        # backfill (VEC-790) moves this same counter under the same `chain`. That
-        # matters twice over. A run would lift the sum off zero on the live
-        # indexer's behalf and hold this quiet for the run plus the 6h the window
-        # remembers it, exactly while a wrong PositionManager address in the LIVE
-        # path went unnoticed. And that worker constructs the same dextelemetry
-        # set, so its SEEDED zero would satisfy the existence requirement above for
-        # a chain whose indexer carries no decoder yet — re-firing the rollout
-        # false positive `== 0` was introduced to kill.
+        # backfill (VEC-790) moves this same counter under the same `chain`. A run
+        # would lift the sum off zero on the live indexer's behalf and hold this
+        # quiet for the run plus the 6h the window remembers it, exactly while a
+        # wrong PositionManager address in the LIVE path went unnoticed. The
+        # exclusion keeps the existence requirement above the live indexer's own.
         expr: |
           sum by (chain, cluster) (
             rate(uniswap_v4_blocks_processed_total{status="success", k8s_namespace_name="vector"}[6h])
@@ -3015,9 +3013,9 @@ groups:
         # Two writers move this counter, and the rule reads only one of them.
         # uniswap-v4-position-bootstrap is excluded because it hosts the VEC-790
         # posm transfer backfill: a hand-started run bulk-loads one chain's whole
-        # posm history (487,908 rows on mainnet, 2026-09) in minutes, which is
-        # ~22 rows/s over a 6h window — eight times this budget, for a load that
-        # is bounded, known and not a growth REGIME. Counting it would fire a
+        # posm history (487,908 rows on mainnet, 2026-09) over ~7.5h, which is
+        # ~18 rows/s — six times this budget, sustained past `for: 6h`, for a load
+        # that is bounded, known and not a growth REGIME. Counting it would fire a
         # warning nobody can act on, twice over: once while the run writes and
         # again for the 6h the window remembers it. The backfill still records
         # through the counter, so its rows stay visible on the series and in the
@@ -3065,13 +3063,14 @@ groups:
         #
         # Different question, so a different shape. The backfill's legitimate
         # signature is a BOUNDED burst that ends: one chain's whole posm history is
-        # ~490k rows (487,908 on mainnet, 2026-09), landing in minutes. Over a 24h
-        # window that is 5.7 rows/s, and a rerun adds ~nothing because the writer
-        # appends only log sites that hold no row. So a rerun loop cannot fire this
-        # — the counter counts rows PERSISTED — and what can is genuine volume: many
-        # chains backfilled at once, or one chain with far more history than mainnet.
+        # ~490k rows (487,908 on mainnet, 2026-09) over ~7.5h, which is 5.7 rows/s
+        # across a 24h window. A rerun on the same build conflicts away entirely,
+        # and one from a different build_id — every deploy is one — re-records that
+        # history as fresh processing_version rows and so costs another 5.7 rows/s.
+        # What reaches this threshold is genuine volume: many chains backfilled at
+        # once, or one chain with far more history than mainnet.
         #
-        # 3M rows/day = 34.7 rows/s trips at ~6 mainnet histories in a day, five
+        # 3M rows/day = 34.7 rows/s trips at ~6 mainnet histories in a day, six
         # times the largest run anyone has cause to start and still two orders under
         # the 100M-row plain-table budget, so there is room to react. The 24h window
         # is what keeps a single legitimate burst under it; `for: 2h` then wants the

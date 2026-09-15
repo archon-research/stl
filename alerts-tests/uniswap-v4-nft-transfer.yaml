@@ -81,8 +81,8 @@ tests:
         alertname: VectorUniswapV4NFTTransferGrowthHigh
         exp_alerts: []
 
-  # A real mainnet run lands ~488k rows in ~30 minutes, eight times the live
-  # indexer's budget, and is not a growth regime.
+  # A real mainnet run lands ~488k rows over ~7.5h: ~18 rows/s, six times the
+  # live indexer's budget, and not a growth regime.
   - name: "growth: the backfill's bulk load is outside this rule"
     interval: 1m
     input_series:
@@ -215,10 +215,10 @@ tests:
         alertname: VectorUniswapV4IndexerNoNFTTransfers
         exp_alerts: []
 
-  # The backfill worker constructs the same counters, so its seeded zero would
-  # otherwise satisfy the guard's existence requirement for an indexer that has
-  # no decoder at all, reviving the rollout false positive.
-  - name: "no-transfers: the backfill's seeded zero is not the indexer's"
+  # The exclusion covers the existence side too: only the live indexer's series
+  # can satisfy the `== 0` term, so a backfill series on a chain whose indexer
+  # has no decoder at all cannot revive the rollout false positive.
+  - name: "no-transfers: a backfill-only counter series does not fire the guard"
     interval: 1m
     input_series:
       - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
@@ -230,7 +230,7 @@ tests:
         alertname: VectorUniswapV4IndexerNoNFTTransfers
         exp_alerts: []
 
-  - name: "no-transfers: the indexer's own seeded zero alongside the backfill's fires"
+  - name: "no-transfers: the indexer's own seeded zero beside a backfill series fires"
     interval: 1m
     input_series:
       - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
