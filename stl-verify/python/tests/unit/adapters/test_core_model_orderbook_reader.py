@@ -29,9 +29,12 @@ from app.adapters.postgres.core_model_orderbook_reader import (
         ("TBTC", "BTC"),
         ("cbBTC", "BTC"),
         ("BTC", "BTC"),
-        # everything else maps to its own symbol
+        # everything else maps to its own symbol; JITOSOL has its own venue
+        # books, so it does not proxy SOL the way LSTs proxy ETH
         ("XRP", "XRP"),
         ("HYPE", "HYPE"),
+        ("SOL", "SOL"),
+        ("JITOSOL", "JITOSOL"),
     ],
 )
 def test_routing_matches_the_model_readme_table(token, book):
@@ -72,4 +75,4 @@ async def test_untracked_book_fails_loudly_and_points_at_data_gaps():
     # The engine is never touched on this path, so a null stands in for it.
     reader = PostgresOrderbookReader(engine=cast(AsyncEngine, None))
     with pytest.raises(ValueError, match="DATA_GAPS"):
-        await reader.get_orderbooks(["SOL"])
+        await reader.get_orderbooks(["DOGE"])
