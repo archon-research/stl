@@ -34,7 +34,7 @@ func seedAnchorageBase(t *testing.T) (context.Context, *pgxpool.Pool) {
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	t.Cleanup(cleanup)
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO prime (name, vault_address) VALUES ('itest-anchorage', decode($1, 'hex'))`, anchorageHolder); err != nil {
+		`INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'itest-anchorage', decode($1, 'hex'))`, anchorageHolder); err != nil {
 		t.Fatalf("seed prime: %v", err)
 	}
 	return ctx, pool
