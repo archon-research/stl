@@ -2042,7 +2042,7 @@ or non-existent token.
   to the PositionManager as well as the chain, so a correcting registry version
   landing mid-run makes the next attempt rescan from the deploy block under the
   new surrogate id instead of inheriting a cursor that would skip everything below
-  it. Timeouts are 4h `StartToClose`, 12h `ScheduleToClose`, 3 attempts, 60 s
+  it. Timeouts are 12h `StartToClose`, 36h `ScheduleToClose`, 3 attempts, 60 s
   heartbeat. As for the position run, heartbeat details belong to one activity
   execution, so a run started again by hand rescans from the deploy block, which
   is safe and costs only RPC time.
