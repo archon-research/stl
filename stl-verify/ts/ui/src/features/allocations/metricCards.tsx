@@ -2,6 +2,7 @@ import type { ChartColor, ChartColorToken } from '@archon-research/charting';
 import {
   ErrorState,
   InfoPopover,
+  SkeletonStack,
   StatTile,
 } from '@archon-research/design-system';
 import { Info } from 'lucide-react';
@@ -14,7 +15,6 @@ import {
   formatFreshnessLabel,
 } from '../../shared/lib/dashboard';
 import { preferReference } from '../../shared/lib/provenance';
-import { Placeholder } from '../../shared/ui/Placeholder';
 
 export type ChartDatum = {
   label: string;
@@ -304,11 +304,13 @@ export function MetricCardSkeleton({ label }: { label: string }) {
       // Widths are a typical figure and subtitle rather than the full column: a
       // placeholder the width of the card reads as a filled card, not a loading
       // one.
-      value={<Placeholder width="8rem" height={28} />}
+      value={
+        <SkeletonStack count={1} itemHeight={28} style={{ width: '8rem' }} />
+      }
       detail={
         <div className={metricDetailClassName}>
-          <Placeholder width="12rem" height={16} />
-          <Placeholder width="100%" height={CHART_HEIGHT} />
+          <SkeletonStack count={1} itemHeight={16} style={{ width: '12rem' }} />
+          <SkeletonStack count={1} itemHeight={CHART_HEIGHT} />
         </div>
       }
     />

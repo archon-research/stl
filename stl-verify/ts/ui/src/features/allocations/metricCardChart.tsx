@@ -19,11 +19,11 @@ import {
   useSyncedCursorHandlers,
   XYChart,
 } from '@archon-research/charting';
+import { SkeletonStack } from '@archon-research/design-system';
 import { useContext, useMemo } from 'react';
 
 import { css } from '#styled-system/css';
 
-import { Placeholder } from '../../shared/ui/Placeholder';
 import {
   CHART_HEIGHT,
   type ChartDatum,
@@ -240,7 +240,7 @@ export function MetricCardTrend({
     // in.
     return (
       <div className={css({ mt: '2' })}>
-        <Placeholder width="100%" height={CHART_HEIGHT} />
+        <SkeletonStack count={1} itemHeight={CHART_HEIGHT} />
       </div>
     );
   }
