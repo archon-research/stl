@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"sort"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,6 +23,40 @@ func init() {
 // the expected columns, tables, and triggers.
 // It also asserts that curve_pool_coin.precision is seeded for all 10 existing
 // coins.
+// curveVec260CoinCounts maps each pool seeded by
+// 20260521_110000_create_curve_dex_tables.sql (VEC-260) to its coins(i) count.
+func curveVec260CoinCounts() map[string]int {
+	return map[string]int{
+		`\xDC24316b9AE028F1497c275EB9192a3Ea0f67022`: 2, // stETH classic
+		`\x21E27a5E5513D6e65C4f830167390997aA84843a`: 2, // stETH-ng
+		`\xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7`: 3, // 3pool
+		`\x7F86Bf177Dd4F3494b841a37e810A34dD56c829B`: 3, // TricryptoUSDC
+	}
+}
+
+// curveVec260PoolAddrs returns those same pool addresses, sorted so a failure
+// reports them in a stable order.
+func curveVec260PoolAddrs() []string {
+	addrs := make([]string, 0, 4)
+	for addr := range curveVec260CoinCounts() {
+		addrs = append(addrs, addr)
+	}
+	sort.Strings(addrs)
+	return addrs
+}
+
+// curveArct384PoolAddrs returns the 5 prime-held stableswap-NG pools seeded by
+// 20260831_120000_seed_prime_dex_pools.sql. Derived from the same table
+// prime_dex_pool_seed_integration_test.go asserts field by field, so the two
+// files cannot drift apart on which pools ARCT-384 added.
+func curveArct384PoolAddrs() []string {
+	addrs := make([]string, 0, len(primeDexCurvePools))
+	for _, p := range primeDexCurvePools {
+		addrs = append(addrs, p.addrHex)
+	}
+	return addrs
+}
+
 func TestCurveExtendedDataMigration(t *testing.T) {
 	ctx := context.Background()
 
@@ -381,16 +416,22 @@ func TestCurveMigration(t *testing.T) {
 		}
 	})
 
-	// 9 = the 4 original VEC-260 pools + the 5 prime-held stableswap-NG pools
-	// seeded by 20260831_120000_seed_prime_dex_pools.sql (ARCT-384).
-	t.Run("seed_9_pools_chain1", func(t *testing.T) {
-		var count int
-		if err := curveTestPool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM curve_pool WHERE chain_id = 1`).Scan(&count); err != nil {
-			t.Fatalf("counting curve_pool: %v", err)
-		}
-		if count != 9 {
-			t.Errorf("curve_pool count for chain_id=1 = %d, want 9", count)
+	// Scoped to the pools this test owns -- the 4 original VEC-260 pools and the
+	// 5 prime-held stableswap-NG pools seeded by
+	// 20260831_120000_seed_prime_dex_pools.sql (ARCT-384) -- rather than a
+	// COUNT(*) over chain 1, so a later seed migration adding an unrelated pool
+	// does not have to come back and edit this file.
+	t.Run("seeded_pools_chain1_present", func(t *testing.T) {
+		for _, addr := range append(curveVec260PoolAddrs(), curveArct384PoolAddrs()...) {
+			var count int
+			if err := curveTestPool.QueryRow(ctx,
+				`SELECT COUNT(*) FROM curve_pool WHERE chain_id = 1 AND pool_address = $1::bytea`,
+				addr).Scan(&count); err != nil {
+				t.Fatalf("counting curve_pool %s: %v", addr, err)
+			}
+			if count != 1 {
+				t.Errorf("curve_pool rows for chain_id=1 %s = %d, want 1", addr, count)
+			}
 		}
 	})
 
@@ -496,15 +537,31 @@ func TestCurveMigration(t *testing.T) {
 		}
 	})
 
+	// Per pool, matching this subtest's name, instead of one COUNT(*) over the
+	// whole table: stETH classic 2, stETH-ng 2, 3pool 3, TricryptoUSDC 3, and 2
+	// for each of the 5 ARCT-384 stableswap-NG pools. A global total would make
+	// every future seed migration edit this assertion.
 	t.Run("coin_count_per_pool", func(t *testing.T) {
-		// stETH classic: 2, stETH-ng: 2, 3pool: 3, TricryptoUSDC: 3 => 10, plus
-		// 2 each for the 5 ARCT-384 stableswap-NG pools => 20 total.
-		var total int
-		if err := curveTestPool.QueryRow(ctx, `SELECT COUNT(*) FROM curve_pool_coin`).Scan(&total); err != nil {
-			t.Fatalf("counting curve_pool_coin: %v", err)
+		want := map[string]int{}
+		for addr, n := range curveVec260CoinCounts() {
+			want[addr] = n
 		}
-		if total != 20 {
-			t.Errorf("curve_pool_coin total = %d, want 20 (2+2+3+3 + 5*2)", total)
+		for _, addr := range curveArct384PoolAddrs() {
+			want[addr] = 2
+		}
+		for addr, wantCoins := range want {
+			var got int
+			if err := curveTestPool.QueryRow(ctx, `
+				SELECT COUNT(*)
+				FROM curve_pool_coin cpc
+				JOIN curve_pool cp ON cp.id = cpc.curve_pool_id
+				WHERE cp.chain_id = 1 AND cp.pool_address = $1::bytea`,
+				addr).Scan(&got); err != nil {
+				t.Fatalf("counting curve_pool_coin for %s: %v", addr, err)
+			}
+			if got != wantCoins {
+				t.Errorf("curve_pool_coin count for %s = %d, want %d", addr, got, wantCoins)
+			}
 		}
 	})
 

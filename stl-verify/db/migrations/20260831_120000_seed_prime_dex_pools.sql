@@ -131,7 +131,7 @@ BEGIN
       AND p.max_liquidity_per_tick = 191757530477355301479181766273477
       AND p.deploy_block = 20508739;
     IF pool_count <> 1 THEN
-        RAISE EXCEPTION 'expected the AUSD/USDC UniswapV3 pool seeded with the cast-verified fields, got % matching rows', pool_count;
+        RAISE EXCEPTION 'expected the AUSD/USDC UniswapV3 pool seeded with the cast-verified fields, got % matching rows. The INSERT above is ON CONFLICT DO NOTHING, so a pool row that already existed with different values was skipped silently and lands here -- compare the existing row before changing this migration', pool_count;
     END IF;
 
     SELECT string_agg(encode(x.pool_address, 'hex'), ', ') INTO bad
@@ -156,7 +156,7 @@ BEGIN
           AND p.deploy_block = x.deploy_block
     );
     IF bad IS NOT NULL THEN
-        RAISE EXCEPTION 'ARCT-384 curve pools missing or seeded with wrong fields: %', bad;
+        RAISE EXCEPTION 'ARCT-384 curve pools missing, or already present with different values (the INSERT above is ON CONFLICT DO NOTHING, so a pre-existing row is skipped silently rather than corrected): %', bad;
     END IF;
 END $$;
 
@@ -192,7 +192,7 @@ BEGIN
           AND cpc.precision = trim_scale(power(10::numeric, (18 - tk.decimals)::numeric))
     );
     IF bad IS NOT NULL THEN
-        RAISE EXCEPTION 'ARCT-384 curve_pool_coin rows missing, pointing at the wrong token, or with an inconsistent precision: %', bad;
+        RAISE EXCEPTION 'ARCT-384 curve_pool_coin rows missing, pointing at the wrong token, or with an inconsistent precision -- or already present with different values, since the INSERT above is ON CONFLICT DO NOTHING: %', bad;
     END IF;
 END $$;
 
