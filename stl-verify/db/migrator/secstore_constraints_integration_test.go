@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestSecStoreEveryEngineRuleRejectsItsInput(t *testing.T) {
@@ -429,6 +430,162 @@ func TestSecStoreNotNullAndForeignKeyCompleteness(t *testing.T) {
 				_, err := pool.Exec(ctx, tc.sql)
 				assertSQLStateOneOf(t, err, tc.want, "sec_edge."+tc.col+" NOT NULL")
 			})
+		}
+	})
+}
+
+func TestSecStoreNotNullCatalogueCompleteness(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	// Every NOT NULL constraint the migration declares must be reflected in
+	// information_schema.columns. A mutation that deletes NOT NULL from the DDL changes
+	// is_nullable from 'NO' to 'YES' and this test catches it.
+	type col struct{ table, column string }
+	expected := []col{
+		// node_status_vocabulary
+		{"node_status_vocabulary", "record_type"},
+		{"node_status_vocabulary", "status"},
+		// sec_node — non-default, non-PK-implied NOT NULL columns that the mutation harness targets.
+		{"sec_node", "id"},
+		{"sec_node", "valid_from"},
+		{"sec_node", "valid_to"},
+		{"sec_node", "ingest_xid"},
+		{"sec_node", "ingested_at"},
+		{"sec_node", "content_hash"},
+		// sec_edge
+		{"sec_edge", "edge_disc"},
+		{"sec_edge", "src_id"},
+		{"sec_edge", "src_kind"},
+		{"sec_edge", "dst_id"},
+		{"sec_edge", "rel_type"},
+		{"sec_edge", "valid_from"},
+		{"sec_edge", "valid_to"},
+		{"sec_edge", "ingest_xid"},
+		{"sec_edge", "ingested_at"},
+		{"sec_edge", "content_hash"},
+	}
+
+	for _, c := range expected {
+		t.Run(c.table+"."+c.column, func(t *testing.T) {
+			var nullable string
+			if err := pool.QueryRow(ctx, `
+				SELECT is_nullable FROM information_schema.columns
+				WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2`,
+				c.table, c.column).Scan(&nullable); err != nil {
+				t.Fatalf("query information_schema for %s.%s: %v", c.table, c.column, err)
+			}
+			if nullable != "NO" {
+				t.Fatalf("%s.%s: is_nullable = %q, want \"NO\"", c.table, c.column, nullable)
+			}
+		})
+	}
+}
+
+func TestSecStoreTombstoneWindowSucceeds(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	// A zero-length window (valid_from = valid_to) is a tombstone. The CHECK is
+	// valid_from <= valid_to. If the mutation flips it to valid_from < valid_to,
+	// this insert fails because valid_from = valid_to no longer satisfies strict <.
+	t.Run("sec_node_tombstone_insert_succeeds", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, `+secstoreSpine+`)
+			VALUES ('em-t-tomb-chk', 'ENTITY', 'ACTIVE', '2026-05-01', '2026-05-01', 'test', 'RETRACTION', 'tombstone must land', 'test')`)
+		if err != nil {
+			t.Fatalf("tombstone insert (valid_from = valid_to) must succeed under CHECK valid_from <= valid_to: %v", err)
+		}
+	})
+
+	t.Run("sec_edge_tombstone_insert_succeeds", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to, `+secstoreSpine+`)
+			VALUES ('sec-t-tomb-chk', 'SECURITY', 'em-t-tomb-chk', 'ENTITY', 'ISSUED_BY', '2026-05-01', '2026-05-01', 'test', 'RETRACTION', 'tombstone must land', 'test')`)
+		if err != nil {
+			t.Fatalf("edge tombstone insert (valid_from = valid_to) must succeed under CHECK valid_from <= valid_to: %v", err)
+		}
+	})
+}
+
+func TestSecStoreACLIncludesTruncateRevoke(t *testing.T) {
+	ctx := context.Background()
+
+	// Create stl_readwrite role cluster-wide BEFORE migrations, so the migration's
+	// IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'stl_readwrite') fires and
+	// the REVOKE actually executes. Without this, the role doesn't exist in the test
+	// container and M190/M195 mutations are invisible.
+	adminPool, err := pgxpool.New(ctx, sharedDSN)
+	if err != nil {
+		t.Fatalf("admin connect: %v", err)
+	}
+	adminPool.Exec(ctx, "CREATE ROLE stl_readwrite NOLOGIN")
+	adminPool.Close()
+
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	ownerHas := func(t *testing.T, table, priv string) bool {
+		t.Helper()
+		var held bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_class c,
+				     aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+				WHERE c.oid = $1::regclass
+				  AND a.grantee = c.relowner
+				  AND a.privilege_type = $2
+			)`, table, priv).Scan(&held); err != nil {
+			t.Fatalf("read %s ACL for %s: %v", table, priv, err)
+		}
+		return held
+	}
+
+	// Check that stl_readwrite also lacks TRUNCATE — this catches M190/M195 if
+	// ALTER DEFAULT PRIVILEGES granted it.
+	t.Run("stl_readwrite_lacks_truncate_on_all_secstore_tables", func(t *testing.T) {
+		tables := []string{
+			"sec_node", "sec_edge",
+			"rel_type_vocabulary", "weight_basis_vocabulary", "change_reason_vocabulary",
+			"concept_class_vocabulary", "node_status_vocabulary",
+		}
+		for _, table := range tables {
+			var hasTruncate bool
+			if err := pool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1
+					FROM pg_class c,
+					     aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+					WHERE c.oid = $1::regclass
+					  AND a.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'stl_readwrite')
+					  AND a.privilege_type = 'TRUNCATE'
+				)`, table).Scan(&hasTruncate); err != nil {
+				t.Fatalf("check TRUNCATE on %s: %v", table, err)
+			}
+			if hasTruncate {
+				t.Errorf("%s: stl_readwrite holds TRUNCATE in the ACL", table)
+			}
+		}
+	})
+
+	t.Run("owner_lacks_truncate_on_stores", func(t *testing.T) {
+		for _, table := range []string{"sec_node", "sec_edge"} {
+			if ownerHas(t, table, "TRUNCATE") {
+				t.Errorf("%s: the owner still holds TRUNCATE", table)
+			}
+		}
+	})
+
+	t.Run("owner_lacks_truncate_on_vocabularies", func(t *testing.T) {
+		for _, table := range []string{
+			"rel_type_vocabulary", "weight_basis_vocabulary", "change_reason_vocabulary",
+			"concept_class_vocabulary", "node_status_vocabulary",
+		} {
+			if ownerHas(t, table, "TRUNCATE") {
+				t.Errorf("%s: the owner still holds TRUNCATE", table)
+			}
 		}
 	})
 }
