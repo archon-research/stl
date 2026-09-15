@@ -405,11 +405,21 @@ def test_a_read_that_ran_no_check_still_leaves_a_decision_event(authz_events, pa
 
 
 @pytest.mark.parametrize("path", POOL_ROUTES)
-def test_an_unresolved_prime_is_allowed_silently_while_auth_is_dark(monkeypatch, authz_events, path):
+def test_an_untracked_holder_is_allowed_silently_while_auth_is_dark(monkeypatch, authz_events, path):
     """Auth off means no gate ran, so no decision event may be written, and an
     untracked holder must not 404: the pool read simply proceeds."""
     monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=None))
     client, _ = _pool_client(fga=_deny(), principal=None)
+
+    assert client.get(path).status_code == 200
+    assert authz_events() == []
+
+
+@pytest.mark.parametrize("path", POOL_ROUTES)
+def test_an_unresolved_prime_emits_nothing_while_auth_is_dark(authz_events, path):
+    """The other branch: no prime resolved and no principal. An allow event
+    for an anonymous caller would be a record of a gate that never ran."""
+    client, _ = _pool_client(fga=_deny(), principal=None, wallet=None)
 
     assert client.get(path).status_code == 200
     assert authz_events() == []
