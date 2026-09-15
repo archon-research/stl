@@ -157,6 +157,7 @@ export function PrimeSelectionProvider({ children }: { children: ReactNode }) {
       requestedPrimeKey: selectedPrimeId,
       fallbackPrimeKey: fallbackGroup.key,
     });
+    // oxlint-disable-next-line react/set-state-in-effect -- must land with the navigateToView() call below; selectedPrimeId is gone from the URL right after, so this can't be recomputed at render time.
     setUnknownPrimeMessage(
       `Prime ${truncateMiddle(selectedPrimeId)} was not found; showing ${fallbackGroup.name}.`,
     );
