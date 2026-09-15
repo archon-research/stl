@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.prime_resolver_repository import PrimeResolverRepository
 
-_SPARK_KEY = "prm_2d3ceee8415e59f3"
+_SPARK_EXTERNAL_ID = "4bd9ee3c-58df-4587-9c04-63b928f1a169"
 _SPARK_VAULT = "0x691a6c29e9e96dd897718305427ad5d534db16ba"
 _SPARK_MAINNET_ALM = "0x1601843c5e9bc251a3272907010afa41fa18347e"
 _SPARK_MAINNET_SUBPROXY = "0x3300f198988e4c9c63f75df86de36421f06af8c4"
@@ -21,7 +21,7 @@ _SPARK_VAULT_CHECKSUMMED = "0x691A6c29E9e96dd897718305427Ad5D534db16BA"
 
 # obex has a vault and no proxies at all — the form that must still resolve.
 _OBEX_VAULT = "0xf275110dfe7b80df66a762f968f59b70babe2b29"
-_OBEX_KEY = "prm_11db7b73f1333a63"
+_OBEX_EXTERNAL_ID = "d0906a47-9b0e-481a-b427-29514e0c2153"
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
@@ -49,7 +49,7 @@ async def test_every_accepted_form_resolves_to_the_same_prime(resolver, identifi
     prime = await resolver.resolve(identifier)
 
     assert prime is not None
-    assert (prime.name, prime.prime_key, prime.vault_address) == ("spark", _SPARK_KEY, _SPARK_VAULT)
+    assert (prime.name, prime.external_id, prime.vault_address) == ("spark", _SPARK_EXTERNAL_ID, _SPARK_VAULT)
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -58,7 +58,7 @@ async def test_a_prime_with_no_proxies_still_resolves(resolver, identifier: str)
     prime = await resolver.resolve(identifier)
 
     assert prime is not None
-    assert (prime.name, prime.prime_key) == ("obex", _OBEX_KEY)
+    assert (prime.name, prime.external_id) == ("obex", _OBEX_EXTERNAL_ID)
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -73,13 +73,13 @@ async def test_an_address_that_is_one_primes_vault_and_anothers_proxy_resolves_t
     conn = await asyncpg.connect(db_url)
     try:
         vault_owner = await conn.fetchval(
-            "INSERT INTO prime (prime_key, name, vault_address) "
-            "VALUES ('prm_t_resolver_vault_match', 'resolver_vault_match', $1) RETURNING id",
+            "INSERT INTO prime (external_id, name, vault_address) "
+            "VALUES (gen_random_uuid(), 'resolver_vault_match', $1) RETURNING id",
             address,
         )
         proxy_owner = await conn.fetchval(
-            "INSERT INTO prime (prime_key, name, vault_address) "
-            "VALUES ('prm_t_resolver_proxy_match', 'resolver_proxy_match', $1) RETURNING id",
+            "INSERT INTO prime (external_id, name, vault_address) "
+            "VALUES (gen_random_uuid(), 'resolver_proxy_match', $1) RETURNING id",
             bytes.fromhex("7d" * 20),
         )
         await conn.execute(

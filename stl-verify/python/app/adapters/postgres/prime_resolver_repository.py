@@ -14,7 +14,7 @@ RESOLVE_PRIME_SQL = """
     SELECT
         p.id,
         p.name,
-        p.prime_key,
+        p.external_id,
         encode(p.vault_address, 'hex') AS vault_hex
     FROM prime p
     WHERE p.name = :name
@@ -62,6 +62,6 @@ class PrimeResolverRepository:
         return PrimeIdentity(
             id=row.id,
             name=row.name,
-            prime_key=row.prime_key,
+            external_id=str(row.external_id),
             vault_address=EthAddress("0x" + row.vault_hex),
         )

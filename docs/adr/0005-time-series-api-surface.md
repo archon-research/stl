@@ -94,10 +94,10 @@ figures while still answering 200 — the worst failure shape available. This is
 policy plus a CI assertion that no name ever maps to a different `prime.id` than before, not by
 machinery: the failure needs two events, a rename and then a reuse, and both go through review.
 
-Prime-scoped responses echo the prime's *current* name and carry `prime_key`, an opaque
-identifier that never changes. The echoed name matches what the entity is called; `prime_key` is
+Prime-scoped responses echo the prime's *current* name and carry `external_id`, an opaque
+identifier that never changes. The echoed name matches what the entity is called; `external_id` is
 the durable handle a client keys on. Retired names stay listed as aliases in the catalogue.
-`prime_key` is a field, never a URL segment.
+`external_id` is a field, never a URL segment.
 
 The key sits on the envelope rather than on every row because no response spans entities: the
 unscoped route for a dataset returns the list of identifiers that have data, not the data itself
@@ -145,7 +145,7 @@ single-observation route. The dataset route lists the identifiers that have data
 returning the data across every entity — a cross-entity history response answers no stated
 requirement, and the max-points rule in decision 5 would reject most of the cases where it would
 have been interesting. The consequence that matters elsewhere: no response carrying points ever
-spans *keyed* entities, which is what puts `prime_key` on the envelope in decision 1.
+spans *keyed* entities, which is what puts `external_id` on the envelope in decision 1.
 
 One dataset keeps a bare data route, and the exception is principled rather than tolerated: the
 protocol-event feed has no entity a client keys on, and forcing one into the path would make "what
@@ -287,7 +287,7 @@ entity key, and its first and last observation timestamps.
 
 The entity key is the part the rest of the descriptor does not cover. Kind, axis and unit say what
 a point *means*; the entity key says what it is *of* — the response fields that identify the thing
-a series is about, which is `prime_key` for a prime-scoped series, chain, token address and feed
+a series is about, which is `external_id` for a prime-scoped series, chain, token address and feed
 for a price series, and empty for protocol events, the one dataset with no entity. Without it a client keying
 rows into a store infers identity per dataset from prose, which is the guessing this endpoint
 exists to remove.
@@ -408,7 +408,7 @@ in the API. In exchange, the two-scope split that today forces proxy-scoped and 
 fields to coexist in one response model stops being expressible, which makes the deprecated
 unprefixed fields removable rather than merely discouraged.
 
-**`prime_key` has to be minted before anything ships**, and must be stable from first
+**`external_id` has to be minted before anything ships**, and must be stable from first
 assignment — its whole purpose is to be the one identifier that never changes. Nothing generates
 one today.
 

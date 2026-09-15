@@ -234,8 +234,8 @@ async def _insert_prime(conn: asyncpg.Connection, name: str, vault_address: byte
         int,
         await conn.fetchval(
             """
-        INSERT INTO prime (prime_key, name, vault_address)
-        VALUES ('prm_t_' || $1, $1, $2)
+        INSERT INTO prime (external_id, name, vault_address)
+        VALUES (gen_random_uuid(), $1, $2)
         ON CONFLICT (name) DO UPDATE SET vault_address = EXCLUDED.vault_address
         RETURNING id
         """,

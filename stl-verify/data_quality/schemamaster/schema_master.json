@@ -1021,8 +1021,8 @@
       "type": "int8",
       "class": "R"
     },
-    "prime_key": {
-      "type": "text",
+    "external_id": {
+      "type": "uuid",
       "class": "S"
     },
     "principal_out": {

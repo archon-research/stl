@@ -11,18 +11,18 @@ import (
 
 // primeIdentityLedger is the audit record the schema does not keep: prime.name is mutable in
 // place with no history, so a rename plus a reuse would silently repoint a published URL at
-// another entity's figures. A prime is added here once, with the id and key its migration
+// another entity's figures. A prime is added here once, with the id and external_id its migration
 // mints, and the row never changes afterwards (ADR-0005 decision 1).
 var primeIdentityLedger = map[string]struct {
-	id  int64
-	key string
+	id         int64
+	externalID string
 }{
-	"spark": {id: 1, key: "prm_2d3ceee8415e59f3"},
-	"grove": {id: 2, key: "prm_9612b110a1975ba4"},
-	"obex":  {id: 3, key: "prm_11db7b73f1333a63"},
+	"spark": {id: 1, externalID: "4bd9ee3c-58df-4587-9c04-63b928f1a169"},
+	"grove": {id: 2, externalID: "9f5e309d-17a7-4fd4-b49b-009b5071afcd"},
+	"obex":  {id: 3, externalID: "d0906a47-9b0e-481a-b427-29514e0c2153"},
 }
 
-// TestPrimeNamesNeverRemap fails when a prime name maps to a different prime.id or prime_key
+// TestPrimeNamesNeverRemap fails when a prime name maps to a different prime.id or external_id
 // than it did before, and when a prime reaches the database without a ledger entry. It runs
 // against a freshly migrated database, so the ids it pins are the fresh-DB assignment order —
 // it certifies the migration set, not a long-lived environment.
@@ -31,7 +31,7 @@ func TestPrimeNamesNeverRemap(t *testing.T) {
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
 
-	rows, err := pool.Query(ctx, `SELECT name, id, prime_key FROM prime ORDER BY id`)
+	rows, err := pool.Query(ctx, `SELECT name, id, external_id FROM prime ORDER BY id`)
 	if err != nil {
 		t.Fatalf("read prime registry: %v", err)
 	}
@@ -39,21 +39,21 @@ func TestPrimeNamesNeverRemap(t *testing.T) {
 
 	seen := make(map[string]bool, len(primeIdentityLedger))
 	for rows.Next() {
-		var name, key string
+		var name, externalID string
 		var id int64
-		if err := rows.Scan(&name, &id, &key); err != nil {
+		if err := rows.Scan(&name, &id, &externalID); err != nil {
 			t.Fatalf("scan prime row: %v", err)
 		}
 		seen[name] = true
 
 		want, ok := primeIdentityLedger[name]
 		if !ok {
-			t.Errorf("prime %q is in the database but not in the ledger; add it with the id and key its migration mints", name)
+			t.Errorf("prime %q is in the database but not in the ledger; add it with the id and external_id its migration mints", name)
 			continue
 		}
-		if id != want.id || key != want.key {
-			t.Errorf("prime %q maps to (id %d, key %q), ledger says (id %d, key %q); a name never remaps",
-				name, id, key, want.id, want.key)
+		if id != want.id || externalID != want.externalID {
+			t.Errorf("prime %q maps to (id %d, external_id %q), ledger says (id %d, external_id %q); a name never remaps",
+				name, id, externalID, want.id, want.externalID)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -79,18 +79,18 @@ func TestPrimeKeyCannotBeRekeyed(t *testing.T) {
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
 
-	_, err := pool.Exec(ctx, `UPDATE prime SET prime_key = 'prm_0000000000000000' WHERE name = 'spark'`)
+	_, err := pool.Exec(ctx, `UPDATE prime SET external_id = '00000000-0000-0000-0000-000000000000' WHERE name = 'spark'`)
 	if err == nil {
-		t.Fatal("re-keying a prime should raise via the prime_key_immutable trigger")
+		t.Fatal("changing a prime's external_id should raise via the prime_external_id_immutable trigger")
 	}
 	if !strings.Contains(err.Error(), "minted once and never changes") {
-		t.Errorf("UPDATE error = %v, want the prime_key immutability message", err)
+		t.Errorf("UPDATE error = %v, want the external_id immutability message", err)
 	}
 
-	// The trigger is column-scoped: a rename is still allowed, and re-stating the same key
-	// alongside it is not a re-key.
+	// The trigger is column-scoped: a rename is still allowed, and re-stating the same external_id
+	// alongside it is not a change.
 	if _, err := pool.Exec(ctx,
-		`UPDATE prime SET name = 'spark2', prime_key = prime_key WHERE name = 'spark'`); err != nil {
+		`UPDATE prime SET name = 'spark2', external_id = external_id WHERE name = 'spark'`); err != nil {
 		t.Errorf("renaming a prime should stay allowed: %v", err)
 	}
 }
@@ -109,8 +109,8 @@ func TestPrimeNameMustBeAnAddressableSlug(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := pool.Exec(ctx,
-				`INSERT INTO prime (prime_key, name, vault_address)
-				  VALUES ('prm_t_rejected', $1, decode('11223344556677889900aabbccddeeff00112233', 'hex'))`,
+				`INSERT INTO prime (external_id, name, vault_address)
+				  VALUES (gen_random_uuid(), $1, decode('11223344556677889900aabbccddeeff00112233', 'hex'))`,
 				tc.primeName)
 			if err == nil {
 				t.Fatalf("prime name %q should be rejected", tc.primeName)

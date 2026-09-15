@@ -10,12 +10,12 @@ class PrimeIdentity:
     """One prime, reached by name, vault address, ALM proxy or SubProxy address.
 
     ``id`` is the canonical internal identifier and never leaves the API — its
-    numbering is environment-specific. ``prime_key`` is the opaque public handle:
+    numbering is environment-specific. ``external_id`` is the opaque public handle:
     minted once and never changed, unlike ``name`` and ``vault_address``, which are
     time-varying attributes of the prime rather than its identity.
     """
 
     id: int
     name: str
-    prime_key: str
+    external_id: str
     vault_address: EthAddress

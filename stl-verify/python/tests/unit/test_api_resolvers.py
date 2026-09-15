@@ -9,7 +9,9 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime import PrimeIdentity
 from app.domain.exceptions import InvalidPrimeIdentifierError
 
-_SPARK = PrimeIdentity(id=1, name="spark", prime_key="prm_2d3ceee8415e59f3", vault_address=EthAddress("0x" + "ab" * 20))
+_SPARK = PrimeIdentity(
+    id=1, name="spark", external_id="4bd9ee3c-58df-4587-9c04-63b928f1a169", vault_address=EthAddress("0x" + "ab" * 20)
+)
 
 
 @pytest.mark.asyncio

@@ -32,7 +32,15 @@ def debt_repo(stub_engine):
 @pytest.mark.parametrize(
     ("resolved", "expected"),
     [
-        (PrimeIdentity(id=_PRIME_ID, name="spark", prime_key="prm_x", vault_address=_VALID_ADDR), _PRIME_ID),
+        (
+            PrimeIdentity(
+                id=_PRIME_ID,
+                name="spark",
+                external_id="4bd9ee3c-58df-4587-9c04-63b928f1a169",
+                vault_address=_VALID_ADDR,
+            ),
+            _PRIME_ID,
+        ),
         (None, None),
     ],
 )

@@ -8,7 +8,7 @@ from app.domain.entities.prime import PrimeIdentity
 from app.domain.exceptions import InvalidPrimeIdentifierError
 
 _VAULT_HEX = "ab" * 20
-_ROW = SimpleNamespace(id=7, name="spark", prime_key="prm_2d3ceee8415e59f3", vault_hex=_VAULT_HEX)
+_ROW = SimpleNamespace(id=7, name="spark", external_id="4bd9ee3c-58df-4587-9c04-63b928f1a169", vault_hex=_VAULT_HEX)
 
 
 @pytest.mark.asyncio
@@ -16,7 +16,10 @@ async def test_resolve_returns_the_prime_identity(stub_engine) -> None:
     engine, _ = stub_engine({"fetchone.return_value": _ROW})
 
     assert await PrimeResolverRepository(engine).resolve("spark") == PrimeIdentity(
-        id=7, name="spark", prime_key="prm_2d3ceee8415e59f3", vault_address=EthAddress("0x" + _VAULT_HEX)
+        id=7,
+        name="spark",
+        external_id="4bd9ee3c-58df-4587-9c04-63b928f1a169",
+        vault_address=EthAddress("0x" + _VAULT_HEX),
     )
 
 

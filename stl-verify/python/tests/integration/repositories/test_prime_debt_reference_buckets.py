@@ -47,7 +47,7 @@ async def seeded(db_url: str):
         prime_id = cast(
             int,
             await conn.fetchval(
-                "INSERT INTO prime (prime_key, name, vault_address) VALUES ('prm_t_' || $1, $1, $2) RETURNING id",
+                "INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), $1, $2) RETURNING id",
                 _PRIME_NAME,
                 _PRIME_ADDRESS,
             ),

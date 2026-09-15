@@ -136,7 +136,7 @@ def test_validate_prime_identifier_rejects_malformed_values(value: str):
 def test_prime_name_pattern_matches_the_database_check():
     """The regex is written twice — here and in the CHECK — so drift is a silent 422."""
     migration = (
-        pathlib.Path(__file__).resolve().parents[3] / "db" / "migrations" / "20260908_130000_add_prime_key.sql"
+        pathlib.Path(__file__).resolve().parents[3] / "db" / "migrations" / "20260908_130000_add_prime_external_id.sql"
     ).read_text()
 
     assert f"CHECK (name ~ '{PRIME_NAME_PATTERN}')" in migration
