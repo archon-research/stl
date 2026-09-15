@@ -248,13 +248,16 @@ naming the actual count and a window that would fit.
 
 Rejecting, not truncating and not paginating.
 
-Rejections are structured. The 422 body carries a stable error code, the actual point count, the
-max-points limit, and a suggested `from_timestamp`/`to_timestamp` — or a `frequency` — that would
-fit, as fields, with the human-readable message alongside. Because rejection replaces the
+Rejections are structured, as an RFC 9457 problem detail: a stable `type` and its static `title`,
+the occurrence in `detail`, and the rest as extension members — the actual point count, the
+max-points limit, and the ways out grouped under `suggestions`, a narrower window or a frequency,
+each keyed like the query parameters so a client merges one in rather than renaming fields. Because rejection replaces the
 truncation flag, this body is the only signal a caller gets that a request was too big, so it has
 to be machine-readable rather than prose: a client re-tiles the window or drops to a fitting
 frequency without parsing an error message. One model serves every 422 on the surface, not only
-this one.
+this one: a parameter the framework rejects before a route is reached answers with the same body
+under `type: invalid_request`, listing each offending parameter and its reason code under an
+`errors` extension member rather than as prose a client would have to parse.
 
 The rule governs history, not every list, and the split across the surface is one line:
 **discovery lists paginate, series never do.** The catalogue and the per-dataset identifier lists
@@ -507,7 +510,11 @@ not to an endpoint. It also means a pinned window can change under a cached copy
 is bounded, because only corrections and backfills can alter a window with a fixed upper bound
 and corrections are rare, but the code comment justifying the cache policy on the grounds that
 the rows are "immutable once observed" is now false and must be corrected — the next reader will
-otherwise build something larger on a false premise.
+otherwise build something larger on a false premise. A window counts as pinned only once its
+upper bound has passed: a bound at or after `now` is still gaining rows. The cached copy is
+`private`, never `public` — every one of these routes is `Authorization`-gated and filters its
+body per principal, and `public` is the one directive that lets a shared cache store a response
+to a request carrying `Authorization`.
 
 **Decision 5 means a legitimate request can be refused.** This is the intended behaviour and it
 is a real cost to callers, paid down by the catalogue: a client that reads first and last

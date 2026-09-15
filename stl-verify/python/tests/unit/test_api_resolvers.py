@@ -4,6 +4,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.deps import PRIME_DENIED_DETAIL
+from app.api.errors import ApiRejectionError
 from app.api.v1._resolvers import resolve_prime
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime import PrimeIdentity
@@ -36,18 +37,20 @@ async def test_resolve_prime_raises_404_for_an_unknown_identifier() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("raised", "status", "detail"),
-    [
-        (InvalidPrimeIdentifierError("bad"), 422, "malformed prime id"),
-        (ValueError("Database query failed while resolving prime spark"), 503, "prime lookup unavailable"),
-    ],
-)
-async def test_resolve_prime_matches_the_authz_gate_on_failures(raised, status, detail) -> None:
+async def test_resolve_prime_rejects_a_malformed_identifier_like_the_authz_gate() -> None:
     resolver = AsyncMock()
-    resolver.resolve.side_effect = raised
+    resolver.resolve.side_effect = InvalidPrimeIdentifierError("bad")
+
+    with pytest.raises(ApiRejectionError, match="malformed prime id"):
+        await resolve_prime("0xnope", resolver)
+
+
+@pytest.mark.asyncio
+async def test_resolve_prime_answers_503_when_the_lookup_fails() -> None:
+    resolver = AsyncMock()
+    resolver.resolve.side_effect = ValueError("Database query failed while resolving prime spark")
 
     with pytest.raises(HTTPException) as exc:
         await resolve_prime("spark", resolver)
 
-    assert (exc.value.status_code, exc.value.detail) == (status, detail)
+    assert (exc.value.status_code, exc.value.detail) == (503, "prime lookup unavailable")

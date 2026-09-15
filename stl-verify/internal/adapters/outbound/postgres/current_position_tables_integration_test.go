@@ -556,7 +556,7 @@ func (f *currentTablesFixture) trySaveAllocationsAs(ctx context.Context, repo *A
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := repo.SavePositions(ctx, tx, rows); err != nil {
+	if _, err := repo.SavePositions(ctx, tx, rows); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

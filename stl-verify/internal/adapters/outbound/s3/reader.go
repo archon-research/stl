@@ -180,6 +180,9 @@ func (r *Reader) StreamFile(ctx context.Context, bucket, key string) (io.ReadClo
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
+	if isMissingObject(err) {
+		return nil, fmt.Errorf("%s/%s: %w: %w", bucket, key, outbound.ErrObjectNotFound, err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get object %s/%s: %w", bucket, key, err)
 	}

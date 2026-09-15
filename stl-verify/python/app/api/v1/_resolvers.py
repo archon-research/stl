@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from fastapi import HTTPException
 
 from app.api.deps import PRIME_DENIED_DETAIL
+from app.api.errors import ApiRejectionError
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime import PrimeIdentity
 from app.domain.entities.receipt_token import ReceiptTokenInfo
@@ -53,7 +54,7 @@ async def resolve_prime(identifier: str, resolver: PrimeResolver) -> PrimeIdenti
     try:
         prime = await resolver.resolve(identifier)
     except InvalidPrimeIdentifierError as exc:
-        raise HTTPException(status_code=422, detail="malformed prime id") from exc
+        raise ApiRejectionError("malformed prime id") from exc
     except ValueError as exc:
         raise HTTPException(status_code=503, detail="prime lookup unavailable") from exc
     if prime is None:
@@ -111,4 +112,4 @@ def parse_asset_identity(
         detail = "provide exactly one of asset_id or (chain_id, token_address); got both"
     else:
         detail = "provide exactly one of asset_id or (chain_id, token_address); got neither"
-    raise HTTPException(status_code=422, detail=detail)
+    raise ApiRejectionError(detail)
