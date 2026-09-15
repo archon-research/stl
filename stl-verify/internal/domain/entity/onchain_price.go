@@ -23,9 +23,10 @@ const (
 type QuoteCurrency string
 
 const (
-	QuoteCurrencyUSD QuoteCurrency = "USD"
-	QuoteCurrencyETH QuoteCurrency = "ETH"
-	QuoteCurrencyBTC QuoteCurrency = "BTC"
+	QuoteCurrencyUSD  QuoteCurrency = "USD"
+	QuoteCurrencyETH  QuoteCurrency = "ETH"
+	QuoteCurrencyBTC  QuoteCurrency = "BTC"
+	QuoteCurrencyUSDS QuoteCurrency = "USDS"
 )
 
 // IsFeedOracle returns true for oracle types that use per-feed price fetching

@@ -1842,7 +1842,7 @@ func TestProcessBlock_FeedOracle_NonUSDConversion(t *testing.T) {
 	repo.getEnabledOraclesByChainFn = func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
 		return []*entity.Oracle{{
 			ID: 1, Name: "chainlink-feeds", Enabled: true,
-			OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
+			OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8, ChainID: 1,
 		}}, nil
 	}
 	repo.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
