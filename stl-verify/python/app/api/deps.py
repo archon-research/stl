@@ -9,6 +9,7 @@ from app.adapters.postgres.prime_capital_stack_repository import PrimeCapitalSta
 from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
 from app.adapters.postgres.reference_position_repository import ReferencePositionRepository
 from app.adapters.postgres.reference_risk_capital_repository import ReferenceRiskCapitalRepository
+from app.api.errors import ApiRejectionError
 from app.auth.fga import FgaClient, FgaError, FgaTruncated
 from app.auth.jwt import JwksUnavailable, Principal, TokenError
 from app.config import Settings, get_settings
@@ -206,7 +207,7 @@ async def check_prime_view(request: Request, principal: Principal | None, prime_
         log_auth_event(
             request, gate="prime", decision="deny", reason="malformed_prime_id", status=422, principal=principal
         )
-        raise HTTPException(status_code=422, detail="malformed prime id") from exc
+        raise ApiRejectionError("malformed prime id") from exc
     # Before the lookup, so a misconfigured app says so without spending a query.
     fga = _fga_or_503(request, gate="prime", principal=principal)
     try:

@@ -23,6 +23,7 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import deps
+from app.api.errors import register_error_handlers
 from app.api.v1 import risk
 from app.auth.jwt import Principal
 from app.domain.entities.allocation import EthAddress
@@ -80,6 +81,7 @@ def _principal(roles: Iterable[str] = ANALYST_ROLES) -> Principal:
 def _client(*, fga, principal: Principal | None, service=None) -> TestClient:
     """The real risk router, mounted the way ``create_app`` mounts it."""
     app = FastAPI()
+    register_error_handlers(app)
     app.state.fga = fga
     app.include_router(risk.router, prefix="/v1", dependencies=[Depends(deps.require_analyst)])
 
