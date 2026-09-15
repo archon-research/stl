@@ -28,6 +28,9 @@ const (
 	// 1, where the backfill starts its scan whatever the pin is.
 	posmDeployBlockMainnet = int64(21689089)
 	defaultE2EScanBlocks   = int64(30_000)
+	// Below this height the raw archive is bulk-downloader-only and so version-1
+	// only; from here up its hash-verified 0/1 twins are both legitimate.
+	mainnetDualVersionBandStart = int64(24_250_000)
 	// The workflow test environment defaults to 3s, which only a mock chain meets.
 	e2eWorkflowTimeout = 10 * time.Minute
 )
@@ -151,6 +154,37 @@ func runE2ETransferWorkflow(t *testing.T, db *pgxpool.Pool) {
 	}
 }
 
+func assertRowsInsideScannedRange(t *testing.T, rows []e2eTransferRow, pin int64) {
+	t.Helper()
+	for _, r := range rows {
+		if r.blockNumber < posmDeployBlockMainnet || r.blockNumber > pin {
+			t.Errorf("block_number %d is outside the scanned range [%d, %d]",
+				r.blockNumber, posmDeployBlockMainnet, pin)
+		}
+	}
+}
+
+// assertArchiveStampedVersions holds each row to what the archive could hold at its
+// height; below the dual-version band that is the bulk downloader's 1 and nothing else.
+func assertArchiveStampedVersions(t *testing.T, rows []e2eTransferRow) {
+	t.Helper()
+	for _, r := range rows {
+		if r.blockNumber >= mainnetDualVersionBandStart {
+			if r.blockVersion < 0 {
+				t.Errorf("block %d: block_version = %d, want a version the archive could hold",
+					r.blockNumber, r.blockVersion)
+			}
+			continue
+		}
+		// A 0 below the band is the zero value, not an archived version: the run
+		// stopped reading the archive.
+		if r.blockVersion != 1 {
+			t.Errorf("block %d: block_version = %d, want the 1 the archive holds below block %d",
+				r.blockNumber, r.blockVersion, mainnetDualVersionBandStart)
+		}
+	}
+}
+
 // TestE2E_PosmTransferBackfillOverRealBlocks is the whole path: eth_getLogs
 // against mainnet, each height's block_version resolved from the real archive with
 // its hash verified against the block being replayed, and rows written through the
@@ -169,18 +203,8 @@ func TestE2E_PosmTransferBackfillOverRealBlocks(t *testing.T) {
 	t.Logf("wrote %d transfer rows over blocks %d..%d (pin %d)",
 		len(rows), rows[0].blockNumber, rows[len(rows)-1].blockNumber, pin)
 
-	for _, r := range rows {
-		if r.blockNumber < posmDeployBlockMainnet || r.blockNumber > pin {
-			t.Errorf("block_number %d is outside the scanned range [%d, %d]",
-				r.blockNumber, posmDeployBlockMainnet, pin)
-		}
-		// Deep history is bulk-downloader-only, archived at version 1, so a 0 here
-		// means the run stopped reading the archive and stamped a default.
-		if r.blockVersion != 1 {
-			t.Errorf("block %d: block_version = %d, want the 1 the archive holds",
-				r.blockNumber, r.blockVersion)
-		}
-	}
+	assertRowsInsideScannedRange(t, rows, pin)
+	assertArchiveStampedVersions(t, rows)
 
 	// A rerun is a new workflow execution carrying no heartbeat details, so it
 	// rescans the range from the start; on the same build every row conflicts away.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"regexp"
 	"testing"
 	"time"
 
@@ -28,16 +29,19 @@ func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
 	}
 }
 
-// RunWorker hands WorkerConfig.Name to InitOTEL as the OTel service name, so this
-// literal is the service_name the alerts/vector-indexers.yaml selectors match.
+// RunWorker hands WorkerConfig.Name to InitOTEL as the OTel service name, so the
+// nft-transfer selectors in alerts/vector-indexers.yaml have to match that name.
 func TestWorkerConfig_NamesTheServiceTheAlertSelectorsMatch(t *testing.T) {
-	const serviceName = "uniswap-v4-position-bootstrap"
+	// Spelled out as the rules spell it, and anchored both ends the way Prometheus
+	// anchors =~ and !~, so the chain-prefix form is what is being checked.
+	const selector = `(^|.*-)uniswap-v4-position-bootstrap`
+	matcher := regexp.MustCompile(`^(?:` + selector + `)$`)
 
 	cfg := (&bootstrapWorker{}).workerConfig("postgres://unused/unused")
 
-	if cfg.Name != serviceName {
-		t.Errorf("WorkerConfig.Name = %q, want %q: the nft-transfer rules select this worker by an exact service_name",
-			cfg.Name, serviceName)
+	if !matcher.MatchString(cfg.Name) {
+		t.Errorf("WorkerConfig.Name = %q: the nft-transfer rules select this worker with service_name=~%q, which does not match it",
+			cfg.Name, selector)
 	}
 }
 

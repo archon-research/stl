@@ -75,7 +75,7 @@ func (s *logWindowScanner) scan(ctx context.Context, from, to int64, emit func(l
 		}
 
 		if err := emit(logWindow{from: cursor, to: end, logs: logs}); err != nil {
-			return stats, fmt.Errorf("handling logs for blocks %d-%d: %w", cursor, end, err)
+			return stats, fmt.Errorf("handling blocks %d-%d for %s: %w", cursor, end, s.subject, err)
 		}
 		stats.windows++
 		stats.logs += len(logs)
@@ -95,7 +95,7 @@ func (s *logWindowScanner) narrow(size, from, to int64, err error) (int64, error
 		return 0, fmt.Errorf("scanning blocks %d-%d for %s: %w", from, to, s.subject, err)
 	}
 	if size <= 1 {
-		return 0, fmt.Errorf("block %d refused on its own; a single block's logs exceed the provider's response limit: %w", from, err)
+		return 0, fmt.Errorf("scanning block %d for %s: a single block's logs exceed the provider's response limit: %w", from, s.subject, err)
 	}
 	// A tail the scan end already clamped below the minimum still halves.
 	narrowed := min(s.policy.shrink(size), size/2)

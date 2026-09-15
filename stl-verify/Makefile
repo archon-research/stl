@@ -403,6 +403,8 @@ e2e-v4-posm-transfer:
 	@set -a; if [ -f ../.env.secrets ]; then . ../.env.secrets; fi; set +a; \
 	[ -n "$$ALCHEMY_API_KEY" ] || { echo "ERROR: ALCHEMY_API_KEY is empty; put it in ../.env.secrets"; exit 1; }; \
 	[ -n "$$AWS_PROFILE" ] || { echo "ERROR: AWS_PROFILE is empty; it must name a profile that can read E2E_S3_BUCKET"; exit 1; }; \
+	[ -n "$$E2E_DEPLOY_ENV" ] || { echo "ERROR: E2E_DEPLOY_ENV is empty; it must name the deploy env whose raw archive is read"; exit 1; }; \
+	[ -n "$$E2E_S3_BUCKET" ] || { echo "ERROR: E2E_S3_BUCKET is empty; it must name a raw archive bucket AWS_PROFILE may read"; exit 1; }; \
 	E2E_SCAN_BLOCKS="$(SCAN_BLOCKS)" go test -tags=integration,e2e -run TestE2E_PosmTransferBackfillOverRealBlocks -v -timeout=15m ./cmd/backfillers/uniswap-v4-position-bootstrap/
 
 # Spot-check the registered L2 Aave V3 reserve facts against the real per-chain RPC.
