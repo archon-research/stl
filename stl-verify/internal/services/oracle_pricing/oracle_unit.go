@@ -17,11 +17,14 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// quoteCurrencyTokenAddr maps quote currencies to their well-known mainnet
-// token addresses, used for reference feed identification.
-var quoteCurrencyTokenAddr = map[string]common.Address{
-	"ETH": common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH
-	"BTC": common.HexToAddress("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"), // WBTC
+// quoteCurrencyTokenAddr maps quote currencies to their well-known token
+// addresses per chain, used for reference feed identification.
+var quoteCurrencyTokenAddr = map[int64]map[string]common.Address{
+	1: {
+		"ETH":  common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH
+		"BTC":  common.HexToAddress("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"), // WBTC
+		"USDS": common.HexToAddress("0xdC035D45d973e3ec169d2276ddab16F1e407384F"), // USDS
+	},
 }
 
 // OracleUnit holds everything needed to fetch prices for one oracle.
@@ -229,7 +232,7 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 	}
 
 	tokenAddrs := tokenInfosToAddressMap(tokenInfos)
-	refFeedIdx, nonUSDFeeds := buildRefFeedIdx(feeds, tokenAddrs)
+	refFeedIdx, nonUSDFeeds := buildRefFeedIdx(feeds, tokenAddrs, int64(oracle.ChainID))
 
 	if err := validateRefFeeds(nonUSDFeeds, refFeedIdx, oracle.Name); err != nil {
 		return nil, err
@@ -404,9 +407,11 @@ func validateRefFeeds(nonUSDFeeds map[int]string, refFeedIdx map[string]int, ora
 // buildRefFeedIdx identifies which feeds serve as USD-denominated reference prices
 // for non-USD quote currencies. It matches token addresses against well-known
 // WETH/WBTC addresses to find feeds that provide ETH/USD and BTC/USD.
-func buildRefFeedIdx(feeds []blockchain.FeedConfig, tokenAddrs map[int64]common.Address) (map[string]int, map[int]string) {
+func buildRefFeedIdx(feeds []blockchain.FeedConfig, tokenAddrs map[int64]common.Address, chainID int64) (map[string]int, map[int]string) {
 	refFeedIdx := make(map[string]int)
 	nonUSDFeeds := make(map[int]string)
+
+	chainRefs := quoteCurrencyTokenAddr[chainID]
 
 	for i, feed := range feeds {
 		if feed.QuoteCurrency != "USD" {
@@ -417,7 +422,7 @@ func buildRefFeedIdx(feeds []blockchain.FeedConfig, tokenAddrs map[int64]common.
 		if !ok {
 			continue
 		}
-		for currency, refAddr := range quoteCurrencyTokenAddr {
+		for currency, refAddr := range chainRefs {
 			if addr == refAddr {
 				refFeedIdx[currency] = i
 			}
