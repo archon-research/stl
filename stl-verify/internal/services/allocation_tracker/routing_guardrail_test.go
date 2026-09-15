@@ -103,6 +103,30 @@ func TestCentrifugeRoutesToERC7540(t *testing.T) {
 	}
 }
 
+// TestCentrifugeFeederRoutesToBalanceOf pins the feeder entries — Centrifuge share
+// tokens, plain ERC-20s — on BalanceOfSource, so a source registered ahead of it
+// cannot quietly claim them without failing here.
+func TestCentrifugeFeederRoutesToBalanceOf(t *testing.T) {
+	registry, err := BuildSourceRegistry(nil, quietLogger())
+	if err != nil {
+		t.Fatalf("build source registry: %v", err)
+	}
+
+	source := registry.Route(&TokenEntry{
+		ContractAddress: common.HexToAddress("0x9477724bb54ad5417de8baff29e59df3fb4da74f"),
+		Chain:           "plume",
+		Star:            "grove",
+		Protocol:        "centrifuge",
+		TokenType:       "centrifuge_feeder",
+	})
+	if source == nil {
+		t.Fatal("centrifuge_feeder entry routes to no source")
+	}
+	if got := source.Name(); got != "balanceof" {
+		t.Errorf("centrifuge_feeder routed to %q, want %q", got, "balanceof")
+	}
+}
+
 // TestCentrifugeRoutesToAShareResolver: the alias path locates the source by type
 // assertion through the real registry, so a source that stopped satisfying
 // shareResolver would fail every block on the chain; this pins it at build time.
