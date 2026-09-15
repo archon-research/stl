@@ -40,7 +40,7 @@ func seedPrimeAllocationBase(t *testing.T) (context.Context, *pgxpool.Pool) {
 		args []any
 	}{
 		{`INSERT INTO chain (chain_id, name) VALUES (1, 'ethereum') ON CONFLICT (chain_id) DO NOTHING`, nil},
-		{`INSERT INTO prime (name, vault_address) VALUES ('itest-alloc', decode($1, 'hex'))`, []any{allocVault}},
+		{`INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'itest-alloc', decode($1, 'hex'))`, []any{allocVault}},
 		{`INSERT INTO token (chain_id, address, symbol, decimals) VALUES (1, decode($1, 'hex'), 'ITX', 18)`, []any{allocTokenX}},
 		{`INSERT INTO token (chain_id, address, symbol, decimals) VALUES (1, decode($1, 'hex'), 'ITY', 6)`, []any{allocTokenY}},
 	} {
