@@ -114,8 +114,8 @@ The venue configs carry six products per venue (Coinbase ARCT-316 #750, OKX
 ARCT-319 #767, Kraken ARCT-321 #769 — staging 25 Aug; prod mirrored verbatim
 in #927, 9 Sep), each symbol verified against the live venue API first; an
 entry a venue stops listing is skipped silently (ARCT-240), so drift thins a
-book rather than crashing. SOL and JITOSOL flow too, ahead of any consumer
-(future Galaxy). VEC-455 (deploy the indexer fleet to prod) closed 24 Aug;
+book rather than crashing. SOL and JITOSOL flow too and the reader serves
+them since VEC-804, ahead of any consumer (future Galaxy). VEC-455 (deploy the indexer fleet to prod) closed 24 Aug;
 new-symbol prod rollouts ride each venue task.
 
 **Remaining:**

@@ -20,6 +20,7 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **on demand** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
 | `uniswap-v4-position-bootstrap` | `uniswap-v4-position-bootstrap` | **on demand** | Snapshots every historical Uniswap V4 LP position of the registered pools at one finality-safe block, closing the gap event-driven indexing cannot (VEC-639); operated from [vector-indexers.md](vector-indexers.md#uniswap-v4-indexer-vec-475) |
 | `block-republisher`, `<chain>-block-republisher` | `block-republisher`, `<chain>-block-republisher` | **on demand** | Re-publishes named block heights under the next `block_version` their raw archive leaves free, so every indexer appends the canonical block for a height whose only published version is a losing fork (ARCT-383). One deployment per chain — see the table under its section below |
+| `block-meta-loader`, `<chain>-block-meta-loader` | `block-meta-loader`, `<chain>-block-meta-loader` | **on demand** | Fills `block_meta` (the canonical block-coordinate → header-timestamp lookup) for one chain from that chain's S3 raw-block archive (VEC-491). One deployment per chain |
 | `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (Python harness; staging + prod; N_MC=10000, pod sized from a live-data pass in #891) |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
@@ -451,9 +452,9 @@ Warning severity for that reason.
 
 Currently matches: `offchain-price-backfill`, `reference-capital-backfill`,
 `morpho-vault-backfill`, `morpho-v2-bootstrap`, `uniswap-v4-position-bootstrap`, and
-every chain's republisher —
-`block-republisher` and `<chain>-block-republisher`, which the rule matches with
-one prefix-agnostic regex rather than a list of chains.
+every chain's republisher and block-meta loader — `block-republisher` /
+`<chain>-block-republisher` and `block-meta-loader` / `<chain>-block-meta-loader`,
+each matched with one prefix-agnostic regex rather than a list of chains.
 
 ### First checks
 
@@ -1290,6 +1291,56 @@ which the worker's startup guard rejects — it requires the deployed
 
 ---
 
+## VectorBlockMetaWorklistGrowthHigh
+
+### What it means
+
+The block-meta loader paged more than 3,000,000 `block_meta_worklist` rows for one
+chain in 24h — about three times chain 1's full first pass of 981,915 pending
+blocks. **Nothing is broken.** `block_meta_worklist` is an UNLOGGED scratch table
+holding one chain's pending blocks for the length of a run, and a run that reaches
+the end clears its own chain. This is the tripwire on the assumption that the
+pending set stays bounded, so that the table can stay plain and unpartitioned.
+
+Warning severity: no data is wrong and nothing is stale. It is a capacity signal.
+
+### First checks
+
+1. **Is the same run failing repeatedly?** A run that dies before it finishes
+   leaves its rows behind, and the next run resumes from them rather than
+   re-enumerating. Repeated failures re-page the same set over and over:
+
+   ```sql
+   SELECT chain_id, count(*) FROM block_meta_worklist GROUP BY chain_id;
+   ```
+
+   Rows sitting there while no run is in flight mean the last one did not finish.
+   Check `VectorCronjobRunFailing` for that chain's `service_name`, and the
+   Temporal UI for the workflow's last outcome.
+
+2. **Did `block_meta` lose rows?** The pending set is what the arms find minus what
+   `block_meta` already holds, so a truncated or partially restored `block_meta`
+   makes every run re-enumerate history:
+
+   ```sql
+   SELECT chain_id, count(*), min(block_number), max(block_number)
+     FROM block_meta GROUP BY chain_id;
+   ```
+
+3. **Did the referenced set widen?** A table added to the loader's arms
+   (`workListArms` in `internal/adapters/outbound/postgres/block_meta_repository.go`)
+   brings every block it references into scope.
+
+### What to do
+
+- A repeatedly failing run is the common cause and is fixed on its own terms —
+  the growth is a symptom, not the problem.
+- If the pending set is genuinely and permanently larger (a new chain, a new
+  referencing table), the threshold is the thing to revisit: raise it to suit the
+  new normal, and record the new first-pass figure here.
+- If the set is large because the loader has never completed a first pass for that
+  chain, let it finish. The first pass is expected to be ~10^6 rows for chain 1.
+
 ## VectorCoreModelRunnerStale
 
 **Severity:** critical (pages) · **For:** 30m · **Window:** 30h
@@ -1772,8 +1823,9 @@ exposure.
 Failure + all-failing alerts are automatic (they group by `service_name`).
 `VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`, the on-demand
 jobs (`offchain-price-backfill`, `reference-capital-backfill`,
-`morpho-vault-backfill`, `morpho-v2-bootstrap`, and every chain's republisher:
-`block-republisher` and `<chain>-block-republisher`), and `core-model-runner`;
+`morpho-vault-backfill`, `morpho-v2-bootstrap`, and every chain's republisher and
+block-meta loader: `block-republisher` / `<chain>-block-republisher` and
+`block-meta-loader` / `<chain>-block-meta-loader`), and `core-model-runner`;
 `VectorCronjobRunFailing` excludes only maple. Two manual steps:
 
 1. Add the new **Deployment name** to the `deployment=~"..."` regex in the

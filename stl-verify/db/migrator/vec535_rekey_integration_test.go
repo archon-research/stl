@@ -88,7 +88,7 @@ func seedVec535Prime(ctx context.Context, t *testing.T, pool *pgxpool.Pool) int6
 	t.Helper()
 	const name = "vec535-rekey-test"
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO prime (name, vault_address) VALUES ($1, decode($2, 'hex'))
+		INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), $1, decode($2, 'hex'))
 		ON CONFLICT (name) DO NOTHING`, name, "5353535353535353535353535353535353535353"); err != nil {
 		t.Fatalf("seed prime: %v", err)
 	}

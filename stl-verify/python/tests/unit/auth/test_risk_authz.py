@@ -23,6 +23,7 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import deps
+from app.api.errors import register_error_handlers
 from app.api.v1 import risk
 from app.auth.jwt import Principal
 from app.domain.entities.allocation import EthAddress
@@ -80,6 +81,7 @@ def _principal(roles: Iterable[str] = ANALYST_ROLES) -> Principal:
 def _client(*, fga, principal: Principal | None, service=None) -> TestClient:
     """The real risk router, mounted the way ``create_app`` mounts it."""
     app = FastAPI()
+    register_error_handlers(app)
     app.state.fga = fga
     app.include_router(risk.router, prefix="/v1", dependencies=[Depends(deps.require_analyst)])
 
@@ -265,7 +267,7 @@ def test_a_permitted_pool_prime_is_the_one_the_figures_are_computed_from(resolve
 
 
 @pytest.mark.parametrize("path", POOL_ROUTES)
-def test_a_genuinely_pool_wide_share_is_not_gated(resolves_to_vault, path):
+def test_a_genuinely_pool_wide_share_is_not_gated(path):
     """Morpho's legacy share is a flat 1 and names no wallet, so there is no
     per-resource object and the role gate really is the whole control."""
     fga = _deny()
@@ -317,3 +319,107 @@ def test_openfga_outage_fails_closed_on_a_risk_route(resolves_to_vault):
     fga.check.side_effect = FgaError("down")
     response = _client(fga=fga, principal=_principal()).get(f"/v1/risk/rrc?asset_id={ASSET_ID}&prime_id={OTHER_PRIME}")
     assert response.status_code == 503
+
+
+# --- the untracked-holder deny is legible in the decision event (ORB-402) ---
+
+
+@pytest.mark.parametrize("path", POOL_ROUTES)
+def test_an_untracked_largest_holder_denies_with_its_own_reason(monkeypatch, authz_events, path):
+    """A largest holder we do not track denies every caller until holdings
+    shift — deliberate, but it presents as an outage. The decision event names
+    it, and the holder, so triage does not start at the database."""
+    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=None))
+    fga = _allow()
+    client, _ = _pool_client(fga=fga, principal=_principal())
+
+    response = client.get(path)
+
+    assert response.status_code == 404
+    fga.check.assert_not_awaited()
+    assert authz_events() == [
+        {
+            "gate": "prime",
+            "decision": "deny",
+            "reason": "holder_untracked",
+            "principal": "user:u1",
+            "resource": path.split("?")[0],
+            "status": 404,
+            "requested_prime": str(POOL_HOLDER).lower(),
+        }
+    ]
+
+
+def test_an_untracked_holder_and_a_caller_named_unknown_prime_answer_identically(monkeypatch):
+    """The reason lives in the decision event ONLY: a distinct body would make
+    the response an oracle for which denials are holder-driven."""
+    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=None))
+    pool_client, _ = _pool_client(fga=_allow(), principal=_principal())
+    named_client = _client(fga=_allow(), principal=_principal())
+
+    pool = pool_client.get(f"/v1/risk/{ASSET_ID}/bad-debt?gap_pct=0.1")
+    named = named_client.get(f"/v1/risk/rrc?asset_id={ASSET_ID}&prime_id={PRIME}")
+
+    assert pool.status_code == named.status_code == 404
+    assert pool.content == named.content
+
+
+@pytest.mark.parametrize("path", POOL_ROUTES)
+def test_the_two_denials_a_pool_caller_can_provoke_are_indistinguishable(monkeypatch, path):
+    """The pair that actually matters, and the one the test above does not
+    compare: on the SAME route, an untracked holder (denied with no OpenFGA
+    call at all) against a tracked holder the caller may not view (denied after
+    one). Different reasons, different work done, one response."""
+    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=None))
+    untracked_fga = _allow()
+    untracked_client, _ = _pool_client(fga=untracked_fga, principal=_principal())
+    untracked = untracked_client.get(path)
+
+    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=VAULT))
+    refused_fga = _deny()
+    refused_client, _ = _pool_client(fga=refused_fga, principal=_principal())
+    refused = refused_client.get(path)
+
+    untracked_fga.check.assert_not_awaited()
+    refused_fga.check.assert_awaited_once_with("user:u1", "can_view", f"prime:{VAULT}")
+    assert untracked.status_code == refused.status_code == 404
+    assert untracked.content == refused.content
+    assert untracked.headers.get("content-type") == refused.headers.get("content-type")
+
+
+@pytest.mark.parametrize("path", POOL_ROUTES)
+def test_a_read_that_ran_no_check_still_leaves_a_decision_event(authz_events, path):
+    """No prime resolved, so no check ran, so nothing else would log."""
+    client, _ = _pool_client(fga=_deny(), principal=_principal(), wallet=None)
+
+    assert client.get(path).status_code == 200
+    assert authz_events() == [
+        {
+            "gate": "prime",
+            "decision": "allow",
+            "reason": "no_prime_resolved",
+            "principal": "user:u1",
+            "resource": path.split("?")[0],
+        }
+    ]
+
+
+@pytest.mark.parametrize("path", POOL_ROUTES)
+def test_an_untracked_holder_is_allowed_silently_while_auth_is_dark(monkeypatch, authz_events, path):
+    """Auth off means no gate ran, so no decision event may be written, and an
+    untracked holder must not 404: the pool read simply proceeds."""
+    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=None))
+    client, _ = _pool_client(fga=_deny(), principal=None)
+
+    assert client.get(path).status_code == 200
+    assert authz_events() == []
+
+
+@pytest.mark.parametrize("path", POOL_ROUTES)
+def test_an_unresolved_prime_emits_nothing_while_auth_is_dark(authz_events, path):
+    """The other branch: no prime resolved and no principal. An allow event
+    for an anonymous caller would be a record of a gate that never ran."""
+    client, _ = _pool_client(fga=_deny(), principal=None, wallet=None)
+
+    assert client.get(path).status_code == 200
+    assert authz_events() == []
