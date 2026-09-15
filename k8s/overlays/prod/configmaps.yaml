@@ -842,6 +842,19 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: arbitrum-oracle-price-worker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "42161"
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: python-api-config
 data:
   ENVIRONMENT: "sentinelprod"

@@ -38,12 +38,14 @@ resources:
   - ../../base/arbitrum-backup-worker
   - ../../base/arbitrum-sparklend-position-tracker
   - ../../base/arbitrum-allocation-tracker
+  - ../../base/arbitrum-oracle-price-worker
   # Robinhood Chain (4663). The backup worker landed ahead of the watcher
   # (#825, ARCT-377) so the consumer was already draining when blocks arrived
   # (infrastructure#658).
   - ../../base/robinhood-watcher
   - ../../base/robinhood-backup-worker
   - ../../base/robinhood-allocation-tracker
+  - ../../base/robinhood-oracle-price-worker
   - ../../base/prime-debt-indexer
   - ../../base/base-psm3-indexer
   - ../../base/optimism-psm3-indexer
