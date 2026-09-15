@@ -2973,7 +2973,7 @@ groups:
           sum by (chain, cluster) (
             rate(uniswap_v4_nft_transfer_rows_attempted_total{
               k8s_namespace_name="vector",
-              service_name!="uniswap-v4-position-bootstrap"
+              service_name!~"(^|.*-)uniswap-v4-position-bootstrap"
             }[6h])
           ) == 0
         for: 10m
@@ -3023,10 +3023,9 @@ groups:
         # through the counter, so its rows stay visible on the series and in the
         # runbook's row-count check; they just do not decide the hypertable
         # question. Every live indexer stays in scope — the selector excludes the
-        # one-shot loader rather than allow-listing today's indexer. An exact match:
-        # RunWorker takes the OTel service name from WorkerConfig.Name, which this
-        # binary sets to its one hard-coded task queue, so a second chain's worker
-        # arrives with a name change here and in that const.
+        # one-shot loader rather than allow-listing today's indexer, and matches it
+        # through the `(^|.*-)` prefix every chain deployment carries, so a second
+        # chain's worker needs no edit here.
         #
         # `sum by (cluster)` without `chain`: the budget belongs to the table,
         # and one table holds every chain's rows. One term, so no zero-fill is
@@ -3035,7 +3034,7 @@ groups:
           sum by (cluster) (
             rate(uniswap_v4_nft_transfer_rows_written_total{
               k8s_namespace_name="vector",
-              service_name!="uniswap-v4-position-bootstrap"
+              service_name!~"(^|.*-)uniswap-v4-position-bootstrap"
             }[6h])
           ) > 2.9
         for: 6h
@@ -3081,7 +3080,7 @@ groups:
           sum by (cluster) (
             rate(uniswap_v4_nft_transfer_rows_written_total{
               k8s_namespace_name="vector",
-              service_name="uniswap-v4-position-bootstrap"
+              service_name=~"(^|.*-)uniswap-v4-position-bootstrap"
             }[24h])
           ) > 34.7
         for: 2h
