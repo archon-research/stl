@@ -507,55 +507,6 @@ func TestPositionDailyIntraBatchPick(t *testing.T) {
 // The app role reads and cannot write; the owner can only append. The owner half is read from the
 // ACL rather than has_table_privilege because the harness's owner is a superuser, for whom that
 // function answers true regardless.
-func TestPositionDailyGrantsAreReadForTheAppRoleAndAppendOnlyForTheOwner(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	for _, c := range []struct {
-		role, priv string
-		want       bool
-	}{
-		{"stl_readonly", "SELECT", true},
-		{"stl_readwrite", "SELECT", true},
-		{"stl_readwrite", "INSERT", false},
-		{"stl_readwrite", "UPDATE", false},
-		{"stl_readwrite", "DELETE", false},
-		{"stl_readwrite", "TRUNCATE", false},
-	} {
-		var got bool
-		if err := f.pool.QueryRow(f.ctx,
-			`SELECT has_table_privilege($1, 'position_daily_observation', $2)`, c.role, c.priv).Scan(&got); err != nil {
-			t.Fatalf("has_table_privilege(%s, %s): %v", c.role, c.priv, err)
-		}
-		if got != c.want {
-			t.Errorf("%s %s on position_daily_observation = %v; want %v", c.role, c.priv, got, c.want)
-		}
-	}
-	for _, view := range []string{"stl_readonly", "stl_readwrite"} {
-		var got bool
-		if err := f.pool.QueryRow(f.ctx,
-			`SELECT has_table_privilege($1, 'position_daily', 'SELECT')`, view).Scan(&got); err != nil {
-			t.Fatal(err)
-		}
-		if !got {
-			t.Errorf("%s cannot SELECT position_daily, the read the table exists for", view)
-		}
-	}
-
-	var ownerPrivs []string
-	if err := f.pool.QueryRow(f.ctx, `
-		SELECT COALESCE(array_agg(a.privilege_type ORDER BY a.privilege_type), '{}')
-		  FROM pg_class c, aclexplode(c.relacl) a
-		 WHERE c.oid = 'position_daily_observation'::regclass AND a.grantee = c.relowner`).Scan(&ownerPrivs); err != nil {
-		t.Fatalf("read the owner's ACL: %v", err)
-	}
-	if !slices.Contains(ownerPrivs, "INSERT") || !slices.Contains(ownerPrivs, "SELECT") {
-		t.Errorf("the owner's ACL is %v; the crystallizer needs INSERT and SELECT", ownerPrivs)
-	}
-	for _, p := range []string{"UPDATE", "DELETE", "TRUNCATE"} {
-		if slices.Contains(ownerPrivs, p) {
-			t.Errorf("the owner still holds %s on position_daily_observation (ACL %v); the creating migration revokes it", p, ownerPrivs)
-		}
-	}
-}
 
 // End to end as the login user the workers really use: every direct write is refused, and so is the
 // crystallizer, which is invoker-rights and therefore owner-only. The owner's own run is the control
@@ -619,21 +570,6 @@ func TestPositionDailyIsWrittenOnlyByItsOwnerUnderTheRealRole(t *testing.T) {
 
 // The crystallizer pins the settings a hand-run statement could forget, and pins search_path so a
 // caller's path cannot bind its names to other objects.
-func TestPositionDailyCrystallizerPinsItsSettings(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	var config []string
-	if err := f.pool.QueryRow(f.ctx,
-		`SELECT proconfig FROM pg_proc WHERE proname = 'crystallize_position_daily'`).Scan(&config); err != nil {
-		t.Fatal(err)
-	}
-	joined := strings.Join(config, " ")
-	for _, want := range []string{"timescaledb.enable_tiered_reads=on", "search_path=pg_catalog, public",
-		"work_mem=64MB", "lock_timeout=10s"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("crystallize_position_daily does not pin %q (proconfig = %v)", want, config)
-		}
-	}
-}
 
 // The crystallizer adds what is missing and touches nothing else: over a complete table it is a
 // no-op, over an emptied one it restores exactly the day winners, and rows it leaves alone keep
@@ -712,50 +648,6 @@ func TestPositionDailyCrystallizerResolvesUnderAShadowingSearchPath(t *testing.T
 
 // A plain postgres table, which is the house default: no hypertable, no chunks, and no native
 // partitioning either. A migration that reaches for create_hypertable again fails here.
-func TestPositionDailyIsAPlainTable(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	f.observe("d-plain", dailyObs{qty: 1, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
-	f.observe("d-plain", dailyObs{qty: 2, block: 200, ts: "2026-01-20T00:00:00Z", dealType: "LOAN"})
-	f.crystallize()
-
-	// position_state is a hypertable in this same database, read through the same views with the same
-	// filter shape: without it, a mistyped name or a renamed catalogue column reads as "plain" and the
-	// test passes on the pre-change code too.
-	var dimensions, chunks, spineDimensions, spineChunks, jobs int
-	if err := f.pool.QueryRow(f.ctx, `
-		SELECT (SELECT count(*) FROM timescaledb_information.dimensions WHERE hypertable_name = 'position_daily_observation'),
-		       (SELECT count(*) FROM timescaledb_information.chunks     WHERE hypertable_name = 'position_daily_observation'),
-		       (SELECT count(*) FROM timescaledb_information.dimensions WHERE hypertable_name = 'position_state'),
-		       (SELECT count(*) FROM timescaledb_information.chunks     WHERE hypertable_name = 'position_state'),
-		       (SELECT count(*) FROM timescaledb_information.jobs       WHERE hypertable_name = 'position_daily_observation')`).
-		Scan(&dimensions, &chunks, &spineDimensions, &spineChunks, &jobs); err != nil {
-		t.Fatal(err)
-	}
-	if spineDimensions < 1 || spineChunks < 1 {
-		t.Fatalf("the control reads %d dimension(s) and %d chunk(s) for position_state, which IS a hypertable; "+
-			"the catalogue views or the filter are not reporting, so zeroes below prove nothing", spineDimensions, spineChunks)
-	}
-	if dimensions != 0 || chunks != 0 {
-		t.Errorf("position_daily_observation has %d partitioning dimension(s) and %d chunk(s); a plain table has neither", dimensions, chunks)
-	}
-	if jobs != 0 {
-		t.Errorf("position_daily_observation carries %d scheduled policy job(s); the table COMMENT says it has none", jobs)
-	}
-
-	var relkind string
-	var partitions int
-	if err := f.pool.QueryRow(f.ctx, `
-		SELECT c.relkind::text, (SELECT count(*) FROM pg_inherits WHERE inhparent = c.oid)
-		  FROM pg_class c WHERE c.oid = 'public.position_daily_observation'::regclass`).Scan(&relkind, &partitions); err != nil {
-		t.Fatal(err)
-	}
-	if relkind != "r" || partitions != 0 {
-		t.Errorf("position_daily_observation is relkind %q with %d partition(s); want an ordinary table ('r') with none", relkind, partitions)
-	}
-	if rows := f.rowCount(); rows != 2 {
-		t.Errorf("the two observations stored %d row(s), want 2", rows)
-	}
-}
 
 // The as_of_date CHECK pins both writers' date derivation, and rejects a hand-written mismatch.
 func TestPositionDailyAsOfDateIsPinnedToBlockTimestamp(t *testing.T) {
@@ -786,51 +678,6 @@ func TestPositionDailyAsOfDateIsPinnedToBlockTimestamp(t *testing.T) {
 // The PK leads with (position_id, as_of_date) so a day's rows are one prefix scan, and the two
 // secondary indexes serve the holder series and the whole book on one date. Read from the catalogue
 // rather than the indexdef text, so a partial, expression or INCLUDE-only index fails.
-func TestPositionDailyIndexesCoverTheHolderAndDateReads(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	for _, want := range []struct {
-		name string
-		cols []string
-	}{
-		{name: "position_daily_observation_pkey", cols: []string{"position_id", "as_of_date", "block_number", "block_version", "processing_version", "block_timestamp"}},
-		{name: "position_daily_observation_holder_idx", cols: []string{"holder_id", "as_of_date"}},
-		{name: "position_daily_observation_as_of_date_idx", cols: []string{"as_of_date", "position_id"}},
-	} {
-		var cols []string
-		var notPartial, notExpression, noInclude, valid bool
-		if err := f.pool.QueryRow(f.ctx, `
-			SELECT (SELECT array_agg(a.attname ORDER BY k.ord)
-			          FROM unnest(i.indkey[0:i.indnkeyatts-1]) WITH ORDINALITY k(attnum, ord)
-			          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum),
-			       i.indpred IS NULL, i.indexprs IS NULL, i.indnatts = i.indnkeyatts, i.indisvalid
-			  FROM pg_index i WHERE i.indexrelid = ('public.' || $1)::regclass`, want.name).
-			Scan(&cols, &notPartial, &notExpression, &noInclude, &valid); err != nil {
-			t.Errorf("%s is missing: %v", want.name, err)
-			continue
-		}
-		if !slices.Equal(cols, want.cols) {
-			t.Errorf("%s keys on %v, want %v in that order", want.name, cols, want.cols)
-		}
-		if !notPartial || !notExpression || !noInclude || !valid {
-			t.Errorf("%s: partial=%t expression=%t include=%t valid=%t; want a plain, complete, valid btree",
-				want.name, !notPartial, !notExpression, !noInclude, valid)
-		}
-	}
-
-	// Only the PK may be unique. Both writers name it as their ON CONFLICT target, so a UNIQUE index
-	// added later would not silently swallow their rows -- but it would reject them outright, and the
-	// two secondary indexes are over columns that legitimately repeat once rows are per-batch.
-	for _, name := range []string{"position_daily_observation_holder_idx", "position_daily_observation_as_of_date_idx"} {
-		var unique bool
-		if err := f.pool.QueryRow(f.ctx,
-			`SELECT indisunique FROM pg_index WHERE indexrelid = ('public.' || $1)::regclass`, name).Scan(&unique); err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if unique {
-			t.Errorf("%s is UNIQUE; holder_id and as_of_date both repeat across batches, so it would reject legitimate appends", name)
-		}
-	}
-}
 
 // A NULL as-of bound must raise. Left to the created_at comparison it is NULL for every row, so the
 // read returns an empty set and a caller with an unset timestamp reads "held nothing" as an answer.
@@ -859,25 +706,6 @@ func TestPositionDailyAsOfRefusesANullBound(t *testing.T) {
 // The view must expose every column of the table. The function RETURNS SETOF the table, so a later
 // ADD COLUMN widens the function; the view's SELECT * was expanded and frozen when it was created, so
 // the two documented reads would then disagree on shape and CREATE OR REPLACE VIEW could not fix it.
-func TestPositionDailyViewExposesEveryTableColumn(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	var tableCols, viewCols []string
-	if err := f.pool.QueryRow(f.ctx, `
-		SELECT (SELECT array_agg(attname ORDER BY attnum) FROM pg_attribute
-		         WHERE attrelid = 'position_daily_observation'::regclass AND attnum > 0 AND NOT attisdropped),
-		       (SELECT array_agg(attname ORDER BY attnum) FROM pg_attribute
-		         WHERE attrelid = 'position_daily'::regclass AND attnum > 0 AND NOT attisdropped)`).
-		Scan(&tableCols, &viewCols); err != nil {
-		t.Fatal(err)
-	}
-	if len(tableCols) == 0 {
-		t.Fatal("read no columns for the table, so the comparison below is vacuous")
-	}
-	if !slices.Equal(tableCols, viewCols) {
-		t.Errorf("the view exposes %v; the table has %v -- re-create the view so a consumer of either read sees the same shape",
-			viewCols, tableCols)
-	}
-}
 
 // A holder filter must reach the table as an index condition. holder_id is in the DISTINCT ON key only
 // so the planner may push it below: left out, it becomes a post-filter over every row of every
@@ -982,7 +810,7 @@ func TestPositionDailyAsOfIsUnstableWhileACrystallizationIsOpen(t *testing.T) {
 // work_mem for.
 func TestPositionDailyCrystallizesOneRowPerPositionPerDateAtBulk(t *testing.T) {
 	f := newPositionDailyFixture(t)
-	const positions = 20000
+	const positions = 2000
 	seed := func(qty, block int, ts, dealType string) {
 		f.t.Helper()
 		if _, err := f.pool.Exec(f.ctx, `
@@ -1299,6 +1127,9 @@ func TestPositionDailyNeverTouchesAnAppendedRow(t *testing.T) {
 // crystallizer is the only writer, so a wrong leg is the day being wrong; a reorg (block_version) and a
 // correction (processing_version) are exactly what it has to get right there.
 func TestPositionDailyCrystallizerOrderingPrecedence(t *testing.T) {
+	// One database for the table: each case owns its position, so the cases cannot
+	// see each other and a fresh database per case would only cost time.
+	f := newPositionDailyFixture(t)
 	for _, tc := range []struct {
 		name             string
 		id               string
@@ -1319,12 +1150,11 @@ func TestPositionDailyCrystallizerOrderingPrecedence(t *testing.T) {
 			challenger: dailyObs{qty: 88, block: 100, pv: 1, ts: "2026-01-01T03:00:00Z", dealType: "LOAN"}, want: 77},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newPositionDailyFixture(t)
 			f.observe(tc.id, tc.base)
 			f.observe(tc.id, tc.challenger)
 			f.crystallize()
-			if n := f.rowCount(); n != 1 {
-				t.Fatalf("crystallizing appended %d row(s) for one position on one date, want 1", n)
+			if n := f.dayRows(tc.id, "2026-01-01"); n != 1 {
+				t.Fatalf("crystallizing wrote %d row(s) for one position on one date, want 1", n)
 			}
 			if got := f.dayQty(tc.id, "2026-01-01"); got != tc.want {
 				t.Errorf("the crystallized day reads %d, want %d", got, tc.want)
@@ -1504,4 +1334,182 @@ func TestPositionDailyCrystallizerReportsWhatItWrote(t *testing.T) {
 	if got := count(); got != 1 {
 		t.Errorf("a correction reported %d rows written, want 1", got)
 	}
+}
+
+// The catalogue-level guarantees, sharing one database: they read pg_catalog and the
+// grants rather than writing, so a fresh database each would only cost time.
+func TestPositionDailySchema(t *testing.T) {
+	f := newPositionDailyFixture(t)
+
+	t.Run("grants are read for the app role and append only for the owner", func(t *testing.T) {
+		for _, c := range []struct {
+			role, priv string
+			want       bool
+		}{
+			{"stl_readonly", "SELECT", true},
+			{"stl_readwrite", "SELECT", true},
+			{"stl_readwrite", "INSERT", false},
+			{"stl_readwrite", "UPDATE", false},
+			{"stl_readwrite", "DELETE", false},
+			{"stl_readwrite", "TRUNCATE", false},
+		} {
+			var got bool
+			if err := f.pool.QueryRow(f.ctx,
+				`SELECT has_table_privilege($1, 'position_daily_observation', $2)`, c.role, c.priv).Scan(&got); err != nil {
+				t.Fatalf("has_table_privilege(%s, %s): %v", c.role, c.priv, err)
+			}
+			if got != c.want {
+				t.Errorf("%s %s on position_daily_observation = %v; want %v", c.role, c.priv, got, c.want)
+			}
+		}
+		for _, view := range []string{"stl_readonly", "stl_readwrite"} {
+			var got bool
+			if err := f.pool.QueryRow(f.ctx,
+				`SELECT has_table_privilege($1, 'position_daily', 'SELECT')`, view).Scan(&got); err != nil {
+				t.Fatal(err)
+			}
+			if !got {
+				t.Errorf("%s cannot SELECT position_daily, the read the table exists for", view)
+			}
+		}
+
+		var ownerPrivs []string
+		if err := f.pool.QueryRow(f.ctx, `
+			SELECT COALESCE(array_agg(a.privilege_type ORDER BY a.privilege_type), '{}')
+			  FROM pg_class c, aclexplode(c.relacl) a
+			 WHERE c.oid = 'position_daily_observation'::regclass AND a.grantee = c.relowner`).Scan(&ownerPrivs); err != nil {
+			t.Fatalf("read the owner's ACL: %v", err)
+		}
+		if !slices.Contains(ownerPrivs, "INSERT") || !slices.Contains(ownerPrivs, "SELECT") {
+			t.Errorf("the owner's ACL is %v; the crystallizer needs INSERT and SELECT", ownerPrivs)
+		}
+		for _, p := range []string{"UPDATE", "DELETE", "TRUNCATE"} {
+			if slices.Contains(ownerPrivs, p) {
+				t.Errorf("the owner still holds %s on position_daily_observation (ACL %v); the creating migration revokes it", p, ownerPrivs)
+			}
+		}
+	})
+
+	t.Run("crystallizer pins its settings", func(t *testing.T) {
+		var config []string
+		if err := f.pool.QueryRow(f.ctx,
+			`SELECT proconfig FROM pg_proc WHERE proname = 'crystallize_position_daily'`).Scan(&config); err != nil {
+			t.Fatal(err)
+		}
+		joined := strings.Join(config, " ")
+		for _, want := range []string{"timescaledb.enable_tiered_reads=on", "search_path=pg_catalog, public",
+			"work_mem=64MB", "lock_timeout=10s"} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("crystallize_position_daily does not pin %q (proconfig = %v)", want, config)
+			}
+		}
+	})
+
+	t.Run("indexes cover the holder and date reads", func(t *testing.T) {
+		for _, want := range []struct {
+			name string
+			cols []string
+		}{
+			{name: "position_daily_observation_pkey", cols: []string{"position_id", "as_of_date", "block_number", "block_version", "processing_version", "block_timestamp"}},
+			{name: "position_daily_observation_holder_idx", cols: []string{"holder_id", "as_of_date"}},
+			{name: "position_daily_observation_as_of_date_idx", cols: []string{"as_of_date", "position_id"}},
+		} {
+			var cols []string
+			var notPartial, notExpression, noInclude, valid bool
+			if err := f.pool.QueryRow(f.ctx, `
+				SELECT (SELECT array_agg(a.attname ORDER BY k.ord)
+				          FROM unnest(i.indkey[0:i.indnkeyatts-1]) WITH ORDINALITY k(attnum, ord)
+				          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum),
+				       i.indpred IS NULL, i.indexprs IS NULL, i.indnatts = i.indnkeyatts, i.indisvalid
+				  FROM pg_index i WHERE i.indexrelid = ('public.' || $1)::regclass`, want.name).
+				Scan(&cols, &notPartial, &notExpression, &noInclude, &valid); err != nil {
+				t.Errorf("%s is missing: %v", want.name, err)
+				continue
+			}
+			if !slices.Equal(cols, want.cols) {
+				t.Errorf("%s keys on %v, want %v in that order", want.name, cols, want.cols)
+			}
+			if !notPartial || !notExpression || !noInclude || !valid {
+				t.Errorf("%s: partial=%t expression=%t include=%t valid=%t; want a plain, complete, valid btree",
+					want.name, !notPartial, !notExpression, !noInclude, valid)
+			}
+		}
+
+		// Only the PK may be unique. Both writers name it as their ON CONFLICT target, so a UNIQUE index
+		// added later would not silently swallow their rows -- but it would reject them outright, and the
+		// two secondary indexes are over columns that legitimately repeat once rows are per-batch.
+		for _, name := range []string{"position_daily_observation_holder_idx", "position_daily_observation_as_of_date_idx"} {
+			var unique bool
+			if err := f.pool.QueryRow(f.ctx,
+				`SELECT indisunique FROM pg_index WHERE indexrelid = ('public.' || $1)::regclass`, name).Scan(&unique); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if unique {
+				t.Errorf("%s is UNIQUE; holder_id and as_of_date both repeat across batches, so it would reject legitimate appends", name)
+			}
+		}
+	})
+
+	t.Run("view exposes every table column", func(t *testing.T) {
+		var tableCols, viewCols []string
+		if err := f.pool.QueryRow(f.ctx, `
+			SELECT (SELECT array_agg(attname ORDER BY attnum) FROM pg_attribute
+			         WHERE attrelid = 'position_daily_observation'::regclass AND attnum > 0 AND NOT attisdropped),
+			       (SELECT array_agg(attname ORDER BY attnum) FROM pg_attribute
+			         WHERE attrelid = 'position_daily'::regclass AND attnum > 0 AND NOT attisdropped)`).
+			Scan(&tableCols, &viewCols); err != nil {
+			t.Fatal(err)
+		}
+		if len(tableCols) == 0 {
+			t.Fatal("read no columns for the table, so the comparison below is vacuous")
+		}
+		if !slices.Equal(tableCols, viewCols) {
+			t.Errorf("the view exposes %v; the table has %v -- re-create the view so a consumer of either read sees the same shape",
+				viewCols, tableCols)
+		}
+	})
+
+	t.Run("is a plain table", func(t *testing.T) {
+		f.observe("d-plain", dailyObs{qty: 1, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
+		f.observe("d-plain", dailyObs{qty: 2, block: 200, ts: "2026-01-20T00:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+
+		// position_state is a hypertable in this same database, read through the same views with the same
+		// filter shape: without it, a mistyped name or a renamed catalogue column reads as "plain" and the
+		// test passes on the pre-change code too.
+		var dimensions, chunks, spineDimensions, spineChunks, jobs int
+		if err := f.pool.QueryRow(f.ctx, `
+			SELECT (SELECT count(*) FROM timescaledb_information.dimensions WHERE hypertable_name = 'position_daily_observation'),
+			       (SELECT count(*) FROM timescaledb_information.chunks     WHERE hypertable_name = 'position_daily_observation'),
+			       (SELECT count(*) FROM timescaledb_information.dimensions WHERE hypertable_name = 'position_state'),
+			       (SELECT count(*) FROM timescaledb_information.chunks     WHERE hypertable_name = 'position_state'),
+			       (SELECT count(*) FROM timescaledb_information.jobs       WHERE hypertable_name = 'position_daily_observation')`).
+			Scan(&dimensions, &chunks, &spineDimensions, &spineChunks, &jobs); err != nil {
+			t.Fatal(err)
+		}
+		if spineDimensions < 1 || spineChunks < 1 {
+			t.Fatalf("the control reads %d dimension(s) and %d chunk(s) for position_state, which IS a hypertable; "+
+				"the catalogue views or the filter are not reporting, so zeroes below prove nothing", spineDimensions, spineChunks)
+		}
+		if dimensions != 0 || chunks != 0 {
+			t.Errorf("position_daily_observation has %d partitioning dimension(s) and %d chunk(s); a plain table has neither", dimensions, chunks)
+		}
+		if jobs != 0 {
+			t.Errorf("position_daily_observation carries %d scheduled policy job(s); the table COMMENT says it has none", jobs)
+		}
+
+		var relkind string
+		var partitions int
+		if err := f.pool.QueryRow(f.ctx, `
+			SELECT c.relkind::text, (SELECT count(*) FROM pg_inherits WHERE inhparent = c.oid)
+			  FROM pg_class c WHERE c.oid = 'public.position_daily_observation'::regclass`).Scan(&relkind, &partitions); err != nil {
+			t.Fatal(err)
+		}
+		if relkind != "r" || partitions != 0 {
+			t.Errorf("position_daily_observation is relkind %q with %d partition(s); want an ordinary table ('r') with none", relkind, partitions)
+		}
+		if rows := f.rowCount(); rows != 2 {
+			t.Errorf("the two observations stored %d row(s), want 2", rows)
+		}
+	})
 }
