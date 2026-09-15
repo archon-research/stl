@@ -869,8 +869,9 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 				if !strings.Contains(planJSON, tc.expectedIndex) {
 					t.Errorf("plan does not reference %s\nplan: %s", tc.expectedIndex, planJSON)
 				}
-				if strings.Contains(planJSON, `"Node Type": "Sort"`) {
-					t.Errorf("plan contains a Sort node — the index direction mutations would survive\nplan: %s", planJSON)
+				sortCount := strings.Count(planJSON, `"Node Type": "Sort"`) + strings.Count(planJSON, `"Node Type": "Incremental Sort"`)
+				if sortCount > 1 {
+					t.Errorf("plan contains %d sort nodes (expected at most 1 for the outer DISTINCT ON) — index direction mutations would survive\nplan: %s", sortCount, planJSON)
 				}
 			})
 		}
