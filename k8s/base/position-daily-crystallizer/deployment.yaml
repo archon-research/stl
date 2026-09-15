@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: position-daily-crystallizer
+spec:
+  # Ships at 0 on purpose: position_state is empty, so the first tick would scan a
+  # spine with nothing in it and the schedule would exist before anything feeds it.
+  # Rollout is: apply (worker at 0) -> land the position materializers -> bump to 1 in
+  # a separate change. VectorCronjobWorkerDown is guarded on desired replicas > 0, so
+  # it does not page while this is intentionally 0.
+  replicas: 0
+  # Explicit, matching the API-server default — ArgoCD must own spec.strategy or
+  # a later change to it cannot prune rollingUpdate. k8s/AGENTS.md, "Rollout strategy".
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  selector:
+    matchLabels:
+      app: position-daily-crystallizer
+  template:
+    metadata:
+      labels:
+        app: position-daily-crystallizer
+    spec:
+      serviceAccountName: position-daily-crystallizer
+      containers:
+        - name: position-daily-crystallizer
+          image: position-daily-crystallizer
+          env:
+            # Inject the deployment name so the worker registers its Temporal
+            # schedule/task queue under this name (cfg.Name) and its metrics
+            # carry service_name="position-daily-crystallizer".
+            - name: SERVICE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app']
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: position-daily-crystallizer
+            - secretRef:
+                name: position-daily-crystallizer
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      terminationGracePeriodSeconds: 90

@@ -324,7 +324,7 @@ type obsRow struct {
 }
 
 // generateHistory produces a legal but adversarial history: several block_versions at one block,
-// corrections, deal-type flips, zero quantities, dates spanning position_daily's 7-day chunk boundary,
+// corrections, deal-type flips, zero quantities, dates spanning several weeks,
 // and block_timestamp monotonic in block_number per position -- which the materializer now enforces.
 func generateHistory(rng *rand.Rand) []obsRow {
 	base := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)

@@ -208,6 +208,11 @@
       "class": "S",
       "semantics": "event_time"
     },
+    "as_of_date": {
+      "type": "date",
+      "class": "S",
+      "semantics": "event_time"
+    },
     "block_version": {
       "type": "int4",
       "class": "S"
@@ -1755,6 +1760,10 @@
     "oracle_asset": {
       "type": "config",
       "owner": "pricing"
+    },
+    "position_daily_observation": {
+      "type": "derived",
+      "owner": "prime"
     },
     "position_projection_refusal": {
       "type": "infrastructure",
