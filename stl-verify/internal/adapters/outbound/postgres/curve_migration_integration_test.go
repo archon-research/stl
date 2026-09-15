@@ -381,14 +381,16 @@ func TestCurveMigration(t *testing.T) {
 		}
 	})
 
-	t.Run("seed_4_pools_chain1", func(t *testing.T) {
+	// 9 = the 4 original VEC-260 pools + the 5 prime-held stableswap-NG pools
+	// seeded by 20260831_120000_seed_prime_dex_pools.sql (ARCT-384).
+	t.Run("seed_9_pools_chain1", func(t *testing.T) {
 		var count int
 		if err := curveTestPool.QueryRow(ctx,
 			`SELECT COUNT(*) FROM curve_pool WHERE chain_id = 1`).Scan(&count); err != nil {
 			t.Fatalf("counting curve_pool: %v", err)
 		}
-		if count != 4 {
-			t.Errorf("curve_pool count for chain_id=1 = %d, want 4", count)
+		if count != 9 {
+			t.Errorf("curve_pool count for chain_id=1 = %d, want 9", count)
 		}
 	})
 
@@ -495,13 +497,14 @@ func TestCurveMigration(t *testing.T) {
 	})
 
 	t.Run("coin_count_per_pool", func(t *testing.T) {
-		// stETH classic: 2, stETH-ng: 2, 3pool: 3, TricryptoUSDC: 3 => 10 total.
+		// stETH classic: 2, stETH-ng: 2, 3pool: 3, TricryptoUSDC: 3 => 10, plus
+		// 2 each for the 5 ARCT-384 stableswap-NG pools => 20 total.
 		var total int
 		if err := curveTestPool.QueryRow(ctx, `SELECT COUNT(*) FROM curve_pool_coin`).Scan(&total); err != nil {
 			t.Fatalf("counting curve_pool_coin: %v", err)
 		}
-		if total != 10 {
-			t.Errorf("curve_pool_coin total = %d, want 10 (2+2+3+3)", total)
+		if total != 20 {
+			t.Errorf("curve_pool_coin total = %d, want 20 (2+2+3+3 + 5*2)", total)
 		}
 	})
 
