@@ -11,30 +11,29 @@ retire: delete this file in the PR that records the completed run
 
 # Backfilling `protocol_event.block_timestamp`
 
-One-time repair. `protocol_event.block_timestamp` is added by
-`20260911_120000_add_block_timestamp_to_protocol_event.sql` as a nullable column; every row that
-predates the migration is NULL. Population runs **out of band on staging, then prod** — an
-`UPDATE` of that size over compressed chunks does not belong in the migrator's single transaction,
-the same reason VEC-491 kept `block_meta` DDL-only.
+One-time repair. `20260911_120000_add_block_timestamp_to_protocol_event.sql` adds the column
+nullable; every row predating it is NULL. Runs out of band, **staging then prod** — an `UPDATE` of
+this size over compressed chunks does not belong in the migrator's single transaction, the same
+reason VEC-491 kept `block_meta` DDL-only.
 
-Every step below is an in-place `UPDATE` on an ingest table, which `stl-verify/db/migrations/AGENTS.md`
-requires the team to sanction before it runs. It is a one-time operator repair of a column that
-never had a value, not a write channel any writer gains: the ingest path only ever INSERTs, and
-`block_timestamp` is never rewritten once set. Get that nod, and record it in that file, before
-Step 1.
+## Before you start
 
-Run as a non-superuser role with write access, against the database directly rather than the pooler
-(no 2-minute statement timeout). ADR-0005's reader switch and the catalogue axis flip to `event` are
-VEC-735's, and must not run until Step 3 reports zero.
+- **Get the team's sign-off and record it in `stl-verify/db/migrations/AGENTS.md`.** Every step here
+  is an in-place `UPDATE` on an ingest table, which that file forbids by default. This is a one-time
+  repair of a column that never had a value, not a write channel any writer gains.
+- **Connect as a non-superuser with write access, direct rather than through the pooler** (no
+  2-minute statement timeout).
+- **`SET timescaledb.enable_tiered_reads = 'on'` in every session.** It defaults off, so a plain
+  session cannot see — or count — a tiered chunk, and Step 3 would report a false zero.
+- ADR-0005's reader switch and the catalogue axis flip to `event` are VEC-735's. They must not run
+  until Step 3 reports zero.
 
-## Run it before the oldest chunks tier
+### There is a deadline
 
-`protocol_event` tiers to object storage after 1 year (`policy_movechunk_to_s3`), and a tiered
-chunk is read-only: an `UPDATE` cannot reach its rows, so they stay undated until someone calls
-`untier_chunk` on each one first. Check the headroom before planning the run — the oldest chunk's
-`range_start` plus a year is the deadline. On prod on 2026-09-15 the oldest chunk was 2025-09-22
-with nothing tiered yet, and `policy_movechunk_to_s3` runs hourly, so the first chunk tiers within
-an hour of becoming eligible:
+`protocol_event` tiers to object storage after 1 year (`policy_movechunk_to_s3`, which runs hourly),
+and **a tiered chunk is read-only** — an `UPDATE` cannot reach its rows without an `untier_chunk`
+first. The oldest chunk's `range_start` plus a year is the deadline; on prod on 2026-09-15 that was
+2025-09-22, with nothing tiered yet:
 
 ```sql
 SELECT count(*) AS chunks, min(range_start)::date AS oldest FROM timescaledb_information.chunks
@@ -42,26 +41,14 @@ WHERE hypertable_name = 'protocol_event';
 SELECT count(*) AS tiered FROM timescaledb_osm.tiered_chunks WHERE hypertable_name = 'protocol_event';
 ```
 
-`timescaledb.enable_tiered_reads` also defaults off, so a plain session cannot see — and Step 3
-cannot count — a tiered chunk. Set it on for every step below, or Step 3 reports zero while tiered
-history stays undated and VEC-735 flips the axis on a series that is still part observation-time:
-
-```sql
-SET timescaledb.enable_tiered_reads = 'on';
-```
-
 ## What the run costs
 
-Everything below was measured on prod on 2026-09-15 and is a snapshot, not an invariant. The
-`created_at` month is the Step 1 window; chunks and compressed size are what that window touches.
+Measured on prod, 2026-09-15 — a snapshot, not an invariant. The `created_at` month is the Step 1
+window; chunks and size are what that window touches.
 
 | Window | Rows | Step 1 (whole-second) | Step 2 (sub-second) | Chunks | Compressed |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 2025-09 | 162 | 162 | — | 8 | 848 kB |
-| 2025-10 | 283 | 283 | — | 31 | 3.1 MB |
-| 2025-11 | 303 | 303 | — | 30 | 3.0 MB |
-| 2025-12 | 729 | 729 | — | 31 | 3.5 MB |
-| 2026-01 | 7,007 | 7,007 | — | 31 | 5.2 MB |
+| 2025-09 .. 2026-01 | 8,484 | 8,484 | — | 131 | 16 MB |
 | 2026-02 | 148,179 | 13,935 | 134,244 | 28 | 19 MB |
 | 2026-03 | 827,217 | 38,805 | 788,412 | 31 | 108 MB |
 | 2026-04 | 747,348 | 460,103 | 287,245 | 30 | 102 MB |
@@ -72,21 +59,18 @@ Everything below was measured on prod on 2026-09-15 and is a snapshot, not an in
 | 2026-09 (partial) | 3,391,028 | 3,391,028 | — | 15 | 868 MB |
 | **Total** | **16,471,952** | **15,262,051** | **1,209,901** | **358** | **2.0 GB** |
 
-Two thirds of Step 1 is the last four months. The first five windows are rounding error and worth
-running first only because they are the ones the tiering clock reaches.
+Two thirds of Step 1 is the last four months. The 2025-09 .. 2026-01 windows are rounding error,
+and are worth running first only because they are the ones the tiering clock reaches.
 
 Step 2's residual, once `block_meta` covers it: 242,328 mainnet and 57,233 Avalanche blocks.
+`block_meta` was still empty on prod when this was written.
 
-### Disk headroom
-
-An `UPDATE` decompresses each chunk it touches and leaves it that way until `policy_compression`
-(`compress_after` 2 days, job runs every 12h) catches up. Prod's current uncompressed chunks give
-the expansion factor directly — the three newest chunks average 216 MB against 12 MB for the
-compressed ones, and per row that is ~956 B against ~97 B, so call it **10x**:
+**Disk headroom.** An `UPDATE` decompresses each chunk it touches and leaves it that way until
+`policy_compression` (`compress_after` 2 days, job every 12h) catches up. Prod's uncompressed chunks
+give the factor: 216 MB average against 12 MB compressed, ~956 B/row against ~97 B, so **~10x**:
 
 ```sql
-SELECT c.is_compressed, count(*) AS chunks,
-       pg_size_pretty(sum(d.total_bytes)) AS total,
+SELECT c.is_compressed, count(*) AS chunks, pg_size_pretty(sum(d.total_bytes)) AS total,
        pg_size_pretty((sum(d.total_bytes) / count(*))::bigint) AS avg_chunk
 FROM timescaledb_information.chunks c
 JOIN chunks_detailed_size('protocol_event') d ON d.chunk_name = c.chunk_name
@@ -94,22 +78,15 @@ WHERE c.hypertable_name = 'protocol_event' AND c.range_start >= date_trunc('mont
 GROUP BY 1;
 ```
 
-One month at a time is what keeps that bounded: the heaviest window (2026-08, 310 MB) peaks around
-3 GB decompressed, against ~20 GB if the whole table were done in one statement. Confirm the
-instance has that headroom for the largest window before starting, and let recompression catch up
-between windows rather than queueing every month back to back.
+One month at a time is what bounds it — the heaviest window (310 MB) peaks near 3 GB decompressed,
+against ~20 GB for the whole table in one statement. Confirm that headroom, and let recompression
+catch up between windows.
 
-### Wall clock
-
-Not estimated here, deliberately. Decompression is not the bottleneck — a warm read of 136k rows
-including `event_data` measured 149 ms — and the write path that is cannot be measured without
-writing, which is what the sign-off gates. Any number produced before the first window would be a
-guess dressed as a figure.
-
-Run the smallest windows first (2025-09 through 2026-01, ~8.5k rows over 131 chunks): they
-establish the per-chunk overhead, which is what dominates them, while risking almost nothing. Then
-one mid-size window (2026-05, 1.5M rows over 31 chunks) gives the per-row rate. Those two numbers
-size the rest, and the ticket asks for them recorded either way.
+**Wall clock is deliberately not estimated.** Decompression is not the bottleneck (136k rows read
+warm in 149 ms); the write path is, and it cannot be measured without writing, which is what the
+sign-off gates. Run the five tiny windows first for the per-chunk overhead that dominates them, then
+2026-05 (1.5M rows, 31 chunks) for the per-row rate. Those two size the rest, and the ticket wants
+them recorded anyway.
 
 ## Where the two cohorts come from
 
@@ -121,22 +98,17 @@ Three eras wrote this table, and only the middle one lost the block time:
 | 2026-02-18 .. 2026-04-14 | live indexers | nothing — the INSERT omitted the column, so `DEFAULT NOW()` fired | the sub-second rows |
 | 2026-04-14 onward | live indexers | the block header, an explicit constructor argument | whole-second, dated |
 
-The table had no event-time column, and the live INSERT did not name `created_at`, so Postgres
-filled it at insert. The header was in the watcher's SNS envelope the whole time — the indexers had
-nowhere to put it and no reason to pass it. VEC-80 (#191) closed that by making it an argument to
-`entity.NewProtocolEvent`, whose `Validate` rejects a zero value, which is why the era ends there.
-It begins where live ingestion begins: a backfiller replaying months-old blocks has to pass a
-timestamp, since `now()` would be visibly absurd for the row it is writing.
+The header sat unused in the watcher's SNS envelope: the table had no event-time column, so the
+indexers had nowhere to put it. VEC-80 (#191) ended that era by making it an argument to
+`entity.NewProtocolEvent`, whose `Validate` rejects a zero value; live ingestion starting is what
+opened it, since a backfiller replaying months-old blocks must pass a timestamp of its own.
 
-So the gap is in the row, not in the world. Every one of those rows still carries
-`(chain_id, block_number, block_version)`, and the header is recoverable from the S3 raw-block
-archive — which is what `block_meta` is for (VEC-491) and what Step 2 joins against. The gap is also
-frozen: no writer can insert an undated row today, so the cohort cannot grow, and it measures the
-same on staging and prod.
+So the gap is in the row, not in the world — every such row still carries
+`(chain_id, block_number, block_version)`, and the header is recoverable from the S3 archive via
+`block_meta`. It is also frozen: no writer can insert an undated row today.
 
-The two are told apart without a join: a block-header timestamp is whole-second, `NOW()` is not.
-Re-measure the split before running anything; the sizes it reported on prod are in
-[What the run costs](#what-the-run-costs):
+The two cohorts are told apart without a join, because a block-header timestamp is whole-second and
+`NOW()` is not. Re-measure before running anything:
 
 ```sql
 SELECT count(*) FILTER (WHERE created_at =  date_trunc('second', created_at)) AS whole_sec,
@@ -146,22 +118,13 @@ SELECT count(*) FILTER (WHERE created_at =  date_trunc('second', created_at)) AS
 FROM protocol_event;
 ```
 
-The sub-second rows are confined to `2026-02-18 14:23:15.93Z .. 2026-04-14 12:02:18.12Z`. Rows
-older than that window are whole-second too: they were written by backfillers that always supplied
-block time.
+The sub-second rows are confined to `2026-02-18 14:23:15.93Z .. 2026-04-14 12:02:18.12Z`.
 
 ### The whole second is not a truncated ingest time
 
-The obvious objection to the test is that a writer could have stored `date_trunc('second', now())`,
-which is whole-second and still ingest time. It did not, and the check that settles it is the delta
-against the chain: a truncated ingest time carries the ingest lag, which is 2.0-3.5s on the rows
-that demonstrably hold one, so it can only land at +2 or +3, never at +0.
-
-21 whole-second mainnet rows sampled across every era — including before the writer change, and the
-whole-second rows interleaved with sub-second ones in 2026-02..04 — matched their block header
-exactly, delta +0 in all 21. Three Avalanche whole-second rows did too. The control is the other
-cohort: two Avalanche sub-second rows came in at +2, which is the signature a truncating writer
-would have left everywhere.
+A writer storing `date_trunc('second', now())` would be whole-second and still hold ingest time. It
+never did, and the delta against the chain is what settles it: a truncated ingest time keeps the
+ingest lag, 2.0-3.5s on the rows that demonstrably hold one, so it lands at +2 or +3 and never +0.
 
 | Cohort | Chain | Samples | Delta vs block header |
 | --- | --- | ---: | --- |
@@ -170,12 +133,13 @@ would have left everywhere.
 | sub-second | Avalanche | 2 | +2 — the ingest lag |
 | sub-second | mainnet, block 24659163 | 2 rows, one block | +2.4s and +2.6s; one block cannot have two header times |
 
-The code says the same: before VEC-80 the INSERT did not name `created_at` at all, so that era's
-live rows fell to `DEFAULT NOW()` — which is why they are sub-second. No truncating branch ever
-existed on that path, and the whole-second rows from that era came from backfillers passing their
-own value.
+The mainnet samples span every era, including before the writer change and the whole-second rows
+interleaved with sub-second ones in 2026-02..04. The code agrees: before VEC-80 the INSERT did not
+name `created_at`, so no truncating branch ever existed on that path.
 
-Re-sample before Step 1 if the run is much later than this doc, with any archive RPC:
+Re-sample before Step 1 if the run is much later than this doc, comparing each against
+`eth_getBlockByNumber` on any archive RPC. **A non-zero delta means the cohort test is wrong for
+that era, and Step 1 must not run on it.**
 
 ```sql
 SELECT chain_id, block_number, extract(epoch FROM created_at)::bigint AS stored_epoch
@@ -185,22 +149,18 @@ WHERE chain_id = 1 AND created_at >= '<window start>' AND created_at < '<window 
 ORDER BY created_at LIMIT 5;
 ```
 
-Compare each against `eth_getBlockByNumber`. A non-zero delta means the cohort test is wrong for
-that era and Step 1 must not run on it.
-
 ## Step 1 — the whole-second rows (no external source needed)
 
-For every row a writer set explicitly, `created_at` *is* the block timestamp, so the copy is local.
-Idempotent, and restartable: re-running it skips what it already wrote.
+`created_at` *is* the block timestamp for these, so the copy is local. Idempotent and restartable:
+re-running skips what it already wrote.
 
-Run it one chunk-window at a time — a single statement over the whole table decompresses every
-chunk at once. Window on `created_at`, the partition key, and as a **literal**, never a bind
-parameter, or the planner builds paths for every chunk.
+One chunk-window at a time — a single statement over the whole table decompresses every chunk at
+once. Window on `created_at`, the partition key, and as a **literal**, never a bind parameter, or
+the planner builds paths for every chunk.
 
-The whole-second predicate is what carries the claim; the date window is only the chunk batching.
-A `NOW()` value that lands on an exact second passes it — at ~1e-6 of the sub-second cohort, under
-one row table-wide — so a stray ingest-time row surviving here is possible and will not be surfaced
-again: Step 3 counts only NULLs.
+The whole-second predicate carries the claim; the date window is only batching. A `NOW()` landing on
+an exact second passes it — ~1e-6 of the sub-second cohort, under one row table-wide — and Step 3
+counts only NULLs, so such a row is never surfaced again.
 
 ```sql
 UPDATE protocol_event
@@ -214,23 +174,21 @@ Record wall-clock and chunk count per window; that is the cost the ticket asks f
 
 ## Step 2 — the sub-second rows (needs `block_meta`)
 
-These carry ingest time in `created_at`, so their event time has to come from
+These hold ingest time, so their event time comes from
 `block_meta (chain_id, block_number, block_version) -> block_timestamp` (VEC-491). `block_states`
-alone cannot serve: it is a rolling ~1-month reorg window and holds none of these blocks.
+cannot serve: it is a rolling ~1-month reorg window and holds none of these blocks.
 
 `block_meta` is filled by `block-meta-loader`, an on-demand Temporal worker, one deployment per
-chain, started by hand from the Temporal UI (`--type BlockMetaLoad`). It needs a run per chain this
-step covers — mainnet and Avalanche — and that is a prerequisite of this step, not part of it.
+chain, started by hand from the Temporal UI (`--type BlockMetaLoad`). A run per chain this step
+covers — mainnet and Avalanche — is a prerequisite, not part of this step.
 
-Nothing has to hand it a block list: it enumerates what a chain references and `block_meta` lacks,
-deriving the tables it scans from `schema_master.json`'s `block_meta` fills. `protocol_event` keeps
-its fill entry for exactly that reason, even though the column is native now — drop the entry and
-the loader stops enumerating this table's blocks, silently, and every value here resolves NULL. The
-entry goes when Step 3 reports zero, in the PR that retires this file.
+Nothing hands it a block list: it enumerates what a chain references and `block_meta` lacks, taking
+the tables it scans from `schema_master.json`'s `block_meta` fills. **`protocol_event` keeps its fill
+entry for that reason**, native column notwithstanding — drop it and the loader silently stops
+enumerating this table, leaving every value here NULL. The entry goes when Step 3 reports zero, in
+the PR that retires this file.
 
-Size the residual first — it is the distinct-block count the `block_meta` load has to cover
-(counted in [What the run costs](#what-the-run-costs); `block_meta` was still empty on prod when
-this was written):
+Size the residual first (counts in [What the run costs](#what-the-run-costs)):
 
 ```sql
 SELECT chain_id, count(*) AS distinct_blocks
@@ -240,9 +198,9 @@ FROM (SELECT DISTINCT chain_id, block_number, block_version FROM protocol_event
 GROUP BY 1 ORDER BY 1;
 ```
 
-Once `block_meta` covers them, date the rows from it, again one window at a time. `block_meta` is
-append-only and versioned on `processing_version`, so a corrected header time is a second row for
-the same block: take the highest one, or a known-bad time wins.
+Then date the rows one window at a time. `block_meta` is append-only and versioned on
+`processing_version`, so a corrected header time is a second row for the same block: take the
+highest, or a known-bad time wins.
 
 ```sql
 UPDATE protocol_event pe
@@ -267,5 +225,5 @@ FROM protocol_event WHERE block_timestamp IS NULL
 GROUP BY 1 ORDER BY 1;
 ```
 
-Any row that survives every source above is undatable, not pending: record which blocks in the
-ticket and leave it NULL, since readers filter `IS NOT NULL`.
+A row surviving every source above is undatable, not pending: record which blocks in the ticket and
+leave it NULL, since readers filter `IS NOT NULL`.
