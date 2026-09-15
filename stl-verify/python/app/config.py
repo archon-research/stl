@@ -79,8 +79,12 @@ class Settings(BaseSettings):
     # derive from the issuer.
     oidc_jwks_url: str = ""
     openfga_url: str = ""  # e.g. http://openfga.auth.svc:8080
-    # Published by the openfga-store ConfigMap (store/model ids are created by
-    # the store-bootstrap Job; they cannot be known at deploy-authoring time).
+    # No reader YET — do not set expecting an effect. ADR-015 open question 7
+    # was settled 2026-09-09 (writer resolves, reader pins): ORB-430 wires
+    # these, publishing the store ConfigMap's ids into this namespace and
+    # sending an explicit authorization_model_id on every call. Until then the
+    # store is resolved by NAME at first use (see app/auth/fga.py) and the
+    # newest model applies.
     openfga_store_id: str = ""
     openfga_model_id: str = ""
     openfga_store_name: str = "auth"
