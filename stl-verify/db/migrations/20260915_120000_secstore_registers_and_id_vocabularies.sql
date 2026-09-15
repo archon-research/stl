@@ -275,7 +275,7 @@ COMMENT ON FUNCTION alias_register_as_of(date, pg_snapshot) IS 'Bitemporal alias
 -- ---------------------------------------------------------------------------
 
 INSERT INTO key_namespace_vocabulary (key_namespace, description) VALUES
- ('token_address','token / aToken / debtToken / ERC-4626 vault / loan: the on-chain contract address, lowercase hex, no 0x'),
+ ('token_address','token / aToken / debtToken / ERC-4626 vault: the on-chain contract address, lowercase hex, no 0x'),
  ('morpho_market','the protocol-emitted market id (bytes32), as Morpho emits it'),
  ('sky_ilk','the Sky ilk: a collateral/vault type in the Vat, e.g. ALLOCATOR-SPARK-A'),
  ('provider_package','provider '':'' package_id, the source-native custody id (Anchorage)')
@@ -287,7 +287,7 @@ INSERT INTO id_scheme_vocabulary (id_scheme, applies_to, value_form, unique_curr
  ('CUSIP','{SECURITY}','9-char', true,'CUSIP, North American securities'),
  ('SEDOL','{SECURITY}','7-char', true,'SEDOL, London Stock Exchange'),
  ('FIGI','{SECURITY}','12-char OpenFIGI', true,'Financial Instrument Global Identifier'),
- ('TICKER','{SECURITY}','venue ticker; many-to-many over time', false,'Exchange ticker symbol. Not unique_current: a ticker is reassigned, and one security carries different tickers per venue'),
+ ('TICKER','{SECURITY}','venue ticker; many-to-many over time', false,'Exchange ticker symbol, and the ONE home for it: a ticker is an alias row, never a node attribute, so a rename is a new row rather than an overwrite and dim_security.ticker reads the current alias. Not unique_current: tickers are reassigned, and one security carries different tickers per venue'),
  ('CONTRACT_ADDRESS','{SECURITY,ENTITY}','hex lowercase, no 0x', true,'On-chain contract address'),
  ('BLOCKCHAIN_ADDRESS','{ENTITY,ACCOUNT}','hex lowercase, no 0x', true,'On-chain wallet / EOA address; the position holder-resolution path (seam 2)'),
  ('PIPELINE_PRIME_ID','{ENTITY,ACCOUNT}','prime.id, verbatim', true,'Our own prime registry id — the path the frozen holder_entity view took for PRIME holders'),
