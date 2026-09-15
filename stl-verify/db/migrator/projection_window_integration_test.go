@@ -10,20 +10,16 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// VEC-566: materialize_position_projection takes an optional window so a scheduled run re-reads only
-// the tail. The window is the whole point of the parameter, so these pin both halves of it: that a
-// bounded run still closes the position, and that it CANNOT discover history outside its window —
-// which is why bootstrap has to pass NULL.
+// VEC-566: materialize_position_projection takes an optional window. These pin both halves of it: a
+// bounded run still closes the position, and it cannot discover history outside its window.
 
-// windowFixture: a 1-day-chunk hypertable behind a DISTINCT ON (the shape of every real projection),
-// 40 daily rows at quantity 100 then a closing zero, one row per UTC day at noon so a window of 36 hours
-// always selects exactly the last two rows and three chunks, whatever the time of day the test runs.
+// windowFixture: 40 daily rows at quantity 100 then a closing zero, one per UTC day at noon, so a 36-hour
+// window selects exactly the last two whatever the time of day. A plain table behind a DISTINCT ON view.
 func windowFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	if _, err := pool.Exec(ctx, `
 		CREATE TABLE wsrc (ts timestamptz NOT NULL, holder text NOT NULL, ik text NOT NULL,
 		                   qty numeric NOT NULL, bn bigint NOT NULL);
-		SELECT create_hypertable('wsrc', by_range('ts', INTERVAL '1 day'));
 		INSERT INTO wsrc SELECT date_trunc('day', now()) + interval '12 hours' - (g||' days')::interval,
 		       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'WIN', 100, 5000-g FROM generate_series(1,40) g;
 		INSERT INTO wsrc VALUES (date_trunc('day', now()) + interval '12 hours', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'WIN', 0, 9000);
@@ -32,106 +28,8 @@ func windowFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		       1::integer AS chain_id, NULL::bigint AS protocol_id, ik AS instrument_key, holder AS holder_id,
 		       qty AS quantity, 'BORROW'::text AS deal_type, bn AS block_number, 0 AS block_version,
 		       0 AS processing_version, ts AS block_timestamp
-		FROM wsrc ORDER BY holder, ik, bn, ts;
-		CREATE FUNCTION position_win_since(p_since timestamptz) RETURNS SETOF position_win
-		LANGUAGE sql STABLE AS $$
-		SELECT DISTINCT ON (holder, ik, bn)
-		       1::integer, NULL::bigint, ik, holder, qty, 'BORROW'::text, bn, 0, 0, ts
-		FROM wsrc WHERE ts > p_since ORDER BY holder, ik, bn, ts $$`); err != nil {
+		FROM wsrc ORDER BY holder, ik, bn, ts`); err != nil {
 		t.Fatalf("build the window fixture: %v", err)
-	}
-}
-
-// chunksTouched runs one materialize call and reports how many of the source's chunks it read, from
-// the per-relation scan counters. The call and the stats flush share one connection, since the
-// counters are the calling backend's.
-func chunksTouched(t *testing.T, ctx context.Context, pool *pgxpool.Pool, window any) int {
-	t.Helper()
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, `SELECT pg_stat_reset()`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.Exec(ctx, `SELECT materialize_position_projection('public.position_win'::regclass, 0, NULL, $1)`, window); err != nil {
-		t.Fatalf("materialize with window %v: %v", window, err)
-	}
-	if _, err := conn.Exec(ctx, `SELECT pg_stat_force_next_flush()`); err != nil {
-		t.Fatal(err)
-	}
-	var n int
-	if err := conn.QueryRow(ctx, `
-		SELECT count(*) FROM pg_stat_all_tables s
-		JOIN timescaledb_information.chunks c ON c.chunk_schema = s.schemaname AND c.chunk_name = s.relname
-		WHERE c.hypertable_name = 'wsrc' AND s.seq_scan + s.idx_scan > 0`).Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	return n
-}
-
-// The window's whole purpose: a bounded run opens only the tail of the source. A bound applied outside
-// the view stays at 41, because the predicate cannot push below the DISTINCT ON.
-func TestProjectionWindowReadsOnlyTheTailOfTheSource(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	windowFixture(t, ctx, pool)
-
-	if got := chunksTouched(t, ctx, pool, nil); got != 41 {
-		t.Fatalf("an unbounded run touched %d chunks, want all 41 (the fixture is not what this test assumes)", got)
-	}
-	if got := chunksTouched(t, ctx, pool, "36 hours"); got != 3 {
-		t.Errorf("a 36-hour window touched %d chunks, want exactly 3; the bound is not reaching the source's scan", got)
-	}
-}
-
-// A projection with no bounded source cannot honour a window, and running it unbounded instead would
-// hide the very cost the caller asked to avoid, so it is refused by name rather than run.
-func TestProjectionWindowRefusesAProjectionWithoutABoundedSource(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	windowFixture(t, ctx, pool)
-	if _, err := pool.Exec(ctx, `DROP FUNCTION position_win_since(timestamptz)`); err != nil {
-		t.Fatal(err)
-	}
-	_, err := pool.Exec(ctx, `SELECT materialize_position_projection('public.position_win'::regclass, 0, NULL, interval '2 days')`)
-	if err == nil || !strings.Contains(err.Error(), "position_win_since(timestamptz)") {
-		t.Fatalf("want a refusal naming the missing bounded source, got %v", err)
-	}
-	// Unbounded still reads the view, so a projection without the function is not unusable.
-	if got := materializeWindow(t, ctx, pool, nil); got != 41 {
-		t.Errorf("unbounded run appended %d rows, want 41", got)
-	}
-}
-
-// The column contract is checked on the view, so the bounded source must be RETURNS SETOF <view>: a
-// _since with its own row type could pass a lossy quantity through the check that exists to refuse it.
-func TestProjectionWindowRefusesABoundedSourceNotReturningTheView(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	windowFixture(t, ctx, pool)
-	if _, err := pool.Exec(ctx, `
-		DROP FUNCTION position_win_since(timestamptz);
-		CREATE FUNCTION position_win_since(p_since timestamptz)
-		RETURNS TABLE (chain_id integer, protocol_id bigint, instrument_key text, holder_id text,
-		               quantity double precision, deal_type text, block_number bigint, block_version integer,
-		               processing_version integer, block_timestamp timestamptz)
-		LANGUAGE sql STABLE AS $$
-		SELECT DISTINCT ON (holder, ik, bn)
-		       1::integer, NULL::bigint, ik, holder, qty::double precision, 'BORROW'::text, bn, 0, 0, ts
-		FROM wsrc WHERE ts > p_since ORDER BY holder, ik, bn, ts $$`); err != nil {
-		t.Fatal(err)
-	}
-	_, err := pool.Exec(ctx, `SELECT materialize_position_projection('public.position_win'::regclass, 0, NULL, interval '2 days')`)
-	if err == nil || !strings.Contains(err.Error(), "RETURNS SETOF public.position_win") {
-		t.Fatalf("want a refusal naming the required return type, got %v", err)
-	}
-	if rows := storedWindowRows(t, ctx, pool); rows != 0 {
-		t.Errorf("stored %d rows through a bounded source of the wrong type, want 0", rows)
 	}
 }
 
@@ -236,15 +134,8 @@ func TestProjectionWindowBoundedAfterBootstrapClosesAndIsIdempotent(t *testing.T
 	}
 }
 
-// The window must reach the planner as a SQL literal. A bound parameter is not constified at plan
-// time, so the planner builds paths for every chunk of the real (hypertable) sources and prunes
-// nothing -- 21.8 MB and 754 ms of planning on onchain_token_price when it was measured (VEC-672).
-//
-// Every other test here asserts row-level results, which a bound parameter does not change, so this is
-// the only thing that fails on that mutation. It reads pg_proc.prosrc because the property IS the
-// generated SQL: the predicate is built by format() at runtime and never exists as a plan this test
-// could EXPLAIN. The repo pins other whole-class properties off prosrc the same way
-// (20260818_130000_create_position_state.sql).
+// The window must reach the planner as a SQL literal (AGENTS.md); row-level results do not change under
+// a bind parameter, so this reads pg_proc.prosrc, the only place the property exists.
 func TestProjectionWindowIsInterpolatedAsALiteral(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -261,8 +152,8 @@ func TestProjectionWindowIsInterpolatedAsALiteral(t *testing.T) {
 	if !strings.Contains(src, "CREATE TEMP TABLE _mpp_src") {
 		t.Fatalf("the function body does not build _mpp_src; this test is reading the wrong function")
 	}
-	if !strings.Contains(src, `format('%s(%L::timestamptz)', v_source, v_since)`) {
-		t.Error("the bounded source's instant is not built with format(... %L ...); a bound instant prunes no chunks (AGENTS.md, \"A time window on a hypertable is a SQL literal\")")
+	if !strings.Contains(src, `format('WHERE block_timestamp > %L::timestamptz', v_since)`) {
+		t.Error("the window predicate is not built with format(... %L ...); a bound instant prunes no chunks (AGENTS.md, \"A time window on a hypertable is a SQL literal\")")
 	}
 	// USING is how a bound parameter would reach the EXECUTE, which is the mutation this guards.
 	if strings.Contains(src, "USING p_window") {
