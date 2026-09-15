@@ -71,12 +71,14 @@ spec:
             limits:
               cpu: "200m"
               memory: "256Mi"
+          # 150s, held above DB_CONNECT_RETRY_DEADLINE_SECONDS (120s) so a pod whose
+          # database never resolves logs its own connect error before this kills it.
           startupProbe:
             httpGet:
               path: /v1/status
               port: 8000
             periodSeconds: 5
-            failureThreshold: 12
+            failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /v1/status

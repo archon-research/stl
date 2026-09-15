@@ -1,12 +1,19 @@
+import socket
 from typing import cast
 
 import asyncpg
 import pytest
 from sqlalchemy import event
 from sqlalchemy.engine.interfaces import ExceptionContext
+from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.pool import QueuePool
 
-from app.adapters.postgres.engine import create_db_engine, mark_stale_transaction_state_as_disconnect
+from app.adapters.postgres import engine as engine_module
+from app.adapters.postgres.engine import (
+    create_db_engine,
+    mark_stale_transaction_state_as_disconnect,
+    wait_for_database,
+)
 from app.config import Settings
 
 
@@ -185,3 +192,172 @@ def test_an_error_already_classified_as_disconnect_is_left_alone() -> None:
     mark_stale_transaction_state_as_disconnect(cast(ExceptionContext, context))
 
     assert context.is_disconnect is True
+
+
+class _FakeConnectEngine:
+    """An engine whose ``connect()`` replays a scripted list of outcomes.
+
+    Each entry is either an exception to raise on that attempt or ``None`` for a
+    connect that succeeds; ``SELECT 1`` on the yielded connection is a no-op, so
+    a test scripts only what ``wait_for_database`` branches on.
+    """
+
+    def __init__(self, outcomes: list[BaseException | None]) -> None:
+        self._outcomes = list(outcomes)
+        self.attempts = 0
+
+    def connect(self) -> "_FakeConnectEngine":
+        return self
+
+    async def __aenter__(self) -> "_FakeConnectEngine":
+        self.attempts += 1
+        outcome = self._outcomes.pop(0) if self._outcomes else None
+        if outcome is not None:
+            raise outcome
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+    async def execute(self, _statement: object) -> None:
+        return None
+
+
+def _dns_failure() -> OSError:
+    """What asyncpg lets out of the dialect when cluster resolution is not ready."""
+    return socket.gaierror(-3, "Temporary failure in name resolution")
+
+
+@pytest.fixture
+def instant_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record the backoff delays and return from each sleep immediately."""
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(engine_module.asyncio, "sleep", fake_sleep)
+    return delays
+
+
+async def test_wait_for_database_retries_until_name_resolution_recovers(instant_sleep: list[float]) -> None:
+    """The single failure that ends startup is the one this exists to absorb.
+
+    A pod's resolver can be unusable for a stretch after its node joins, and
+    asyncpg raises EAI_AGAIN out of the very first connect. Unretried, that ends
+    startup and the pod enters CrashLoopBackOff whose backoff outlives the
+    outage, which is what leaves a rollout stalled.
+    """
+    fake = _FakeConnectEngine([_dns_failure(), _dns_failure(), None])
+
+    await wait_for_database(cast(AsyncEngine, fake), deadline_seconds=120)
+
+    assert fake.attempts == 3
+
+
+async def test_wait_for_database_connects_once_when_the_database_is_reachable(instant_sleep: list[float]) -> None:
+    """A healthy start must cost no extra connect and no sleep, so the retry
+    cannot quietly become part of every pod's startup time."""
+    fake = _FakeConnectEngine([None])
+
+    await wait_for_database(cast(AsyncEngine, fake), deadline_seconds=120)
+
+    assert fake.attempts == 1
+    assert instant_sleep == []
+
+
+async def test_wait_for_database_backs_off_exponentially_up_to_the_cap(instant_sleep: list[float]) -> None:
+    """Sub-second first, then doubling to a cap: a resolver ready a moment later
+    costs no measurable startup time, and a minutes-long outage is not hammered
+    once per loop iteration."""
+    fake = _FakeConnectEngine([_dns_failure()] * 6 + [None])
+
+    await wait_for_database(
+        cast(AsyncEngine, fake),
+        deadline_seconds=120,
+        initial_backoff_seconds=0.5,
+        max_backoff_seconds=5.0,
+    )
+
+    assert instant_sleep == [0.5, 1.0, 2.0, 4.0, 5.0, 5.0]
+
+
+async def test_wait_for_database_raises_the_connect_error_once_the_deadline_passes() -> None:
+    """The retry is bounded so a database that never answers still ends startup,
+    with the connect error in the log rather than a container that outlives its
+    startup probe mid-retry."""
+    fake = _FakeConnectEngine([_dns_failure()] * 50)
+
+    with pytest.raises(OSError, match="Temporary failure in name resolution"):
+        await wait_for_database(cast(AsyncEngine, fake), deadline_seconds=0)
+
+    assert fake.attempts == 1
+
+
+async def test_wait_for_database_never_sleeps_past_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The last attempt has to land inside the budget the startup probe allows,
+    so the final wait is clipped to what remains rather than the full backoff."""
+    delays: list[float] = []
+    clock = 0.0
+
+    async def fake_sleep(delay: float) -> None:
+        nonlocal clock
+        delays.append(delay)
+        clock += delay
+
+    class _FakeLoop:
+        def time(self) -> float:
+            return clock
+
+    monkeypatch.setattr(engine_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(engine_module.asyncio, "get_running_loop", lambda: _FakeLoop())
+    fake = _FakeConnectEngine([_dns_failure()] * 50)
+
+    with pytest.raises(OSError):
+        await wait_for_database(
+            cast(AsyncEngine, fake),
+            deadline_seconds=3.0,
+            initial_backoff_seconds=2.0,
+            max_backoff_seconds=2.0,
+        )
+
+    assert delays == [2.0, 1.0]
+    assert sum(delays) == 3.0
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(
+            asyncpg.exceptions.InvalidPasswordError("password authentication failed"),
+            id="rejected-password",
+        ),
+        pytest.param(
+            asyncpg.exceptions.InvalidCatalogNameError('database "nope" does not exist'),
+            id="missing-database",
+        ),
+    ],
+)
+async def test_wait_for_database_does_not_retry_a_misconfigured_connection(
+    error: BaseException, instant_sleep: list[float]
+) -> None:
+    """Anything above the socket layer is configuration, and retrying it only
+    spends the whole deadline before failing with the error it already had."""
+    fake = _FakeConnectEngine([error])
+
+    with pytest.raises(type(error)):
+        await wait_for_database(cast(AsyncEngine, fake), deadline_seconds=120)
+
+    assert fake.attempts == 1
+    assert instant_sleep == []
+
+
+async def test_wait_for_database_retries_a_socket_error_the_dialect_wrapped(instant_sleep: list[float]) -> None:
+    """SQLAlchemy raises a DBAPIError ``from`` the socket error it wrapped, so
+    the reachability test walks the cause chain the way the disconnect listener
+    does — a wrapped EAI_AGAIN is the same outage as a bare one."""
+    fake = _FakeConnectEngine([_shim_wrapped(_dns_failure()), None])
+
+    await wait_for_database(cast(AsyncEngine, fake), deadline_seconds=120)
+
+    assert fake.attempts == 2

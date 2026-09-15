@@ -1,11 +1,20 @@
+import asyncio
 import logging
 
 import asyncpg
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.engine.interfaces import ExceptionContext
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 logger = logging.getLogger(__name__)
+
+# Backoff shape for the first connect. Starts sub-second so a resolver that is
+# ready a moment after the container costs no measurable startup time, and caps
+# well inside a deadline so the last attempt still lands near it rather than
+# sleeping past it. Unlike the deadline these need no per-environment tuning:
+# the deadline is what has to fit a given startup probe's budget.
+_INITIAL_CONNECT_BACKOFF_SECONDS = 0.5
+_MAX_CONNECT_BACKOFF_SECONDS = 5.0
 
 # The SQLSTATE class-25 errors that mean the server-side backend is gone
 # (pooler shed it mid-transaction, or the server timed it out) rather than the
@@ -90,3 +99,85 @@ def mark_stale_transaction_state_as_disconnect(context: ExceptionContext) -> Non
             context.is_disconnect = True
             return
         exception = exception.__cause__
+
+
+async def wait_for_database(
+    engine: AsyncEngine,
+    *,
+    deadline_seconds: float,
+    initial_backoff_seconds: float = _INITIAL_CONNECT_BACKOFF_SECONDS,
+    max_backoff_seconds: float = _MAX_CONNECT_BACKOFF_SECONDS,
+) -> None:
+    """Open the process's first connection, retrying while the host is unreachable.
+
+    A pod's DNS is not always usable the moment its container is: cluster
+    resolution can fail for minutes after a node joins, and asyncpg surfaces
+    that as EAI_AGAIN out of the very first connect. That single failure ends
+    startup, so the container exits and the pod enters CrashLoopBackOff — whose
+    backoff grows past the outage it is waiting out, which is what leaves a
+    rollout stalled long after resolution recovers. Retrying inside one
+    container holds it across the outage instead.
+
+    The deadline belongs inside the startup probe's budget (see
+    ``k8s/base/python-api/deployment.yaml``) so a pod that cannot reach its
+    database is killed on the probe's verdict, with this function's own error in
+    the log, rather than mid-retry. Failures above the socket layer — a rejected
+    password, a database that does not exist — are configuration and raise on
+    the first attempt.
+    """
+    loop = asyncio.get_running_loop()
+    give_up_at = loop.time() + deadline_seconds
+    backoff = initial_backoff_seconds
+    attempt = 1
+    while True:
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+        except Exception as error:
+            if not _is_unreachable_database(error):
+                raise
+            remaining = give_up_at - loop.time()
+            if remaining <= 0:
+                logger.error(
+                    "database unreachable after %d attempt(s) over %.1fs, giving up: %s",
+                    attempt,
+                    deadline_seconds,
+                    error,
+                )
+                raise
+            # Never sleep past the deadline: the remaining budget is worth one
+            # more shorter attempt, and overshooting would hand the probe a
+            # container still sleeping rather than one that has reported why.
+            delay = min(backoff, max_backoff_seconds, remaining)
+            logger.warning(
+                "database unreachable on attempt %d, retrying in %.1fs: %s",
+                attempt,
+                delay,
+                error,
+            )
+            await asyncio.sleep(delay)
+            backoff = min(backoff * 2, max_backoff_seconds)
+            attempt += 1
+        else:
+            if attempt > 1:
+                logger.info("database reachable on attempt %d", attempt)
+            return
+
+
+def _is_unreachable_database(error: BaseException) -> bool:
+    """Whether the connect failed below the protocol: DNS, routing, refusal, timeout.
+
+    Every such failure reaches here as an ``OSError`` — ``socket.gaierror`` for
+    resolution, ``ConnectionRefusedError`` for a server not yet listening,
+    ``TimeoutError`` for a black-holed route. asyncpg lets those out of the
+    dialect unwrapped, so the first connect usually raises one directly; the
+    chain is walked as well because a wrapped one arrives as a ``DBAPIError``
+    raised ``from`` it, the same chaining
+    ``mark_stale_transaction_state_as_disconnect`` reads.
+    """
+    cause: BaseException | None = error
+    while cause is not None:
+        if isinstance(cause, OSError):
+            return True
+        cause = cause.__cause__
+    return False
