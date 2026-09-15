@@ -953,9 +953,8 @@ func (h *serviceTestHarness) setupPositionEventMulticall() {
 	}
 }
 
-// stubUnregisteredAdapterAllocation makes an Allocate for testAdapterAddr look like one
-// the log has no answer about: the type probe classifies the adapter, realAssets answers,
-// and the pre-transaction membership read finds nothing.
+// stubUnregisteredAdapterAllocation makes an Allocate for testAdapterAddr look unanswered:
+// the type probe classifies, realAssets answers, the membership read finds nothing.
 func (h *serviceTestHarness) stubUnregisteredAdapterAllocation(adapterType entity.MorphoAdapterType, realAssets *big.Int) {
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {

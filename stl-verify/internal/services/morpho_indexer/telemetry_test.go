@@ -82,14 +82,8 @@ func TestSecondsHistograms_UseSecondsBuckets(t *testing.T) {
 	}
 }
 
-// TestRecordAdapterMembershipObservation_LabelsTypeAndProvenance pins the label
-// vocabulary the VectorMorphoV2UnknownAdapters and
-// VectorMorphoV2LazyAdapterRegistrations rules select on. Renaming a value here
-// silently un-fires those alerts. observed_via deliberately carries the same five
-// values as morpho_adapter_membership.observed_via, so the metric and the table
-// answer provenance questions in one vocabulary; at_discovery_block splits the
-// allocation source into the benign discovery-block append and the discovery gap,
-// and is "not_applicable" on every source that does not ask the question.
+// Renaming a label value here silently un-fires VectorMorphoV2UnknownAdapters and
+// VectorMorphoV2LazyAdapterRegistrations, which select on this vocabulary.
 func TestRecordAdapterMembershipObservation_LabelsTypeAndProvenance(t *testing.T) {
 	tests := []struct {
 		name                 string

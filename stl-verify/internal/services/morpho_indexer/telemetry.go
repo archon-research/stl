@@ -52,11 +52,8 @@ func adapterTypeLabel(t *entity.MorphoAdapterType) string {
 	}
 }
 
-// discoveryBlockLabel renders the answer to
-// outbound.MorphoRepository.AdapterSetEnumeratedAt. Only the membership an Allocate
-// implies asks that question; every other source renders "not_applicable" rather than a
-// "false" that would read as a discovery gap, which
-// VectorMorphoV2LazyAdapterRegistrations counts exactly.
+// A source that does not ask the question renders "not_applicable", never "false":
+// VectorMorphoV2LazyAdapterRegistrations counts "false" exactly.
 func discoveryBlockLabel(atDiscoveryBlock *bool) string {
 	if atDiscoveryBlock == nil {
 		return "not_applicable"
