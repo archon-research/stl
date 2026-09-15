@@ -4,10 +4,12 @@ package migrator_test
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -798,4 +800,77 @@ func TestMaterializeAaveLendingForwardsTheWriterRun(t *testing.T) {
 			t.Errorf("materialize_aave_lending declares %v, missing %s -- the runner calls it by name", args, want)
 		}
 	}
+}
+
+// The cap is a function setting, so a materializer replaced without re-declaring it (CREATE OR REPLACE
+// resets proconfig) runs against the 200 GB server default again. Asserted on the mechanism: CI cannot spill 4 GB.
+func TestMaterializeAaveLendingPinsTempFileLimit(t *testing.T) {
+	ctx, pool := seedAaveLendingBase(t)
+	if cfg := functionSettings(ctx, t, pool, "materialize_aave_lending(integer, bigint)"); !slices.Contains(cfg, "temp_file_limit=4GB") {
+		t.Errorf("proconfig = %v; want a temp_file_limit=4GB entry", cfg)
+	}
+}
+
+// temp_file_limit is superuser-context, so a role creates or enters a function pinning it only with SET on
+// the parameter; without it the run is refused outright (42501), never run uncapped. Measured as stl_readwrite.
+func TestMaterializeAaveLendingNeedsSetOnTempFileLimit(t *testing.T) {
+	ctx, pool := seedAaveLendingLedger(t)
+	var publicHolders int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM pg_parameter_acl, aclexplode(paracl) a WHERE parname = 'temp_file_limit' AND a.grantee = 0`).Scan(&publicHolders); err != nil {
+		t.Fatalf("read pg_parameter_acl: %v", err)
+	}
+	if publicHolders != 0 {
+		t.Fatalf("precondition: this cluster grants SET on temp_file_limit to PUBLIC, so the refusal cannot be observed")
+	}
+	if _, err := pool.Exec(ctx, `REVOKE SET ON PARAMETER temp_file_limit FROM stl_readwrite`); err != nil {
+		t.Fatalf("clear any leaked parameter grant: %v", err)
+	}
+	rw, done := asReadWritePool(ctx, t, pool)
+	defer done()
+	const pinned = `CREATE FUNCTION pg_temp.pins_temp_file_limit() RETURNS int LANGUAGE sql SET temp_file_limit = '4GB' AS 'SELECT 1'`
+
+	t.Run("without SET on the parameter a function pinning it cannot be created", func(t *testing.T) {
+		_, err := rw.Exec(ctx, pinned)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42501" || !strings.Contains(pgErr.Message, "temp_file_limit") {
+			t.Fatalf("CREATE FUNCTION ... SET temp_file_limit as a non-superuser without the grant: err = %v, want SQLSTATE 42501 naming temp_file_limit", err)
+		}
+	})
+
+	t.Run("without SET on the parameter the caller is refused", func(t *testing.T) {
+		_, err := rw.Exec(ctx, `SELECT materialize_aave_lending()`)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42501" || !strings.Contains(pgErr.Message, "temp_file_limit") {
+			t.Fatalf("as stl_readwrite without the grant: err = %v, want SQLSTATE 42501 naming temp_file_limit", err)
+		}
+		var rows int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&rows); err != nil {
+			t.Fatalf("count position_state: %v", err)
+		}
+		if rows != 0 {
+			t.Errorf("the refused call wrote %d position_state rows, want 0", rows)
+		}
+	})
+
+	t.Run("with SET on the parameter the app role runs the projection", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `GRANT SET ON PARAMETER temp_file_limit TO stl_readwrite`); err != nil {
+			t.Fatalf("grant SET on temp_file_limit: %v", err)
+		}
+		t.Cleanup(func() {
+			if _, err := pool.Exec(ctx, `REVOKE SET ON PARAMETER temp_file_limit FROM stl_readwrite`); err != nil {
+				t.Errorf("revoke SET on temp_file_limit: %v", err)
+			}
+		})
+		if _, err := rw.Exec(ctx, pinned); err != nil {
+			t.Fatalf("CREATE FUNCTION ... SET temp_file_limit as a non-superuser with the grant: %v", err)
+		}
+		var written int64
+		if err := rw.QueryRow(ctx, `SELECT materialize_aave_lending()`).Scan(&written); err != nil {
+			t.Fatalf("as stl_readwrite with the grant: %v", err)
+		}
+		if written != aaveWantRows {
+			t.Errorf("materialize_aave_lending() as stl_readwrite reported %d rows, want %d", written, aaveWantRows)
+		}
+	})
 }
