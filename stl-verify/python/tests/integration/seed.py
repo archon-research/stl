@@ -3308,7 +3308,8 @@ async def seed_processing_version_dedup_scenarios(db_url: str) -> None:
     try:
         async with conn.transaction():
             prime_id = await conn.fetchval(
-                "INSERT INTO prime (name, vault_address) VALUES ('pv_dedup', $1) RETURNING id",
+                "INSERT INTO prime (prime_key, name, vault_address) "
+                "VALUES ('prm_t_pv_dedup', 'pv_dedup', $1) RETURNING id",
                 bytes.fromhex(PVD_VAULT_HEX),
             )
             await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=PVD_ALM_PROXY_HEX)
