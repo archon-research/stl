@@ -12,7 +12,7 @@ section that does not apply.
 fired, prior PR, staging observation), the outcome. What a reviewer needs to
 know before reading the diff. -->
 
----
+<hr>
 
 <!-- Agent-filled from here down. -->
 
