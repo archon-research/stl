@@ -1,24 +1,26 @@
 import {
-  AreaSeries,
-  Axis,
-  buildChartTheme,
-  ChartCursorLayer,
   ChartLegend,
   type ChartLegendItem,
   chartColorToken,
   type ChartColorToken,
   chartTokens,
+  resolveChartColor,
+  useContainerWidth,
+} from '@archon-research/charting/core';
+import {
+  AreaSeries,
+  Axis,
+  buildChartTheme,
+  ChartCursorLayer,
   DataContext,
   Grid,
   LineSeries,
   ReferenceBand,
-  resolveChartColor,
   Tooltip,
-  useContainerWidth,
   useHoveredTimestamp,
   useSyncedCursorHandlers,
   XYChart,
-} from '@archon-research/charting';
+} from '@archon-research/charting/xychart';
 import { SkeletonStack } from '@archon-research/design-system';
 import { useContext, useMemo } from 'react';
 

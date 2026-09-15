@@ -1,4 +1,4 @@
-import { SyncedChartGroup } from '@archon-research/charting';
+import { SyncedChartGroup } from '@archon-research/charting/xychart';
 import {
   Badge,
   type BadgeColorPalette,

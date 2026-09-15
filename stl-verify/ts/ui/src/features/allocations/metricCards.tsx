@@ -1,4 +1,7 @@
-import type { ChartColor, ChartColorToken } from '@archon-research/charting';
+import type {
+  ChartColor,
+  ChartColorToken,
+} from '@archon-research/charting/core';
 import {
   ErrorState,
   InfoPopover,
