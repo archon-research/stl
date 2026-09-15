@@ -67,6 +67,7 @@ resources:
   # per chain with a raw archive, each on its own task queue; Robinhood has no
   # backup worker, so it has no archive to repair against and no worker here.
   - ../../base/block-republisher
+  - ../../base/block-meta-loader
   - ../../base/arbitrum-block-republisher
   - ../../base/avalanche-block-republisher
   - ../../base/base-block-republisher
