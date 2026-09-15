@@ -96,3 +96,30 @@ func sortedKeys(m map[string]bool) string {
 	sort.Strings(out)
 	return strings.Join(out, ", ")
 }
+
+// VectorCronjobWorkerDown is the only rule that sees a pod that never starts: a dead worker emits no
+// cronjob_runs_total, so the metric-based rules above cannot. It keys on the kube-state-metrics
+// deployment label and its comment asks every scheduled cronjob to add its Deployment name to BOTH
+// regexes. The name is spelled out, not read from a constant, so a rename here cannot pass silently.
+func TestAlerts_WorkerDownCoversThisDeployment(t *testing.T) {
+	body := alertsFile(t)
+	rule := ""
+	for block := range strings.SplitSeq(body, "- alert:") {
+		if strings.HasPrefix(strings.TrimSpace(block), "VectorCronjobWorkerDown") {
+			rule = block
+			break
+		}
+	}
+	if rule == "" {
+		t.Fatal("VectorCronjobWorkerDown is not in the alerts file")
+	}
+	regexes := regexp.MustCompile(`deployment=~"([^"]*)"`).FindAllStringSubmatch(rule, -1)
+	if len(regexes) != 2 {
+		t.Fatalf("VectorCronjobWorkerDown carries %d deployment regexes, want 2 (available and desired)", len(regexes))
+	}
+	for i, m := range regexes {
+		if !regexp.MustCompile(`(^|\|)position-materializer(\||$)`).MatchString(m[1]) {
+			t.Errorf("deployment regex %d of VectorCronjobWorkerDown omits position-materializer: %q", i+1, m[1])
+		}
+	}
+}
