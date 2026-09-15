@@ -18,8 +18,6 @@ const config = {
     'max-lines': ['error', { max: 950 }],
     'import/max-dependencies': ['error', { max: 21 }],
 
-    'react/react-compiler': 'off',
-
     'typescript/no-floating-promises': 'error',
     'typescript/no-misused-promises': 'error',
     'typescript/await-thenable': 'error',

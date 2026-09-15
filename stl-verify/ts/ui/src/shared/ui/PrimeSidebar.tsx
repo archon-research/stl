@@ -59,7 +59,7 @@ export function PrimeSidebar({
           boxSizing: 'border-box',
           px: '5',
           py: '4',
-          borderBottomWidth: '1px',
+          borderBottomWidth: 'hairline',
           borderBottomStyle: 'solid',
           borderBottomColor: 'border.subtle',
         })}
@@ -157,7 +157,7 @@ export function PrimeSidebar({
                     boxSizing: 'border-box',
                     textAlign: 'left',
                     borderRadius: 'md',
-                    borderWidth: '1px',
+                    borderWidth: 'hairline',
                     borderStyle: 'solid',
                     borderColor: isSelected
                       ? 'interactive.accent'

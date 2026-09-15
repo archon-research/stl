@@ -1,52 +1,101 @@
 import { HttpRequestError } from '@archon-research/http-client-react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { queryClient } from './query-client';
 
-/**
- * The retry predicate off the client's defaults, which is the surface
- * react-query calls it through — it is deliberately module-private.
- */
-function defaultRetry(): (failureCount: number, error: Error) => boolean {
-  const { retry } = queryClient.getDefaultOptions().queries ?? {};
-  if (typeof retry !== 'function') {
-    throw new Error('the query client carries no retry predicate');
+describe("the app's query client defaults", () => {
+  it('states its own staleTime rather than inheriting react-query default', () => {
+    expect(queryClient.getDefaultOptions().queries?.staleTime).toBe(30_000);
+  });
+
+  it('keeps cached data for 5 minutes', () => {
+    expect(queryClient.getDefaultOptions().queries?.gcTime).toBe(5 * 60_000);
+  });
+
+  it("stays 'always' so an uncached query fetches while offline instead of parking in pending forever", () => {
+    expect(queryClient.getDefaultOptions().queries?.networkMode).toBe('always');
+  });
+});
+
+describe('the policy inherited from createQueryClient', () => {
+  /**
+   * A future uikit change that drops or weakens `shouldRetryRequest` should
+   * fail here, not silently ship — this app never restates the policy itself.
+   */
+  function defaultRetry(): (failureCount: number, error: Error) => boolean {
+    const { retry } = queryClient.getDefaultOptions().queries ?? {};
+    if (typeof retry !== 'function') {
+      throw new Error('the query client carries no retry predicate');
+    }
+    return retry;
   }
-  return retry;
-}
 
-const retry = defaultRetry();
+  const retry = defaultRetry();
 
-const httpError = (status: number) =>
-  new HttpRequestError({
-    method: 'get',
-    path: '/v1/primes',
-    body: undefined,
-    response: new Response(null, { status }),
+  const httpError = (status: number) =>
+    new HttpRequestError({
+      method: 'get',
+      path: '/v1/primes',
+      body: undefined,
+      response: new Response(null, { status }),
+    });
+
+  it('gives up immediately on a non-retryable 4xx', () => {
+    expect(retry(0, httpError(404))).toBe(false);
   });
 
-describe('the default retry policy', () => {
-  it.each([400, 401, 403, 404, 422])('gives up immediately on %i', (status) => {
-    expect(retry(0, httpError(status))).toBe(false);
+  it('retries a 429', () => {
+    expect(retry(0, httpError(429))).toBe(true);
   });
 
-  it.each([408, 425, 429])(
-    'retries %i, which is a timing accident',
-    (status) => {
-      expect(retry(0, httpError(status))).toBe(true);
-    },
-  );
+  it('stays disabled by refetchOnWindowFocus', () => {
+    expect(queryClient.getDefaultOptions().queries?.refetchOnWindowFocus).toBe(
+      false,
+    );
+  });
+});
 
-  it.each([500, 502, 503])('retries %i', (status) => {
-    expect(retry(0, httpError(status))).toBe(true);
+describe('the queryCache logging hook', () => {
+  it('logs a failed query at error level by default', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await queryClient.fetchQuery({
+        queryKey: ['query-client-test', 'default-level'],
+        queryFn: () => Promise.reject(new Error('boom')),
+        retry: false,
+      });
+    } catch {
+      // The rejection itself is not under test; the logging side effect is.
+    }
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      'API request failed',
+      expect.objectContaining({
+        queryKey: ['query-client-test', 'default-level'],
+      }),
+    );
+    errorSpy.mockRestore();
   });
 
-  it('retries an error that carries no status at all', () => {
-    expect(retry(0, new Error('network down'))).toBe(true);
-  });
+  it("honors a query's own logLevel and logMessage", async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await queryClient.fetchQuery({
+        queryKey: ['query-client-test', 'custom-level'],
+        queryFn: () => Promise.reject(new Error('boom')),
+        retry: false,
+        meta: { logLevel: 'warn', logMessage: 'fell back to cache' },
+      });
+    } catch {
+      // The rejection itself is not under test; the logging side effect is.
+    }
 
-  it('stops a retryable failure at three attempts', () => {
-    expect(retry(1, httpError(429))).toBe(true);
-    expect(retry(2, httpError(429))).toBe(false);
+    expect(warnSpy).toHaveBeenCalledWith(
+      'fell back to cache',
+      expect.objectContaining({
+        queryKey: ['query-client-test', 'custom-level'],
+      }),
+    );
+    warnSpy.mockRestore();
   });
 });

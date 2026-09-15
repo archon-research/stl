@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import babel from '@rolldown/plugin-babel';
-import react, { reactCompilerPreset } from '@vitejs/plugin-react';
+import reactCompiler from '@archon-research/vite-config/react-compiler';
+import react from '@vitejs/plugin-react';
 import type { Plugin } from 'vite';
 import { defineConfig } from 'vitest/config';
 
@@ -34,25 +34,6 @@ function dropMockWorkerScript(): Plugin {
 
 const WORKER_SCRIPT = 'mockServiceWorker.js';
 
-/**
- * The React Compiler, as a rolldown babel preset.
- *
- * React is 19.2, so no `target` is needed: the compiler emits calls into
- * `react/compiler-runtime`, which that version ships. The preset ships only a
- * `code` filter, and Babel is the one thing in this pipeline that is not Oxc,
- * so an id filter is added for the two trees that would cost the most for
- * nothing -- the generated OpenAPI types and Panda's generated styled-system.
- */
-function reactCompiler() {
-  const preset = reactCompilerPreset();
-  preset.rolldown.filter = {
-    ...preset.rolldown.filter,
-    id: { exclude: ['**/src/generated/**', '**/styled-system/**'] },
-  };
-
-  return babel({ presets: [preset] });
-}
-
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
   const env = resolveAppEnv(mode, import.meta.dirname);
@@ -66,7 +47,13 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [
       react(),
-      reactCompiler(),
+      // React is 19.2, so no `compiler.target` is needed: the compiler emits
+      // calls into `react/compiler-runtime`, which that version ships.
+      // `src/generated` (the OpenAPI types) has no preset default and is
+      // added explicitly; `styled-system` is left at the preset's default,
+      // which carves `styled-system/jsx/` back in for the real `forwardRef`
+      // components Panda generates there under `jsxFramework: 'react'`.
+      reactCompiler({ exclude: [/[/\\]src[/\\]generated[/\\]/] }),
       ...(mocked ? [] : [dropMockWorkerScript()]),
     ],
     // env.ts is the only validator of this flag, and it reads `.env.default`,
