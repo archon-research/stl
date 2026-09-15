@@ -43,20 +43,32 @@ groups:
       # ---------------------------------------------------------------------
 
       - alert: VectorWatcherNoBlocks
-        # Watcher stops requesting new blocks from Alchemy. If true for >1m
+        # Watcher stops fetching block data from Alchemy. If true for >1m
         # the pipeline is starved at the head — every downstream service
         # will appear idle within minutes.
         #
+        # The matcher spans every per-block fetch method, because the two
+        # ingestion paths use different ones and either alone is proof of
+        # life: the live path fetches each newHeads header by hash
+        # (eth_getBlockByHash + eth_getBlockReceipts, and trace_block where
+        # traces are on), backfill fetches each gap range as one batched
+        # call, and eth_getBlockByNumber carries the boundary re-verification
+        # at the top of a backfill pass plus the reorg canonical check.
+        # Scoped to a single method the rule tracks that one path's cadence
+        # instead of ingestion: on a chain whose gap-fill pass outlives its
+        # poll interval the boundary check runs once per pod, which reads as
+        # a stall while the head is ingesting normally.
+        #
         # `for: 1m` is intentionally aggressive (per Simon's Slack feedback):
-        # a healthy watcher polls every block (~12s on Ethereum, ~2s on L2s).
-        # If we're not seeing eth_getBlockByNumber for a full minute, the
-        # watcher is stuck — no benign reason to wait longer.
+        # a healthy watcher fetches every block it is handed, so a full
+        # minute with no fetch on any method means the client is wedged or
+        # upstream is gone — no benign reason to wait longer.
         expr: |
           sum by (service_name, cluster) (
             rate(alchemy_client_requests_total{
               k8s_namespace_name="vector",
               service_name=~".*watcher",
-              rpc_method="eth_getBlockByNumber"
+              rpc_method=~"batch|eth_getBlockByHash|eth_getBlockByNumber|eth_getBlockReceipts|trace_block"
             }[1m])
           ) == 0
         for: 1m
@@ -66,12 +78,14 @@ groups:
           component: watcher
           namespace: vector
         annotations:
-          summary: "Vector watcher not polling blocks on {{ $labels.service_name }}"
+          summary: "Vector watcher not fetching blocks on {{ $labels.service_name }}"
           description: |
             Watcher `{{ $labels.service_name }}` has not issued a single
-            `eth_getBlockByNumber` call to Alchemy for >1m. The chain
-            ingestion pipeline is stalled at the head — every downstream
-            indexer will go idle shortly.
+            block fetch to Alchemy for >1m — neither the live path
+            (`eth_getBlockByHash`, `eth_getBlockReceipts`) nor backfill
+            (`batch`, `eth_getBlockByNumber`). The chain ingestion pipeline
+            is stalled at the head — every downstream indexer will go idle
+            shortly.
 
             Check watcher pod logs and Alchemy availability before restarting.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatchernoblocks

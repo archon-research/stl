@@ -1082,6 +1082,52 @@ export interface components {
         | null;
     };
     /**
+     * ApiErrorResponse
+     * @description The body of every ``422`` on the surface, as an RFC 9457 problem detail.
+     *
+     *     The extension members below are populated on a max-points rejection and absent
+     *     otherwise, so a client can branch on ``type`` and read only what that type
+     *     promises.
+     */
+    ApiErrorResponse: {
+      /**
+       * Detail
+       * @description Human-readable explanation of this occurrence. Never the only signal.
+       */
+      detail: string;
+      /**
+       * Errors
+       * @description The parameters that failed, one entry each. `invalid_request` only.
+       */
+      errors?: components['schemas']['FieldError'][] | null;
+      /**
+       * Max Points
+       * @description Ceiling the request exceeded. Max-points rejections only.
+       */
+      max_points?: number | null;
+      /**
+       * Point Count
+       * @description Observations the request would return. Max-points rejections only.
+       */
+      point_count?: number | null;
+      /**
+       * Status
+       * @description HTTP status of the response carrying this body.
+       * @default 422
+       */
+      status: number;
+      /** @description Ways out of the rejection. Max-points rejections only. */
+      suggestions?: components['schemas']['RejectionSuggestions'] | null;
+      /**
+       * Title
+       * @description Short static label for the `type`. Same across every occurrence of one type.
+       * @example Too many points
+       */
+      title: string;
+      /** @description Stable, machine-readable rejection identifier. */
+      type: components['schemas']['RejectionType'];
+    };
+    /**
      * BadDebtResponse
      * @description Estimated bad debt for a receipt-token position at a given collateral gap.
      * @example {
@@ -1339,6 +1385,29 @@ export interface components {
       window: components['schemas']['ResampledTimeSeriesWindow'];
     };
     /**
+     * FieldError
+     * @description One parameter's rejection, so a client branches per field instead of on prose.
+     */
+    FieldError: {
+      /**
+       * Code
+       * @description Machine-readable reason code for this field.
+       * @example datetime_parsing
+       */
+      code: string;
+      /**
+       * Field
+       * @description Dotted path to the parameter, as `location.name`.
+       * @example query.to_timestamp
+       */
+      field: string;
+      /**
+       * Message
+       * @description Human-readable reason. The submitted value is redacted out of it.
+       */
+      message: string;
+    };
+    /**
      * GapSweepDetails
      * @description Gap-sweep model-specific output embedded in an RrcResult.
      *
@@ -1362,10 +1431,27 @@ export interface components {
        */
       risk_model: 'gap_sweep';
     };
-    /** HTTPValidationError */
-    HTTPValidationError: {
-      /** Detail */
-      detail?: components['schemas']['ValidationError'][];
+    /**
+     * NarrowerWindow
+     * @description A window to retry the same request over, keyed like the query parameters.
+     *
+     *     Scaled by the requested window's average density, so it is exact only for evenly
+     *     spaced observations: a series clustered in this span is rejected again, with a
+     *     further-narrowed suggestion.
+     */
+    NarrowerWindow: {
+      /**
+       * From Timestamp
+       * Format: date-time
+       * @description Lower bound to retry with (UTC).
+       */
+      from_timestamp: string;
+      /**
+       * To Timestamp
+       * Format: date-time
+       * @description Upper bound to retry with — the requested one (UTC).
+       */
+      to_timestamp: string;
     };
     /**
      * PrimeDebtBucketResponse
@@ -1963,6 +2049,53 @@ export interface components {
       window: components['schemas']['TimeSeriesWindow'];
     };
     /**
+     * RejectionSuggestions
+     * @description The ways out of a max-points rejection, each a complete set of query parameters.
+     *
+     *     Grouped and keyed to match the request so a client merges one of them into the
+     *     parameters it sent, with no key to rename or trim. The two are alternatives, not
+     *     a set: taking both narrows a window that the frequency alone would have served
+     *     in full.
+     */
+    RejectionSuggestions: {
+      /** @description Absent once the scaled span rounds below a second. */
+      narrower_window?: components['schemas']['NarrowerWindow'] | null;
+      /** @description Grid that fits the window as asked. */
+      resampled: components['schemas']['ResampledRetry'];
+    };
+    /**
+     * RejectionType
+     * @description Every ``type`` the surface can put on a 422, closed so a client can be exhaustive.
+     *
+     *     An enum rather than a free string: this is the member a caller branches on, and
+     *     publishing the closed set is what lets a generated TS client fail to compile when
+     *     a new rejection appears rather than fall through its `switch`. ``INVALID_REQUEST``
+     *     covers every rejection FastAPI raises before a route is reached — the branch is the
+     *     same either way, and which parameter failed is in ``errors``.
+     * @enum {string}
+     */
+    RejectionType:
+      | 'invalid_request'
+      | 'invalid_time_range'
+      | 'timestamp_out_of_range'
+      | 'window_too_large'
+      | 'frequency_too_fine'
+      | 'frequency_requires_aggregation_method'
+      | 'max_points_exceeded';
+    /**
+     * ResampledRetry
+     * @description A frequency to retry the same window on, keyed like the query parameters.
+     *
+     *     Fits the window as asked, so unlike ``narrower_window`` it needs no second round
+     *     trip and returns the whole span the caller requested.
+     */
+    ResampledRetry: {
+      /** @description Method to cut on that grid. A frequency without one is itself a rejection. */
+      aggregation_method: components['schemas']['AggregationMethod'];
+      /** @description Grid to resample onto. */
+      frequency: components['schemas']['TimeSeriesFrequency'];
+    };
+    /**
      * ResampledTimeSeriesWindow
      * @description The window echo for a resampled response, naming the grid it sits on.
      *
@@ -2507,19 +2640,6 @@ export interface components {
       /** @description The window and frequency applied to this response. */
       window: components['schemas']['ResampledTimeSeriesWindow'];
     };
-    /** ValidationError */
-    ValidationError: {
-      /** Context */
-      ctx?: Record<string, never>;
-      /** Input */
-      input?: unknown;
-      /** Location */
-      loc: (string | number)[];
-      /** Message */
-      msg: string;
-      /** Error Type */
-      type: string;
-    };
   };
   responses: never;
   parameters: never;
@@ -2570,13 +2690,13 @@ export interface operations {
           'application/json': components['schemas']['AllocationActivityEnvelope'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2599,6 +2719,15 @@ export interface operations {
           'application/json': components['schemas']['ChainResponse'][];
         };
       };
+      /** @description Request rejected; branch on `type`. */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiErrorResponse'];
+        };
+      };
     };
   };
   get_data_sources_v1_data_sources_get: {
@@ -2619,6 +2748,15 @@ export interface operations {
           'application/json': components['schemas']['DataSourcesResponse'];
         };
       };
+      /** @description Request rejected; branch on `type`. */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiErrorResponse'];
+        };
+      };
     };
   };
   list_primes_v1_primes_get: {
@@ -2637,6 +2775,15 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['PrimeResponse'][];
+        };
+      };
+      /** @description Request rejected; branch on `type`. */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2670,13 +2817,13 @@ export interface operations {
           'application/json': components['schemas']['AllocationResponse'][];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2704,7 +2851,7 @@ export interface operations {
       };
       header?: never;
       path: {
-        /** @description Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses — this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`. */
+        /** @description Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses — this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`. Results are whole-prime: passing a proxy address returns the entire prime, including the chains that proxy has nothing to do with. */
         prime_id: string;
       };
       cookie?: never;
@@ -2720,13 +2867,13 @@ export interface operations {
           'application/json': components['schemas']['PrimeDebtEnvelope'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2770,13 +2917,13 @@ export interface operations {
           'application/json': components['schemas']['ExposureEnvelope'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2810,13 +2957,13 @@ export interface operations {
           'application/json': components['schemas']['PrimeRiskCapitalResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2860,13 +3007,13 @@ export interface operations {
           'application/json': components['schemas']['TotalCapitalEnvelope'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2904,13 +3051,13 @@ export interface operations {
           'application/json': components['schemas']['ProtocolEventsEnvelope'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2933,6 +3080,15 @@ export interface operations {
           'application/json': components['schemas']['ProtocolResponse'][];
         };
       };
+      /** @description Request rejected; branch on `type`. */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiErrorResponse'];
+        };
+      };
     };
   };
   get_provenance_availability_v1_provenance_available_get: {
@@ -2953,6 +3109,15 @@ export interface operations {
           'application/json': components['schemas']['ProvenanceAvailabilityResponse'];
         };
       };
+      /** @description Request rejected; branch on `type`. */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiErrorResponse'];
+        };
+      };
     };
   };
   get_ready_v1_ready_get: {
@@ -2971,6 +3136,15 @@ export interface operations {
         };
         content: {
           'application/json': unknown;
+        };
+      };
+      /** @description Request rejected; branch on `type`. */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3004,13 +3178,13 @@ export interface operations {
           'application/json': components['schemas']['RrcEnvelope'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3037,13 +3211,13 @@ export interface operations {
           'application/json': components['schemas']['RrcEnvelope'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3074,13 +3248,13 @@ export interface operations {
           'application/json': components['schemas']['BadDebtResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3111,13 +3285,13 @@ export interface operations {
           'application/json': components['schemas']['RiskBreakdownResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3145,13 +3319,13 @@ export interface operations {
           'application/json': components['schemas']['BadDebtResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3179,13 +3353,13 @@ export interface operations {
           'application/json': components['schemas']['RiskBreakdownResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3206,6 +3380,15 @@ export interface operations {
         };
         content: {
           'application/json': unknown;
+        };
+      };
+      /** @description Request rejected; branch on `type`. */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3235,13 +3418,13 @@ export interface operations {
           'application/json': components['schemas']['TokenResponse'][];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3269,13 +3452,13 @@ export interface operations {
           'application/json': components['schemas']['TokenResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3303,13 +3486,13 @@ export interface operations {
           'application/json': components['schemas']['TokenPriceResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3334,13 +3517,13 @@ export interface operations {
           'application/json': components['schemas']['TokenResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3365,13 +3548,13 @@ export interface operations {
           'application/json': components['schemas']['TokenPriceResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3397,13 +3580,13 @@ export interface operations {
           'application/json': components['schemas']['ProtocolEventResponse'][];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };

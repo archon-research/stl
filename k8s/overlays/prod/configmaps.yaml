@@ -749,9 +749,15 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelprod"
   ENABLE_BACKFILL: "true"
+  # Robinhood produces ~10 blocks/s, the fastest chain we watch. On the 10/30s
+  # defaults a pass drained ~7 blk/s measured on staging — under live, so the
+  # gap grew and one gap-fill pass ran for the whole pod lifetime. 100 blocks
+  # every 5s = ~20 blk/s, matching the avalanche and arbitrum tuning above.
+  BACKFILL_BATCH_SIZE: "100"
+  BACKFILL_POLL_INTERVAL: "5s"
   # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
   # 2500 newHeads slots hold ~4 min at ~10 blocks/s, so a hung request drops
-  # nothing. Backfill keeps the client default (30s) for its batches.
+  # nothing. Backfill keeps the client default (30s) for its 100-block batches.
   LIVE_RPC_TIMEOUT: "10s"
   SUBSCRIBER_BUFFER_SIZE: "2500"
 ---
@@ -863,6 +869,12 @@ data:
   # values above, so an operator can tune them without a rebuild.
   DB_POOL_RECYCLE_SECONDS: "300"
   DB_STATEMENT_CACHE_SIZE: "0"
+  # Startup retries an unreachable database for this long before the pod fails.
+  # Declared here so it sits beside the startupProbe budget it is bound by:
+  # k8s/base/python-api/deployment.yaml allows 150s, and the worst case here is
+  # this value plus one 10s connect timeout. Raising it past 140 needs the probe
+  # raised first, or the kubelet kills the container before it logs why.
+  DB_CONNECT_RETRY_DEADLINE_SECONDS: "120"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -984,6 +996,21 @@ data:
   # Same value as staging; the deployment's memory limit is sized for it — raise
   # both together (k8s/base/core-model-runner/deployment.yaml).
   CORE_MODEL_N_MC: "10000"
+---
+# block-meta-loader (VEC-491): on-demand Temporal worker filling block_meta for
+# Ethereum from that chain's raw-block archive. Started by hand from the Temporal
+# UI; no schedule. S3_BUCKET and DATABASE_URL come from the ExternalSecret, since
+# both are per-environment infra config.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: block-meta-loader
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  DEPLOY_ENV: "prod"
 ---
 apiVersion: v1
 kind: ConfigMap

@@ -153,7 +153,7 @@ func TestSavePositions_PersistsUnderlyingValuation(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	if err := repo.SavePositions(ctx, tx, []*entity.AllocationPosition{posA, posB}); err != nil {
+	if _, err := repo.SavePositions(ctx, tx, []*entity.AllocationPosition{posA, posB}); err != nil {
 		t.Fatalf("SavePositions: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -313,7 +313,7 @@ func TestSavePositions_ResolvesUnderlyingWhenShareTokenAlreadySeen(t *testing.T)
 	}
 	defer tx.Rollback(ctx)
 
-	if err := repo.SavePositions(ctx, tx, []*entity.AllocationPosition{pos1, pos2}); err != nil {
+	if _, err := repo.SavePositions(ctx, tx, []*entity.AllocationPosition{pos1, pos2}); err != nil {
 		t.Fatalf("SavePositions: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
