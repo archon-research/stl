@@ -194,6 +194,12 @@ groups:
         # VectorMapleIndexerDown). When a new SCHEDULED cronjob ships, add its
         # Deployment name to both regexes below.
         #
+        # Retiring one is the mirror image: drop it from both regexes AND delete
+        # its Temporal schedule (docs/temporal_guide.md, "Recipe: remove a
+        # cronjob"). A deleted Deployment stops producing the kube_deployment_*
+        # series this rule reads, so a schedule left behind keeps firing into an
+        # unpolled task queue that no rule in this file can see.
+        #
         # On-demand workers (temporal.RunWorker) are deliberately NOT listed here.
         # This rule pages because a dead scheduled worker means ticks are firing
         # into the void and data is going stale. They carry no schedule, so
