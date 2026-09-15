@@ -36,17 +36,18 @@ type UniswapV4ServiceDeps struct {
 // sqsutil.RunLoop processes one SQS message at a time, so no field is
 // synchronised.
 type UniswapV4Service struct {
-	poolsByID   map[common.Hash]RegisteredPool
-	poolsByRow  map[int64]RegisteredPool
-	pools       []RegisteredPool
-	poolManager common.Address
-	multicaller outbound.Multicaller
-	repo        outbound.UniswapV4Repository
-	eventWriter *dexconsumer.ProtocolEventWriter
-	txMgr       outbound.TxManager
-	chainID     int64
-	logger      *slog.Logger
-	telemetry   *dextelemetry.Telemetry
+	poolsByID       map[common.Hash]RegisteredPool
+	poolsByRow      map[int64]RegisteredPool
+	pools           []RegisteredPool // ordered for deterministic iteration
+	poolManager     common.Address
+	positionManager RegisteredPositionManager
+	multicaller     outbound.Multicaller
+	repo            outbound.UniswapV4Repository
+	eventWriter     *dexconsumer.ProtocolEventWriter
+	txMgr           outbound.TxManager
+	chainID         int64
+	logger          *slog.Logger
+	telemetry       *dextelemetry.Telemetry
 
 	tracker      *dexconsumer.SnapshotTracker
 	baselineSeen map[int64]bool
@@ -89,9 +90,19 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 	if _, err := eventsByID(); err != nil {
 		return nil, err
 	}
+	if _, err := positionManagerTransferEvent(); err != nil {
+		return nil, err
+	}
 	poolManager, err := PoolManagerFor(deps.Pools)
 	if err != nil {
 		return nil, err
+	}
+	positionManager, err := PositionManagerFor(deps.Pools)
+	if err != nil {
+		return nil, err
+	}
+	if positionManager.Address == poolManager {
+		return nil, fmt.Errorf("the registry gives the PoolManager and the PositionManager the same address (%s): every PoolManager log would decode as an NFT transfer", poolManager)
 	}
 	everSnapshotted, err := deps.Repo.PoolIDsEverSnapshotted(ctx, deps.ChainID)
 	if err != nil {
@@ -99,20 +110,21 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 	}
 	baselineSeen := seenSet(everSnapshotted)
 	svc := &UniswapV4Service{
-		poolsByID:    IndexPoolsByHash(deps.Pools),
-		poolsByRow:   indexPoolsByRowID(deps.Pools),
-		pools:        deps.Pools,
-		poolManager:  poolManager,
-		multicaller:  deps.Multicaller,
-		repo:         deps.Repo,
-		eventWriter:  deps.EventWriter,
-		txMgr:        deps.TxManager,
-		chainID:      deps.ChainID,
-		logger:       deps.Logger,
-		telemetry:    deps.Telemetry,
-		tracker:      dexconsumer.NewSnapshotTracker(noPeriodicSweep),
-		baselineSeen: baselineSeen,
-		neverIndexed: neverIndexedPools(deps.Pools, baselineSeen),
+		poolsByID:       IndexPoolsByHash(deps.Pools),
+		poolsByRow:      indexPoolsByRowID(deps.Pools),
+		pools:           deps.Pools,
+		poolManager:     poolManager,
+		positionManager: positionManager,
+		multicaller:     deps.Multicaller,
+		repo:            deps.Repo,
+		eventWriter:     deps.EventWriter,
+		txMgr:           deps.TxManager,
+		chainID:         deps.ChainID,
+		logger:          deps.Logger,
+		telemetry:       deps.Telemetry,
+		tracker:         dexconsumer.NewSnapshotTracker(noPeriodicSweep),
+		baselineSeen:    baselineSeen,
+		neverIndexed:    neverIndexedPools(deps.Pools, baselineSeen),
 	}
 	svc.reportNeverIndexed(ctx)
 	svc.reportExcludedFromSnapshots()
@@ -185,6 +197,26 @@ func PoolManagerFor(pools []RegisteredPool) (common.Address, error) {
 		}
 	}
 	return first.PoolManager, nil
+}
+
+// PositionManagerFor returns the one ERC-721 PositionManager the registry
+// shares, by PoolManagerFor's one-deployment rule. A registry that lost it would
+// hand back address(0), which no log is emitted by: every transfer would be
+// dropped without an error.
+func PositionManagerFor(pools []RegisteredPool) (RegisteredPositionManager, error) {
+	first := pools[0]
+	for _, pool := range pools[1:] {
+		if pool.PositionManager != first.PositionManager {
+			return RegisteredPositionManager{}, fmt.Errorf("pools %d and %d have different PositionManager addresses (%s, %s): one worker serves one deployment", first.ID, pool.ID, first.PositionManager, pool.PositionManager)
+		}
+		if pool.PositionManagerID != first.PositionManagerID {
+			return RegisteredPositionManager{}, fmt.Errorf("pools %d and %d have different uniswap_v4_position_manager rows (%d, %d): one worker serves one deployment", first.ID, pool.ID, first.PositionManagerID, pool.PositionManagerID)
+		}
+	}
+	if first.PositionManager == (common.Address{}) || first.PositionManagerID <= 0 {
+		return RegisteredPositionManager{}, fmt.Errorf("pool %d carries no PositionManager registry row: address(0) matches no log, so every transfer would be dropped silently", first.ID)
+	}
+	return RegisteredPositionManager{ID: first.PositionManagerID, Address: first.PositionManager}, nil
 }
 
 // ValidatePoolKeys has already rejected duplicate PoolIds.
@@ -267,14 +299,15 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 }
 
 // recordBlockMetrics runs only after a successful commit. Attempted is what
-// VectorUniswapV4IndexerNotWritingState keys on; the tick and position counts
-// are what the append-on-change writers persisted, i.e. real table growth.
+// VectorUniswapV4IndexerNotWritingState keys on; the tick, position and NFT
+// transfer counts are rows that landed, i.e. real table growth.
 func (s *UniswapV4Service) recordBlockMetrics(ctx context.Context, acc blockAccumulators, rows outbound.StateRowCounts) {
 	s.recordPoolsTouched(ctx, acc.touchedIDs)
 	s.telemetry.RecordStateRowsAttempted(ctx, int(rows.Attempted))
 	s.telemetry.RecordStateRows(ctx, int(rows.Persisted))
 	s.telemetry.RecordTickRows(ctx, int(rows.TicksPersisted))
 	s.telemetry.RecordPositionRows(ctx, int(rows.PositionsPersisted))
+	s.telemetry.RecordNFTTransferRows(ctx, len(acc.nftTransfers), int(rows.NFTTransfersPersisted))
 }
 
 // Only the snapshot_supported half reaches the due set, so only it may gate
@@ -362,16 +395,20 @@ type blockCoords struct {
 }
 
 type blockAccumulators struct {
-	swaps      []*entity.UniswapV4Swap
-	liquidity  []*entity.UniswapV4LiquidityEvent
-	poolEvts   []*entity.UniswapV4PoolEvent
-	captured   []dexconsumer.CapturedLog
-	touchedIDs map[int64]bool
-	liqByPool  map[int64][]*entity.UniswapV4LiquidityEvent
+	swaps        []*entity.UniswapV4Swap
+	liquidity    []*entity.UniswapV4LiquidityEvent
+	poolEvts     []*entity.UniswapV4PoolEvent
+	nftTransfers []*entity.UniswapV4PositionNFTTransfer
+	captured     []dexconsumer.CapturedLog
+	touchedIDs   map[int64]bool
+	liqByPool    map[int64][]*entity.UniswapV4LiquidityEvent
 }
 
+// Must count NFT transfers: they touch no pool, so a block whose only V4
+// activity is a posm transfer would otherwise be dropped before the write.
 func (acc blockAccumulators) hasEvents() bool {
-	return len(acc.swaps) > 0 || len(acc.liquidity) > 0 || len(acc.poolEvts) > 0 || len(acc.captured) > 0
+	return len(acc.swaps) > 0 || len(acc.liquidity) > 0 || len(acc.poolEvts) > 0 ||
+		len(acc.nftTransfers) > 0 || len(acc.captured) > 0
 }
 
 func (s *UniswapV4Service) decodeBlockEvents(ctx context.Context, receipts []shared.TransactionReceipt, bn int64, ver int, ts time.Time) (blockAccumulators, error) {
@@ -383,13 +420,14 @@ func (s *UniswapV4Service) decodeBlockEvents(ctx context.Context, receipts []sha
 		if err := ctx.Err(); err != nil {
 			return blockAccumulators{}, err
 		}
-		decoded, touched, err := DecodeEvents(receipt, s.poolsByID, s.poolManager, bn, ver, ts)
+		decoded, touched, err := DecodeEvents(receipt, s.poolsByID, s.poolManager, s.positionManager, bn, ver, ts)
 		if err != nil {
 			return blockAccumulators{}, fmt.Errorf("decoding PoolManager events at block %d: %w", bn, err)
 		}
 		acc.swaps = append(acc.swaps, decoded.Swaps...)
 		acc.liquidity = append(acc.liquidity, decoded.LiquidityEvents...)
 		acc.poolEvts = append(acc.poolEvts, decoded.PoolEvents...)
+		acc.nftTransfers = append(acc.nftTransfers, decoded.NFTTransfers...)
 		acc.captured = append(acc.captured, decoded.Captured...)
 		for _, e := range decoded.LiquidityEvents {
 			acc.liqByPool[e.PoolID] = append(acc.liqByPool[e.PoolID], e)
@@ -557,6 +595,7 @@ func (s *UniswapV4Service) buildBlockWrites(acc blockAccumulators, snaps blockSn
 		Ticks:           snaps.ticks,
 		PoolEvents:      acc.poolEvts,
 		Positions:       snaps.positions,
+		NFTTransfers:    acc.nftTransfers,
 	}
 	return writes, dexconsumer.ToProtocolEventInputs(acc.captured, s.chainID, coords.number, coords.version, coords.ts)
 }
