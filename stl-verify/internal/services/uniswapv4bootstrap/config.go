@@ -14,10 +14,14 @@ const (
 	// The getPositionInfo multicall cap, so the default batch is one round trip;
 	// a larger batch is one transaction over several multicalls.
 	DefaultPositionBatch = 500
-	// One transaction per 1,000 decoded transfers. A whole scan window's logs in
-	// one transaction would be up to the provider's ~10k-log response cap, and
-	// each row's insert takes an advisory lock the live indexer also wants.
+	// One transaction per 1,000 decoded transfers. Each distinct log site in a
+	// batch is one transaction-scoped advisory lock held to commit, and the lock
+	// table is a cluster-wide budget: a stock instance sizes for ~12,800 entries,
+	// staging's max_locks_per_transaction=256 for ~76,800.
 	DefaultTransferBatch = 1_000
+	// MaxTransferBatch keeps a mis-set knob inside that budget with room for
+	// concurrent writers, rather than exhausting the lock table for every session.
+	MaxTransferBatch = 10_000
 )
 
 type Config struct {
@@ -83,6 +87,8 @@ func (c Config) validate() error {
 		return fmt.Errorf("positionBatch must be positive, got %d", c.PositionBatch)
 	case c.TransferBatch <= 0:
 		return fmt.Errorf("transferBatch must be positive, got %d", c.TransferBatch)
+	case c.TransferBatch > MaxTransferBatch:
+		return fmt.Errorf("transferBatch %d is above %d: each log site in a batch holds one advisory lock to commit, out of a cluster-wide table", c.TransferBatch, MaxTransferBatch)
 	}
 	return nil
 }

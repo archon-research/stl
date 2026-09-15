@@ -142,3 +142,15 @@ func TestNFTTransfersFromLogs_DecodesABurnToTheZeroAddress(t *testing.T) {
 		t.Errorf("To = %s, want the zero address (a burn)", got[0].To)
 	}
 }
+
+// A scan bounded below the reorg window is answered from the canonical chain, so a
+// removed log means the provider served a fork. It must fail the window: as a
+// version-0 row it would then satisfy the existence check guarding the real one.
+func TestNFTTransfersFromLogs_RefusesARemovedLog(t *testing.T) {
+	removed := scannedTransferLog(func(l *shared.Log) { l.Removed = true })
+
+	_, err := NFTTransfersFromLogs([]shared.Log{removed}, scanPosm())
+	if err == nil || !strings.Contains(err.Error(), "flagged removed") {
+		t.Fatalf("NFTTransfersFromLogs error = %v, want it to refuse a removed log", err)
+	}
+}

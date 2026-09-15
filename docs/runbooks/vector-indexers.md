@@ -1870,8 +1870,8 @@ different holes: `UniswapV4PositionBootstrap` (the positions, above) and
 keeps the older name. They write different tables and neither is a phase of the
 other, so either can be started alone, or both at once. One consequence when
 triaging: `cronjob.runs.total` carries only the task queue, so
-`VectorCronjobRunFailing` for `uniswap-v4-position-bootstrap` does not say WHICH
-of the two failed — the Temporal UI's execution list does, and so do the logs.
+`VectorCronjobRunFailing` for `uniswap-v4-position-bootstrap` names the worker,
+while the Temporal UI's execution list and the pod logs name the workflow type.
 
 **How to start a run.** Temporal UI (namespace **`vector`**) → **Start Workflow**:
 
@@ -1884,12 +1884,20 @@ of the two failed — the Temporal UI's execution list does, and so do the logs.
 
 There is nothing to supply: a run reads the chain from its ConfigMap, the
 registry from the database, and pins its own finalized head. The equivalent CLI
-call:
+call for the positions:
 
 ```bash
 temporal workflow start --namespace vector \
   --task-queue uniswap-v4-position-bootstrap --type UniswapV4PositionBootstrap \
   --workflow-id uniswap-v4-position-bootstrap-2026-09-14
+```
+
+And for the posm transfers — same queue, its own type, its own ID:
+
+```bash
+temporal workflow start --namespace vector \
+  --task-queue uniswap-v4-position-bootstrap --type UniswapV4PosmTransferBackfill \
+  --workflow-id uniswap-v4-posm-transfer-backfill-2026-09-14
 ```
 
 The Workflow ID is the concurrency guard: Temporal rejects a duplicate while a
@@ -1952,7 +1960,8 @@ own ConfigMap, Secret (`DATABASE_URL`, `ALCHEMY_API_KEY`) and ServiceAccount.
 on the same worker replays the PositionManager's whole ERC-721 `Transfer` history
 from `uniswap_v4_position_manager.deploy_block` (21689089 on mainnet) up to a
 pinned finality-safe height, and appends the rows into
-`uniswap_v4_position_nft_transfer`.
+`uniswap_v4_position_nft_transfer`. Start it from the form or the CLI call in
+"How to start a run" above, under its own Workflow ID.
 
 Why it is not optional: for a PositionManager-managed position —
 **2,895 of 4,501 tracked keys on staging, 64% (measured 2026-09-14)** — `uniswap_v4_position.owner` is
@@ -1981,9 +1990,12 @@ or non-existent token.
   bad write — it is how you learn the range was reorged under the run, which
   past the finality depth means the rows below it want re-checking.
 - **Rerun behaviour is fully idempotent**, including over the stretch the live
-  indexer already covers. The writer appends only log sites that hold NO row
-  (`SaveNFTTransfersIfAbsent`), rather than the correction version a second
-  build's plain insert would append at every site it revisits. So a rerun
+  indexer already covers and across a registry correction. The writer appends only
+  log sites that hold NO row (`SaveNFTTransfersIfAbsent`), rather than the
+  correction version a second build's plain insert would append at every site it
+  revisits, and it asks that of every `uniswap_v4_position_manager` version the
+  chain has had — a fact row keeps the retired surrogate, so a check keyed on the
+  current one alone would find a whole history absent. So a rerun
   reports `transfersWritten=0` — that, not the row count, is how you tell a
   no-op rerun from one that closed a real gap. Run it again whenever you suspect
   a gap; it costs RPC time and no rows.

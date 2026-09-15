@@ -111,5 +111,11 @@ func assertScannedTransferSite(ev abi.Event, log shared.Log, positionManager com
 		return fmt.Errorf("scanned PositionManager Transfer (tx %s, index %s) carries %d topics, want %d: an ERC-20 Transfer shares this topic0, so the filter's address must be wrong",
 			log.TransactionHash, log.LogIndex, len(log.Topics), erc721TransferTopics)
 	}
+	// A scan bounded below the reorg window is answered from the canonical chain,
+	// so a removed log means the provider is serving a fork: it would land as a
+	// version-0 row and then satisfy the existence check that guards the real one.
+	if log.Removed {
+		return fmt.Errorf("scanned PositionManager Transfer (tx %s, index %s) is flagged removed: the provider answered from a fork below the finality depth", log.TransactionHash, log.LogIndex)
+	}
 	return nil
 }

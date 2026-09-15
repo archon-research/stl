@@ -257,23 +257,38 @@ func TestTransferRun_PersistsEveryDecodedTransfer(t *testing.T) {
 	}
 }
 
-// The growth tripwire reads this counter as the table's growth; a backfill that
-// wrote without it would grow the table while the rule stayed flat.
-func TestTransferRun_RecordsTheRowsItQueuedAndLanded(t *testing.T) {
+// newPartiallyCoveredTransferRun serves two transfers to a writer that reports
+// one of the two sites as already holding a row, which is what separates the
+// queued count from the landed one.
+func newPartiallyCoveredTransferRun(t *testing.T) *transferFixture {
+	t.Helper()
 	f := newTransferFixture(t, nil)
 	f.repo.SaveFn = func(transfers []*entity.UniswapV4PositionNFTTransfer) (int64, error) {
-		return int64(len(transfers)) - 1, nil // one site already held a row
+		return int64(len(transfers)) - 1, nil
 	}
 	f.client.GetLogsFn = logsAt(
 		transferFilteredLog(388720, posmDeployBlock+10, 2, zeroAddress, transferHolderAddr),
 		transferFilteredLog(388721, posmDeployBlock+11, 5, transferHolderAddr, ownerA),
 	)
+	return f
+}
+
+func TestTransferRun_RecordsEveryRowItQueued(t *testing.T) {
+	f := newPartiallyCoveredTransferRun(t)
 
 	if _, err := f.svc.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if f.telemetry.Attempted != 2 {
 		t.Errorf("recorded %d attempted, want 2", f.telemetry.Attempted)
+	}
+}
+
+func TestTransferRun_RecordsOnlyTheRowsThatLanded(t *testing.T) {
+	f := newPartiallyCoveredTransferRun(t)
+
+	if _, err := f.svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 	if f.telemetry.Written != 1 {
 		t.Errorf("recorded %d written, want 1: the counter must report landed rows, not queued ones", f.telemetry.Written)
@@ -393,15 +408,24 @@ func TestTransferRun_StopsWhenTheScanStartIsAboveThePin(t *testing.T) {
 }
 
 func TestTransferRun_StopsOnAWriteFailureRatherThanLeavingAHole(t *testing.T) {
+	const unwrittenBlock = posmDeployBlock + 10
 	f := newTransferFixture(t, nil)
 	f.repo.SaveFn = func([]*entity.UniswapV4PositionNFTTransfer) (int64, error) {
 		return 0, errors.New("deadlock detected")
 	}
-	f.client.GetLogsFn = logsAt(transferFilteredLog(388720, posmDeployBlock+10, 2, zeroAddress, transferHolderAddr))
+	f.client.GetLogsFn = logsAt(transferFilteredLog(388720, unwrittenBlock, 2, zeroAddress, transferHolderAddr))
 
 	_, err := f.svc.Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "deadlock detected") {
 		t.Fatalf("Run error = %v, want the write failure to stop the run", err)
+	}
+	// The hole is a resume point above a block whose rows never committed: no
+	// later attempt would scan that block again.
+	for i, save := range f.progress.Saves {
+		if save.NextBlock > unwrittenBlock {
+			t.Errorf("progress %d records NextBlock %d, past the failed write at block %d",
+				i, save.NextBlock, unwrittenBlock)
+		}
 	}
 }
 
@@ -429,6 +453,9 @@ func TestNewTransferService_RefusesIncompleteDeps(t *testing.T) {
 		{"no position manager address", func(d *TransferDeps) { d.PositionManager.Address = common.Address{} }, "non-zero address"},
 		{"no position manager row id", func(d *TransferDeps) { d.PositionManager.ID = 0 }, "positive row id"},
 		{"no deploy block", func(d *TransferDeps) { d.PositionManager.DeployBlock = 0 }, "the scan would start at genesis"},
+		{"a negative deploy block", func(d *TransferDeps) { d.PositionManager.DeployBlock = -1 }, "the scan would start at genesis"},
+		{"a negative position manager row id", func(d *TransferDeps) { d.PositionManager.ID = -1 }, "positive row id"},
+		{"a negative transfer batch", func(d *TransferDeps) { d.Config.TransferBatch = -1 }, "transferBatch must be positive"},
 		{"no log scan client", func(d *TransferDeps) { d.LogScan = nil }, "log scan client"},
 		{"no repo", func(d *TransferDeps) { d.Repo = nil }, "repo"},
 		{"no tx manager", func(d *TransferDeps) { d.TxManager = nil }, "txManager"},

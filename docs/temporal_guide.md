@@ -313,6 +313,7 @@ whatever input the job declares. Nothing here has a schedule or a button.
 | `cmd/cronjobs/morpho-v2-bootstrap` | `morpho-v2-bootstrap` | `MorphoV2Bootstrap` | none (`{}` is accepted and ignored) |
 | `cmd/backfillers/block-republisher` | `block-republisher` (ethereum), `<chain>-block-republisher` elsewhere | `BlockRepublish` | `{"blocks":[25395651,25087888]}` (the version is derived per height from the raw archive; naming one, or any other field, fails the run) |
 | `cmd/backfillers/uniswap-v4-position-bootstrap` | `uniswap-v4-position-bootstrap` | `UniswapV4PositionBootstrap` | none (`{}` is accepted and ignored); the run pins its own finalized head and resumes it across attempts from the activity's heartbeat details |
+| `cmd/backfillers/uniswap-v4-position-bootstrap` (same worker, second type) | `uniswap-v4-position-bootstrap` | `UniswapV4PosmTransferBackfill` | none (`{}` is accepted and ignored); the run pins its own finality-safe head and resumes across attempts from a block cursor in the activity's heartbeat details |
 
 ### Shape of an on-demand job
 
@@ -378,7 +379,7 @@ left empty is not silent — the SDK panics at registration.
 
 Two further consequences: heartbeat details stay per job, which is why each needs
 its own store; and `cronjob.runs.total` carries only the task queue, so an alert
-keyed on it names the worker, never which of its jobs failed.
+keyed on it names the worker, while the Temporal UI's execution list names the job.
 
 ### Starting a run from the Temporal UI
 

@@ -91,3 +91,19 @@ func TestConfigValidate_ExportedFormAppliesTheDefaultsFirst(t *testing.T) {
 		t.Fatal("expected an error: a negative batch is not filled by the defaults")
 	}
 }
+
+// Each log site in a batch holds one advisory lock to commit, from a cluster-wide
+// table, so the knob needs a ceiling as well as a floor.
+func TestConfigValidate_RejectsATransferBatchAboveTheLockBudget(t *testing.T) {
+	cfg := Config{ChainID: 1}.withDefaults()
+	cfg.TransferBatch = MaxTransferBatch + 1
+
+	err := cfg.validate()
+	if err == nil || !strings.Contains(err.Error(), "advisory lock") {
+		t.Fatalf("validate error = %v, want it to reject a batch above the lock budget", err)
+	}
+	cfg.TransferBatch = MaxTransferBatch
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate at the ceiling: %v", err)
+	}
+}

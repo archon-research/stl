@@ -65,8 +65,10 @@ type UniswapV4PositionWriter interface {
 // their coverage overlaps every site it revisits would gain a correction version
 // that corrects nothing.
 type UniswapV4NFTTransferWriter interface {
-	// Returns how many rows it inserted; a site that already holds a row under
-	// any build is left alone, so a rerun over covered history returns 0.
+	// Returns how many rows it inserted; a site that already holds a row under any
+	// build, and under any of the chain's PositionManager versions, is left alone —
+	// so a rerun over covered history returns 0 even after a registry correction
+	// has given the chain a new surrogate and left the stored rows on the old one.
 	SaveNFTTransfersIfAbsent(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) (insertedRows int64, err error)
 }
 

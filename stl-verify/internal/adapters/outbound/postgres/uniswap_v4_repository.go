@@ -156,7 +156,7 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 		StateView:                  common.BytesToAddress(stateView),
 		PositionManagerID:          *positionManagerID,
 		PositionManager:            common.BytesToAddress(positionManagerAddress),
-		PositionManagerDeployBlock: derefOrZero(positionManagerDeployBlk),
+		PositionManagerDeployBlock: *positionManagerDeployBlk,
 		PoolIDHash:                 common.BytesToHash(onchainPoolID),
 		Currency0:                  common.BytesToAddress(currency0),
 		Currency1:                  common.BytesToAddress(currency1),
@@ -168,16 +168,6 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 		DeployBlock:                deployBlock,
 		SnapshotSupported:          snapshotSupported,
 	}, nil
-}
-
-// Only the posm transfer backfill reads deploy_block, and it refuses a
-// non-positive one by name, so an absent value must not fail this loader: the live
-// indexer boots through it and does not read the column at all.
-func derefOrZero(v *int64) int64 {
-	if v == nil {
-		return 0
-	}
-	return *v
 }
 
 // token is the raw column, so an absent row stays distinguishable from the zero
@@ -255,6 +245,11 @@ func (r *UniswapV4Repository) SavePositions(ctx context.Context, tx pgx.Tx, posi
 
 // This NOT EXISTS decides whether a row lands, so lockNFTTransferSitesV4 must
 // already hold the site's lock when the statement runs (ADR-0002 §3).
+//
+// $11 is every uniswap_v4_position_manager surrogate of the chain, not just the
+// one this build resolved: a fact row keeps the retired id after a registry
+// correction and reads reach it through chain_id, so asking about one id would
+// find a whole history absent and append it again.
 const insertUniswapV4NFTTransferIfAbsentSQL = `
 	INSERT INTO uniswap_v4_position_nft_transfer
 	   (position_manager_id, token_id, block_number, block_version, block_timestamp,
@@ -262,12 +257,20 @@ const insertUniswapV4NFTTransferIfAbsentSQL = `
 	SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 	WHERE NOT EXISTS (
 	    SELECT 1 FROM uniswap_v4_position_nft_transfer
-	    WHERE position_manager_id = $1
+	    WHERE position_manager_id = ANY($11::bigint[])
 	      AND block_number        = $3
 	      AND block_version       = $4
 	      AND log_index           = $7
-	)
-	ON CONFLICT (position_manager_id, block_number, block_version, log_index, processing_version) DO NOTHING`
+	)`
+
+// posmChainScopeSQL resolves the chain a PositionManager surrogate belongs to and
+// every surrogate the chain has had, the natural-key resolution
+// currentUniswapV4PoolCTE does for pools.
+const posmChainScopeSQL = `
+	SELECT sib.chain_id, array_agg(sib.id ORDER BY sib.id)
+	FROM uniswap_v4_position_manager sib
+	WHERE sib.chain_id = (SELECT chain_id FROM uniswap_v4_position_manager WHERE id = $1)
+	GROUP BY sib.chain_id`
 
 // SaveNFTTransfersIfAbsent appends only the log sites that hold no row yet, so
 // the transfer backfill can replay history the live indexer already covered
@@ -280,7 +283,11 @@ func (r *UniswapV4Repository) SaveNFTTransfersIfAbsent(ctx context.Context, tx p
 	if err != nil {
 		return 0, err
 	}
-	if err := lockNFTTransferSitesV4(ctx, tx, transfers); err != nil {
+	scope, err := r.posmChainScope(ctx, tx, transfers)
+	if err != nil {
+		return 0, err
+	}
+	if err := lockNFTTransferSitesV4(ctx, tx, transfers, scope.chainID); err != nil {
 		return 0, err
 	}
 
@@ -290,19 +297,49 @@ func (r *UniswapV4Repository) SaveNFTTransfersIfAbsent(ctx context.Context, tx p
 		batch.Queue(insertUniswapV4NFTTransferIfAbsentSQL,
 			t.PositionManagerID, c.tokenID, t.BlockNumber, t.BlockVersion, t.BlockTimestamp,
 			t.TxHash.Bytes(), t.LogIndex, t.From.Bytes(), t.To.Bytes(), int(r.buildID),
+			scope.positionManagerIDs,
 		)
 	}
-	return sendNFTTransferIfAbsentBatch(ctx, tx, batch, len(rows))
+	return sendInsertBatch(ctx, tx, batch, len(rows), "uniswap_v4 nft transfer")
+}
+
+// posmChainScope is the chain a batch belongs to and every PositionManager
+// surrogate that chain has had.
+type posmChainScope struct {
+	chainID            int64
+	positionManagerIDs []int64
+}
+
+// One batch is one run's decode, so it carries one PositionManager; a mixed batch
+// would silently scope half of it to the wrong chain.
+func (r *UniswapV4Repository) posmChainScope(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) (posmChainScope, error) {
+	posmID := transfers[0].PositionManagerID
+	for _, t := range transfers[1:] {
+		if t.PositionManagerID != posmID {
+			return posmChainScope{}, fmt.Errorf("nft transfer batch mixes uniswap_v4_position_manager ids %d and %d", posmID, t.PositionManagerID)
+		}
+	}
+
+	var scope posmChainScope
+	if err := tx.QueryRow(ctx, posmChainScopeSQL, posmID).Scan(&scope.chainID, &scope.positionManagerIDs); err != nil {
+		return posmChainScope{}, fmt.Errorf("resolving the chain of uniswap_v4_position_manager %d: %w", posmID, err)
+	}
+	return scope, nil
 }
 
 // lockNFTTransferSitesV4 takes every log site's advisory lock in one round-trip,
 // ahead of the existence check that decides the insert, so a concurrent writer
 // cannot pass the same check and land a second row at processing_version 1.
 //
-// Same key and hash as the table's assign_processing_version trigger, so the
-// trigger's own acquisition is re-entrant and free.
-func lockNFTTransferSitesV4(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) error {
-	return lockAdvisoryKeys(ctx, tx, distinctSortedNFTTransferSiteKeys(transfers), "uniswap_v4 nft transfer sites")
+// Keyed by CHAIN and log site, as wide as that check: two builds holding different
+// PositionManager surrogates for one chain — a worker booted either side of a
+// registry correction — would otherwise take different locks for one logical site
+// and both decide it absent. Wider than the table's assign_processing_version
+// trigger, so the trigger's per-row acquisition is its own lock rather than a
+// re-entrant no-op; measured at 1,000 sites that is 2,000 of the ~12,800 shared
+// slots a stock instance sizes for, and staging sizes for 76,800.
+func lockNFTTransferSitesV4(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer, chainID int64) error {
+	return lockAdvisoryKeys(ctx, tx, distinctSortedNFTTransferSiteKeys(transfers, chainID), "uniswap_v4 nft transfer sites")
 }
 
 type v4NFTTransferSite struct {
@@ -313,15 +350,15 @@ type v4NFTTransferSite struct {
 }
 
 // The 'u4pnt|…' spelling is the trigger's, so both acquisitions name one lock.
-func (s v4NFTTransferSite) lockKey() string {
-	return fmt.Sprintf("u4pnt|%d|%d|%d|%d", s.positionManagerID, s.blockNumber, s.blockVersion, s.logIndex)
+func (s v4NFTTransferSite) lockKey(chainID int64) string {
+	return fmt.Sprintf("u4pnt-chain|%d|%d|%d|%d", chainID, s.blockNumber, s.blockVersion, s.logIndex)
 }
 
 // Ordered by the key's COMPONENTS numerically, which is ascending log order
 // within a block — the order the live path's per-row trigger acquisitions already
 // arrive in, so two overlapping writers agree and cannot deadlock. Sorting the
 // formatted strings instead would put "…|10" below "…|7".
-func distinctSortedNFTTransferSiteKeys(transfers []*entity.UniswapV4PositionNFTTransfer) []string {
+func distinctSortedNFTTransferSiteKeys(transfers []*entity.UniswapV4PositionNFTTransfer, chainID int64) []string {
 	seen := make(map[v4NFTTransferSite]struct{}, len(transfers))
 	for _, t := range transfers {
 		seen[v4NFTTransferSite{
@@ -346,23 +383,26 @@ func distinctSortedNFTTransferSiteKeys(transfers []*entity.UniswapV4PositionNFTT
 
 	keys := make([]string, len(sites))
 	for i, site := range sites {
-		keys[i] = site.lockKey()
+		keys[i] = site.lockKey(chainID)
 	}
 	return keys
 }
 
-func sendNFTTransferIfAbsentBatch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, count int) (inserted int64, err error) {
+// sendInsertBatch reads every queued statement's result and sums the rows they
+// landed. Each statement's outcome must be read: pgx returns batch results
+// positionally, so a skipped read mis-attributes every later one.
+func sendInsertBatch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, queued int, subject string) (inserted int64, err error) {
 	br := tx.SendBatch(ctx, batch)
 	defer func() {
 		if closeErr := br.Close(); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("closing the uniswap_v4 nft transfer backfill batch: %w", closeErr))
+			err = errors.Join(err, fmt.Errorf("closing the %s batch: %w", subject, closeErr))
 		}
 	}()
 
-	for i := range count {
+	for i := range queued {
 		tag, execErr := br.Exec()
 		if execErr != nil {
-			return inserted, fmt.Errorf("inserting uniswap_v4 nft transfer %d of %d: %w", i+1, count, execErr)
+			return 0, fmt.Errorf("inserting %s batch entry %d of %d: %w", subject, i+1, queued, execErr)
 		}
 		inserted += tag.RowsAffected()
 	}
@@ -954,20 +994,7 @@ func (r *UniswapV4Repository) insertChangedPositionsV4(
 		return 0, nil
 	}
 
-	br := tx.SendBatch(ctx, batch)
-	defer func() {
-		if closeErr := br.Close(); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("closing uniswap_v4 position batch: %w", closeErr))
-		}
-	}()
-	for i := range queued {
-		tag, execErr := br.Exec()
-		if execErr != nil {
-			return 0, fmt.Errorf("inserting uniswap_v4 position batch entry %d: %w", i, execErr)
-		}
-		inserted += tag.RowsAffected()
-	}
-	return inserted, nil
+	return sendInsertBatch(ctx, tx, batch, queued, "uniswap_v4 position")
 }
 
 func queueChangedPositionsV4(positions []*entity.UniswapV4Position, latest map[v4PositionKey]v4PositionValues, buildID buildregistry.BuildID) (*pgx.Batch, int, error) {
