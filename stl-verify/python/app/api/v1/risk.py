@@ -15,6 +15,7 @@ from app.api._validators import (
 from app.api.deps import (
     check_prime_view,
     get_crypto_lending_risk_service,
+    get_direct_asset_lookup,
     get_model_registry,
     get_principal,
     get_receipt_token_lookup,
@@ -30,16 +31,18 @@ from app.api.v1._resolvers import (
 from app.auth.jwt import Principal
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.receipt_token import ReceiptTokenInfo
-from app.domain.entities.risk import RrcResult
+from app.domain.entities.risk import RiskBreakdown, RrcResult
 from app.domain.exceptions import (
     AllocationUnpricedError,
     InvalidOverrideError,
     ModelDataUnavailableError,
 )
 from app.domain.serialization import PlainDecimal
+from app.ports.direct_asset_lookup import DirectAssetLookup
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
+from app.services.self_backed_breakdown import build_self_backed_breakdown
 
 logger = logging.getLogger(__name__)
 
@@ -216,8 +219,12 @@ async def _compute_risk_breakdown(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if breakdown is None:
         raise HTTPException(404, "receipt token not found")
+    return _breakdown_to_response(receipt_token_id, breakdown)
+
+
+def _breakdown_to_response(asset_id: int, breakdown: RiskBreakdown) -> RiskBreakdownResponse:
     return RiskBreakdownResponse(
-        receipt_token_id=receipt_token_id,
+        receipt_token_id=asset_id,
         items=[
             RiskBreakdownItemResponse(
                 token_id=item.token_id,
@@ -337,21 +344,22 @@ async def get_bad_debt_by_address(
 @router.get(
     "/risk/{chain_id}/{token_address}/breakdown",
     response_model=RiskBreakdownResponse,
-    summary="Risk-enriched collateral breakdown (by chain id and receipt-token address)",
+    summary="Risk-enriched collateral breakdown (by chain id and token address)",
     dependencies=[Depends(require_prime_view_query)],
     description=(
-        "Return the full risk-enriched collateral breakdown for the receipt-token "
-        "position at `(chain_id, token_address)`.\n\n"
-        "`token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), "
-        "not the underlying ERC-20 address. Passing an underlying address yields a "
-        "`404` whose body suggests matching receipt tokens.\n\n"
+        "Return the full risk-enriched collateral breakdown for the position at "
+        "`(chain_id, token_address)`.\n\n"
+        "The address is first resolved as a **receipt token** (e.g. `aUSDC`, `spWETH`). "
+        "If no receipt token is found, it falls back to a **direct asset holding** "
+        "(e.g. RLUSD, PYUSD) and returns a single-row self-backed breakdown.\n\n"
         "Pass an optional `prime_id` to scale the breakdown to that prime's position "
         "(per-prime, pro-rata by pool share). Omitted, the position resolves to the "
         "receipt token's largest current holder, so the response is that prime's "
-        "breakdown and the caller needs access to it.\n\n"
+        "breakdown and the caller needs access to it. `prime_id` is ignored for "
+        "direct asset holdings.\n\n"
         "Errors:\n"
-        "- `404` if the receipt token is not found, or the caller may not view the "
-        "prime the position resolves to.\n"
+        "- `404` if neither a receipt token nor a direct asset is found at the address, "
+        "or the caller may not view the prime the position resolves to.\n"
         "- `422` if `chain_id` < 1, `token_address` is malformed, or `prime_id` is malformed.\n"
         "- `503` (`share_data_*`) if the allocation-share lookup fails."
     ),
@@ -369,12 +377,19 @@ async def get_risk_breakdown_by_address(
     ] = None,
     service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
     lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
+    direct_lookup: DirectAssetLookup = Depends(get_direct_asset_lookup),
     principal: Principal | None = Depends(get_principal),
 ) -> RiskBreakdownResponse:
-    info = await resolve_receipt_token(chain_id, token_address, lookup)
-    return await _compute_risk_breakdown(
-        request, principal, info.receipt_token_id, service, _parse_optional_prime(prime_id)
-    )
+    address = EthAddress(token_address)
+    info = await lookup.get_by_chain_and_address(chain_id, address)
+    if info is not None:
+        return await _compute_risk_breakdown(
+            request, principal, info.receipt_token_id, service, _parse_optional_prime(prime_id)
+        )
+    holding = await direct_lookup.get_by_chain_and_address(chain_id, address)
+    if holding is None:
+        raise HTTPException(status_code=404, detail="Receipt token not found")
+    return _breakdown_to_response(holding.token_id, build_self_backed_breakdown(holding))
 
 
 # ---------------------------------------------------------------------------

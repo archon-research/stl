@@ -18,6 +18,7 @@ from app.adapters.postgres.backed_breakdown_repository_maple import MapleBackedB
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.core_model_results_reader import PostgresCoreModelResultsReader
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
+from app.adapters.postgres.direct_asset_lookup_repository import PostgresDirectAssetLookupRepository
 from app.adapters.postgres.engine import create_db_engine
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.morpho_vault_allocations_reader import PostgresMorphoVaultAllocationsReader
@@ -276,6 +277,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             app.state.crypto_lending_risk_service = crypto_lending_risk_service
             app.state.model_registry = model_registry
             app.state.receipt_token_lookup = receipt_token_repo
+            app.state.direct_asset_lookup = PostgresDirectAssetLookupRepository(engine)
 
             # Beside the engine so it is disposed in the same finally. Absent
             # from app.state when auth is off, which the gates read as anonymous.

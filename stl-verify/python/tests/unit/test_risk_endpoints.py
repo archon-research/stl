@@ -18,7 +18,8 @@ from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
-from app.api.deps import get_crypto_lending_risk_service, get_receipt_token_lookup
+from app.api.deps import get_crypto_lending_risk_service, get_direct_asset_lookup, get_receipt_token_lookup
+from app.domain.entities.allocation import DirectAssetHolding
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.exceptions import MissingShareError, StaleShareError
 from app.main import app
@@ -35,9 +36,19 @@ def _override_service(service: CryptoLendingRiskService):
     return _dep
 
 
-def _override_lookup(info: ReceiptTokenInfo):
+def _override_lookup(info: ReceiptTokenInfo | None = None):
     lookup = AsyncMock()
     lookup.get_by_chain_and_address = AsyncMock(return_value=info)
+
+    def _dep():
+        return lookup
+
+    return _dep
+
+
+def _override_direct_lookup(holding: DirectAssetHolding | None = None):
+    lookup = AsyncMock()
+    lookup.get_by_chain_and_address = AsyncMock(return_value=holding)
 
     def _dep():
         return lookup
@@ -181,6 +192,7 @@ def test_breakdown_by_address_forwards_prime_id() -> None:
     prime = "0x" + "ab" * 20
     app.dependency_overrides[get_crypto_lending_risk_service] = _override_service(service)
     app.dependency_overrides[get_receipt_token_lookup] = _override_lookup(info)
+    app.dependency_overrides[get_direct_asset_lookup] = _override_direct_lookup(None)
     try:
         client = TestClient(app)
 
@@ -193,6 +205,7 @@ def test_breakdown_by_address_forwards_prime_id() -> None:
     finally:
         app.dependency_overrides.pop(get_crypto_lending_risk_service, None)
         app.dependency_overrides.pop(get_receipt_token_lookup, None)
+        app.dependency_overrides.pop(get_direct_asset_lookup, None)
 
 
 def test_breakdown_returns_422_on_value_error() -> None:
@@ -223,3 +236,83 @@ def test_breakdown_returns_503_share_data_missing() -> None:
         assert response.json()["detail"]["code"] == "share_data_missing"
     finally:
         app.dependency_overrides.pop(get_crypto_lending_risk_service, None)
+
+
+_DIRECT_ADDRESS = "0x" + "ef" * 20
+
+
+def test_breakdown_by_address_falls_back_to_direct_asset() -> None:
+    holding = DirectAssetHolding(
+        chain_id=1,
+        token_id=42,
+        token_address=_DIRECT_ADDRESS,
+        symbol="RLUSD",
+        balance=Decimal("1000"),
+        amount_usd=Decimal("1000"),
+    )
+    service = _make_service()
+    app.dependency_overrides[get_crypto_lending_risk_service] = _override_service(service)
+    app.dependency_overrides[get_receipt_token_lookup] = _override_lookup(None)
+    app.dependency_overrides[get_direct_asset_lookup] = _override_direct_lookup(holding)
+    try:
+        client = TestClient(app)
+
+        response = client.get(f"/v1/risk/1/{_DIRECT_ADDRESS}/breakdown")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["receipt_token_id"] == 42
+        assert len(body["items"]) == 1
+        assert body["items"][0]["symbol"] == "RLUSD"
+        assert body["items"][0]["backing_pct"] == "100"
+        service.get_risk_breakdown.assert_not_awaited()
+    finally:
+        app.dependency_overrides.pop(get_crypto_lending_risk_service, None)
+        app.dependency_overrides.pop(get_receipt_token_lookup, None)
+        app.dependency_overrides.pop(get_direct_asset_lookup, None)
+
+
+def test_breakdown_by_address_returns_404_when_neither_found() -> None:
+    service = _make_service()
+    app.dependency_overrides[get_crypto_lending_risk_service] = _override_service(service)
+    app.dependency_overrides[get_receipt_token_lookup] = _override_lookup(None)
+    app.dependency_overrides[get_direct_asset_lookup] = _override_direct_lookup(None)
+    try:
+        client = TestClient(app)
+
+        response = client.get(f"/v1/risk/1/{_DIRECT_ADDRESS}/breakdown")
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Receipt token not found"
+    finally:
+        app.dependency_overrides.pop(get_crypto_lending_risk_service, None)
+        app.dependency_overrides.pop(get_receipt_token_lookup, None)
+        app.dependency_overrides.pop(get_direct_asset_lookup, None)
+
+
+def test_breakdown_by_address_prefers_receipt_token_over_direct() -> None:
+    info = ReceiptTokenInfo(
+        receipt_token_id=_RECEIPT_TOKEN_ID,
+        protocol_id=3,
+        underlying_token_id=42,
+        receipt_token_address=bytes.fromhex("cd" * 20),
+        chain_id=1,
+        protocol_name="sparklend",
+        receipt_token_token_id=555,
+    )
+    service = _make_service()
+    service.get_risk_breakdown.return_value = None
+    app.dependency_overrides[get_crypto_lending_risk_service] = _override_service(service)
+    app.dependency_overrides[get_receipt_token_lookup] = _override_lookup(info)
+    app.dependency_overrides[get_direct_asset_lookup] = _override_direct_lookup(None)
+    try:
+        client = TestClient(app)
+
+        response = client.get(f"/v1/risk/1/{_RECEIPT_TOKEN_ADDRESS}/breakdown")
+
+        assert response.status_code == 404
+        service.get_risk_breakdown.assert_awaited_once()
+    finally:
+        app.dependency_overrides.pop(get_crypto_lending_risk_service, None)
+        app.dependency_overrides.pop(get_receipt_token_lookup, None)
+        app.dependency_overrides.pop(get_direct_asset_lookup, None)
