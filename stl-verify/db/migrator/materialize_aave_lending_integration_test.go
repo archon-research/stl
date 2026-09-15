@@ -874,3 +874,47 @@ func TestMaterializeAaveLendingNeedsSetOnTempFileLimit(t *testing.T) {
 		}
 	})
 }
+
+// The two tests above pin the mechanism; this one makes the cap bite. Lowered to 1kB with work_mem small
+// enough that the projection's DISTINCT ON sort spills, a run over 20k observations aborts with 53400.
+// Temp TABLES do not count toward temp_file_limit, so the spill has to come from a sort, not from the
+// materializer's snapshot. Called as the owner: the cap is per backend and binds whichever role calls.
+func TestMaterializeAaveLendingTempFileCapAbortsASpillingRun(t *testing.T) {
+	ctx, pool := seedAaveLendingLedger(t)
+	// One statement of this size into the hypertable exhausts the test image's lock table (53200).
+	for batch := 0; batch < 4; batch++ {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, created_at, build_id)
+			SELECT u.id, p.id, tk.id, 1000 + g, 0, g, 1, 'Borrow', '\xff', '2026-02-01T00:00:00Z'::timestamptz + g * interval '1 second', 0
+			FROM generate_series($1::int * 5000 + 1, ($1::int + 1) * 5000) g, "user" u, protocol p, token tk
+			WHERE u.chain_id = 1 AND u.address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+			  AND p.chain_id = 1 AND p.name = 'p1' AND tk.chain_id = 1 AND tk.address = '\xdead'`, batch); err != nil {
+			t.Fatalf("seeding the spill-sized history (batch %d): %v", batch, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `ALTER FUNCTION materialize_aave_lending(integer, bigint) SET temp_file_limit = '1kB' SET work_mem = '64kB'`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := pool.Exec(ctx, `ALTER FUNCTION materialize_aave_lending(integer, bigint) SET temp_file_limit = '4GB' RESET work_mem`); err != nil {
+			t.Error(err)
+		}
+	})
+	var pgErr *pgconn.PgError
+	_, err := pool.Exec(ctx, `SELECT materialize_aave_lending()`)
+	if !errors.As(err, &pgErr) || pgErr.Code != "53400" {
+		t.Fatalf("a run whose sort exceeds temp_file_limit must abort with 53400, got %v", err)
+	}
+	// Negative control: the same spilling sort under the shipped 4 GB cap projects, so the abort above
+	// was the cap and not the seeded rows.
+	if _, err := pool.Exec(ctx, `ALTER FUNCTION materialize_aave_lending(integer, bigint) SET temp_file_limit = '4GB'`); err != nil {
+		t.Fatal(err)
+	}
+	var written int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_aave_lending()`).Scan(&written); err != nil {
+		t.Fatalf("under the 4 GB cap the same spilling run must project: %v", err)
+	}
+	if written < 20000 {
+		t.Errorf("wrote %d rows, want at least the 20,000 seeded observations", written)
+	}
+}
