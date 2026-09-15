@@ -23,17 +23,19 @@ import (
 // no-op when called on a nil pointer, so production code can pass nil for
 // "telemetry disabled" without guard checks at each call site.
 type Telemetry struct {
-	prefix              string
-	chainAttr           attribute.KeyValue
-	blocksProcessed     metric.Int64Counter
-	errorsTotal         metric.Int64Counter
-	blockDuration       metric.Float64Histogram
-	stateRowsWritten    metric.Int64Counter
-	stateRowsAttempted  metric.Int64Counter
-	poolsTouched        metric.Int64Counter
-	tickRowsWritten     metric.Int64Counter
-	positionRowsWritten metric.Int64Counter
-	poolsNeverIndexed   metric.Int64Gauge
+	prefix                   string
+	chainAttr                attribute.KeyValue
+	blocksProcessed          metric.Int64Counter
+	errorsTotal              metric.Int64Counter
+	blockDuration            metric.Float64Histogram
+	stateRowsWritten         metric.Int64Counter
+	stateRowsAttempted       metric.Int64Counter
+	poolsTouched             metric.Int64Counter
+	tickRowsWritten          metric.Int64Counter
+	positionRowsWritten      metric.Int64Counter
+	nftTransferRowsAttempted metric.Int64Counter
+	nftTransferRowsWritten   metric.Int64Counter
+	poolsNeverIndexed        metric.Int64Gauge
 }
 
 // NewTelemetry registers the whole instrument set for one DEX; the
@@ -106,6 +108,15 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		return nil, err
 	}
 
+	nftTransferRowsAttempted, err := counter(".nft.transfer.rows.attempted", "Total NFT transfer rows a block queued for insert, conflicts included")
+	if err != nil {
+		return nil, err
+	}
+	nftTransferRowsWritten, err := counter(".nft.transfer.rows.written", "Total NFT transfer event rows written")
+	if err != nil {
+		return nil, err
+	}
+
 	neverIndexed, err := meter.Int64Gauge(
 		prefix+".pools.never_indexed",
 		metric.WithDescription("Registered, snapshot-supported pools that have never produced a state or tick row"),
@@ -115,31 +126,41 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 	}
 
 	t := &Telemetry{
-		prefix:              prefix,
-		chainAttr:           attribute.String("chain", chainName),
-		blocksProcessed:     blocks,
-		errorsTotal:         errs,
-		blockDuration:       dur,
-		stateRowsWritten:    stateRows,
-		stateRowsAttempted:  stateRowsAttempted,
-		poolsTouched:        touched,
-		tickRowsWritten:     tickRows,
-		positionRowsWritten: positionRows,
-		poolsNeverIndexed:   neverIndexed,
+		prefix:                   prefix,
+		chainAttr:                attribute.String("chain", chainName),
+		blocksProcessed:          blocks,
+		errorsTotal:              errs,
+		blockDuration:            dur,
+		stateRowsWritten:         stateRows,
+		stateRowsAttempted:       stateRowsAttempted,
+		poolsTouched:             touched,
+		tickRowsWritten:          tickRows,
+		positionRowsWritten:      positionRows,
+		nftTransferRowsAttempted: nftTransferRowsAttempted,
+		nftTransferRowsWritten:   nftTransferRowsWritten,
+		poolsNeverIndexed:        neverIndexed,
 	}
-	// Only blocks.processed: the Stalled rules read it as
-	// rate(status="success")==0, which cannot match an absent series.
+	// blocks.processed: the Stalled rules read it as rate(status="success")==0,
+	// which cannot match an absent series.
+	//
+	// nft.transfer.rows.attempted: NoNFTTransfers reads it as ==0, so the series
+	// must exist from the boot of any build carrying the posm decoder. That is
+	// what separates "this build decodes transfers and has seen none", which is
+	// the wrong-address failure worth paging on, from "this build predates the
+	// decoder" — the window between the alert rules syncing on merge and the
+	// image reaching the cluster, which is every rollout of this feature.
 	//
 	// state.rows.written is deliberately NOT seeded even though it is read by
 	// an alert. Its absence is load-bearing — RecordStateRows is a no-op at
 	// zero rows so that "attempted but nothing written" is distinguishable from
 	// "wrote zero", which is the firing condition StateRowsNotLanding stages
 	// and its tests assert. Seeding would make the counter permanently present
-	// and erase that. The `A > 0 unless B > 0` shape needs no seed anyway, and
-	// it covers attempted/touched for the same reason. errors.total's
-	// `operation` label is open-ended; pools.never_indexed is a gauge its
-	// recorder already reports as 0.
+	// and erase that. The `A > 0 unless B > 0` shape needs no seed for
+	// state.rows.attempted or pools.touched. errors.total's `operation` label
+	// is open-ended; pools.never_indexed is a gauge its recorder already
+	// reports as 0.
 	telemetry.SeedStatusCounter(context.Background(), t.blocksProcessed, t.chainAttr)
+	telemetry.SeedCounter(context.Background(), t.nftTransferRowsAttempted, t.chainAttr)
 	return t, nil
 }
 
@@ -226,4 +247,21 @@ func (t *Telemetry) RecordPositionRows(ctx context.Context, n int) {
 		return
 	}
 	t.positionRowsWritten.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
+}
+
+// RecordNFTTransferRows counts the posm Transfer rows a committed block queued
+// (attempted) and landed (written). Attempted is the decode evidence the
+// NoNFTTransfers alert keys on — a wrong PositionManager address raises no error
+// and empties it alone — and, as for state rows, a same-build replay lands
+// nothing while healthy, so the alert must never key on written.
+func (t *Telemetry) RecordNFTTransferRows(ctx context.Context, attempted, written int) {
+	if t == nil {
+		return
+	}
+	if attempted > 0 {
+		t.nftTransferRowsAttempted.Add(ctx, int64(attempted), metric.WithAttributes(t.chainAttr))
+	}
+	if written > 0 {
+		t.nftTransferRowsWritten.Add(ctx, int64(written), metric.WithAttributes(t.chainAttr))
+	}
 }

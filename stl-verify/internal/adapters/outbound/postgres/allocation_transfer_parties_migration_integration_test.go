@@ -143,7 +143,7 @@ func TestSavePositions_PersistsTransferParties(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	if err := repo.SavePositions(ctx, tx, []*entity.AllocationPosition{
+	if _, err := repo.SavePositions(ctx, tx, []*entity.AllocationPosition{
 		inboundPos, outboundPos, mintPos, sweepPos,
 	}); err != nil {
 		t.Fatalf("SavePositions: %v", err)

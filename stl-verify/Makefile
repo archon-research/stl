@@ -8,7 +8,7 @@ include lint.mk
 	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-secrets dev-env-files dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service _docker-build-go-service _docker-push-go-service \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-dex-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-transform-bootstrap-internal _docker-release-cronjob-%-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-dex-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-allocation-underlying-value-backfill-internal _docker-release-python-api-internal _docker-release-transform-bootstrap-internal _docker-release-cronjob-%-internal \
 		docker-build-offchain-price-backfill docker-release-offchain-price-backfill _docker-release-offchain-price-backfill-internal \
 		docker-build-reference-capital-backfill docker-release-reference-capital-backfill _docker-release-reference-capital-backfill-internal \
 		docker-build-morpho-vault-backfill docker-release-morpho-vault-backfill _docker-release-morpho-vault-backfill-internal \
@@ -1445,6 +1445,8 @@ docker-release-all:
 	@echo ""
 	@$(MAKE) _docker-release-uniswap-v4-position-bootstrap-internal ENV=$(ENV)
 	@echo ""
+	@$(MAKE) _docker-release-allocation-underlying-value-backfill-internal ENV=$(ENV)
+	@echo ""
 	@for cj in $(CRONJOBS); do \
 		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
 		echo ""; \
@@ -2410,6 +2412,19 @@ docker-release-uniswap-v4-position-bootstrap: ecr-login _docker-release-uniswap-
 
 _docker-release-uniswap-v4-position-bootstrap-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Uniswap V4 Position Bootstrap" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/uniswap-v4-position-bootstrap GO_BIN=uniswap-v4-position-bootstrap GO_CACHE_KEY="cronjob-uniswap-v4-position-bootstrap" GO_TAG="uniswap-v4-position-bootstrap-$(IMAGE_TAG)" GO_LATEST_TAG="uniswap-v4-position-bootstrap-latest"
+
+# allocation-underlying-value-backfill (VEC-759): the on-demand backfill for
+# allocation_position.underlying_value. Like offchain-price-backfill it registers no
+# Temporal schedule, so it is not auto-discovered as a cronjob, but it is a
+# long-running worker Deployment that polls its task queue. Ships in the shared
+# cronjob ECR repo with a name-prefixed tag.
+docker-build-allocation-underlying-value-backfill:
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/allocation-underlying-value-backfill --build-arg BIN=allocation-underlying-value-backfill -t stl-allocation-underlying-value-backfill:$(LOCAL_TAG) -f Dockerfile.common .
+
+docker-release-allocation-underlying-value-backfill: ecr-login _docker-release-allocation-underlying-value-backfill-internal
+
+_docker-release-allocation-underlying-value-backfill-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Allocation Underlying Value Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/allocation-underlying-value-backfill GO_BIN=allocation-underlying-value-backfill GO_CACHE_KEY="cronjob-allocation-underlying-value-backfill" GO_TAG="allocation-underlying-value-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="allocation-underlying-value-backfill-latest"
 
 # offchain-price-backfill (VEC-540): the on-demand CoinGecko history backfill. Not a
 # cronjob (it registers no Temporal schedule) so it is not auto-discovered, but it is
