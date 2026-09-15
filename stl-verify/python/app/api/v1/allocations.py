@@ -23,6 +23,7 @@ from app.api.deps import (
     require_prime_view,
     vault_filter,
 )
+from app.api.errors import ApiRejectionError
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
@@ -1003,15 +1004,12 @@ async def list_allocation_activity(
     if allowed is not None and parsed_prime_id is None and time_series.is_bucketed:
         # A bucket is one number over many primes; scope it to a named prime
         # rather than serving the caller's whole permitted set as a total.
-        raise HTTPException(status_code=422, detail="prime_id is required for aggregated activity")
+        raise ApiRejectionError("prime_id is required for aggregated activity")
     # Selective = an index-seekable exact filter. Substring filters
     # (protocol_name/token_symbol) and low-cardinality filters (chain_id,
     # action_type) do not qualify because they cannot prune chunks.
     has_selective_filter = parsed_prime_id is not None or tx_hash is not None
-    try:
-        enforce_filter_for_window(time_series, has_selective_filter=has_selective_filter)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    enforce_filter_for_window(time_series, has_selective_filter=has_selective_filter)
 
     apply_cache_control(response, time_series)
 

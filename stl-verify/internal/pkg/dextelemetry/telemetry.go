@@ -140,19 +140,27 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		nftTransferRowsWritten:   nftTransferRowsWritten,
 		poolsNeverIndexed:        neverIndexed,
 	}
-	// Only blocks.processed: the Stalled rules read it as
-	// rate(status="success")==0, which cannot match an absent series.
+	// blocks.processed: the Stalled rules read it as rate(status="success")==0,
+	// which cannot match an absent series.
+	//
+	// nft.transfer.rows.attempted: NoNFTTransfers reads it as ==0, so the series
+	// must exist from the boot of any build carrying the posm decoder. That is
+	// what separates "this build decodes transfers and has seen none", which is
+	// the wrong-address failure worth paging on, from "this build predates the
+	// decoder" — the window between the alert rules syncing on merge and the
+	// image reaching the cluster, which is every rollout of this feature.
 	//
 	// state.rows.written is deliberately NOT seeded even though it is read by
 	// an alert. Its absence is load-bearing — RecordStateRows is a no-op at
 	// zero rows so that "attempted but nothing written" is distinguishable from
 	// "wrote zero", which is the firing condition StateRowsNotLanding stages
 	// and its tests assert. Seeding would make the counter permanently present
-	// and erase that. The `A > 0 unless B > 0` shape needs no seed anyway, and
-	// it covers attempted/touched for the same reason. errors.total's
-	// `operation` label is open-ended; pools.never_indexed is a gauge its
-	// recorder already reports as 0.
+	// and erase that. The `A > 0 unless B > 0` shape needs no seed for
+	// state.rows.attempted or pools.touched. errors.total's `operation` label
+	// is open-ended; pools.never_indexed is a gauge its recorder already
+	// reports as 0.
 	telemetry.SeedStatusCounter(context.Background(), t.blocksProcessed, t.chainAttr)
+	telemetry.SeedCounter(context.Background(), t.nftTransferRowsAttempted, t.chainAttr)
 	return t, nil
 }
 
