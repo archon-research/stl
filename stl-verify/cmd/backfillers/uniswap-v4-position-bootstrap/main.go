@@ -417,17 +417,22 @@ func newMulticaller(
 	}, nil
 }
 
-// transferActivityTimeouts sizes one run against a full mainnet posm history.
-// Measured 2026-09-14 against mainnet: 487,908 Transfer logs over 4.29M blocks in
-// 68 windows with 25 narrowings, ~2 minutes of eth_getLogs; the writes dominate
-// the rest. The ceilings are headroom for provider slowness and for a chain with
-// an order of magnitude more tokens, not an estimate.
+// transferActivityTimeouts sizes one run against a full mainnet posm history plus
+// the archive reads that stamp each block's version.
 //
-// Wider than the position bootstrap's because the row count is two orders of
-// magnitude larger; the attempt count and heartbeat are its, for its reasons.
+// Measured 2026-09-14/15 against mainnet: 487,908 Transfer logs over 4.29M blocks
+// in 68 eth_getLogs windows, ~2 minutes of RPC; ~4,300 partition listings; and a
+// hash read for each height carrying more than one archived version, which is the
+// ~100k in the band two archive writers overlapped. StartToClose therefore has to
+// clear a run of several hours end to end — 12h leaves room for provider slowness
+// and for a chain with an order of magnitude more tokens, and ScheduleToClose
+// admits three attempts of it.
+//
+// A later attempt is cheaper than the first: the scan resumes from the recorded
+// cursor, so committed windows are neither re-listed nor re-read.
 var transferActivityTimeouts = temporal.ActivityTimeouts{
-	StartToClose:    4 * time.Hour,
-	ScheduleToClose: 12 * time.Hour,
+	StartToClose:    12 * time.Hour,
+	ScheduleToClose: 36 * time.Hour,
 	MaximumAttempts: 3,
 	Heartbeat:       time.Minute,
 }

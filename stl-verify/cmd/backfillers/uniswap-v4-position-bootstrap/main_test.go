@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 )
@@ -47,5 +48,22 @@ func TestActivityTimeouts_LeaveRoomToResume(t *testing.T) {
 					timeouts.ScheduleToClose, timeouts.StartToClose)
 			}
 		})
+	}
+}
+
+// A full mainnet posm history plus its archive version reads is a multi-hour run,
+// so the ceiling has to clear one end to end and the total has to admit the
+// attempts the retry budget promises. Temporal kills an activity at StartToClose
+// mid-run, and a resumed attempt would then restart the same wall clock.
+func TestTransferActivityTimeouts_ClearAMultiHourRun(t *testing.T) {
+	const longestExpectedRun = 7*time.Hour + 30*time.Minute
+
+	if transferActivityTimeouts.StartToClose < longestExpectedRun {
+		t.Errorf("StartToClose = %s, want at least %s: a run measured at that length would be killed mid-flight",
+			transferActivityTimeouts.StartToClose, longestExpectedRun)
+	}
+	if want := time.Duration(transferActivityTimeouts.MaximumAttempts) * longestExpectedRun; transferActivityTimeouts.ScheduleToClose < want {
+		t.Errorf("ScheduleToClose = %s, want at least %s so %d attempts of a %s run each fit",
+			transferActivityTimeouts.ScheduleToClose, want, transferActivityTimeouts.MaximumAttempts, longestExpectedRun)
 	}
 }
