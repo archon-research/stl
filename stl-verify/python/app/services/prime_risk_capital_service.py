@@ -15,6 +15,7 @@ The result is model-derived and partial by design (see
 """
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 
@@ -28,7 +29,7 @@ from app.domain.entities.prime_risk_capital import (
     UnpricedReason,
 )
 from app.domain.entities.receipt_token import ReceiptTokenInfo
-from app.domain.entities.risk import ModelName, RrcResult
+from app.domain.entities.risk import LiquidationParams, ModelName, RrcResult
 from app.domain.exceptions import AllocationUnpricedError, ModelDataUnavailableError
 from app.domain.prime_registry import alm_proxies_for_prime, prime_name_for
 from app.domain.provenance import Provenance
@@ -274,19 +275,23 @@ class PrimeRiskCapitalService:
         # at dispatch time, which is the rare, data-gap path.
         primary_models = [chain[0] if chain else None for chain in model_chains]
 
-        # Pre-fetch every crypto-lending share AND backed breakdown up front and
-        # pass them through ``compute_with_share``. Without this, each
-        # per-allocation ``compute`` would hit ``get_share`` and the (expensive,
-        # protocol-wide) breakdown query independently — a per-position fan-out.
-        # Both are batched (the aave-like breakdown runs one query per protocol).
+        # Pre-fetch every crypto-lending share, backed breakdown and (aave-like)
+        # liquidation-params set up front and pass them through
+        # ``compute_with_share``. Without this, each per-allocation ``compute``
+        # would hit ``get_share``, the (expensive, protocol-wide) breakdown query
+        # and the protocol-wide params read independently — a per-position
+        # fan-out. All three are batched (one query per aave-like protocol).
         # Non-crypto-lending models (SURAF, CORE) fall through to the unchanged
         # ``model.compute`` path.
-        prefetched_shares, prefetched_infos, prefetched_breakdowns = await self._prefetch_crypto_lending_inputs(
-            positions, primary_models, proxy_address
-        )
+        (
+            prefetched_shares,
+            prefetched_infos,
+            prefetched_breakdowns,
+            prefetched_liq_params,
+        ) = await self._prefetch_crypto_lending_inputs(positions, primary_models, proxy_address)
 
-        # Run the per-allocation model computes concurrently. Each compute is
-        # still a DB round trip (liquidation params), so the gather keeps these
+        # Run the per-allocation model computes concurrently: a Morpho compute
+        # still reads its liquidation params per asset, so the gather keeps those
         # in flight in parallel.
         results = iter(
             await asyncio.gather(
@@ -298,6 +303,7 @@ class PrimeRiskCapitalService:
                         prefetched_shares,
                         prefetched_infos,
                         prefetched_breakdowns,
+                        prefetched_liq_params,
                     )
                     for position, model_chain in zip(positions, model_chains)
                     if model_chain
@@ -415,16 +421,23 @@ class PrimeRiskCapitalService:
         positions,
         models,
         prime_id: EthAddress,
-    ) -> tuple[dict[int, Decimal | Exception], dict[int, ReceiptTokenInfo], dict[int, BackedBreakdown]]:
-        """Resolve shares, infos, and breakdowns for every crypto-lending position.
+    ) -> tuple[
+        dict[int, Decimal | Exception],
+        dict[int, ReceiptTokenInfo],
+        dict[int, BackedBreakdown],
+        dict[int, Mapping[int, LiquidationParams]],
+    ]:
+        """Resolve shares, infos, breakdowns and liquidation params for every crypto-lending position.
 
-        Returns ``(shares, infos, breakdowns)`` keyed by ``receipt_token_id``.
+        Returns ``(shares, infos, breakdowns, liquidation_params)`` keyed by ``receipt_token_id``.
         ``shares`` maps each asset to a resolved share or a stored share-lookup
         error (re-raised later by ``compute_with_share`` in the same place the
         un-batched path would have). ``infos`` carries the receipt-token records
         fetched to build the batches. ``breakdowns`` carries the backed breakdown
-        per asset, resolved in one query per aave-like protocol. The per-allocation
-        compute reuses all three instead of re-fetching them.
+        per asset, resolved in one query per aave-like protocol. ``liquidation_params``
+        carries each aave-like asset's protocol-wide params, read once per protocol
+        (Morpho assets are absent and read theirs per asset). The per-allocation
+        compute reuses all four instead of re-fetching them.
         """
         # All crypto-lending model instances share the same reader (constructed
         # once at startup), so the first one we see is enough to drive the
@@ -438,7 +451,7 @@ class PrimeRiskCapitalService:
                 asset_ids.append(position.receipt_token_id)
 
         if cl_model is None or not asset_ids:
-            return {}, {}, {}
+            return {}, {}, {}, {}
 
         reader = cl_model.reader
         # Resolve receipt-token infos concurrently; this is the same per-asset
@@ -465,14 +478,15 @@ class PrimeRiskCapitalService:
                 continue
             infos_by_id[asset_id] = info
         if not infos_by_id:
-            return {}, {}, {}
+            return {}, {}, {}, {}
 
         valid_infos = list(infos_by_id.values())
-        shares, breakdowns = await asyncio.gather(
+        shares, breakdowns, liquidation_params = await asyncio.gather(
             reader.batch_get_shares(valid_infos, prime_id),
             reader.batch_get_breakdowns(valid_infos),
+            reader.batch_get_liquidation_params(valid_infos),
         )
-        return dict(shares), infos_by_id, dict(breakdowns)
+        return dict(shares), infos_by_id, dict(breakdowns), dict(liquidation_params)
 
     async def _dispatch_compute(
         self,
@@ -482,9 +496,11 @@ class PrimeRiskCapitalService:
         prefetched_shares: dict[int, Decimal | Exception],
         prefetched_infos: dict[int, ReceiptTokenInfo],
         prefetched_breakdowns: dict[int, BackedBreakdown],
+        prefetched_liq_params: dict[int, Mapping[int, LiquidationParams]],
     ):
         """Try each model in ``model_chain``, in order, plumbing the pre-fetched
-        share/info/breakdown through the first (only that one was prefetched).
+        share/info/breakdown/liquidation params through the first (only that one
+        was prefetched).
 
         The share value (or share-lookup error) is handed to
         ``compute_with_share`` and only consumed *after* the empty-breakdown
@@ -516,6 +532,7 @@ class PrimeRiskCapitalService:
                         prefetched_shares[asset_id],
                         info=prefetched_infos.get(asset_id),
                         breakdown_override=prefetched_breakdowns.get(asset_id),
+                        liquidation_params_override=prefetched_liq_params.get(asset_id),
                     )
                 return await model.compute(asset_id, prime_id, {})
             except AllocationUnpricedError as exc:

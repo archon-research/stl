@@ -619,6 +619,7 @@ async def test_prime_compute_uses_batch_get_shares_and_skips_per_asset_get_share
         make_receipt_token_position(receipt_token_id=2, symbol="aDAI", amount_usd=Decimal("200")),
     ]
     reader = AsyncMock(spec=PostgresCryptoLendingReader)
+    reader.batch_get_liquidation_params.return_value = {}
     infos = {1: _info(1, 777), 2: _info(2, 888)}
     # Map each asset_id to its info for the prefetch's concurrent lookups.
     reader.get_receipt_token.side_effect = lambda aid: infos[aid]
@@ -652,6 +653,7 @@ async def test_prime_compute_batches_breakdowns_and_skips_per_asset_fetch():
         make_receipt_token_position(receipt_token_id=2, symbol="aDAI", amount_usd=Decimal("200")),
     ]
     reader = AsyncMock(spec=PostgresCryptoLendingReader)
+    reader.batch_get_liquidation_params.return_value = {}
     reader.get_receipt_token.side_effect = lambda aid: {1: _info(1, 777), 2: _info(2, 888)}[aid]
     reader.batch_get_shares.return_value = {1: Decimal("0.4"), 2: Decimal("0.25")}
     empty = BackedBreakdown(backed_asset_id=42, items=())
@@ -665,12 +667,50 @@ async def test_prime_compute_batches_breakdowns_and_skips_per_asset_fetch():
 
 
 @pytest.mark.asyncio
+async def test_prime_compute_batches_liquidation_params_and_skips_per_asset_fetch():
+    """Aave-like liquidation params are prefetched once per protocol and sliced per
+    allocation — the protocol-wide read must not fan out per asset."""
+    from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralContribution
+    from app.domain.entities.risk import LiquidationParams
+
+    positions = [
+        make_receipt_token_position(receipt_token_id=1, symbol="aWETH", amount_usd=Decimal("100")),
+        make_receipt_token_position(receipt_token_id=2, symbol="aDAI", amount_usd=Decimal("200")),
+    ]
+    reader = AsyncMock(spec=PostgresCryptoLendingReader)
+    reader.get_receipt_token.side_effect = lambda aid: {1: _info(1, 777), 2: _info(2, 888)}[aid]
+    reader.batch_get_shares.return_value = {1: Decimal("0.4"), 2: Decimal("0.25")}
+    priced = BackedBreakdown(
+        backed_asset_id=42,
+        items=(
+            CollateralContribution(
+                token_id=99,
+                symbol="WETH",
+                backing_value=Decimal("1"),
+                backing_pct=Decimal("1"),
+                price_usd=Decimal("2000"),
+            ),
+        ),
+    )
+    reader.batch_get_breakdowns.return_value = {1: priced, 2: priced}
+    params = {99: LiquidationParams(99, Decimal("0.8"), Decimal("1.05"))}
+    reader.batch_get_liquidation_params.return_value = {1: params, 2: params}
+    service = _service(_repo(positions, Decimal("1000")), _FakeRegistry([_crypto_lending_service(reader)]))
+
+    await service.compute(_PRIME)
+
+    reader.batch_get_liquidation_params.assert_awaited_once()
+    reader.get_liquidation_params.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_prime_compute_logs_missing_receipt_token():
     """A crypto-lending position whose receipt-token record is missing is a data
     gap: it must be logged (not silently dropped from the batch), and — since no
     model can price it — still surface as an error rather than a fake zero RRC."""
     positions = [make_receipt_token_position(receipt_token_id=1, symbol="aWETH", amount_usd=Decimal("100"))]
     reader = AsyncMock(spec=PostgresCryptoLendingReader)
+    reader.batch_get_liquidation_params.return_value = {}
     reader.get_receipt_token.return_value = None  # receipt-token record cannot be resolved
     model = _crypto_lending_service(reader)
     service = _service(_repo(positions, Decimal("1000")), _FakeRegistry([model]))
@@ -709,6 +749,7 @@ async def test_prime_compute_degrades_share_error_to_unpriced(share_error, expec
         make_receipt_token_position(receipt_token_id=2, symbol="aDAI", amount_usd=Decimal("200")),
     ]
     reader = AsyncMock(spec=PostgresCryptoLendingReader)
+    reader.batch_get_liquidation_params.return_value = {}
     reader.get_receipt_token.side_effect = lambda aid: {1: _info(1, 777), 2: _info(2, 888)}[aid]
     reader.batch_get_shares.return_value = {1: share_error, 2: Decimal("0.5")}
     nonempty_breakdown = BackedBreakdown(
@@ -758,6 +799,7 @@ async def test_prime_compute_swallows_share_error_for_empty_breakdown():
         make_receipt_token_position(receipt_token_id=1, symbol="aWETH", amount_usd=Decimal("100")),
     ]
     reader = AsyncMock(spec=PostgresCryptoLendingReader)
+    reader.batch_get_liquidation_params.return_value = {}
     reader.get_receipt_token.return_value = _info(1, 777)
     reader.batch_get_shares.return_value = {1: MissingShareError("warm-up")}
     reader.batch_get_breakdowns.return_value = {1: BackedBreakdown(backed_asset_id=42, items=())}
@@ -795,6 +837,7 @@ async def test_prime_compute_degrades_price_data_missing_to_unpriced():
         make_receipt_token_position(receipt_token_id=2, symbol="aDAI", amount_usd=Decimal("200")),
     ]
     reader = AsyncMock(spec=PostgresCryptoLendingReader)
+    reader.batch_get_liquidation_params.return_value = {}
     reader.get_receipt_token.side_effect = lambda aid: {1: _info(1, 777), 2: _info(2, 888)}[aid]
     reader.batch_get_shares.return_value = {1: Decimal("1"), 2: Decimal("1")}
     unpriced_breakdown = BackedBreakdown(
