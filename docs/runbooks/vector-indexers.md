@@ -1955,7 +1955,7 @@ pinned finality-safe height, and appends the rows into
 `uniswap_v4_position_nft_transfer`.
 
 Why it is not optional: for a PositionManager-managed position —
-**2,895 of 4,501 tracked keys on staging, 64%** — `uniswap_v4_position.owner` is
+**2,895 of 4,501 tracked keys on staging, 64% (measured 2026-09-14)** — `uniswap_v4_position.owner` is
 the PositionManager contract, so that transfer table is the only path to a real
 holder. A token appears in it only when it MOVES, so an LP position minted and
 then held emits no `Transfer` at all and forward-only coverage never reaches it.

@@ -346,7 +346,7 @@ func buildRunnerJobs(deps temporal.Dependencies, w runnerWiring) ([]temporal.Run
 		},
 		{
 			WorkflowType: transferWorkflowTypeName,
-			ActivityName: transferWorkflowTypeName + "Execute",
+			ActivityName: temporal.RunnerActivityName(transferWorkflowTypeName),
 			Runner: temporal.RunnerFunc(func(ctx context.Context) error {
 				if transferErr != nil {
 					return fmt.Errorf("the posm transfer backfill was refused at worker startup on chain %d: %w", chainID, transferErr)

@@ -441,7 +441,8 @@ data:
   AWS_REGION: "eu-west-1"
   DEPLOY_ENV: "prod"
 ---
-# On-demand Uniswap V4 position bootstrap worker (VEC-639). No schedule: it
+# On-demand Uniswap V4 backfill worker (VEC-639, VEC-790): hosts both
+# UniswapV4PositionBootstrap and UniswapV4PosmTransferBackfill. No schedule: it
 # idles on its task queue until a run is started by hand. ALCHEMY_HTTP_URL is
 # the uniswap-v4-indexer's own; a run reads the same chain the indexer does.
 apiVersion: v1

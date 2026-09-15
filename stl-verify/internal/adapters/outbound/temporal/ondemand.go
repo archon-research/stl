@@ -142,6 +142,13 @@ func RegisterRunner(r worker.Registry, job RunnerJob) error {
 	return nil
 }
 
+// RunnerActivityName is the ActivityName a later job on a worker should take:
+// the workflow type carrying the suffix RegisterRunner requires. Exported so a
+// call site does not hand-spell "Execute" and learn of a typo at registration.
+func RunnerActivityName(workflowType string) string {
+	return workflowType + cronjobActivityMethod
+}
+
 func (j RunnerJob) activityName() string {
 	if j.ActivityName == "" {
 		return cronjobActivityMethod

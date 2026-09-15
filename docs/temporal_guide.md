@@ -367,12 +367,18 @@ deleted.
 **One worker can host several runner jobs.** Call `RegisterRunner` once per job,
 each with its own `WorkflowType` and its own `Progress` store; an operator then
 picks the type when starting a run and `uniswap-v4-position-bootstrap` is the
-worked example (positions and posm transfers). Each job's activity is registered
-under its workflow type as a prefix — `MyOneShotRepairExecute` — because they
-all share one `Execute` method and the registry admits a name once. Two
-consequences: heartbeat details stay per job, which is why each needs its own
-store; and `cronjob.runs.total` carries only the task queue, so an alert keyed on
-it names the worker, never which of its jobs failed.
+worked example (positions and posm transfers).
+
+Every job shares one `Execute` method and the registry admits a name once, so each
+job after the first sets `ActivityName: temporal.RunnerActivityName(itsType)`. The
+**first job leaves it empty**, which keeps the bare `Execute` its already-deployed
+workflow histories record: a moved `ActivityType` is a non-determinism error that
+wedges a run in flight across the rollout until `ScheduleToClose`. Two jobs both
+left empty is not silent — the SDK panics at registration.
+
+Two further consequences: heartbeat details stay per job, which is why each needs
+its own store; and `cronjob.runs.total` carries only the task queue, so an alert
+keyed on it names the worker, never which of its jobs failed.
 
 ### Starting a run from the Temporal UI
 

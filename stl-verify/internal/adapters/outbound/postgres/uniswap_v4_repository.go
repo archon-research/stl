@@ -139,9 +139,6 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 	if positionManagerAddress == nil {
 		return row, fmt.Errorf("uniswap_v4_position_manager row %d for chain %d references protocol %d, which is not on chain %d", *positionManagerID, chainID, *positionManagerProtoID, chainID)
 	}
-	if positionManagerDeployBlk == nil {
-		return row, fmt.Errorf("uniswap_v4_position_manager row %d for chain %d has a NULL deploy_block", *positionManagerID, chainID)
-	}
 
 	currency0Decimals, err := currencyTokenDecimals(id, "currency0", common.BytesToAddress(currency0), token0, decimals0)
 	if err != nil {
@@ -159,7 +156,7 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 		StateView:                  common.BytesToAddress(stateView),
 		PositionManagerID:          *positionManagerID,
 		PositionManager:            common.BytesToAddress(positionManagerAddress),
-		PositionManagerDeployBlock: *positionManagerDeployBlk,
+		PositionManagerDeployBlock: derefOrZero(positionManagerDeployBlk),
 		PoolIDHash:                 common.BytesToHash(onchainPoolID),
 		Currency0:                  common.BytesToAddress(currency0),
 		Currency1:                  common.BytesToAddress(currency1),
@@ -171,6 +168,16 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 		DeployBlock:                deployBlock,
 		SnapshotSupported:          snapshotSupported,
 	}, nil
+}
+
+// Only the posm transfer backfill reads deploy_block, and it refuses a
+// non-positive one by name, so an absent value must not fail this loader: the live
+// indexer boots through it and does not read the column at all.
+func derefOrZero(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
 }
 
 // token is the raw column, so an absent row stays distinguishable from the zero
@@ -295,16 +302,7 @@ func (r *UniswapV4Repository) SaveNFTTransfersIfAbsent(ctx context.Context, tx p
 // Same key and hash as the table's assign_processing_version trigger, so the
 // trigger's own acquisition is re-entrant and free.
 func lockNFTTransferSitesV4(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) error {
-	lockKeys := distinctSortedNFTTransferSiteKeys(transfers)
-	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended(k, 0))
-		 FROM unnest($1::text[]) WITH ORDINALITY AS u(k, ord)
-		 ORDER BY ord`,
-		lockKeys,
-	); err != nil {
-		return fmt.Errorf("locking %d uniswap_v4 nft transfer sites: %w", len(lockKeys), err)
-	}
-	return nil
+	return lockAdvisoryKeys(ctx, tx, distinctSortedNFTTransferSiteKeys(transfers), "uniswap_v4 nft transfer sites")
 }
 
 type v4NFTTransferSite struct {
@@ -860,15 +858,7 @@ func lockPositionKeysV4(ctx context.Context, tx pgx.Tx, keys []v4PositionKey) er
 		lockKeys[i] = fmt.Sprintf("uniswap_v4_position|%d|%s|%d|%d|%s",
 			k.poolID, k.key.Owner.Hex(), k.key.TickLower, k.key.TickUpper, k.key.Salt.Hex())
 	}
-	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended(k, 0))
-		 FROM unnest($1::text[]) WITH ORDINALITY AS u(k, ord)
-		 ORDER BY ord`,
-		lockKeys,
-	); err != nil {
-		return fmt.Errorf("locking %d uniswap_v4 position slots: %w", len(keys), err)
-	}
-	return nil
+	return lockAdvisoryKeys(ctx, tx, lockKeys, "uniswap_v4 position slots")
 }
 
 func positionKeyArrays(keys []v4PositionKey) (poolIDs []int64, owners [][]byte, tickLowers, tickUppers []int32, salts [][]byte) {
