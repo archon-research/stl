@@ -896,6 +896,91 @@
         "title": "AllocationRiskCapitalResponse",
         "type": "object"
       },
+      "ApiErrorResponse": {
+        "description": "The body of every ``422`` on the surface, as an RFC 9457 problem detail.\n\nThe extension members below are populated on a max-points rejection and absent\notherwise, so a client can branch on ``type`` and read only what that type\npromises.",
+        "properties": {
+          "detail": {
+            "description": "Human-readable explanation of this occurrence. Never the only signal.",
+            "title": "Detail",
+            "type": "string"
+          },
+          "errors": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/FieldError"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The parameters that failed, one entry each. `invalid_request` only.",
+            "title": "Errors"
+          },
+          "max_points": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Ceiling the request exceeded. Max-points rejections only.",
+            "title": "Max Points"
+          },
+          "point_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Observations the request would return. Max-points rejections only.",
+            "title": "Point Count"
+          },
+          "status": {
+            "default": 422,
+            "description": "HTTP status of the response carrying this body.",
+            "title": "Status",
+            "type": "integer"
+          },
+          "suggestions": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RejectionSuggestions"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Ways out of the rejection. Max-points rejections only."
+          },
+          "title": {
+            "description": "Short static label for the `type`. Same across every occurrence of one type.",
+            "examples": [
+              "Too many points"
+            ],
+            "title": "Title",
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/RejectionType",
+            "description": "Stable, machine-readable rejection identifier."
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "detail"
+        ],
+        "title": "ApiErrorResponse",
+        "type": "object"
+      },
       "BadDebtResponse": {
         "description": "Estimated bad debt for a receipt-token position at a given collateral gap.",
         "example": {
@@ -1340,6 +1425,39 @@
         "title": "ExposureEnvelope",
         "type": "object"
       },
+      "FieldError": {
+        "description": "One parameter's rejection, so a client branches per field instead of on prose.",
+        "properties": {
+          "code": {
+            "description": "Machine-readable reason code for this field.",
+            "examples": [
+              "datetime_parsing"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "field": {
+            "description": "Dotted path to the parameter, as `location.name`.",
+            "examples": [
+              "query.to_timestamp"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable reason. The submitted value is redacted out of it.",
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "code",
+          "message"
+        ],
+        "title": "FieldError",
+        "type": "object"
+      },
       "GapSweepDetails": {
         "additionalProperties": false,
         "description": "Gap-sweep model-specific output embedded in an RrcResult.\n\n``gap_pct`` is a *fraction* in ``[0, 1]`` (e.g. ``Decimal(\"0.15\")``\nmeans a 15% collateral price drop) \u2014 note this is a different scale\nfrom ``SurafDetails.crr_pct`` which is on 0\u2013100. ``loss_usd`` is the\nengine-native expected loss in USD under that price drop; equal in\nmagnitude to the envelope-level ``rrc_usd`` for this model and rounded\nto USD cents. The cross-model comparable capital ratio is exposed on\n``RrcResult.comparable_crr_pct`` using the receipt-token USD exposure\nbasis, not the collateral backing basis.",
@@ -1368,17 +1486,27 @@
         "title": "GapSweepDetails",
         "type": "object"
       },
-      "HTTPValidationError": {
+      "NarrowerWindow": {
+        "description": "A window to retry the same request over, keyed like the query parameters.\n\nScaled by the requested window's average density, so it is exact only for evenly\nspaced observations: a series clustered in this span is rejected again, with a\nfurther-narrowed suggestion.",
         "properties": {
-          "detail": {
-            "items": {
-              "$ref": "#/components/schemas/ValidationError"
-            },
-            "title": "Detail",
-            "type": "array"
+          "from_timestamp": {
+            "description": "Lower bound to retry with (UTC).",
+            "format": "date-time",
+            "title": "From Timestamp",
+            "type": "string"
+          },
+          "to_timestamp": {
+            "description": "Upper bound to retry with \u2014 the requested one (UTC).",
+            "format": "date-time",
+            "title": "To Timestamp",
+            "type": "string"
           }
         },
-        "title": "HTTPValidationError",
+        "required": [
+          "from_timestamp",
+          "to_timestamp"
+        ],
+        "title": "NarrowerWindow",
         "type": "object"
       },
       "PrimeDebtBucketResponse": {
@@ -2402,6 +2530,64 @@
         "title": "RawProtocolEventsEnvelope",
         "type": "object"
       },
+      "RejectionSuggestions": {
+        "description": "The ways out of a max-points rejection, each a complete set of query parameters.\n\nGrouped and keyed to match the request so a client merges one of them into the\nparameters it sent, with no key to rename or trim. The two are alternatives, not\na set: taking both narrows a window that the frequency alone would have served\nin full.",
+        "properties": {
+          "narrower_window": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NarrowerWindow"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Absent once the scaled span rounds below a second."
+          },
+          "resampled": {
+            "$ref": "#/components/schemas/ResampledRetry",
+            "description": "Grid that fits the window as asked."
+          }
+        },
+        "required": [
+          "resampled"
+        ],
+        "title": "RejectionSuggestions",
+        "type": "object"
+      },
+      "RejectionType": {
+        "description": "Every ``type`` the surface can put on a 422, closed so a client can be exhaustive.\n\nAn enum rather than a free string: this is the member a caller branches on, and\npublishing the closed set is what lets a generated TS client fail to compile when\na new rejection appears rather than fall through its `switch`. ``INVALID_REQUEST``\ncovers every rejection FastAPI raises before a route is reached \u2014 the branch is the\nsame either way, and which parameter failed is in ``errors``.",
+        "enum": [
+          "invalid_request",
+          "invalid_time_range",
+          "timestamp_out_of_range",
+          "window_too_large",
+          "frequency_too_fine",
+          "frequency_requires_aggregation_method",
+          "max_points_exceeded"
+        ],
+        "title": "RejectionType",
+        "type": "string"
+      },
+      "ResampledRetry": {
+        "description": "A frequency to retry the same window on, keyed like the query parameters.\n\nFits the window as asked, so unlike ``narrower_window`` it needs no second round\ntrip and returns the whole span the caller requested.",
+        "properties": {
+          "aggregation_method": {
+            "$ref": "#/components/schemas/AggregationMethod",
+            "description": "Method to cut on that grid. A frequency without one is itself a rejection."
+          },
+          "frequency": {
+            "$ref": "#/components/schemas/TimeSeriesFrequency",
+            "description": "Grid to resample onto."
+          }
+        },
+        "required": [
+          "frequency",
+          "aggregation_method"
+        ],
+        "title": "ResampledRetry",
+        "type": "object"
+      },
       "ResampledTimeSeriesWindow": {
         "description": "The window echo for a resampled response, naming the grid it sits on.\n\nA default-frequency response carries the points at their stored frequency,\nso it echoes the bare window above \u2014 a frequency there would name a grid the\npoints are not on, and a `null` would still put the key on the wire.",
         "properties": {
@@ -3305,46 +3491,6 @@
         ],
         "title": "TotalCapitalEnvelope",
         "type": "object"
-      },
-      "ValidationError": {
-        "properties": {
-          "ctx": {
-            "title": "Context",
-            "type": "object"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "loc": {
-            "items": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                }
-              ]
-            },
-            "title": "Location",
-            "type": "array"
-          },
-          "msg": {
-            "title": "Message",
-            "type": "string"
-          },
-          "type": {
-            "title": "Error Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "loc",
-          "msg",
-          "type"
-        ],
-        "title": "ValidationError",
-        "type": "object"
       }
     }
   },
@@ -3590,11 +3736,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Allocation activity feed",
@@ -3621,6 +3767,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List supported chains",
@@ -3643,6 +3799,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List registered data sources",
@@ -3669,6 +3835,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List all primes",
@@ -3751,11 +3927,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List a prime's current allocations",
@@ -3770,12 +3946,12 @@
         "operationId": "list_prime_debt_snapshots_v1_primes__prime_id__debt_get",
         "parameters": [
           {
-            "description": "Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses \u2014 this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`.",
+            "description": "Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses \u2014 this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`. Results are whole-prime: passing a proxy address returns the entire prime, including the chains that proxy has nothing to do with.",
             "in": "path",
             "name": "prime_id",
             "required": true,
             "schema": {
-              "description": "Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses \u2014 this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`.",
+              "description": "Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses \u2014 this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`. Results are whole-prime: passing a proxy address returns the entire prime, including the chains that proxy has nothing to do with.",
               "title": "Prime Id",
               "type": "string"
             }
@@ -3922,11 +4098,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List prime debt snapshots",
@@ -4094,11 +4270,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Prime exposure time series",
@@ -4178,11 +4354,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Self-computed prime risk capital",
@@ -4353,11 +4529,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Prime total-capital (treasury) time series",
@@ -4512,11 +4688,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List protocol events",
@@ -4543,6 +4719,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List supported protocols",
@@ -4565,6 +4751,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Provenance coverage per prime",
@@ -4585,6 +4781,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Readiness probe",
@@ -4690,11 +4896,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Risk capital (RRC) at default stress",
@@ -4732,11 +4938,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Risk capital (RRC) with scenario overrides",
@@ -4817,11 +5023,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Estimate bad debt at a collateral gap (by chain id and receipt-token address)",
@@ -4901,11 +5107,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Risk-enriched collateral breakdown (by chain id and receipt-token address)",
@@ -4967,11 +5173,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Estimate bad debt at a collateral gap (deprecated)",
@@ -5033,11 +5239,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Risk-enriched collateral breakdown (deprecated)",
@@ -5058,6 +5264,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Liveness probe",
@@ -5147,11 +5363,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List tokens",
@@ -5210,11 +5426,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Get a token by chain id and address",
@@ -5273,11 +5489,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Get latest token price by chain id and address",
@@ -5317,11 +5533,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Get a token by id (deprecated)",
@@ -5361,11 +5577,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Get latest token price (deprecated)",
@@ -5410,11 +5626,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Get all events for a transaction",

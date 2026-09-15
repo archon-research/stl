@@ -70,6 +70,11 @@ type historicalPosition struct {
 	fromAddress   *common.Address
 	toAddress     *common.Address
 	createdAt     time.Time
+	// buildID distinguishes two observations at one natural key: the
+	// processing_version trigger reuses an existing row's version when the
+	// build matches, so a second seed under the same build is a replay, not a
+	// new version.
+	buildID int
 }
 
 // insertHistoricalPosition seeds one row as the live indexer would have
@@ -100,14 +105,14 @@ func insertHistoricalPosition(t *testing.T, ctx context.Context, pool *pgxpool.P
 	query := fmt.Sprintf(`
 		INSERT INTO allocation_position
 			(chain_id, token_id, prime_id, proxy_address, balance, scaled_balance, block_number, block_version,
-			 tx_hash, log_index, tx_amount, direction, created_at, from_address, to_address)
-		VALUES (1, $1, $2, $3, %s, %s, $4, $5, $6, $7, %s, $8, $9, $10, $11)
+			 tx_hash, log_index, tx_amount, direction, created_at, from_address, to_address, build_id)
+		VALUES (1, $1, $2, $3, %s, %s, $4, $5, $6, $7, %s, $8, $9, $10, $11, $12)
 	`, p.balance, scaledBalanceLiteral, p.txAmount)
 
 	if _, err := pool.Exec(ctx, query,
 		p.tokenID, p.primeID, p.proxyAddress.Bytes(),
 		p.blockNumber, p.blockVersion, txHashBytes, p.logIndex,
-		p.direction, p.createdAt, fromBytes, toBytes,
+		p.direction, p.createdAt, fromBytes, toBytes, p.buildID,
 	); err != nil {
 		t.Fatalf("insert historical position: %v", err)
 	}

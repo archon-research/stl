@@ -187,10 +187,10 @@ const heartbeatTimeoutFactor = 3
 // On the scheduled path it travels as the cronjobWorkflow argument, because
 // ensureSchedule bakes it into the schedule's action at creation. Any zero field
 // falls back to the default above, which is also what a schedule created before
-// this argument existed decodes to. reconcileScheduleSpec deliberately touches
-// only the timing spec, so changing the values later requires deleting the
-// schedule in Temporal and restarting the worker — the same caveat that already
-// applies to a changed interval.
+// this argument existed decodes to. reconcileScheduleSpec rewrites only the
+// timing spec, so a changed interval or offset lands on the next redeploy, while
+// changing these values requires deleting the schedule in Temporal and
+// restarting the worker.
 //
 // An on-demand job has no action to carry them and binds them at registration
 // instead (RegisterRunner), so a redeploy is enough to change them.
