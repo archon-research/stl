@@ -113,10 +113,26 @@ size the rest, and the ticket asks for them recorded either way.
 
 ## Where the two cohorts come from
 
-Every indexer passes the block-header timestamp into `entity.NewProtocolEvent`, which rejects a zero
-value, so `created_at` on a row written today *is* event time. That has held since VEC-80 (#191,
-2026-04-14) made the field an explicit constructor argument; before it, `created_at` was left to its
-`DEFAULT NOW()` and holds ingest time.
+Three eras wrote this table, and only the middle one lost the block time:
+
+| Era | Writer | Where `created_at` came from | Result |
+| --- | --- | --- | --- |
+| up to 2026-02-18 | backfillers | the block header, passed explicitly | whole-second, dated |
+| 2026-02-18 .. 2026-04-14 | live indexers | nothing — the INSERT omitted the column, so `DEFAULT NOW()` fired | the sub-second rows |
+| 2026-04-14 onward | live indexers | the block header, an explicit constructor argument | whole-second, dated |
+
+The table had no event-time column, and the live INSERT did not name `created_at`, so Postgres
+filled it at insert. The header was in the watcher's SNS envelope the whole time — the indexers had
+nowhere to put it and no reason to pass it. VEC-80 (#191) closed that by making it an argument to
+`entity.NewProtocolEvent`, whose `Validate` rejects a zero value, which is why the era ends there.
+It begins where live ingestion begins: a backfiller replaying months-old blocks has to pass a
+timestamp, since `now()` would be visibly absurd for the row it is writing.
+
+So the gap is in the row, not in the world. Every one of those rows still carries
+`(chain_id, block_number, block_version)`, and the header is recoverable from the S3 raw-block
+archive — which is what `block_meta` is for (VEC-491) and what Step 2 joins against. The gap is also
+frozen: no writer can insert an undated row today, so the cohort cannot grow, and it measures the
+same on staging and prod.
 
 The two are told apart without a join: a block-header timestamp is whole-second, `NOW()` is not.
 Re-measure the split before running anything; the sizes it reported on prod are in
