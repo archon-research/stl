@@ -129,7 +129,7 @@ func TestSecStoreEveryEngineRuleRejectsItsInput(t *testing.T) {
 		_, err := pool.Exec(ctx, `
 			INSERT INTO sec_node (id, record_type, status, valid_from, `+secstoreSpine+`)
 			VALUES ('em-t-badkind', 'INVENTED', 'ACTIVE', '2026-01-01', 'test', 'SEED_LOAD', 'unknown record_type', 'test')`)
-		assertSQLState(t, err, "23514", "record_type CHECK")
+		assertSQLState(t, err, "23514", "unknown record_type")
 	})
 
 	t.Run("processing_version_check_rejects_negative", func(t *testing.T) {
@@ -214,9 +214,6 @@ func TestSecStoreEveryEngineRuleRejectsItsInput(t *testing.T) {
 			INSERT INTO sec_edge (edge_disc, src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, `+secstoreSpine+`)
 			OVERRIDING SYSTEM VALUE
 			VALUES ('not-valid-disc', 'sec-t-disc-chk', 'SECURITY', 'sec-t-disc-dst', 'SECURITY', 'HAS_UNDERLYING', '2026-01-01', 'test', 'SEED_LOAD', 'bad disc shape', 'test')`)
-		if err == nil {
-			t.Skip("guard assigns edge_disc before CHECK fires; disc shape checked indirectly via the guard")
-		}
 		assertSQLState(t, err, "P0001", "sec_edge guard rejects invalid edge_disc shape")
 	})
 
@@ -245,17 +242,26 @@ func TestSecStoreEveryEngineRuleRejectsItsInput(t *testing.T) {
 	})
 
 	t.Run("vocabulary_immutability_delete", func(t *testing.T) {
-		// Accepts both P0001 (immutability trigger) and 23503 (FK from sec_node/sec_edge):
-		// Postgres evaluates FK constraints before EACH ROW triggers, so tables referenced
-		// by edges hit 23503 before the trigger fires.
-		vocabs := []string{
-			"rel_type_vocabulary",
+		// Tables with FK references from sec_node/sec_edge hit 23503 before the
+		// trigger fires, so we split: FK-free tables must hit P0001 (the trigger
+		// is their only defence); FK-referenced tables accept either.
+		fkFree := []string{
 			"weight_basis_vocabulary",
-			"change_reason_vocabulary",
 			"concept_class_vocabulary",
+		}
+		fkReferenced := []string{
+			"rel_type_vocabulary",
+			"change_reason_vocabulary",
 			"node_status_vocabulary",
 		}
-		for _, v := range vocabs {
+		for _, v := range fkFree {
+			t.Run(v, func(t *testing.T) {
+				_, err := pool.Exec(ctx, fmt.Sprintf(
+					"DELETE FROM %s WHERE false OR true", v))
+				assertSQLState(t, err, "P0001", v+" immutability trigger DELETE")
+			})
+		}
+		for _, v := range fkReferenced {
 			t.Run(v, func(t *testing.T) {
 				_, err := pool.Exec(ctx, fmt.Sprintf(
 					"DELETE FROM %s WHERE false OR true", v))
@@ -265,7 +271,7 @@ func TestSecStoreEveryEngineRuleRejectsItsInput(t *testing.T) {
 						t.Fatalf("DELETE on %s: got %s (%s), want P0001 (immutability) or 23503 (FK)", v, pgErr.Code, pgErr.Message)
 					}
 				} else if err == nil {
-					t.Fatalf("DELETE on %s must be rejected by immutability trigger", v)
+					t.Fatalf("DELETE on %s must be rejected", v)
 				} else {
 					t.Fatalf("DELETE on %s: unexpected error %v", v, err)
 				}

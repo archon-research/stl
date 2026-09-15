@@ -407,6 +407,9 @@ func assertNodeHashesRecompute(t *testing.T, ctx context.Context, pool *pgxpool.
 			}
 		}
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	if mismatches > 0 {
 		t.Fatalf("%d of 352 seed node hashes do not recompute", mismatches)
 	}
@@ -443,6 +446,9 @@ func assertEdgeHashesRecompute(t *testing.T, ctx context.Context, pool *pgxpool.
 					recordID, hex.EncodeToString(stored), hex.EncodeToString(recomputed))
 			}
 		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	if mismatches > 0 {
 		t.Fatalf("%d of 149 seed edge hashes do not recompute", mismatches)

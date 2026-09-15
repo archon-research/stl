@@ -664,6 +664,9 @@ func TestSecStoreAppendGuardChainsAndRejectsForgedProvenance(t *testing.T) {
 		if err := pool.QueryRow(ctx, `SELECT git_hash FROM build_registry WHERE id = 0`).Scan(&expectedHash); err != nil {
 			t.Fatalf("read build_registry seed row: %v", err)
 		}
+		if expectedHash == "" {
+			t.Fatal("build_registry seed row has empty git_hash — the assertion is vacuous")
+		}
 		if gitHash != expectedHash {
 			t.Errorf("git_hash from provenance join: got %q, want %q (build_registry row 0)", gitHash, expectedHash)
 		}

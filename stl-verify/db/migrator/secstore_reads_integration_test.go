@@ -254,6 +254,25 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 		}
 	})
 
+	t.Run("edge_as_of_window_first_disagrees", func(t *testing.T) {
+		// Mirror of node_as_of_window_first_disagrees for sec_edge_as_of.
+		// Both the open and closed edge rows are valid-time candidates for Mar;
+		// window-first returns both, two-step picks only the closed one.
+		var count int
+		if err := pool.QueryRow(ctx, `
+			WITH window_first AS (
+				SELECT * FROM sec_edge
+				WHERE valid_from <= '2026-03-01' AND '2026-03-01' < valid_to
+			)
+			SELECT count(DISTINCT valid_to) FROM window_first
+			WHERE src_id = 'sec-t-reads-src' AND rel_type = 'ISSUED_BY'`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count <= 1 {
+			t.Fatal("edge window-first and two-step agree on this fixture — both rows must be valid-time candidates for the distinction to matter")
+		}
+	})
+
 	t.Run("edge_current_returns_second_window", func(t *testing.T) {
 		var validFrom string
 		if err := pool.QueryRow(ctx, `
@@ -272,12 +291,12 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 
 	t.Run("pv0_append_after_correction_does_not_win", func(t *testing.T) {
 		// A pv-0 append with a newer ingest_xid must not beat the pv-N restatement.
-		// Use a different valid_to so the PK (id, pv, valid_from, valid_to) does not collide
-		// with the existing pv-0 Jun-open row; the resolution groups on (id, valid_from),
-		// so both rows compete and pvN must still win.
+		// valid_from stays '2026-06-01' so it competes in the same (id, valid_from) group.
+		// valid_to '9999-12-31' avoids PK collision with the existing pv-0 Jun-open row
+		// (which has valid_to 'infinity') while staying in the same resolution group.
 		_, err := pool.Exec(ctx, `
 			INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, processing_version, `+secstoreSpine+`)
-			VALUES ('em-t-reads', 'ENTITY', 'ACTIVE', '2026-06-15', 'infinity', 0, 'test', 'SEED_LOAD', 'late pv-0 append', 'test')`)
+			VALUES ('em-t-reads', 'ENTITY', 'ACTIVE', '2026-06-01', '9999-12-31', 0, 'test', 'SEED_LOAD', 'late pv-0 append', 'test')`)
 		if err != nil {
 			t.Fatalf("late pv-0 append: %v", err)
 		}
@@ -317,7 +336,7 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 	t.Run("edge_current_pv0_does_not_beat_correction", func(t *testing.T) {
 		_, err := pool.Exec(ctx, `
 			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to, processing_version, `+secstoreSpine+`)
-			VALUES ('sec-t-reads-src', 'SECURITY', 'em-t-reads-edst', 'ENTITY', 'ISSUED_BY', '2026-06-01', '2026-12-01', 0, 'test', 'SEED_LOAD', 'late pv-0 edge', 'test')`)
+			VALUES ('sec-t-reads-src', 'SECURITY', 'em-t-reads-edst', 'ENTITY', 'ISSUED_BY', '2026-06-01', '9999-12-31', 0, 'test', 'SEED_LOAD', 'late pv-0 edge', 'test')`)
 		if err != nil {
 			t.Fatalf("late pv-0 edge append: %v", err)
 		}
@@ -387,6 +406,71 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 		}
 		if validTo != "2026-06-01" {
 			t.Fatalf("got valid_to=%s, want 2026-06-01 — the closing row must win by record_id", validTo)
+		}
+	})
+
+	t.Run("ingest_xid_tiebreak_beats_record_id", func(t *testing.T) {
+		// Two rows with the same (id, valid_from, pv=0) in separate transactions.
+		// xids are assigned lazily at first write, not at BEGIN, so we force
+		// assignment with pg_current_xact_id() to decouple xid order from
+		// record_id (sequence) order.
+		// txEarly: forced xid first (lower xid), inserts second (higher record_id).
+		// txLate:  forced xid second (higher xid), inserts first (lower record_id).
+		// Resolution uses ingest_xid DESC before record_id DESC, so txLate's row must win.
+		const xidID = "em-t-reads-xid"
+
+		txEarly, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer txEarly.Rollback(ctx)
+
+		// Force xid assignment on txEarly first — it gets the lower xid.
+		if _, err := txEarly.Exec(ctx, "SELECT pg_current_xact_id()"); err != nil {
+			t.Fatal(err)
+		}
+
+		txLate, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer txLate.Rollback(ctx)
+
+		// Force xid assignment on txLate second — it gets the higher xid.
+		if _, err := txLate.Exec(ctx, "SELECT pg_current_xact_id()"); err != nil {
+			t.Fatal(err)
+		}
+
+		// txLate inserts first — gets a lower record_id but higher ingest_xid.
+		_, err = txLate.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, `+secstoreSpine+`)
+			VALUES ($1, 'ENTITY', 'INACTIVE', '2026-01-01', 'infinity', 'test', 'SEED_LOAD', 'late-xid row', 'test')`, xidID)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// txEarly inserts second — gets a higher record_id but lower ingest_xid.
+		_, err = txEarly.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, `+secstoreSpine+`)
+			VALUES ($1, 'ENTITY', 'ACTIVE', '2026-01-01', '9999-12-31', 'test', 'SEED_LOAD', 'early-xid row', 'test')`, xidID)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := txLate.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := txEarly.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		var status string
+		if err := pool.QueryRow(ctx, `
+			SELECT status FROM sec_node_current WHERE id = $1`, xidID).Scan(&status); err != nil {
+			t.Fatalf("sec_node_current for %s: %v", xidID, err)
+		}
+		if status != "INACTIVE" {
+			t.Fatalf("got status=%s, want INACTIVE — the higher ingest_xid (txLate) must win over higher record_id (txEarly)", status)
 		}
 	})
 
@@ -786,7 +870,7 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 					t.Errorf("plan does not reference %s\nplan: %s", tc.expectedIndex, planJSON)
 				}
 				if strings.Contains(planJSON, `"Node Type": "Sort"`) {
-					t.Errorf("plan contains a Sort node — the index direction mutations would survive")
+					t.Errorf("plan contains a Sort node — the index direction mutations would survive\nplan: %s", planJSON)
 				}
 			})
 		}

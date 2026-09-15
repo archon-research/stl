@@ -110,9 +110,12 @@ apply_mutation() {
     local wt_migrations="$WORKTREE_DIR/stl-verify/db/migrations"
 
     # Reset both files to their worktree originals
-    git -C "$WORKTREE_DIR" checkout -- \
+    if ! git -C "$WORKTREE_DIR" checkout -- \
         "stl-verify/db/migrations/$FILE1" \
-        "stl-verify/db/migrations/$FILE2" 2>/dev/null
+        "stl-verify/db/migrations/$FILE2" 2>/dev/null; then
+        echo "ERROR: git checkout failed — cannot reset migration files" >&2
+        return 1
+    fi
 
     # Apply patches via python for precision — patches sorted descending by line
     # so earlier patches don't shift indices of later ones.
@@ -164,8 +167,10 @@ classify_result() {
 
     if [[ $exit_code -eq 0 ]]; then
         echo "SURVIVED"
-    elif [[ "$test_output" == *FAIL* || "$test_output" == *FATAL* || "$test_output" == *panic* ]]; then
+    elif [[ "$test_output" == *"--- FAIL:"* ]]; then
         echo "KILLED"
+    elif [[ "$test_output" == *FAIL* || "$test_output" == *FATAL* || "$test_output" == *panic* ]]; then
+        echo "HARNESS_ERROR"
     else
         echo "HARNESS_ERROR"
     fi
@@ -229,6 +234,16 @@ main() {
     local total
     total=$(python3 -c "import json; print(len(json.load(open('$MUTATIONS_JSON'))))")
     echo "Generated $total mutations"
+
+    echo "Running unmutated control..."
+    local ctrl_output ctrl_exit=0
+    ctrl_output=$(run_tests 2>&1) || ctrl_exit=$?
+    if [[ $ctrl_exit -ne 0 ]]; then
+        echo "FATAL: unmutated tree is red (exit $ctrl_exit). Fix the suite before running mutations." >&2
+        echo "$ctrl_output" | grep -E '(FAIL|FATAL|panic)' | head -10 >&2
+        exit 1
+    fi
+    echo "Control: green"
 
     init_results
 
