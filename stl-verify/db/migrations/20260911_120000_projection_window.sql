@@ -14,7 +14,7 @@ CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_bu
     SET search_path FROM CURRENT
     SET timescaledb.enable_tiered_reads = 'on'
     AS $fn$
-DECLARE n bigint; bad text; bad_qty text; bad_dt text; v_qualname text; v_emitted bigint;
+DECLARE n bigint; bad text; bad_qty text; bad_dt text; v_qualname text; v_source text; v_emitted bigint;
         v_inverted integer := 0; v_refused integer := 0;
 BEGIN
     IF p_view IS NULL THEN
@@ -78,18 +78,28 @@ BEGIN
     DROP TABLE IF EXISTS pg_temp._mpp_new;
     DROP TABLE IF EXISTS pg_temp._mpp_drift;
     DROP TABLE IF EXISTS pg_temp._mpp_refused;
-    -- The window is interpolated as a SQL literal, never bound: a bound parameter is not constified at
-    -- plan time, so the planner builds paths for every chunk and the pruning this exists for never
-    -- happens (db/migrations/AGENTS.md, "A time window on a hypertable is a SQL literal").
+    -- A bound cannot sit OUTSIDE the view: every projection dedupes with a DISTINCT ON whose key leaves
+    -- out the timestamp, and a qualifier above a DISTINCT does not push below it, so the whole source is
+    -- still read (measured on staging: 194 chunks with the bound outside, 3 with it inside the scan).
+    -- A bounded run therefore reads the projection's bounded source, <view>_since(timestamptz): an
+    -- inlinable SQL function carrying the same SELECT with the bound on its source's partition column.
+    -- The instant is interpolated as a literal, never bound, so it is constified at plan time and the
+    -- chunk exclusion this exists for happens (AGENTS.md, "A time window on a hypertable is a SQL literal").
+    IF p_window IS NULL THEN
+        v_source := v_qualname;
+    ELSE
+        IF to_regprocedure(v_qualname || '_since(timestamptz)') IS NULL THEN
+            RAISE EXCEPTION 'projection % has no bounded source %_since(timestamptz): a window applied outside the view prunes nothing, so pass NULL or add that function', p_view, v_qualname;
+        END IF;
+        v_source := format('%s_since(%L::timestamptz)', v_qualname, now() - p_window);
+    END IF;
     EXECUTE format($q$
         CREATE TEMP TABLE _mpp_src ON COMMIT DROP AS
         SELECT public.position_id(chain_id, protocol_id, instrument_key, holder_id) AS position_id,
                chain_id, protocol_id, instrument_key, holder_id, quantity,
                block_number, block_version, processing_version, block_timestamp, deal_type
-        FROM %s %s
-    $q$, p_view,
-         CASE WHEN p_window IS NULL THEN ''
-              ELSE format('WHERE block_timestamp > now() - interval %L', p_window::text) END);
+        FROM %s
+    $q$, v_source);
     ANALYZE pg_temp._mpp_src;
 
     SELECT string_agg(msg, ', ') INTO bad FROM (
@@ -332,6 +342,6 @@ BEGIN
     RETURN n;
 END $fn$;
 
-COMMENT ON FUNCTION materialize_position_projection(regclass, integer, bigint, interval) IS '[Operational] Appends a projection view''s observations to position_state, applying closure, the column contract, ownership and refusals. p_window bounds the batch to block_timestamp > now() - p_window, interpolated as a literal so chunk pruning actually happens; NULL means unbounded. A bounded run keeps closure correct (the LAG falls back to history probed from position_state) but cannot discover positions whose observations all fall outside the window, so bootstrap and any recovery after an outage longer than the window must pass NULL.';
+COMMENT ON FUNCTION materialize_position_projection(regclass, integer, bigint, interval) IS '[Operational] Appends a projection view''s observations to position_state, applying closure, the column contract, ownership and refusals. p_window bounds the batch: the snapshot is read from <view>_since(now() - p_window), the projection''s bounded source with the bound inside its own scan (a bound outside the view does not push below its DISTINCT ON), the instant interpolated as a literal so chunk pruning actually happens; a windowed call on a projection without that function is refused. NULL means unbounded and reads the view. A bounded run keeps closure correct (the LAG falls back to history probed from position_state) but cannot discover positions whose observations all fall outside the window, so bootstrap and any recovery after an outage longer than the window must pass NULL.';
 
 INSERT INTO migrations (filename) VALUES ('20260911_120000_projection_window.sql') ON CONFLICT (filename) DO NOTHING;

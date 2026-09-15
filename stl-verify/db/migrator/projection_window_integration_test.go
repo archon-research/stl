@@ -16,21 +16,99 @@ import (
 // which is why bootstrap has to pass NULL.
 
 // windowFixture builds a projection over a 41-day source: 40 days at quantity 100, then a closing zero
-// an hour ago. Block numbers ascend with time, as the spine's block-time invariant requires. A plain
-// table, which is the house default; nothing here turns on how the source is stored.
+// an hour ago. Block numbers ascend with time, as the spine's block-time invariant requires. The source
+// is a hypertable with 1-day chunks, and the view dedupes with a DISTINCT ON whose key leaves out the
+// timestamp -- the shape every real projection has, and the one a bound outside the view cannot prune
+// through. position_win_since is the bounded source the materializer reads for a windowed run.
 func windowFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	if _, err := pool.Exec(ctx, `
 		CREATE TABLE wsrc (ts timestamptz NOT NULL, holder text NOT NULL, ik text NOT NULL,
 		                   qty numeric NOT NULL, bn bigint NOT NULL);
+		SELECT create_hypertable('wsrc', by_range('ts', INTERVAL '1 day'));
 		INSERT INTO wsrc SELECT now() - (g||' days')::interval, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
 		       'WIN', 100, 5000-g FROM generate_series(1,40) g;
 		INSERT INTO wsrc VALUES (now() - interval '1 hour', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'WIN', 0, 9000);
 		CREATE VIEW position_win AS
-		SELECT 1::integer AS chain_id, NULL::bigint AS protocol_id, ik AS instrument_key, holder AS holder_id,
+		SELECT DISTINCT ON (holder, ik, bn)
+		       1::integer AS chain_id, NULL::bigint AS protocol_id, ik AS instrument_key, holder AS holder_id,
 		       qty AS quantity, 'BORROW'::text AS deal_type, bn AS block_number, 0 AS block_version,
-		       0 AS processing_version, ts AS block_timestamp FROM wsrc`); err != nil {
+		       0 AS processing_version, ts AS block_timestamp
+		FROM wsrc ORDER BY holder, ik, bn, ts;
+		CREATE FUNCTION position_win_since(p_since timestamptz) RETURNS SETOF position_win
+		LANGUAGE sql STABLE AS $$
+		SELECT DISTINCT ON (holder, ik, bn)
+		       1::integer, NULL::bigint, ik, holder, qty, 'BORROW'::text, bn, 0, 0, ts
+		FROM wsrc WHERE ts > p_since ORDER BY holder, ik, bn, ts $$`); err != nil {
 		t.Fatalf("build the window fixture: %v", err)
+	}
+}
+
+// chunksTouched runs one materialize call and reports how many of the source's chunks it read, from
+// the per-relation scan counters. The call and the stats flush share one connection, since the
+// counters are the calling backend's.
+func chunksTouched(t *testing.T, ctx context.Context, pool *pgxpool.Pool, window any) int {
+	t.Helper()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_stat_reset()`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `SELECT materialize_position_projection('public.position_win'::regclass, 0, NULL, $1)`, window); err != nil {
+		t.Fatalf("materialize with window %v: %v", window, err)
+	}
+	if _, err := conn.Exec(ctx, `SELECT pg_stat_force_next_flush()`); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := conn.QueryRow(ctx, `
+		SELECT count(*) FROM pg_stat_all_tables s
+		JOIN timescaledb_information.chunks c ON c.chunk_schema = s.schemaname AND c.chunk_name = s.relname
+		WHERE c.hypertable_name = 'wsrc' AND s.seq_scan + s.idx_scan > 0`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// The window's whole purpose: a bounded run opens only the tail of the source. Unbounded, all 41
+// chunks are read; two days back, three at most. Applied outside the view this stays at 41, because
+// the predicate cannot push below the DISTINCT ON -- which is what the previous revision did.
+func TestProjectionWindowReadsOnlyTheTailOfTheSource(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	windowFixture(t, ctx, pool)
+
+	if got := chunksTouched(t, ctx, pool, nil); got != 41 {
+		t.Fatalf("an unbounded run touched %d chunks, want all 41 (the fixture is not what this test assumes)", got)
+	}
+	got := chunksTouched(t, ctx, pool, "2 days")
+	t.Logf("2-day window touched %d of 41 chunks", got)
+	if got > 3 {
+		t.Errorf("a 2-day window touched %d chunks, want at most 3; the bound is not reaching the source's scan", got)
+	}
+}
+
+// A projection with no bounded source cannot honour a window, and running it unbounded instead would
+// hide the very cost the caller asked to avoid, so it is refused by name rather than run.
+func TestProjectionWindowRefusesAProjectionWithoutABoundedSource(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	windowFixture(t, ctx, pool)
+	if _, err := pool.Exec(ctx, `DROP FUNCTION position_win_since(timestamptz)`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := pool.Exec(ctx, `SELECT materialize_position_projection('public.position_win'::regclass, 0, NULL, interval '2 days')`)
+	if err == nil || !strings.Contains(err.Error(), "position_win_since(timestamptz)") {
+		t.Fatalf("want a refusal naming the missing bounded source, got %v", err)
+	}
+	// Unbounded still reads the view, so a projection without the function is not unusable.
+	if got := materializeWindow(t, ctx, pool, nil); got != 41 {
+		t.Errorf("unbounded run appended %d rows, want 41", got)
 	}
 }
 
@@ -138,8 +216,8 @@ func TestProjectionWindowIsInterpolatedAsALiteral(t *testing.T) {
 	if !strings.Contains(src, "CREATE TEMP TABLE _mpp_src") {
 		t.Fatalf("the function body does not build _mpp_src; this test is reading the wrong function")
 	}
-	if !strings.Contains(src, `format('WHERE block_timestamp > now() - interval %L', p_window::text)`) {
-		t.Error("the window predicate is not built with format(... %L ...); a bound window prunes no chunks (AGENTS.md, \"A time window on a hypertable is a SQL literal\")")
+	if !strings.Contains(src, `format('%s_since(%L::timestamptz)', v_qualname, now() - p_window)`) {
+		t.Error("the bounded source's instant is not built with format(... %L ...); a bound instant prunes no chunks (AGENTS.md, \"A time window on a hypertable is a SQL literal\")")
 	}
 	// USING is how a bound parameter would reach the EXECUTE, which is the mutation this guards.
 	if strings.Contains(src, "USING p_window") {
