@@ -918,3 +918,76 @@ func TestMaterializeAaveLendingTempFileCapAbortsASpillingRun(t *testing.T) {
 		t.Errorf("wrote %d rows, want at least the 20,000 seeded observations", written)
 	}
 }
+
+// position_aave_lending_since is the view's SELECT with the bound inside both ledger scans (VEC-566). It
+// emits exactly the view's rows when the bound precedes everything, and a tail bound opens only the
+// tail's chunks, where the same bound outside the view -- above its DISTINCT ON -- opens every chunk.
+func TestAaveLendingBoundedSourceMatchesTheViewAndPrunes(t *testing.T) {
+	ctx, pool, _ := seedAaveLending(t)
+
+	var drift, rows int
+	if err := pool.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM (
+		          (TABLE position_aave_lending EXCEPT ALL SELECT * FROM position_aave_lending_since('-infinity'))
+		          UNION ALL
+		          (SELECT * FROM position_aave_lending_since('-infinity') EXCEPT ALL TABLE position_aave_lending)) d),
+		       (SELECT count(*) FROM position_aave_lending)`).Scan(&drift, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows == 0 || drift != 0 {
+		t.Fatalf("view rows=%d, rows differing from the bounded source at -infinity=%d; want >0 and 0", rows, drift)
+	}
+	var after int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_aave_lending_since('infinity')`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != 0 {
+		t.Fatalf("a bound after every observation still returned %d rows", after)
+	}
+
+	// Ten more days on the mapped P1/USDC debt reserve and its supply side, one per day, on the
+	// 1-day-chunked ledgers.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, created_at, build_id)
+		SELECT u.id, p.id, tk.id, 90000 + d, 0, d, 1, 'Borrow', '\xfe', '2026-03-01T12:00:00Z'::timestamptz + (d - 1) * interval '1 day', 0
+		FROM generate_series(1, 10) d, "user" u, protocol p, token tk
+		WHERE u.chain_id = 1 AND u.address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND p.chain_id = 1 AND p.name = 'p1' AND tk.chain_id = 1 AND tk.address = '\xdead';
+		INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled, created_at, build_id)
+		SELECT u.id, p.id, tk.id, 90000 + d, 0, d, 1, 'Supply', '\xfd', true, '2026-03-01T12:00:00Z'::timestamptz + (d - 1) * interval '1 day', 0
+		FROM generate_series(1, 10) d, "user" u, protocol p, token tk
+		WHERE u.chain_id = 1 AND u.address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND p.chain_id = 1 AND p.name = 'p1' AND tk.chain_id = 1 AND tk.address = '\xdead'`); err != nil {
+		t.Fatal(err)
+	}
+	all := aaveChunkScans(t, ctx, pool, `SELECT * FROM position_aave_lending`)
+	outside := aaveChunkScans(t, ctx, pool, `SELECT * FROM position_aave_lending WHERE block_timestamp > '2026-03-09T00:00:00Z'::timestamptz`)
+	inside := aaveChunkScans(t, ctx, pool, `SELECT * FROM position_aave_lending_since('2026-03-09T00:00:00Z'::timestamptz)`)
+	t.Logf("chunk scans: unbounded %d, bound outside the view %d, bound inside the source %d", all, outside, inside)
+	if all < 20 {
+		t.Fatalf("the unbounded view plans %d chunk scans, want at least the 10 seeded days on each ledger", all)
+	}
+	if outside != all {
+		t.Errorf("a bound outside the view planned %d chunk scans against %d unbounded; the control no longer shows the DISTINCT ON blocking pushdown", outside, all)
+	}
+	if inside > 6 {
+		t.Errorf("a bound inside the source planned %d chunk scans, want at most 3 per ledger", inside)
+	}
+}
+
+// aaveChunkScans counts the hypertable chunks a statement's plan reads: EXPLAIN names each as _hyper_N_M_chunk.
+func aaveChunkScans(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string) int {
+	t.Helper()
+	rows, err := pool.Query(ctx, "EXPLAIN (COSTS OFF) "+sql)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	plan := ""
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		plan += line + "\n"
+	}
+	return strings.Count(plan, "_hyper_")
+}
