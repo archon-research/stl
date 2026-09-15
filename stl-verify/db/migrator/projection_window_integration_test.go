@@ -15,20 +15,18 @@ import (
 // bounded run still closes the position, and that it CANNOT discover history outside its window —
 // which is why bootstrap has to pass NULL.
 
-// windowFixture builds a projection over a 41-day source: 40 days at quantity 100, then a closing zero
-// an hour ago. Block numbers ascend with time, as the spine's block-time invariant requires. The source
-// is a hypertable with 1-day chunks, and the view dedupes with a DISTINCT ON whose key leaves out the
-// timestamp -- the shape every real projection has, and the one a bound outside the view cannot prune
-// through. position_win_since is the bounded source the materializer reads for a windowed run.
+// windowFixture: a 1-day-chunk hypertable behind a DISTINCT ON (the shape of every real projection),
+// 40 daily rows at quantity 100 then a closing zero, one row per UTC day at noon so a window of 36 hours
+// always selects exactly the last two rows and three chunks, whatever the time of day the test runs.
 func windowFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	if _, err := pool.Exec(ctx, `
 		CREATE TABLE wsrc (ts timestamptz NOT NULL, holder text NOT NULL, ik text NOT NULL,
 		                   qty numeric NOT NULL, bn bigint NOT NULL);
 		SELECT create_hypertable('wsrc', by_range('ts', INTERVAL '1 day'));
-		INSERT INTO wsrc SELECT now() - (g||' days')::interval, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-		       'WIN', 100, 5000-g FROM generate_series(1,40) g;
-		INSERT INTO wsrc VALUES (now() - interval '1 hour', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'WIN', 0, 9000);
+		INSERT INTO wsrc SELECT date_trunc('day', now()) + interval '12 hours' - (g||' days')::interval,
+		       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'WIN', 100, 5000-g FROM generate_series(1,40) g;
+		INSERT INTO wsrc VALUES (date_trunc('day', now()) + interval '12 hours', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'WIN', 0, 9000);
 		CREATE VIEW position_win AS
 		SELECT DISTINCT ON (holder, ik, bn)
 		       1::integer AS chain_id, NULL::bigint AS protocol_id, ik AS instrument_key, holder AS holder_id,
@@ -73,9 +71,8 @@ func chunksTouched(t *testing.T, ctx context.Context, pool *pgxpool.Pool, window
 	return n
 }
 
-// The window's whole purpose: a bounded run opens only the tail of the source. Unbounded, all 41
-// chunks are read; two days back, three at most. Applied outside the view this stays at 41, because
-// the predicate cannot push below the DISTINCT ON -- which is what the previous revision did.
+// The window's whole purpose: a bounded run opens only the tail of the source. A bound applied outside
+// the view stays at 41, because the predicate cannot push below the DISTINCT ON.
 func TestProjectionWindowReadsOnlyTheTailOfTheSource(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -85,10 +82,8 @@ func TestProjectionWindowReadsOnlyTheTailOfTheSource(t *testing.T) {
 	if got := chunksTouched(t, ctx, pool, nil); got != 41 {
 		t.Fatalf("an unbounded run touched %d chunks, want all 41 (the fixture is not what this test assumes)", got)
 	}
-	got := chunksTouched(t, ctx, pool, "2 days")
-	t.Logf("2-day window touched %d of 41 chunks", got)
-	if got > 3 {
-		t.Errorf("a 2-day window touched %d chunks, want at most 3; the bound is not reaching the source's scan", got)
+	if got := chunksTouched(t, ctx, pool, "36 hours"); got != 3 {
+		t.Errorf("a 36-hour window touched %d chunks, want exactly 3; the bound is not reaching the source's scan", got)
 	}
 }
 
@@ -109,6 +104,34 @@ func TestProjectionWindowRefusesAProjectionWithoutABoundedSource(t *testing.T) {
 	// Unbounded still reads the view, so a projection without the function is not unusable.
 	if got := materializeWindow(t, ctx, pool, nil); got != 41 {
 		t.Errorf("unbounded run appended %d rows, want 41", got)
+	}
+}
+
+// The column contract is checked on the view, so the bounded source must be RETURNS SETOF <view>: a
+// _since with its own row type could pass a lossy quantity through the check that exists to refuse it.
+func TestProjectionWindowRefusesABoundedSourceNotReturningTheView(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	windowFixture(t, ctx, pool)
+	if _, err := pool.Exec(ctx, `
+		DROP FUNCTION position_win_since(timestamptz);
+		CREATE FUNCTION position_win_since(p_since timestamptz)
+		RETURNS TABLE (chain_id integer, protocol_id bigint, instrument_key text, holder_id text,
+		               quantity double precision, deal_type text, block_number bigint, block_version integer,
+		               processing_version integer, block_timestamp timestamptz)
+		LANGUAGE sql STABLE AS $$
+		SELECT DISTINCT ON (holder, ik, bn)
+		       1::integer, NULL::bigint, ik, holder, qty::double precision, 'BORROW'::text, bn, 0, 0, ts
+		FROM wsrc WHERE ts > p_since ORDER BY holder, ik, bn, ts $$`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := pool.Exec(ctx, `SELECT materialize_position_projection('public.position_win'::regclass, 0, NULL, interval '2 days')`)
+	if err == nil || !strings.Contains(err.Error(), "RETURNS SETOF public.position_win") {
+		t.Fatalf("want a refusal naming the required return type, got %v", err)
+	}
+	if rows := storedWindowRows(t, ctx, pool); rows != 0 {
+		t.Errorf("stored %d rows through a bounded source of the wrong type, want 0", rows)
 	}
 }
 
@@ -147,16 +170,14 @@ func TestProjectionWindowNullIsUnbounded(t *testing.T) {
 }
 
 // The trap the parameter's COMMENT documents: bounded from cold, everything outside the window is
-// silently never discovered. Pinned so the documented limitation cannot quietly stop being true. Two
-// days back selects exactly the g=1 row and the closing zero, so the count is exact, not a ceiling: a
-// window anchored on the wrong column or the wrong instant lands on a different number.
+// silently never discovered. Exact, not a ceiling, so a wrong column or instant lands on another number.
 func TestProjectionWindowBoundedFromColdCannotDiscoverHistory(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
 	windowFixture(t, ctx, pool)
 
-	if appended := materializeWindow(t, ctx, pool, "2 days"); appended != 2 {
+	if appended := materializeWindow(t, ctx, pool, "36 hours"); appended != 2 {
 		t.Fatalf("bounded cold run appended %d, want exactly 2 (the g=1 row and the closing zero)", appended)
 	}
 	if rows := storedWindowRows(t, ctx, pool); rows != 2 {
@@ -164,9 +185,8 @@ func TestProjectionWindowBoundedFromColdCannotDiscoverHistory(t *testing.T) {
 	}
 }
 
-// position_projection_run is append-only and its table COMMENT reads a trailing position as "swept and
-// not re-observed". That inference holds only for an unbounded run, so the window a run was called with
-// is stamped on its record: NULL for unbounded, the interval otherwise.
+// The run table's COMMENT reads a trailing position as "swept and not re-observed", which holds only for
+// an unbounded run, so each record carries the window it was called with: NULL for unbounded.
 func TestProjectionWindowIsStampedOnTheRunRecord(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -175,30 +195,16 @@ func TestProjectionWindowIsStampedOnTheRunRecord(t *testing.T) {
 
 	materializeWindow(t, ctx, pool, nil)
 	materializeWindow(t, ctx, pool, "2 days")
-	rows, err := pool.Query(ctx, `
-		SELECT window_interval::text FROM position_projection_run
-		 WHERE projection = 'public.position_win' ORDER BY created_at`)
-	if err != nil {
+	var got string
+	if err := pool.QueryRow(ctx, `
+		SELECT string_agg(CASE WHEN window_interval IS NULL THEN 'NULL'
+		                       WHEN window_interval = interval '2 days' THEN '2 days'
+		                       ELSE window_interval::text END, ',' ORDER BY created_at)
+		  FROM position_projection_run WHERE projection = 'public.position_win'`).Scan(&got); err != nil {
 		t.Fatalf("read the run records: %v", err)
 	}
-	defer rows.Close()
-	var got []string
-	for rows.Next() {
-		var w *string
-		if err := rows.Scan(&w); err != nil {
-			t.Fatal(err)
-		}
-		if w == nil {
-			got = append(got, "NULL")
-		} else {
-			got = append(got, *w)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if want := []string{"NULL", "2 days"}; strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("run records carry window_interval %v, want %v", got, want)
+	if want := "NULL,2 days"; got != want {
+		t.Errorf("run records carry window_interval %q, want %q", got, want)
 	}
 }
 
@@ -255,7 +261,7 @@ func TestProjectionWindowIsInterpolatedAsALiteral(t *testing.T) {
 	if !strings.Contains(src, "CREATE TEMP TABLE _mpp_src") {
 		t.Fatalf("the function body does not build _mpp_src; this test is reading the wrong function")
 	}
-	if !strings.Contains(src, `format('%s_since(%L::timestamptz)', v_qualname, now() - p_window)`) {
+	if !strings.Contains(src, `format('%s(%L::timestamptz)', v_source, v_since)`) {
 		t.Error("the bounded source's instant is not built with format(... %L ...); a bound instant prunes no chunks (AGENTS.md, \"A time window on a hypertable is a SQL literal\")")
 	}
 	// USING is how a bound parameter would reach the EXECUTE, which is the mutation this guards.
@@ -264,18 +270,19 @@ func TestProjectionWindowIsInterpolatedAsALiteral(t *testing.T) {
 	}
 }
 
-// A zero or negative window would silently select nothing at all, so it is refused rather than run.
+// A zero or negative window selects nothing, and an infinite one sweeps everything while stamping a
+// non-NULL window on the run record; both are refused rather than run.
 func TestProjectionWindowRefusesANonPositiveInterval(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
 	windowFixture(t, ctx, pool)
 
-	for _, w := range []string{"0", "-1 days"} {
+	for _, w := range []string{"0", "-1 days", "infinity"} {
 		var n int64
 		err := pool.QueryRow(ctx,
 			`SELECT materialize_position_projection('public.position_win'::regclass, 0, NULL, $1)`, w).Scan(&n)
-		if err == nil || !strings.Contains(err.Error(), "p_window must be positive") {
+		if err == nil || !strings.Contains(err.Error(), "p_window must be a finite positive interval") {
 			t.Errorf("window %q: want a refusal naming p_window, got n=%d err=%v", w, n, err)
 		}
 	}

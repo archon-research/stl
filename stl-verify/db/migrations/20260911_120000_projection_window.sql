@@ -7,7 +7,7 @@ DROP FUNCTION IF EXISTS materialize_position_projection(regclass, integer, bigin
 
 -- Append-only table: a run's window can never be reconstructed later, so it is stamped on the record.
 ALTER TABLE position_projection_run ADD COLUMN IF NOT EXISTS window_interval interval;
-COMMENT ON COLUMN position_projection_run.window_interval IS 'Roles: Audit. The p_window this run was called with: it read only observations with block_timestamp > created_at - window_interval, so a position it did not touch may have been outside the window rather than unchanged. NULL means unbounded, the whole source swept.';
+COMMENT ON COLUMN position_projection_run.window_interval IS 'Roles: Audit. The p_window this run was called with: it read <view>_since(now() - p_window) as of the run''s transaction start (created_at is clock time at completion), so a position it did not touch may have been outside the window rather than unchanged. NULL means unbounded, the whole source swept.';
 COMMENT ON TABLE position_projection_run IS '[Operational] One row per COMPLETED materialize_position_projection() run, written in the run''s own transaction. Only for a run with window_interval NULL does a position whose latest observation trails its projection''s latest row here mean swept and not re-observed; a bounded run saw only the window, so a trailing position may simply have fallen outside it. Plain table: volume is one row per run per projection, so no compression or tiering.';
 COMMENT ON COLUMN position_projection_run.block_timestamp IS 'Roles: Derived. Latest block_timestamp among the observations this run accepted; NULL when it accepted nothing, which is still a completed sweep of the whole source when window_interval is NULL and of the window alone otherwise. Comparable across on-chain and off-chain observations, unlike block_number.';
 
@@ -19,7 +19,7 @@ CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_bu
     SET search_path FROM CURRENT
     SET timescaledb.enable_tiered_reads = 'on'
     AS $fn$
-DECLARE n bigint; bad text; bad_qty text; bad_dt text; v_qualname text; v_source text; v_emitted bigint;
+DECLARE n bigint; bad text; bad_qty text; bad_dt text; v_qualname text; v_source text; v_since timestamptz; v_emitted bigint;
         v_inverted integer := 0; v_refused integer := 0;
 BEGIN
     IF p_view IS NULL THEN
@@ -27,8 +27,13 @@ BEGIN
     END IF;
     -- NULL is unbounded. A bounded run cannot discover history outside its window (see the function
     -- COMMENT), so bootstrap and recovery pass NULL.
-    IF p_window IS NOT NULL AND p_window <= interval '0' THEN
-        RAISE EXCEPTION 'materialize_position_projection: p_window must be positive, got %', p_window;
+    IF p_window IS NOT NULL THEN
+        -- Judged on the instant, not the interval: a calendar interval can normalise positive yet bound
+        -- into the future, and an infinite one would sweep everything while stamping a non-NULL window.
+        v_since := now() - p_window;
+        IF NOT isfinite(v_since) OR v_since >= now() THEN
+            RAISE EXCEPTION 'materialize_position_projection: p_window must be a finite positive interval, got %', p_window;
+        END IF;
     END IF;
 
     IF p_build_id IS NULL THEN
@@ -81,15 +86,22 @@ BEGIN
     DROP TABLE IF EXISTS pg_temp._mpp_drift;
     DROP TABLE IF EXISTS pg_temp._mpp_refused;
     -- A bound outside the view does not push below its DISTINCT ON, so a bounded run reads <view>_since,
-    -- the same SELECT with the bound on the source's partition column. The instant is a literal, never a
-    -- bind parameter (AGENTS.md, "A time window on a hypertable is a SQL literal").
+    -- the same SELECT with the bound on the source's partition column; the instant is a literal, never bound.
     IF p_window IS NULL THEN
         v_source := v_qualname;
     ELSE
-        IF to_regprocedure(v_qualname || '_since(timestamptz)') IS NULL THEN
-            RAISE EXCEPTION 'projection % has no bounded source %_since(timestamptz): a window applied outside the view prunes nothing, so pass NULL or add that function', p_view, v_qualname;
+        -- RETURNS SETOF <view> pins the column set, order and types to the view the contract was checked on.
+        SELECT format('%I.%I', nsp.nspname, fn.proname) INTO v_source
+          FROM pg_catalog.pg_class cls
+          JOIN pg_catalog.pg_namespace nsp ON nsp.oid = cls.relnamespace
+          JOIN pg_catalog.pg_proc fn ON fn.pronamespace = cls.relnamespace AND fn.proname = cls.relname || '_since'
+                                    AND fn.proargtypes = ARRAY['timestamptz'::regtype::oid]::oidvector
+                                    AND fn.proretset AND fn.prorettype = cls.reltype
+         WHERE cls.oid = p_view;
+        IF v_source IS NULL THEN
+            RAISE EXCEPTION 'projection % has no bounded source %_since(timestamptz) RETURNS SETOF %: a window applied outside the view prunes nothing, so pass NULL or add that function', p_view, v_qualname, v_qualname;
         END IF;
-        v_source := format('%s_since(%L::timestamptz)', v_qualname, now() - p_window);
+        v_source := format('%s(%L::timestamptz)', v_source, v_since);
     END IF;
     EXECUTE format($q$
         CREATE TEMP TABLE _mpp_src ON COMMIT DROP AS

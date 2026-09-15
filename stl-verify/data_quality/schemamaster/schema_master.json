@@ -1525,6 +1525,10 @@
       "type": "text",
       "class": "A",
       "not_null": true
+    },
+    "window_interval": {
+      "type": "interval",
+      "class": "A"
     }
   },
   "tables": {
