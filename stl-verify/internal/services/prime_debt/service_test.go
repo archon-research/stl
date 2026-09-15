@@ -301,6 +301,11 @@ func sparkPrime() entity.Prime {
 const testBlockNum = 21000000
 const testChainID int64 = 1
 
+// testBlockTime is the on-chain timestamp of testBlockNum; later blocks advance
+// by one slot, so each event carries a distinct, deterministic block time.
+const testBlockTime int64 = 1750000000
+const testSlotSeconds int64 = 12
+
 func makeBlockEvents(startBlock int64, count int) []outbound.BlockEvent {
 	events := make([]outbound.BlockEvent, count)
 	for i := range events {
@@ -310,7 +315,7 @@ func makeBlockEvents(startBlock int64, count int) []outbound.BlockEvent {
 			Version:        0,
 			BlockHash:      fmt.Sprintf("0x%064x", startBlock+int64(i)),
 			ParentHash:     fmt.Sprintf("0x%064x", startBlock+int64(i)-1),
-			BlockTimestamp: time.Now().Unix(),
+			BlockTimestamp: testBlockTime + int64(i)*testSlotSeconds,
 			ReceivedAt:     time.Now(),
 		}
 	}
@@ -559,6 +564,89 @@ func TestSync_WritesSnapshotPerPrime(t *testing.T) {
 
 	cancel()
 	_ = svc.Stop()
+}
+
+// synced_at is in prime_debt's natural key, so only an on-chain value keeps a
+// redelivery of the same block at the same key.
+func TestSync_StampsSnapshotsWithBlockTime(t *testing.T) {
+	prime := sparkPrime()
+
+	caller := newFakeVatCaller()
+	caller.setIlk(prime.VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
+
+	events := makeBlockEvents(testBlockNum, 1)
+	consumer := newFakeSQSConsumer(events)
+
+	repo := &fakePrimeDebtRepository{primes: []entity.Prime{prime}}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for repo.savedCount() < 1 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for snapshot")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	_ = svc.Stop()
+
+	want := time.Unix(testBlockTime, 0).UTC()
+	for _, snap := range repo.allSaved() {
+		if !snap.SyncedAt.Equal(want) {
+			t.Errorf("prime_id %d: SyncedAt = %s, want block time %s", snap.PrimeID, snap.SyncedAt, want)
+		}
+	}
+}
+
+// TestProcessBlock_MissingBlockTimestamp_ReturnsError: an event with no block
+// timestamp must fail loud before the vat caller. time.Unix(0, 0) survives an
+// IsZero() guard, so a defaulted value would file the snapshot in a 1970 chunk.
+func TestProcessBlock_MissingBlockTimestamp_ReturnsError(t *testing.T) {
+	caller := newFakeVatCaller()
+	caller.setIlk(sparkPrime().VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
+
+	events := makeBlockEvents(testBlockNum, 1)
+	events[0].BlockTimestamp = 0
+	consumer := newFakeSQSConsumer(events)
+
+	repo := &fakePrimeDebtRepository{primes: []entity.Prime{sparkPrime()}}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	_ = svc.Stop()
+
+	if len(caller.readHashes) != 0 {
+		t.Errorf("ReadDebts invoked %d times, want 0 (guard must fire before the caller)", len(caller.readHashes))
+	}
+	if repo.savedCount() != 0 {
+		t.Errorf("expected 0 saved snapshots on missing block timestamp, got %d", repo.savedCount())
+	}
+	if consumer.deleteCount() != 0 {
+		t.Errorf("expected message to not be ACKed on missing block timestamp, deleteCount = %d", consumer.deleteCount())
+	}
 }
 
 // TestSync_ReadDebtsPinnedToBlockHash asserts the sweep threads the event's

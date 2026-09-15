@@ -214,7 +214,12 @@ func (s *VaultDebtService) processBlock(
 		return fmt.Errorf("parse block hash: %w", err)
 	}
 
-	if err := s.syncAll(ctx, event.BlockNumber, blockHash, event.Version); err != nil {
+	blockTime, err := event.BlockTime()
+	if err != nil {
+		return fmt.Errorf("resolve block time: %w", err)
+	}
+
+	if err := s.syncAll(ctx, event, blockHash, blockTime); err != nil {
 		return err
 	}
 
@@ -266,13 +271,13 @@ func (s *VaultDebtService) resolveIlks(ctx context.Context, primes []entity.Prim
 }
 
 // syncAll batch-reads on-chain debt for all primes pinned to blockHash
-// and writes snapshots to Postgres. blockNumber is retained for the snapshot
-// rows and logging; the on-chain read pins by blockHash (see ReadDebts).
-func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, blockHash common.Hash, blockVersion int) error {
+// and writes snapshots to Postgres. The block number is retained for the
+// snapshot rows and logging; the on-chain read pins by blockHash (see
+// ReadDebts). blockTime stamps the snapshots, so a redelivered block writes the
+// same natural key and ON CONFLICT DO NOTHING can dedupe it.
+func (s *VaultDebtService) syncAll(ctx context.Context, event outbound.BlockEvent, blockHash common.Hash, blockTime time.Time) error {
 	start := time.Now()
-	syncedAt := start.UTC()
 
-	// Build queries.
 	queries := make([]entity.DebtQuery, len(s.resolved))
 	for i, p := range s.resolved {
 		queries[i] = entity.DebtQuery{
@@ -284,10 +289,36 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, block
 	// Single multicall for all rate + art reads, pinned to the block hash.
 	results, err := s.caller.ReadDebts(ctx, queries, blockHash)
 	if err != nil {
-		return fmt.Errorf("read debts at block %d: %w", blockNumber, err)
+		return fmt.Errorf("read debts at block %d: %w", event.BlockNumber, err)
 	}
 
-	// Build snapshots from results.
+	snapshots, err := s.buildSnapshots(event, blockTime, results)
+	if err != nil {
+		return err
+	}
+
+	if err := s.repo.SaveDebtSnapshots(ctx, snapshots); err != nil {
+		return fmt.Errorf("save debt snapshots: %w", err)
+	}
+
+	s.logger.Info("debt sync complete",
+		"primes", len(snapshots),
+		"block", event.BlockNumber,
+		"duration", time.Since(start),
+	)
+
+	return nil
+}
+
+// buildSnapshots turns one multicall result per resolved prime into validated
+// snapshots, stamped with the swept block's number, version and on-chain time.
+func (s *VaultDebtService) buildSnapshots(
+	event outbound.BlockEvent,
+	blockTime time.Time,
+	results []entity.DebtResult,
+) ([]*entity.PrimeDebt, error) {
+	blockNumber := event.BlockNumber
+
 	snapshots := make([]*entity.PrimeDebt, 0, len(s.resolved))
 	for i, prime := range s.resolved {
 		if i >= len(results) {
@@ -319,7 +350,7 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, block
 		// re-reads become expensive, accumulate-then-return is the next
 		// form.
 		if r.Err != nil {
-			return fmt.Errorf("prime %s: error reading debt: %w", prime.Name, r.Err)
+			return nil, fmt.Errorf("prime %s: error reading debt: %w", prime.Name, r.Err)
 		}
 
 		debtWad := entity.ComputeDebtWad(r.Art, r.Rate)
@@ -336,8 +367,8 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, block
 			IlkName:      ilkToString(prime.ilk),
 			DebtWad:      debtWad,
 			BlockNumber:  blockNumber,
-			BlockVersion: blockVersion,
-			SyncedAt:     syncedAt,
+			BlockVersion: event.Version,
+			SyncedAt:     blockTime,
 		})
 	}
 
@@ -349,26 +380,16 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, block
 	// outage) than a real coordinated "no data" answer across independent
 	// vaults. Prefer the loud DLQ over a silent ACK.
 	if len(snapshots) == 0 {
-		return fmt.Errorf("all vault reads failed, skipping db write")
+		return nil, fmt.Errorf("all vault reads failed, skipping db write")
 	}
 
 	for i, snap := range snapshots {
 		if err := snap.Validate(); err != nil {
-			return fmt.Errorf("debt snapshot %d: %w", i, err)
+			return nil, fmt.Errorf("debt snapshot %d: %w", i, err)
 		}
 	}
 
-	if err := s.repo.SaveDebtSnapshots(ctx, snapshots); err != nil {
-		return fmt.Errorf("save debt snapshots: %w", err)
-	}
-
-	s.logger.Info("debt sync complete",
-		"primes", len(snapshots),
-		"block", blockNumber,
-		"duration", time.Since(start),
-	)
-
-	return nil
+	return snapshots, nil
 }
 
 // ilkToString converts a bytes32 ilk to a human-readable string by

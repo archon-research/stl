@@ -31,7 +31,9 @@ type PrimeDebt struct {
 	DebtWad      *big.Int
 	BlockNumber  int64
 	BlockVersion int
-	SyncedAt     time.Time
+	// SyncedAt is the on-chain timestamp of BlockNumber, not wall clock: it is
+	// part of the row's natural key, so a redelivered block must reproduce it.
+	SyncedAt time.Time
 }
 
 // Validate checks that the snapshot is well-formed before persistence.
