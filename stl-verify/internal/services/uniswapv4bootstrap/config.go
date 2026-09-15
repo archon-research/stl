@@ -1,10 +1,16 @@
 package uniswapv4bootstrap
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
+)
 
 const (
 	// 64 blocks is two epochs on Ethereum mainnet, past finalisation: the pinned
-	// block cannot be reorged out under the run.
+	// block cannot be reorged out under the run. It is a mainnet number (two
+	// minutes on Base, sixteen seconds on Arbitrum), so it is the default on
+	// mainnet only; every other chain states its own depth.
 	DefaultFinalityDepth = int64(64)
 	// Wide on purpose: the bisect finds the provider's real ceiling in fewer
 	// requests than crawling four million blocks at a known-safe 10k.
@@ -28,7 +34,7 @@ type Config struct {
 }
 
 func (c Config) withDefaults() Config {
-	if c.FinalityDepth == 0 {
+	if c.FinalityDepth == 0 && c.ChainID == chainutil.EthereumMainnetChainID {
 		c.FinalityDepth = DefaultFinalityDepth
 	}
 	if c.InitialWindow == 0 {
@@ -58,6 +64,9 @@ func (c Config) validate() error {
 		return fmt.Errorf("chainID must be positive, got %d", c.ChainID)
 	case c.FinalityDepth < 0:
 		return fmt.Errorf("finality depth must not be negative, got %d", c.FinalityDepth)
+	// A pin alone is not enough: the reorg-window refusal is pin > head - depth.
+	case c.FinalityDepth == 0:
+		return fmt.Errorf("chain %d has no default finality depth: pass one explicitly (%d is two mainnet epochs and means nothing elsewhere)", c.ChainID, DefaultFinalityDepth)
 	case c.FromBlock < 0:
 		return fmt.Errorf("fromBlock must not be negative, got %d", c.FromBlock)
 	case c.PinBlock < 0:
