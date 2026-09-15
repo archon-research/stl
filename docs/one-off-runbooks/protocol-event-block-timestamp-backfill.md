@@ -27,14 +27,39 @@ Run as a non-superuser role with write access, against the database directly rat
 (no 2-minute statement timeout). ADR-0005's reader switch and the catalogue axis flip to `event` are
 VEC-735's, and must not run until Step 3 reports zero.
 
-`protocol_event` carries a 1-year `add_tiering_policy` and `timescaledb.enable_tiered_reads`
-defaults off, so a plain session cannot see — and Step 3 cannot count — a tiered chunk. Set it on
-for every step below, or Step 3 reports zero while tiered history stays undated and VEC-735 flips
-the axis on a series that is still part observation-time:
+## Run it before the oldest chunks tier
+
+`protocol_event` tiers to object storage after 1 year (`policy_movechunk_to_s3`), and a tiered
+chunk is read-only: an `UPDATE` cannot reach its rows, so they stay undated until someone calls
+`untier_chunk` on each one first. Check the headroom before planning the run — the oldest chunk's
+`range_start` plus a year is the deadline, and at the time of writing the oldest was 2025-09-22
+with nothing tiered yet:
+
+```sql
+SELECT count(*) AS chunks, min(range_start)::date AS oldest FROM timescaledb_information.chunks
+WHERE hypertable_name = 'protocol_event';
+SELECT count(*) AS tiered FROM timescaledb_osm.tiered_chunks WHERE hypertable_name = 'protocol_event';
+```
+
+`timescaledb.enable_tiered_reads` also defaults off, so a plain session cannot see — and Step 3
+cannot count — a tiered chunk. Set it on for every step below, or Step 3 reports zero while tiered
+history stays undated and VEC-735 flips the axis on a series that is still part observation-time:
 
 ```sql
 SET timescaledb.enable_tiered_reads = 'on';
 ```
+
+## Cost and headroom
+
+Each window decompresses the chunks it touches, rewrites every row in them, and leaves them
+uncompressed until `policy_compression` (`compress_after` 2 days) catches up. Two consequences to
+size before starting: the table needs disk headroom for its decompressed form (2.1 GB compressed
+across 358 chunks at the time of writing, several times that uncompressed), and the recompression
+that follows is its own background load.
+
+Decompression itself is not the bottleneck — a warm read of 135k rows including `event_data`
+measured 285 ms. The write path is, and it cannot be measured without writing, so treat the first
+window as the calibration run and extrapolate from what it reports rather than from a guess.
 
 ## Where the two cohorts come from
 
