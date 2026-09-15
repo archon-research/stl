@@ -1864,17 +1864,27 @@ run failures are covered by `VectorOnDemandWorkerDown` and
 `VectorCronjobRunFailing` like the other on-demand workers
 ([vector-cronjobs.md](vector-cronjobs.md#vectorondemandworkerdown)).
 
+**That Deployment hosts TWO workflow types**, both hand-started, closing
+different holes: `UniswapV4PositionBootstrap` (the positions, above) and
+`UniswapV4PosmTransferBackfill` (the posm token holders, below). The task queue
+keeps the older name. They write different tables and neither is a phase of the
+other, so either can be started alone, or both at once. One consequence when
+triaging: `cronjob.runs.total` carries only the task queue, so
+`VectorCronjobRunFailing` for `uniswap-v4-position-bootstrap` names the worker,
+while the Temporal UI's execution list and the pod logs name the workflow type.
+
 **How to start a run.** Temporal UI (namespace **`vector`**) → **Start Workflow**:
 
 | Field | Value |
 |---|---|
 | Task Queue | `uniswap-v4-position-bootstrap` |
-| Workflow Type | `UniswapV4PositionBootstrap` |
+| Workflow Type | `UniswapV4PositionBootstrap` or `UniswapV4PosmTransferBackfill` |
 | Workflow ID | descriptive and unique, e.g. `uniswap-v4-position-bootstrap-2026-09-14` |
 | Input | leave empty |
 
-There is nothing to supply: the run reads the chain from its ConfigMap, the pool
-set from the database, and pins its own finalized head. The equivalent CLI call:
+There is nothing to supply: a run reads the chain from its ConfigMap, the
+registry from the database, and pins its own finalized head. The equivalent CLI
+call for the positions:
 
 ```bash
 temporal workflow start --namespace vector \
@@ -1882,17 +1892,28 @@ temporal workflow start --namespace vector \
   --workflow-id uniswap-v4-position-bootstrap-2026-09-14
 ```
 
+And for the posm transfers — same queue, its own type, its own ID:
+
+```bash
+temporal workflow start --namespace vector \
+  --task-queue uniswap-v4-position-bootstrap --type UniswapV4PosmTransferBackfill \
+  --workflow-id uniswap-v4-posm-transfer-backfill-2026-09-14
+```
+
 The Workflow ID is the concurrency guard: Temporal rejects a duplicate while a
-run with that ID is in flight. Follow a run with
+run with that ID is in flight. It is per ID, not per queue, so give the two
+workflow types distinct IDs. Follow a run with
 `kubectl -n vector logs -f deploy/uniswap-v4-position-bootstrap` or in the
 execution's history; it closes with one `uniswap-v4 position bootstrap finished`
-line carrying its counters, and a failed attempt logs the partial ones at Warn.
+or `uniswap-v4 posm transfer backfill finished` line carrying its counters, and a
+failed attempt logs the partial ones at Warn.
 
 The scan knobs are the Deployment's ConfigMap, all optional and defaulted when
 unset: `FINALITY_DEPTH`, `INITIAL_WINDOW`, `MIN_WINDOW`, `MAX_WINDOW`,
-`POSITION_BATCH`. Changing one is a config change and a rollout, not a run
-input. The worker reuses nothing of the indexer's: it has its own ConfigMap, Secret
-(`DATABASE_URL`, `ALCHEMY_API_KEY`) and ServiceAccount.
+`POSITION_BATCH`, `TRANSFER_BATCH`. They are shared by both workflow types
+except the last two, which size one each. Changing one is a config change and a
+rollout, not a run input. The worker reuses nothing of the indexer's: it has its
+own ConfigMap, Secret (`DATABASE_URL`, `ALCHEMY_API_KEY`) and ServiceAccount.
 
 - **Pin semantics.** The whole run snapshots one block: `head - 64` (two epochs,
   comfortably past finalisation). One block for the run is what makes the
@@ -1935,6 +1956,118 @@ input. The worker reuses nothing of the indexer's: it has its own ConfigMap, Sec
   on the same pin appends it again. State-at-height answers are unaffected (the
   canonical version ranks above); a later run pins higher and avoids it.
 
+**Backfilling the posm transfer log (VEC-790).** `UniswapV4PosmTransferBackfill`
+on the same worker replays the PositionManager's whole ERC-721 `Transfer` history
+from `uniswap_v4_position_manager.deploy_block` (21689089 on mainnet) up to a
+pinned finality-safe height, and appends the rows into
+`uniswap_v4_position_nft_transfer`. Start it from the form or the CLI call in
+"How to start a run" above, under its own Workflow ID.
+
+Why it is not optional: for a PositionManager-managed position —
+**2,895 of 4,501 tracked keys on staging, 64% (measured 2026-09-14)** — `uniswap_v4_position.owner` is
+the PositionManager contract, so that transfer table is the only path to a real
+holder. A token appears in it only when it MOVES, so an LP position minted and
+then held emits no `Transfer` at all and forward-only coverage never reaches it.
+Mainnet spreads ~1k transfers/day across ~389k minted tokens, so the share
+landing on the tracked set is small and skewed toward whichever few trade
+actively — months to years before coverage is adequate. And the failure is
+silent: the holder query returns no row, which is exactly its answer for a burned
+or non-existent token.
+
+- **It reads no chain state at all.** Every field is carried by the log: height,
+  timestamp, token id, both parties. That makes it much cheaper than the
+  position bootstrap, and it is why there is no multicall and no pinned read.
+  The `blockTimestamp` is Alchemy's per-log extension, outside the JSON-RPC
+  spec — a run REFUSES a log without one rather than stamping 1970, so a
+  provider that stopped returning it fails the run loudly instead of writing
+  rows outside the band every sibling read prunes chunks with. Verified present
+  and matching `eth_getBlockByNumber` across 21,122 sampled logs spanning the
+  whole history (2026-09-14).
+- **Pin semantics.** The scan stops at `head - FINALITY_DEPTH` and the live
+  indexer owns everything above, so no row is written for a block that can still
+  reorg. The pin is re-read at the end of the scan; because rows commit as the scan
+  goes, that check cannot prevent a bad write — it is how you learn the range was
+  reorged under the run, which past the finality depth means the rows below it want
+  re-checking.
+- **Where `block_version` comes from.** A scanned log carries none, so each row's
+  version is read from the chain's raw S3 archive through
+  `internal/pkg/blockversion` — never from `block_states`, which is the watchers'
+  operational table and retains only 30 days, less than this scan's range. The rule
+  is the maintainer-set highest-version-wins one every replay in this repo uses,
+  and `cmd/backfillers/morpho-vault-backfill/discovery.go` states it in full
+  including its two surprises: deep history is `_1_`-only and one transition window
+  holds identical `_0_`/`_1_` twins, so **a replayed row carrying
+  `block_version = 1` implies no reorg**. Never read a reorg out of `block_version`
+  on a replayed row. A height the archive cannot answer for, or answers for with a
+  different block, stops the run — the archive is what gets repaired, by the
+  republisher or the bulk downloader, before the range is replayed again.
+- **Rerun behaviour is the live path's**, the same terms `morpho-v2-bootstrap`
+  states for its replay. `SaveNFTTransfers` queues the statement the live
+  indexer's transfer phase queues, so a rerun **on the same build** conflicts away
+  and reports `transfersWritten=0`. A rerun **from a different build** re-records
+  the range as parallel provenance rows, because `processing_version` keys on
+  `build_id`: the row count moves by up to one whole posm history while the holder
+  answer does not, since the newest `processing_version` wins the ordering and
+  carries identical content. The backfill is itself a different build from the
+  live indexer, so its first run over a stretch the indexer already covered writes
+  parallel rows there by construction. Run it again whenever you suspect a gap;
+  read `transfersWritten` together with the build, not on its own.
+- **Row volume and runtime.** Mainnet, measured 2026-09-14: **487,908 Transfer
+  logs over 4,286,968 blocks in 68 `eth_getLogs` windows with 25 narrowings**,
+  about two minutes of RPC. A whole-history run still takes **~7.5h**, because
+  the archive reads that stamp `block_version` dominate it: one `ListObjectsV2`
+  per distinct height plus a ranged GET for that height's block hash, ~250k of
+  each. The default `INITIAL_WINDOW` of 500,000 is right — measured against
+  50,000 and 100,000, all three land within 68–75 windows and 106–114 s, because
+  the adaptive window self-tunes to the provider's ~10,000-log response cap
+  within a few narrowings.
+- **It does NOT trip the live indexers' growth tripwire; it has its own.**
+  487,908 rows over ~7.5h is ~18 rows/s, six times
+  [`VectorUniswapV4NFTTransferGrowthHigh`](#vectoruniswapv4nfttransfergrowthhigh)'s
+  budget and sustained past its `for: 6h`, so both
+  `uniswap_v4_position_nft_transfer` rules exclude this worker's `service_name`:
+  its bulk load is neither a growth regime nor evidence the live decoder is
+  healthy. The run still records through the same `dextelemetry`
+  counters, so its rows stay visible on
+  `uniswap_v4_nft_transfer_rows_written_total{service_name="uniswap-v4-position-bootstrap"}`,
+  and
+  [`VectorUniswapV4NFTTransferBackfillGrowthHigh`](#vectoruniswapv4nfttransferbackfillgrowthhigh)
+  watches exactly that series at a threshold a single run cannot reach. Remember
+  both when reconciling the table's row count against the live rate: the count
+  includes one whole posm history per chain backfilled.
+- **A killed attempt resumes near where it stopped.** The run records the chain,
+  the PositionManager registry row, its pin and a `NextBlock` cursor in the
+  activity's heartbeat details, advanced one scan window at a time once that
+  window's rows have committed, so a resumed attempt redoes at most one window —
+  and redoing one writes nothing. It never re-derives a fresh pin. A cursor
+  already past the pin means an earlier attempt finished the scan and only its
+  closing pin check failed; that attempt logs `already scanned to its pin on an
+  earlier attempt` and succeeds rather than failing the run. The record is scoped
+  to the PositionManager as well as the chain, so a correcting registry version
+  landing mid-run makes the next attempt rescan from the deploy block under the
+  new surrogate id instead of inheriting a cursor that would skip everything below
+  it. Timeouts are 12h `StartToClose`, 75h `ScheduleToClose`, 10 attempts, 60 s
+  heartbeat. **Each pod roll spends one attempt**: the activity dies with its
+  worker, Temporal notices 180 s later (heartbeat × 3), and the next attempt picks
+  up the recorded cursor — so a deploy, a spot reclaim and a drain in one afternoon
+  cost three of the ten and no rescanning beyond the window that was in flight.
+  As for the position run, heartbeat details belong to one activity execution, so a
+  run started again by hand rescans from the deploy block, which is safe and costs
+  RPC time plus an archive read per height. That is the reason the attempt budget
+  is 10: exhausting it is what turns a resumable interruption into a full rescan.
+- **A run that scans the whole history and decodes nothing logs a Warn**, not an
+  error. On a chain with no posm activity yet that is the truth; on mainnet it is
+  what a wrong `uniswap_v4_position_manager` protocol address looks like (the
+  address is the FK'd `protocol` row's, never a column here). The line names both
+  readings. A *resumed* attempt covers only a tail, so it never raises this — a
+  quiet tail says nothing about the address.
+- **An unseeded `deploy_block` refuses the run**, naming the chain: scanning from
+  genesis is not a sensible fallback. It refuses the RUN, not the worker: the
+  workflow type still registers and the pod logs the reason at Error on boot, so
+  `UniswapV4PositionBootstrap` stays startable. The live indexer never reads that
+  column either, so it boots fine — fix it by appending a correcting registry
+  version ([Fixing a bad registry row](#fixing-a-bad-registry-row)).
+
 **Tables:** `uniswap_v4_pool_state`, `uniswap_v4_swap`,
 `uniswap_v4_liquidity_event`, `uniswap_v4_tick`, `uniswap_v4_pool_event`,
 `uniswap_v4_position`, `uniswap_v4_position_nft_transfer`.
@@ -1953,9 +2086,13 @@ the ERC-721 PositionManager, and its address comes through `protocol_id` too.
 the PositionManager contract itself — never the person. The holder lives in
 `uniswap_v4_position_nft_transfer`, one row per ERC-721 `Transfer` log, and the
 two join on `uniswap_v4_position.salt = bytes32(token_id)` (PositionManager
-passes the token id as the salt). Coverage starts at the block the indexer began
-running, not at the PositionManager's deploy block; a historical backfill of the
-transfer log is a separate job. The holder at a height is a plain SELECT:
+passes the token id as the salt). The live indexer's coverage starts at the block
+it began running; everything below that comes from the
+`UniswapV4PosmTransferBackfill` run described under "Backfilling the posm
+transfer log" below, so on a chain where that has not been run the holder query
+answers "no row" for any token whose last move predates go-live — which is the
+same answer it gives for a burned token. The holder at a height is a plain
+SELECT:
 
 ```sql
 -- Who held posm token 388720 at block 25873334 on chain 1?
@@ -2944,14 +3081,24 @@ nothing (every INSERT conflicts away) still keeps it alive;
 `uniswap_v4_nft_transfer_rows_written_total` is the growth counter.
 
 **Zero, not absent.** Unlike its siblings in this group, the rule requires the
-counter's series to exist. `dextelemetry` seeds it at construction, so it is
-present from the boot of any build carrying the posm decoder and absent from one
-that predates it. That distinction is load-bearing: the alert rules sync to Mimir
+counter's series to exist. The indexer's `dextelemetry` set seeds it at
+construction, so it is present from the boot of any build carrying the posm
+decoder and absent from one that predates it. That distinction is load-bearing: the alert rules sync to Mimir
 the moment a PR merges, while the image reaches the cluster minutes later, and
 the blocks-processed terms are satisfied by the old build throughout. Written as
 `unless … > 0` this fired on every rollout of the feature rather than only when
 decoding was broken. A pod that dies before exporting anything is
 [`VectorUniswapV4IndexerDown`](#vectoruniswapv4indexerdown)'s case, not this one.
+
+**The live indexers only.** The selector excludes
+`service_name="uniswap-v4-position-bootstrap"`, whose posm transfer backfill moves
+this same counter under the same `chain`. A run would lift the sum off zero on the
+live indexer's behalf and hold this alert quiet for the run plus the 6h the window
+remembers it, precisely while a wrong PositionManager address in the LIVE path went
+unnoticed. The exclusion also keeps the existence requirement above the live
+indexer's own, so the backfill worker's series can never stand in for an indexer
+that carries no decoder yet. A backfill running, or merely deployed, changes
+nothing about what this alert says.
 
 `uniswap_v4_position_nft_transfer` is the only source of posm token holders, so
 while this fires "who holds token T" answers with stale data and no query can
@@ -3079,6 +3226,14 @@ ERC-721 `Transfer` — have run above 250k/day for six hours. The counter is
 a redelivered range whose INSERTs all conflict away adds nothing, so the rate is
 real table growth.
 
+**The rule reads the live indexers only.** It excludes
+`service_name="uniswap-v4-position-bootstrap"`, because that worker hosts the
+VEC-790 posm transfer backfill, and one hand-started run bulk-loads a chain's
+whole posm history — 487,908 rows on mainnet over ~7.5h, ~18 rows/s, six times
+the budget — for a load that is bounded, known, and not a growth regime.
+So a firing rule is never the backfill, and the row count in step 1 will exceed
+what this rate alone implies by one posm history per chain backfilled.
+
 **Threshold derivation** (mirrored in the rule comment):
 
 | | |
@@ -3109,14 +3264,19 @@ spans chains).
    GROUP BY 1 ORDER BY 1;
    ```
 
-2. **Is a backfill running?** The ARCT-385 historical backfill from the
-   PositionManager's deploy block (`uniswap_v4_position_manager.deploy_block`)
-   writes years of transfers in hours. It moves this rule only if it records
-   through `dextelemetry.RecordNFTTransferRows`, as the live indexer does —
-   today nothing but the live indexer does, so a backfill built without that
-   grows the table while this rule stays flat, and step 1's `created_at`
-   histogram is where its rows show up. If it does record, confirm the run, let
-   it finish, expect the alert to clear itself.
+2. **Separate the backfill's rows from the live rate.** The backfill
+   (`UniswapV4PosmTransferBackfill`) does record through
+   `dextelemetry.RecordNFTTransferRows`, so its rows are visible — they are just
+   excluded from this rule. Split the two to see what step 1's total is made of:
+
+   ```promql
+   sum by (service_name) (
+     rate(uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector"}[6h])
+   )
+   ```
+
+   If the live indexer's own term is what is over budget, this is a real regime
+   change; go to step 3. A firing rule cannot have been caused by the backfill.
 
 3. **What changed.** Another chain's `uniswap-v4-indexer` now writing into the
    same table, or a traffic regime change on an existing one:
@@ -3208,6 +3368,97 @@ sum(rate(uniswap_v4_nft_transfer_rows_written_total[6h])) <= 2.9
 ```
 
 After a conversion the rule no longer describes the table — remove it in that PR.
+
+---
+
+## VectorUniswapV4NFTTransferBackfillGrowthHigh
+
+**Severity:** warning · **For:** 2h
+
+The companion to
+[`VectorUniswapV4NFTTransferGrowthHigh`](#vectoruniswapv4nfttransfergrowthhigh),
+covering the one writer that rule excludes: the `UniswapV4PosmTransferBackfill`
+runs on `uniswap-v4-position-bootstrap`. Between them the two rules watch every
+writer of `uniswap_v4_position_nft_transfer`, which a plain table owes
+(`stl-verify/db/migrations/AGENTS.md`).
+
+### What it means
+
+The backfill has written above 3M rows/day into
+`uniswap_v4_position_nft_transfer` for two hours. Nothing is broken — this is a
+volume signal on a plain table, not a fault.
+
+Why the threshold is so much higher than the live rule's 2.9 rows/s: the two
+measure different things. A live indexer's rate is a *regime* that continues; the
+backfill's is a **bounded burst that ends**. One chain's whole posm history is
+~490k rows (487,908 on mainnet, 2026-09) and takes ~7.5h, which is 5.7 rows/s
+averaged over the 24h window. A rerun on the same build adds close to nothing,
+because the insert conflicts away and this counter counts rows *persisted* — so
+**a backfill looping on one build cannot fire this**. A rerun from a new build
+re-records the range, which is one history's worth per run and still well inside
+the budget; several of those in a day is what the threshold is set for.
+
+| | |
+|---|---|
+| One mainnet posm history | ~490k rows → 5.7 rows/s over 24h |
+| Alert threshold | 3M rows/day = **34.7 rows/s**, about 6 histories in a day |
+| Plain-table comfort ceiling | ~100M rows (shared with the live rule) |
+
+### First checks
+
+1. **Which chains are being backfilled, and how much each contributed.**
+   `created_at` is the insertion time, so it is what shows where the growth
+   landed — a backfill writes rows whose `block_timestamp` is years old:
+
+   ```sql
+   SELECT m.chain_id,
+          date_trunc('hour', t.created_at) AS hour,
+          count(*)                         AS rows_inserted
+   FROM uniswap_v4_position_nft_transfer t
+   JOIN uniswap_v4_position_manager m ON m.id = t.position_manager_id
+   WHERE t.created_at > now() - INTERVAL '2 days'
+   GROUP BY 1, 2 ORDER BY 2, 1;
+   ```
+
+2. **Confirm the runs are deliberate.** Temporal UI, namespace `vector`, task
+   queue `uniswap-v4-position-bootstrap`, workflow type
+   `UniswapV4PosmTransferBackfill`. A run closes with one
+   `uniswap-v4 posm transfer backfill finished` line carrying `transfersWritten`.
+   Several chains being seeded in one day is the expected cause.
+
+3. **The real row count**, which is what the conversion decision turns on:
+
+   ```sql
+   SELECT n_live_tup, pg_size_pretty(pg_total_relation_size(relid)) AS total_size
+   FROM pg_stat_user_tables
+   WHERE relname = 'uniswap_v4_position_nft_transfer';
+   ```
+
+### Common causes
+
+- **Several chains backfilled the same day** — the expected cause. Let the runs
+  finish; the rate decays out of the 24h window on its own.
+- **A chain with far more posm history than mainnet.** Legitimate, and exactly
+  the measurement the plain-table decision was deferred to: take the row count
+  from step 3 to the conversion path below.
+- **A rerun from a different `build_id`** where you expected a no-op. Every deploy
+  is a new build, and a rerun on one re-records the whole history as new
+  `processing_version` rows: the row count moves, the holder answers do not. Only a
+  same-build rerun conflicts away to `transfersWritten=0`.
+
+### Remediation
+
+Nothing to remediate unless step 3's row count is approaching ~100M, in which
+case the conversion is the one in
+[`VectorUniswapV4NFTTransferGrowthHigh`](#remediation--converting-to-a-hypertable).
+Its caveat applies unchanged: **no tiering policy**, because the holder read has
+no lower bound and `timescaledb.enable_tiered_reads` is off.
+
+### Verify recovery
+
+The rule clears once the 24h window no longer holds the burst — up to a day after
+the last run finishes. `sum by (service_name) (rate(uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector"}[24h]))`
+splits the backfill's contribution from the live indexers'.
 
 ---
 

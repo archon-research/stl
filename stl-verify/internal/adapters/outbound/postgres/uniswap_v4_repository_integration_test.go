@@ -3189,6 +3189,197 @@ func TestUniswapV4Repository_NFTTransferHolderSurvivesAPositionManagerCorrection
 		}
 	})
 
+	if correctedID := appendUniswapV4PositionManagerVersion(t, ctx); correctedID == managerID {
+		t.Fatalf("the correction reused surrogate id %d, so this test proves nothing", correctedID)
+	}
+
+	if got := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, tokenID, blockNumber); got != uniswapV4MintFixtureTo {
+		t.Errorf("holder after a registry correction = %s, want %s: the read is keyed on one surrogate id instead of the chain",
+			got, uniswapV4MintFixtureTo)
+	}
+}
+
+func TestUniswapV4Repository_SaveNFTTransfers_ARerunOnTheSameBuildWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	const blockNumber = int64(25003000)
+	managerID, transfers := newUniswapV4NFTTransferBlock(t, ctx, 0x5a, blockNumber, 3)
+	first, err := writeNFTTransfersInTx(ctx, t, testUniswapV4BuildID, transfers)
+	if err != nil {
+		t.Fatalf("seeding the covered block: %v", err)
+	}
+	if first != 3 {
+		t.Fatalf("the first write landed %d rows, want 3: the rerun would prove nothing", first)
+	}
+
+	rerun, err := writeNFTTransfersInTx(ctx, t, testUniswapV4BuildID, transfers)
+
+	if err != nil {
+		t.Fatalf("SaveNFTTransfers: %v", err)
+	}
+	if rerun != 0 {
+		t.Errorf("the rerun reported %d rows written, want 0", rerun)
+	}
+	if rowCount := countUniswapV4NFTTransferRows(t, ctx, managerID, blockNumber); rowCount != 3 {
+		t.Errorf("the block holds %d rows, want 3: the rerun duplicated a log site", rowCount)
+	}
+}
+
+// processing_version keys on build_id, so a rerun from another build is a second
+// provenance record of the same logs rather than a correction of them.
+func TestUniswapV4Repository_SaveNFTTransfers_ARerunFromAnotherBuildRecordsTheRangeAgain(t *testing.T) {
+	ctx := context.Background()
+	const blockNumber = int64(25004000)
+	managerID, transfers := newUniswapV4NFTTransferBlock(t, ctx, 0x5b, blockNumber, 3)
+	if _, err := writeNFTTransfersInTx(ctx, t, testUniswapV4BuildID, transfers); err != nil {
+		t.Fatalf("seeding the covered block: %v", err)
+	}
+
+	rerun, err := writeNFTTransfersInTx(ctx, t, testUniswapV4RebuildID, transfers)
+
+	if err != nil {
+		t.Fatalf("SaveNFTTransfers: %v", err)
+	}
+	if rerun != 3 {
+		t.Errorf("the rerun reported %d rows written, want 3", rerun)
+	}
+	if rowCount := countUniswapV4NFTTransferRows(t, ctx, managerID, blockNumber); rowCount != 6 {
+		t.Errorf("the block holds %d rows, want 6: one set per build", rowCount)
+	}
+	got := uniswapV4NFTTransferRowsAt(t, ctx, managerID, blockNumber, 0)
+	want := []uniswapV4NFTTransferProvenance{
+		{processingVersion: 0, buildID: int(testUniswapV4BuildID), to: uniswapV4MintFixtureTo},
+		{processingVersion: 1, buildID: int(testUniswapV4RebuildID), to: uniswapV4MintFixtureTo},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("the log site holds %+v, want %+v", got, want)
+	}
+}
+
+// The two rows carry identical content, so the newest processing_version winning
+// the holder ordering cannot change the answer it wins with.
+func TestUniswapV4Repository_SaveNFTTransfers_ARerunFromAnotherBuildLeavesTheHolderUnchanged(t *testing.T) {
+	ctx := context.Background()
+	const blockNumber = int64(25005000)
+	managerID, transfers := newUniswapV4NFTTransferBlock(t, ctx, 0x5c, blockNumber, 1)
+	if _, err := writeNFTTransfersInTx(ctx, t, testUniswapV4BuildID, transfers); err != nil {
+		t.Fatalf("seeding the covered block: %v", err)
+	}
+	tokenID := transfers[0].TokenID.Int64()
+	before := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, tokenID, blockNumber)
+
+	if _, err := writeNFTTransfersInTx(ctx, t, testUniswapV4RebuildID, transfers); err != nil {
+		t.Fatalf("the rerun from another build: %v", err)
+	}
+
+	if rowCount := countUniswapV4NFTTransferRows(t, ctx, managerID, blockNumber); rowCount != 2 {
+		t.Fatalf("the block holds %d rows, want 2: no parallel row landed to answer alongside", rowCount)
+	}
+	if after := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, tokenID, blockNumber); after != before {
+		t.Errorf("holder of token %d went %s -> %s across a rerun from another build", tokenID, before, after)
+	}
+}
+
+func newUniswapV4NFTTransferBlock(
+	t *testing.T,
+	ctx context.Context,
+	discriminator byte,
+	blockNumber int64,
+	logs int,
+) (int64, []*entity.UniswapV4PositionNFTTransfer) {
+	t.Helper()
+	seedUniswapV4RepoTestPool(t, ctx, discriminator)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	transfers := make([]*entity.UniswapV4PositionNFTTransfer, 0, logs)
+	for i := range logs {
+		transfer := &entity.UniswapV4PositionNFTTransfer{
+			PositionManagerID: managerID,
+			TokenID:           big.NewInt(int64(discriminator)*1000 + int64(i)),
+			BlockNumber:       blockNumber,
+			BlockTimestamp:    uniswapV4TestBlockTime(blockNumber),
+			TxHash:            uniswapV4MintFixtureTx,
+			LogIndex:          i,
+			From:              common.Address{},
+			To:                uniswapV4MintFixtureTo,
+		}
+		if err := transfer.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		transfers = append(transfers, transfer)
+	}
+	return managerID, transfers
+}
+
+func countUniswapV4NFTTransferRows(t *testing.T, ctx context.Context, managerID, blockNumber int64) int {
+	t.Helper()
+	var rowCount int
+	if err := uniswapV4TestPool.QueryRow(ctx, `
+		SELECT count(*) FROM uniswap_v4_position_nft_transfer
+		WHERE position_manager_id = $1 AND block_number = $2`, managerID, blockNumber).Scan(&rowCount); err != nil {
+		t.Fatalf("counting nft transfer rows: %v", err)
+	}
+	return rowCount
+}
+
+// uniswapV4NFTTransferProvenance is what separates two rows of one log site.
+type uniswapV4NFTTransferProvenance struct {
+	processingVersion int
+	buildID           int
+	to                common.Address
+}
+
+func uniswapV4NFTTransferRowsAt(t *testing.T, ctx context.Context, managerID, blockNumber int64, logIndex int) []uniswapV4NFTTransferProvenance {
+	t.Helper()
+	rows, err := uniswapV4TestPool.Query(ctx, `
+		SELECT processing_version, build_id, to_address
+		FROM uniswap_v4_position_nft_transfer
+		WHERE position_manager_id = $1 AND block_number = $2 AND log_index = $3
+		ORDER BY processing_version`, managerID, blockNumber, logIndex)
+	if err != nil {
+		t.Fatalf("reading the log site's rows: %v", err)
+	}
+	defer rows.Close()
+
+	var got []uniswapV4NFTTransferProvenance
+	for rows.Next() {
+		var row uniswapV4NFTTransferProvenance
+		var to []byte
+		if err := rows.Scan(&row.processingVersion, &row.buildID, &to); err != nil {
+			t.Fatalf("scanning the log site's rows: %v", err)
+		}
+		row.to = common.BytesToAddress(to)
+		got = append(got, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading the log site's rows: %v", err)
+	}
+	return got
+}
+
+func writeNFTTransfersInTx(
+	ctx context.Context,
+	t *testing.T,
+	buildID buildregistry.BuildID,
+	transfers []*entity.UniswapV4PositionNFTTransfer,
+) (int64, error) {
+	t.Helper()
+	tx, err := uniswapV4TestPool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	written, err := NewUniswapV4Repository(uniswapV4TestPool, buildID).SaveNFTTransfers(ctx, tx, transfers)
+	if err != nil {
+		return 0, err
+	}
+	return written, tx.Commit(ctx)
+}
+
+// appendUniswapV4PositionManagerVersion supersedes the chain's current posm row,
+// which is how the runbook has an operator correct a bad registry row.
+func appendUniswapV4PositionManagerVersion(t *testing.T, ctx context.Context) int64 {
+	t.Helper()
 	var correctedID int64
 	if err := uniswapV4TestPool.QueryRow(ctx, `
 		INSERT INTO uniswap_v4_position_manager (chain_id, protocol_id, deploy_block, build_id)
@@ -3200,12 +3391,5 @@ func TestUniswapV4Repository_NFTTransferHolderSurvivesAPositionManagerCorrection
 		RETURNING id`, uniswapV4RepoSaveChainID).Scan(&correctedID); err != nil {
 		t.Fatalf("appending a corrected position manager version: %v", err)
 	}
-	if correctedID == managerID {
-		t.Fatalf("the correction reused surrogate id %d, so this test proves nothing", correctedID)
-	}
-
-	if got := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, tokenID, blockNumber); got != uniswapV4MintFixtureTo {
-		t.Errorf("holder after a registry correction = %s, want %s: the read is keyed on one surrogate id instead of the chain",
-			got, uniswapV4MintFixtureTo)
-	}
+	return correctedID
 }
