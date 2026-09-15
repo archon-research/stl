@@ -546,3 +546,71 @@ func TestMaterializeSkyPrimeDebtForwardsTheWriterRun(t *testing.T) {
 		}
 	}
 }
+
+// position_sky_prime_debt_since is the view's SELECT with the bound inside the prime_debt scan (VEC-566).
+// It emits exactly the view's rows when the bound precedes everything, and a tail bound opens only the
+// tail's chunks, where the same bound outside the view -- above its DISTINCT ON -- opens every chunk,
+// the control that says the placement matters.
+func TestSkyPrimeDebtBoundedSourceMatchesTheViewAndPrunes(t *testing.T) {
+	ctx, pool, _ := seedSkyPrimeDebt(t)
+
+	var drift, rows int
+	if err := pool.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM (
+		          (TABLE position_sky_prime_debt EXCEPT ALL SELECT * FROM position_sky_prime_debt_since('-infinity'))
+		          UNION ALL
+		          (SELECT * FROM position_sky_prime_debt_since('-infinity') EXCEPT ALL TABLE position_sky_prime_debt)) d),
+		       (SELECT count(*) FROM position_sky_prime_debt)`).Scan(&drift, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows == 0 || drift != 0 {
+		t.Fatalf("view rows=%d, rows differing from the bounded source at -infinity=%d; want >0 and 0", rows, drift)
+	}
+	var after int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_sky_prime_debt_since('infinity')`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != 0 {
+		t.Fatalf("a bound after every snapshot still returned %d rows", after)
+	}
+
+	// Ten more days of snapshots for one prime, one per day, on the 1-day-chunked source.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO prime_debt (prime_id, protocol_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id)
+		SELECT s.prime_id, s.protocol_id, s.ilk_name, d, 900000 + d, 0, '2026-03-01T12:00:00Z'::timestamptz + (d - 1) * interval '1 day', 0, 0
+		FROM generate_series(1, 10) d, (SELECT prime_id, protocol_id, ilk_name FROM prime_debt ORDER BY 1, 2, 3 LIMIT 1) s`); err != nil {
+		t.Fatal(err)
+	}
+	all := skyChunkScans(t, ctx, pool, `SELECT * FROM position_sky_prime_debt`)
+	outside := skyChunkScans(t, ctx, pool, `SELECT * FROM position_sky_prime_debt WHERE block_timestamp > '2026-03-09T00:00:00Z'::timestamptz`)
+	inside := skyChunkScans(t, ctx, pool, `SELECT * FROM position_sky_prime_debt_since('2026-03-09T00:00:00Z'::timestamptz)`)
+	t.Logf("chunk scans: unbounded %d, bound outside the view %d, bound inside the source %d", all, outside, inside)
+	if all < 10 {
+		t.Fatalf("the unbounded view plans %d chunk scans, want at least the 10 seeded days", all)
+	}
+	if outside != all {
+		t.Errorf("a bound outside the view planned %d chunk scans against %d unbounded; the control no longer shows the DISTINCT ON blocking pushdown", outside, all)
+	}
+	if inside > 3 {
+		t.Errorf("a bound inside the source planned %d chunk scans, want at most 3", inside)
+	}
+}
+
+// skyChunkScans counts the hypertable chunks a statement's plan reads: EXPLAIN names each as _hyper_N_M_chunk.
+func skyChunkScans(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string) int {
+	t.Helper()
+	rows, err := pool.Query(ctx, "EXPLAIN (COSTS OFF) "+sql)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	plan := ""
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		plan += line + "\n"
+	}
+	return strings.Count(plan, "_hyper_")
+}

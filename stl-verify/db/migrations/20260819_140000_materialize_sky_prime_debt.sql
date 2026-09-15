@@ -56,6 +56,35 @@ JOIN prime    pr ON pr.id = o.prime_id;
 
 COMMENT ON VIEW position_sky_prime_debt IS '[Operational] VEC-406 projection: Sky prime debt as native position rows, one position per (prime, Vat, ilk) and one row per observation; instrument_key = native ilk_name, holder_id = the prime vault address, protocol_id = the Vat row stamped on the snapshot, deal_type BORROW. block_timestamp is prime_debt.synced_at, the indexer''s receipt time, since prime_debt carries no block time. GRAIN LIMIT: this view keys finer than prime_debt can store — its unique constraint is (prime_id, block_number, block_version, processing_version, synced_at), with neither protocol_id nor ilk_name, so a second Vat or a second ilk per prime at one block and synced_at is dropped at INSERT by ON CONFLICT DO NOTHING and never reaches this view. Single-Vat, single-ilk-per-prime is an assumption here, not an invariant the table enforces; widening that constraint is the fix when either arrives. Emits the shared position_state column contract consumed by materialize_position_projection(); closure is applied there.';
 
+-- Bounded source for a windowed run (VEC-566): the view's SELECT with the bound INSIDE the scan of
+-- prime_debt on synced_at, its partition column -- a bound outside the view does not pass the
+-- DISTINCT ON. Single STABLE SELECT, so it inlines and a literal argument is constified at plan time.
+CREATE OR REPLACE FUNCTION position_sky_prime_debt_since(p_since timestamptz)
+    RETURNS SETOF position_sky_prime_debt
+    LANGUAGE sql STABLE AS $fn$
+SELECT p.chain_id,
+       o.protocol_id,
+       o.ilk_name,
+       encode(pr.vault_address, 'hex'),
+       o.debt_wad,
+       'BORROW'::text,
+       o.block_number, o.block_version, o.processing_version,
+       o.synced_at
+FROM (
+    SELECT DISTINCT ON (pd.prime_id, pd.protocol_id, pd.ilk_name, pd.block_number, pd.block_version, pd.processing_version)
+           pd.prime_id, pd.protocol_id, pd.ilk_name, pd.debt_wad,
+           pd.block_number, pd.block_version, pd.processing_version, pd.synced_at
+    FROM prime_debt pd
+    WHERE pd.synced_at > p_since
+    ORDER BY pd.prime_id, pd.protocol_id, pd.ilk_name, pd.block_number, pd.block_version, pd.processing_version,
+             pd.synced_at
+) o
+JOIN protocol p  ON p.id  = o.protocol_id
+JOIN prime    pr ON pr.id = o.prime_id;
+$fn$;
+
+COMMENT ON FUNCTION position_sky_prime_debt_since(timestamptz) IS '[Operational] VEC-566 bounded source of position_sky_prime_debt: the same rows as the view for snapshots with prime_debt.synced_at after p_since, the bound inside the source scan so a windowed materialize_position_projection() run opens only the chunks after it. Must stay the view''s SELECT plus that one predicate.';
+
 -- Names every snapshot the view cannot resolve, then delegates to the shared materializer.
 -- Dropped rather than replaced: keeping the old argument list beside the new one makes a
 -- call that omits the run ambiguous, as it did for the spine.
