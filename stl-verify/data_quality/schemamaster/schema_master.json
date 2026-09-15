@@ -1761,16 +1761,16 @@
       "type": "config",
       "owner": "pricing"
     },
+    "position_daily_observation": {
+      "type": "derived",
+      "owner": "prime"
+    },
     "position_projection_refusal": {
       "type": "infrastructure",
       "owner": "prime"
     },
     "position_projection_run": {
       "type": "infrastructure",
-      "owner": "prime"
-    },
-    "position_daily_observation": {
-      "type": "derived",
       "owner": "prime"
     },
     "position_state": {
