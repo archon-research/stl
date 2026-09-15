@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import time
+from collections.abc import Awaitable, Callable
 
 import asyncpg
 from sqlalchemy import event, text
@@ -15,6 +17,13 @@ logger = logging.getLogger(__name__)
 # the deadline is what has to fit a given startup probe's budget.
 _INITIAL_CONNECT_BACKOFF_SECONDS = 0.5
 _MAX_CONNECT_BACKOFF_SECONDS = 5.0
+
+# Ceiling on one connection attempt. asyncpg's own default is 60s, which is long
+# enough that a single black-holed attempt outlives the budget a startup probe
+# allows — so this is what makes wait_for_database's deadline a ceiling on the
+# whole wait rather than only on the sleeps between attempts. It also bounds a
+# runtime checkout, where 60s of hanging would hold a request's worker.
+_CONNECT_TIMEOUT_SECONDS = 10.0
 
 # The SQLSTATE class-25 errors that mean the server-side backend is gone
 # (pooler shed it mid-transaction, or the server timed it out) rather than the
@@ -37,6 +46,7 @@ def create_db_engine(
     pool_timeout: float | None = None,
     pool_recycle: int | None = None,
     statement_cache_size: int | None = None,
+    connect_timeout: float = _CONNECT_TIMEOUT_SECONDS,
 ) -> AsyncEngine:
     """The one engine factory for every process, keyed by an explicit URL.
 
@@ -46,7 +56,8 @@ def create_db_engine(
     silently fall back to .env.default's localhost URL) and keep SQLAlchemy's
     pool defaults — a tick holds few connections. pool_pre_ping is
     unconditional: worker ticks can be hours apart, far past the pooler's idle
-    timeout. The caller owns the engine's lifecycle.
+    timeout, and so is the connect timeout (see _CONNECT_TIMEOUT_SECONDS). The
+    caller owns the engine's lifecycle.
     """
     pool_kwargs: dict = {}
     if pool_size is not None:
@@ -57,12 +68,12 @@ def create_db_engine(
         pool_kwargs["pool_timeout"] = pool_timeout
     if pool_recycle is not None:
         pool_kwargs["pool_recycle"] = pool_recycle
+    connect_args: dict = {"timeout": connect_timeout}
     if statement_cache_size is not None:
         # One value feeds both caches; see Settings.db_statement_cache_size.
-        pool_kwargs["connect_args"] = {
-            "statement_cache_size": statement_cache_size,
-            "prepared_statement_cache_size": statement_cache_size,
-        }
+        connect_args["statement_cache_size"] = statement_cache_size
+        connect_args["prepared_statement_cache_size"] = statement_cache_size
+    pool_kwargs["connect_args"] = connect_args
     # hide_parameters: a StatementError renders its bind parameters into its own
     # string, and on a prime-filtered query those are the caller's whole vault
     # allow-list, which the error path then logs. Use _loggable_params instead.
@@ -107,6 +118,8 @@ async def wait_for_database(
     deadline_seconds: float,
     initial_backoff_seconds: float = _INITIAL_CONNECT_BACKOFF_SECONDS,
     max_backoff_seconds: float = _MAX_CONNECT_BACKOFF_SECONDS,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
     """Open the process's first connection, retrying while the host is unreachable.
 
@@ -118,15 +131,17 @@ async def wait_for_database(
     rollout stalled long after resolution recovers. Retrying inside one
     container holds it across the outage instead.
 
-    The deadline belongs inside the startup probe's budget (see
-    ``k8s/base/python-api/deployment.yaml``) so a pod that cannot reach its
-    database is killed on the probe's verdict, with this function's own error in
-    the log, rather than mid-retry. Failures above the socket layer — a rejected
-    password, a database that does not exist — are configuration and raise on
-    the first attempt.
+    The deadline plus one ``_CONNECT_TIMEOUT_SECONDS`` belongs inside the startup
+    probe's budget (see ``k8s/base/python-api/deployment.yaml``) so a pod that
+    cannot reach its database is killed on the probe's verdict, with this
+    function's own error in the log, rather than mid-retry. Failures above the
+    socket layer — a rejected password, a database that does not exist — are
+    configuration and raise on the first attempt.
+
+    ``sleep`` and ``monotonic`` are injectable so a test can drive the schedule
+    without patching the ``asyncio`` module for the whole process.
     """
-    loop = asyncio.get_running_loop()
-    give_up_at = loop.time() + deadline_seconds
+    give_up_at = monotonic() + deadline_seconds
     backoff = initial_backoff_seconds
     attempt = 1
     while True:
@@ -136,7 +151,7 @@ async def wait_for_database(
         except Exception as error:
             if not _is_unreachable_database(error):
                 raise
-            remaining = give_up_at - loop.time()
+            remaining = give_up_at - monotonic()
             if remaining <= 0:
                 logger.error(
                     "database unreachable after %d attempt(s) over %.1fs, giving up: %s",
@@ -155,7 +170,7 @@ async def wait_for_database(
                 delay,
                 error,
             )
-            await asyncio.sleep(delay)
+            await sleep(delay)
             backoff = min(backoff * 2, max_backoff_seconds)
             attempt += 1
         else:

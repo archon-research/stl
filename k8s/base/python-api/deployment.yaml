@@ -71,8 +71,11 @@ spec:
             limits:
               cpu: "200m"
               memory: "256Mi"
-          # 150s, held above DB_CONNECT_RETRY_DEADLINE_SECONDS (120s) so a pod whose
-          # database never resolves logs its own connect error before this kills it.
+          # 150s, held above the worst case startup can take to give up on an
+          # unreachable database — DB_CONNECT_RETRY_DEADLINE_SECONDS (120s, set in
+          # each overlay's python-api-config) plus the 10s that bounds the final
+          # connect attempt — so the pod logs its own connect error, not a kubelet
+          # kill mid-retry.
           startupProbe:
             httpGet:
               path: /v1/status
