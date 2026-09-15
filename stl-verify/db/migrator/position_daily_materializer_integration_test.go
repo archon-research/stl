@@ -9,11 +9,28 @@ import (
 	"testing"
 )
 
-// The rest of the position_daily_observation suite writes to the spine directly, which exercises the trigger but
-// not the write path production actually uses. These drive the table through
+// The rest of the position_daily suite writes to the spine directly, which exercises the crystallizer but
+// not the write path production actually uses. These drive it through
 // materialize_position_projection, where the batch is an INSERT ... WHERE NOT EXISTS ... ON CONFLICT
-// DO NOTHING whose transition table is what the statement trigger reads. Reads go through
-// position_daily, the newest appended row per (position, date).
+// DO NOTHING. Reads go through the position_daily view, which is that day's winning row.
+
+// mppDaily materializes a batch and then crystallizes, which is the production sequence: the
+// materializer appends to the spine continuously, and the scheduled job writes the settled days.
+// Every date in this file is in the past, so all of them are settled.
+func (f *psFixture) mppDaily(t *testing.T, name, valuesBody, reason string) int {
+	t.Helper()
+	n := f.mppN(t, name, valuesBody, reason)
+	f.crystallize(t)
+	return n
+}
+
+// crystallize runs the only writer of position_daily_observation.
+func (f *psFixture) crystallize(t *testing.T) {
+	t.Helper()
+	if _, err := f.pool.Exec(f.ctx, `CALL crystallize_position_daily()`); err != nil {
+		t.Fatalf("crystallize: %v", err)
+	}
+}
 
 // mppRow is one contract-shaped projection row with its own block_timestamp, which the package's
 // shared row() helper pins to a single date.
@@ -98,9 +115,9 @@ func cachedDays(t *testing.T, f *psFixture, ik string) []string {
 }
 
 // cacheDisagreement reports every position where position_current is not the position_daily row on
-// that position's latest observed date. The two caches read the same spine through two triggers on the same
-// statement, and their agreement is what the block_time_inverts_height refusal exists to protect: they
-// order by block and date by timestamp, so an inverted pair makes them name different winners.
+// that position's latest observed date. Both derive from the same spine, and their agreement is what the
+// block_time_inverts_height refusal exists to protect: one orders by block and the other groups by date,
+// so an inverted pair makes them name different winners.
 func cacheDisagreement(t *testing.T, f *psFixture) []string {
 	t.Helper()
 	rows, err := f.pool.Query(f.ctx, `
@@ -160,7 +177,7 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 			mppRow("mpp-b", 25, 550, 1, 0, "2026-04-01T02:00:00Z", "LOAN"),
 			mppRow("mpp-b", 30, 550, 1, 1, "2026-04-01T02:00:00Z", "BORROW"),
 		)
-		if n := f.mppN(t, "pv_daily_argmax", body, "a multi-position batch"); n != 6 {
+		if n := f.mppDaily(t, "pv_daily_argmax", body, "a multi-position batch"); n != 6 {
 			t.Fatalf("the materializer appended %d observations, want 6", n)
 		}
 		if got := cachedDays(t, f, "mpp-a"); len(got) != 2 || got[0] != "2026-04-01=150" || got[1] != "2026-04-02=175" {
@@ -183,7 +200,7 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 			mppRow("mpp-inv", 11, 900, 0, 0, "2026-04-09T00:00:00Z", "LOAN"),
 			mppRow("mpp-peer", 44, 850, 0, 0, "2026-04-10T12:00:00Z", "LOAN"),
 		)
-		if n := f.mppN(t, "pv_daily_inverted", body, "an inverted pair plus a peer"); n != 1 {
+		if n := f.mppDaily(t, "pv_daily_inverted", body, "an inverted pair plus a peer"); n != 1 {
 			t.Errorf("the materializer appended %d observations, want 1: the peer lands, the inverted position is withheld", n)
 		}
 		var refusals int
@@ -211,12 +228,12 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 	// if it did, it would hold a number that exists in no observation of history.
 	t.Run("a drift re-emission does not move the cache", func(t *testing.T) {
 		const ik = "mpp-drift"
-		if n := f.mppN(t, "pv_daily_drift", valuesOf(mppRow(ik, 70, 1000, 0, 0, "2026-04-20T00:00:00Z", "LOAN")),
+		if n := f.mppDaily(t, "pv_daily_drift", valuesOf(mppRow(ik, 70, 1000, 0, 0, "2026-04-20T00:00:00Z", "LOAN")),
 			"the stored observation"); n != 1 {
 			t.Fatalf("seeding appended %d, want 1", n)
 		}
 		// Same coordinate, different quantity and deal_type.
-		if n := f.mppN(t, "pv_daily_drift", valuesOf(mppRow(ik, 99, 1000, 0, 0, "2026-04-20T00:00:00Z", "BORROW")),
+		if n := f.mppDaily(t, "pv_daily_drift", valuesOf(mppRow(ik, 99, 1000, 0, 0, "2026-04-20T00:00:00Z", "BORROW")),
 			"the drifted re-emission"); n != 0 {
 			t.Errorf("the drifted re-emission appended %d observations, want 0: the spine keeps the stored row", n)
 		}
@@ -241,19 +258,20 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 		}
 	})
 
-	// A re-run over unchanged history appends nothing to the spine, so the statement trigger fires on an
-	// empty transition table and must append nothing here either.
+	// A re-run over unchanged history appends nothing to the spine, so the next crystallization recomputes
+	// the same winner and must write nothing here either.
 	t.Run("a re-run appends nothing to the table", func(t *testing.T) {
 		const ik = "mpp-rerun"
 		body := valuesOf(mppRow(ik, 60, 1100, 0, 0, "2026-04-25T00:00:00Z", "LOAN"))
-		if n := f.mppN(t, "pv_daily_rerun", body, "the first run"); n != 1 {
+		if n := f.mppDaily(t, "pv_daily_rerun", body, "the first run"); n != 1 {
 			t.Fatalf("the first run appended %d, want 1", n)
 		}
+		f.crystallize(t)
 		before := f.dailyImagesFor(t, ik)
 		if len(before) != 1 {
 			t.Fatalf("the first run left %d row(s) for %s, want 1", len(before), ik)
 		}
-		if n := f.mppN(t, "pv_daily_rerun", body, "the re-run"); n != 0 {
+		if n := f.mppDaily(t, "pv_daily_rerun", body, "the re-run"); n != 0 {
 			t.Errorf("the re-run appended %d observations, want 0", n)
 		}
 		// Row images, not a count: a count is unchanged by a rewrite in place, which is the thing an
@@ -293,6 +311,7 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 		if inserted != 1 {
 			t.Fatalf("appended %d, want 1", inserted)
 		}
+		f.crystallize(t)
 		var gotBuild int
 		var gotRun int64
 		if err := f.pool.QueryRow(f.ctx, `
@@ -309,7 +328,7 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 	})
 }
 
-// The two caches are fed by two triggers on the same INSERT, from the same spine. position_current holds
+// Both caches derive from the same spine. position_current holds
 // the newest observation outright; position_daily_observation's latest date must be that same observation, or one of
 // them is telling a consumer something the other denies.
 //
@@ -336,7 +355,7 @@ func TestPositionCurrentAndPositionDailyNameTheSameWinner(t *testing.T) {
 		// A single-observation position: its only day is also its newest.
 		mppRow("agree-c", 99, 700, 0, 0, "2026-05-04T00:00:00Z", "BORROW"),
 	)
-	if n := f.mppN(t, "pv_agree", body, "a multi-day history"); n != 9 {
+	if n := f.mppDaily(t, "pv_agree", body, "a multi-day history"); n != 9 {
 		t.Fatalf("the materializer appended %d observations, want 9", n)
 	}
 
@@ -354,14 +373,14 @@ func TestPositionCurrentAndPositionDailyNameTheSameWinner(t *testing.T) {
 		t.Errorf("the two caches name different winners for %d position(s): %s", len(d), strings.Join(d, " | "))
 	}
 
-	// And after a rebuild of each from the spine alone, which is the other writer.
-	for _, proc := range []string{"CALL rebuild_position_daily()", "CALL rebuild_position_current()"} {
+	// And after re-deriving each from the spine alone.
+	for _, proc := range []string{"CALL crystallize_position_daily()", "CALL rebuild_position_current()"} {
 		if _, err := f.pool.Exec(f.ctx, proc); err != nil {
 			t.Fatalf("%s: %v", proc, err)
 		}
 	}
 	if d := cacheDisagreement(t, f); len(d) != 0 {
-		t.Errorf("the two caches disagree after a rebuild from the spine: %s", strings.Join(d, " | "))
+		t.Errorf("the two caches disagree after re-deriving from the spine: %s", strings.Join(d, " | "))
 	}
 }
 
@@ -418,11 +437,11 @@ func TestPositionDailyKeepsADayACorrectionMovedAway(t *testing.T) {
 	defer cleanup()
 
 	const ik = "moved-day"
-	if n := f.mppN(t, "pv_moved", valuesOf(
+	if n := f.mppDaily(t, "pv_moved", valuesOf(
 		mppRow(ik, 100, 1000, 0, 0, "2026-06-02T00:00:05Z", "LOAN")), "the original, just after midnight"); n != 1 {
 		t.Fatalf("seeding appended %d, want 1", n)
 	}
-	if n := f.mppN(t, "pv_moved", valuesOf(
+	if n := f.mppDaily(t, "pv_moved", valuesOf(
 		mppRow(ik, 555, 1000, 0, 1, "2026-06-01T23:59:58Z", "LOAN")), "the correction, just before it"); n != 1 {
 		t.Fatalf("the correction appended %d, want 1: same block, so nothing refuses it", n)
 	}

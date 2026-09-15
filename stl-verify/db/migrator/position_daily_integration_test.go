@@ -48,9 +48,10 @@ type dailyObs struct {
 	dealType           string
 }
 
-// observe appends one observation to the history in its own statement, which the trigger propagates
-// to the table as one appended row. projection and build_id vary with processing_version and run_id
-// with the coordinate, so the whole-row comparison against the spine covers every copied column.
+// observe appends one observation to the spine. Nothing reaches position_daily_observation until
+// crystallize runs, which is the point: the day's answer is written once, after the day has closed.
+// projection and build_id vary with processing_version and run_id with the coordinate, so the
+// whole-row comparison against the spine covers every copied column.
 func (f *positionDailyFixture) observe(id string, o dailyObs) {
 	f.t.Helper()
 	var dt any
@@ -163,10 +164,11 @@ func (f *positionDailyFixture) rowCount() int {
 	return n
 }
 
-func (f *positionDailyFixture) rebuild() {
+// crystallize runs the only writer. Every fixture date is in the past, so all of them are settled.
+func (f *positionDailyFixture) crystallize() {
 	f.t.Helper()
-	if _, err := f.pool.Exec(f.ctx, `CALL rebuild_position_daily()`); err != nil {
-		f.t.Fatalf("rebuild: %v", err)
+	if _, err := f.pool.Exec(f.ctx, `CALL crystallize_position_daily()`); err != nil {
+		f.t.Fatalf("crystallize: %v", err)
 	}
 }
 
@@ -212,6 +214,7 @@ func TestPositionDailyNewerWinsPrecedence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f.observe(tc.id, tc.base)
 			f.observe(tc.id, tc.challenger)
+			f.crystallize()
 			want := tc.challenger.qty
 			if tc.keepBase {
 				want = tc.base.qty
@@ -228,6 +231,7 @@ func TestPositionDailyOlderObservationArrivingLaterCannotRegressTheDay(t *testin
 	f := newPositionDailyFixture(t)
 	f.observe("d-late", dailyObs{qty: 22, block: 200, ts: "2026-01-01T05:00:00Z", dealType: "LOAN"})
 	f.observe("d-late", dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+	f.crystallize()
 	if got := f.dayQty("d-late", "2026-01-01"); got != 22 {
 		t.Errorf("the day reads %d; want 22 -- an older observation arriving later must not win", got)
 	}
@@ -243,6 +247,7 @@ func TestPositionDailyRetainsEveryObservedDateAndOnlyThose(t *testing.T) {
 	} {
 		f.observe("d-dates", o)
 	}
+	f.crystallize()
 	got := strings.Join(f.daily("d-dates"), ",")
 	if got != "2026-01-01=10,2026-01-03=20,2026-01-06=30" {
 		t.Errorf("series = %s; want only the three observed dates, with no carry-forward into 01-02 or 01-04/05", got)
@@ -256,55 +261,82 @@ func TestPositionDailyCorrectionsLandOnTheirOwnDate(t *testing.T) {
 	f.observe("d-corr", dailyObs{qty: 10, block: 100, ts: "2026-01-01T23:00:00Z", dealType: "LOAN"})
 	f.observe("d-corr", dailyObs{qty: 15, block: 100, pv: 1, ts: "2026-01-01T23:30:00Z", dealType: "LOAN"})
 	f.observe("d-corr", dailyObs{qty: 99, block: 200, ts: "2026-01-02T00:30:00Z", dealType: "LOAN"})
+	f.crystallize()
 	got := strings.Join(f.daily("d-corr"), ",")
 	if got != "2026-01-01=15,2026-01-02=99" {
 		t.Errorf("series = %s; want the same-day reprocess to supersede 01-01 and the next day to be its own row", got)
 	}
 }
 
-// The table is append-only in fact, not just in grants: every batch that observes a (position, day)
-// leaves one row behind, the earlier rows keep the values they were written with, and nothing is
-// ever rewritten. An upsert holds one row per day and fails the count.
-func TestPositionDailyAppendsOneRowPerBatchAndNeverRewrites(t *testing.T) {
+// One row per (position, date), and a late arrival only adds one when it actually changes the answer.
+// This is the shape the whole design turns on: crystallize once per settled day, never per batch.
+func TestPositionDailyCrystallizesOnceADayAndAppendsOnlyOnChange(t *testing.T) {
 	f := newPositionDailyFixture(t)
-	const id, day = "d-append", "2026-01-01"
-	series := []dailyObs{
-		{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"},
-		{qty: 20, block: 200, ts: "2026-01-01T05:00:00Z", dealType: "BORROW"},
-		// An older observation arriving third: appended like any other, and it must not win.
-		{qty: 5, block: 50, ts: "2026-01-01T00:30:00Z", dealType: "LOAN"},
-		{qty: 30, block: 300, ts: "2026-01-01T09:00:00Z", dealType: "LOAN"},
+	const id, day = "d-cry", "2026-01-01"
+	// The day as it stood when it closed: several observations, one answer.
+	f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T02:00:00Z", dealType: "LOAN"})
+	f.observe(id, dailyObs{qty: 20, block: 200, ts: "2026-01-01T09:00:00Z", dealType: "LOAN"})
+	for _, tc := range []struct {
+		name     string
+		arrive   *dailyObs
+		wantQty  int
+		wantRows int
+	}{
+		{name: "day close", wantQty: 20, wantRows: 1},
+		{name: "re-run changes nothing", wantQty: 20, wantRows: 1},
+		{name: "a late observation that loses", wantQty: 20, wantRows: 1,
+			arrive: &dailyObs{qty: 5, block: 50, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"}},
+		{name: "a correction to the winner", wantQty: 22, wantRows: 2,
+			arrive: &dailyObs{qty: 22, block: 200, pv: 1, ts: "2026-01-01T09:00:00Z", dealType: "LOAN"}},
+		{name: "a late observation that wins", wantQty: 30, wantRows: 3,
+			arrive: &dailyObs{qty: 30, block: 300, ts: "2026-01-01T11:00:00Z", dealType: "LOAN"}},
+		{name: "a reorg of that block", wantQty: 33, wantRows: 4,
+			arrive: &dailyObs{qty: 33, block: 300, bv: 1, ts: "2026-01-01T11:00:00Z", dealType: "LOAN"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.arrive != nil {
+				f.observe(id, *tc.arrive)
+			}
+			f.crystallize()
+			if got := f.dayQty(id, day); got != tc.wantQty {
+				t.Errorf("the day reads %d, want %d", got, tc.wantQty)
+			}
+			if got := f.dayRows(id, day); got != tc.wantRows {
+				t.Errorf("the table holds %d row(s) for the day, want %d -- a writer that appends per batch "+
+					"rather than per change fails here", got, tc.wantRows)
+			}
+		})
 	}
-	for _, o := range series {
-		f.observe(id, o)
-	}
-	if got := f.dayRows(id, day); got != len(series) {
-		t.Fatalf("the table holds %d row(s) for the day after %d batches; want one per batch -- an upsert leaves one", got, len(series))
-	}
-	// Each row still carries the coordinate and quantity it was appended with, in ascending created_at.
-	rows, err := f.pool.Query(f.ctx, `
-		SELECT block_number, quantity::int FROM position_daily_observation
-		 WHERE position_id = sha256($1::bytea) AND as_of_date = $2 ORDER BY created_at, block_number`, id, day)
-	if err != nil {
+}
+
+// The current UTC day is still gaining observations, so crystallizing it would append a row every time
+// its answer moved. Only settled days are written.
+func TestPositionDailyDoesNotCrystallizeTheCurrentDay(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	var today, yesterday string
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT ((now() AT TIME ZONE 'utc')::date)::text,
+		       ((now() AT TIME ZONE 'utc')::date - 1)::text`).Scan(&today, &yesterday); err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
-	var got []string
-	for rows.Next() {
-		var bn, q int
-		if err := rows.Scan(&bn, &q); err != nil {
-			t.Fatal(err)
-		}
-		got = append(got, fmt.Sprintf("%d=%d", bn, q))
+	f.observe("d-today", dailyObs{qty: 7, block: 100, ts: today + "T00:30:00Z", dealType: "LOAN"})
+	f.observe("d-yday", dailyObs{qty: 8, block: 90, ts: yesterday + "T00:30:00Z", dealType: "LOAN"})
+	f.crystallize()
+
+	if got := f.dayRows("d-today", today); got != 0 {
+		t.Errorf("the current UTC day crystallized %d row(s); it is still open", got)
 	}
-	if err := rows.Err(); err != nil {
+	// Control: a settled day does land, so the assertion above is not passing on a writer that is
+	// simply doing nothing.
+	if got := f.dayRows("d-yday", yesterday); got != 1 {
+		t.Errorf("yesterday crystallized %d row(s), want 1", got)
+	}
+	// And it lands once the day is treated as settled, which is what settle_after tunes.
+	if _, err := f.pool.Exec(f.ctx, `CALL crystallize_position_daily(interval '-2 days')`); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"100=10", "200=20", "50=5", "300=30"}; !slices.Equal(got, want) {
-		t.Errorf("the appended rows read %v in created_at order; want %v, each as written", got, want)
-	}
-	if q := f.dayQty(id, day); q != 30 {
-		t.Errorf("the day reads %d; want 30, the newest block", q)
+	if got := f.dayRows("d-today", today); got != 1 {
+		t.Errorf("with the window opened the current day crystallized %d row(s), want 1", got)
 	}
 }
 
@@ -316,8 +348,10 @@ func TestPositionDailyAnswersAsOfATimeReproducibly(t *testing.T) {
 	const id, day = "d-asof", "2026-01-01"
 	beforeAny := f.dbNow()
 	f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T10:00:00Z", dealType: "LOAN"})
+	f.crystallize()
 	reportRanAt := f.dbNow()
 	f.observe(id, dailyObs{qty: 15, block: 100, pv: 1, ts: "2026-01-01T10:00:00Z", dealType: "BORROW"})
+	f.crystallize()
 
 	if got := f.dayQty(id, day); got != 15 {
 		t.Fatalf("the latest reading is %d; want 15, the correction", got)
@@ -418,31 +452,21 @@ func TestPositionDailyLatestViewIsInlined(t *testing.T) {
 	}
 }
 
-// Every column of the day's reading equals that day's winning spine row, through the trigger and
-// through a rebuild from empty.
+// Every column of the day's reading equals that day's winning spine row.
 func TestPositionDailyEqualsTheWinningSpineRowOnEveryColumn(t *testing.T) {
-	for _, writer := range []string{"trigger", "rebuild"} {
-		t.Run(writer, func(t *testing.T) {
-			f := newPositionDailyFixture(t)
-			const id, date = "d-every-col", "2026-01-01"
-			f.observe(id, dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
-			f.observe(id, dailyObs{qty: 22, block: 200, pv: 1, ts: "2026-01-01T05:00:00Z", dealType: "BORROW"})
-			if writer == "rebuild" {
-				if _, err := f.pool.Exec(f.ctx, `DELETE FROM position_daily_observation`); err != nil {
-					t.Fatalf("empty the table (superuser harness): %v", err)
-				}
-				f.rebuild()
-			}
-			got, want := f.dayRow(id, date), f.dayWinner(id, date)
-			for k, v := range want {
-				if got[k] != v {
-					t.Errorf("%s: reading %s = %q, winning spine row = %q", writer, k, got[k], v)
-				}
-			}
-			if got["deal_type"] != "BORROW" {
-				t.Errorf("%s: deal_type = %q, want BORROW -- the day's winner flipped direction", writer, got["deal_type"])
-			}
-		})
+	f := newPositionDailyFixture(t)
+	const id, date = "d-every-col", "2026-01-01"
+	f.observe(id, dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+	f.observe(id, dailyObs{qty: 22, block: 200, pv: 1, ts: "2026-01-01T05:00:00Z", dealType: "BORROW"})
+	f.crystallize()
+	got, want := f.dayRow(id, date), f.dayWinner(id, date)
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("reading %s = %q, winning spine row = %q", k, got[k], v)
+		}
+	}
+	if got["deal_type"] != "BORROW" {
+		t.Errorf("deal_type = %q, want BORROW -- the day's winner flipped direction", got["deal_type"])
 	}
 }
 
@@ -450,6 +474,7 @@ func TestPositionDailyEqualsTheWinningSpineRowOnEveryColumn(t *testing.T) {
 func TestPositionDailyCarriesANullDealType(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	f.observe("d-null", dailyObs{qty: 5, block: 100, ts: "2026-01-01T00:00:00Z"})
+	f.crystallize()
 	if got := f.dayRow("d-null", "2026-01-01")["deal_type"]; got != "NULL" {
 		t.Errorf("deal_type = %q, want NULL", got)
 	}
@@ -469,8 +494,9 @@ func TestPositionDailyIntraBatchPick(t *testing.T) {
 		             (22, 200, '2026-01-01T05:00:00Z', 'LOAN')) AS v(qty, bn, ts, dt)`); err != nil {
 		t.Fatalf("batch insert: %v", err)
 	}
+	f.crystallize()
 	if n := f.dayRows("d-batch", "2026-01-01"); n != 1 {
-		t.Errorf("one batch left %d row(s) for the day; want 1, the batch's newest", n)
+		t.Errorf("the day holds %d row(s); want 1, its winning observation", n)
 	}
 	got := f.dayRow("d-batch", "2026-01-01")
 	if got["quantity"] != "33" || got["block_number"] != "300" || got["deal_type"] != "BORROW" {
@@ -522,7 +548,7 @@ func TestPositionDailyGrantsAreReadForTheAppRoleAndAppendOnlyForTheOwner(t *test
 		t.Fatalf("read the owner's ACL: %v", err)
 	}
 	if !slices.Contains(ownerPrivs, "INSERT") || !slices.Contains(ownerPrivs, "SELECT") {
-		t.Errorf("the owner's ACL is %v; the trigger and the rebuild need INSERT and SELECT", ownerPrivs)
+		t.Errorf("the owner's ACL is %v; the crystallizer needs INSERT and SELECT", ownerPrivs)
 	}
 	for _, p := range []string{"UPDATE", "DELETE", "TRUNCATE"} {
 		if slices.Contains(ownerPrivs, p) {
@@ -531,10 +557,10 @@ func TestPositionDailyGrantsAreReadForTheAppRoleAndAppendOnlyForTheOwner(t *test
 	}
 }
 
-// End to end as the login user the workers really use: every direct write on the table is refused,
-// while an append to the history still lands a row through the SECURITY DEFINER trigger. The third
-// case is what makes the refusals meaningful: a REVOKE that also broke the trigger would look the same.
-func TestPositionDailyIsWrittenOnlyByItsTriggerUnderTheRealRole(t *testing.T) {
+// End to end as the login user the workers really use: every direct write is refused, and so is the
+// crystallizer, which is invoker-rights and therefore owner-only. The owner's own run is the control
+// that makes the refusals meaningful -- a REVOKE that also broke the writer would look the same.
+func TestPositionDailyIsWrittenOnlyByItsOwnerUnderTheRealRole(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	appPool, err := pgxpool.New(f.ctx, loginRoleDSN(t, f.pool))
 	if err != nil {
@@ -553,7 +579,7 @@ func TestPositionDailyIsWrittenOnlyByItsTriggerUnderTheRealRole(t *testing.T) {
 	} {
 		_, err := appPool.Exec(f.ctx, stmt)
 		if err == nil {
-			t.Errorf("%s on position_daily_observation succeeded as stl_read_write; only the trigger and the rebuild may write it", name)
+			t.Errorf("%s on position_daily_observation succeeded as stl_read_write; only the owner may write it", name)
 			continue
 		}
 		var pgErr *pgconn.PgError
@@ -562,6 +588,7 @@ func TestPositionDailyIsWrittenOnlyByItsTriggerUnderTheRealRole(t *testing.T) {
 		}
 	}
 
+	// The app role appends to the spine, as ingest does, and that alone must not reach the table.
 	if _, err := appPool.Exec(f.ctx, `
 		INSERT INTO position_state
 		    (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
@@ -570,105 +597,97 @@ func TestPositionDailyIsWrittenOnlyByItsTriggerUnderTheRealRole(t *testing.T) {
 		        '2026-01-01T10:00:00Z', 'public.proj-0', 0, 'LOAN')`); err != nil {
 		t.Fatalf("append to position_state as stl_read_write: %v", err)
 	}
+	if n := f.rowCount(); n != 0 {
+		t.Errorf("an append to the spine wrote %d row(s) here; nothing but the crystallizer may write it", n)
+	}
+	// And the app role cannot run the crystallizer either: it is invoker-rights and holds no INSERT.
+	_, err = appPool.Exec(f.ctx, `CALL crystallize_position_daily()`)
+	requireInsufficientPrivilege(t, err, "CALL crystallize_position_daily() as stl_read_write")
+
+	// Control: the owner's run does write it, so the refusals above are not a broken writer.
+	f.crystallize()
 	var qty int
 	if err := appPool.QueryRow(f.ctx,
 		`SELECT quantity FROM position_daily WHERE position_id = sha256('d-role'::bytea) AND as_of_date = '2026-01-01'`).
 		Scan(&qty); err != nil {
-		t.Fatalf("no row after the append -- the SECURITY DEFINER trigger did not write it, or the role lost SELECT: %v", err)
+		t.Fatalf("no row after the owner crystallized, or the role lost SELECT: %v", err)
 	}
 	if qty != 42 {
 		t.Errorf("the day reads %d, want 42", qty)
 	}
 }
 
-// The maintainer runs as the owner with a pinned search_path, both mandatory for SECURITY DEFINER.
-func TestPositionDailyTriggerFunctionIsSecurityDefinerWithAPinnedPath(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	var definer bool
-	var config []string
-	if err := f.pool.QueryRow(f.ctx,
-		`SELECT prosecdef, proconfig FROM pg_proc WHERE proname = 'append_position_daily'`).Scan(&definer, &config); err != nil {
-		t.Fatal(err)
-	}
-	if !definer {
-		t.Error("append_position_daily is not SECURITY DEFINER, so the appending role would need a write grant on the table")
-	}
-	// The exact value, not merely the presence of the setting: the path IS the security boundary on a
-	// SECURITY DEFINER function, and `SET search_path = pg_temp` satisfies a presence check.
-	if !strings.Contains(strings.Join(config, " "), "search_path=pg_catalog, public") {
-		t.Errorf("append_position_daily pins proconfig = %v; want search_path=pg_catalog, public", config)
-	}
-}
-
-// The rebuild procedure pins the settings a hand-run region could forget.
-func TestPositionDailyRebuildPinsItsSettings(t *testing.T) {
+// The crystallizer pins the settings a hand-run statement could forget, and pins search_path so a
+// caller's path cannot bind its names to other objects.
+func TestPositionDailyCrystallizerPinsItsSettings(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	var config []string
 	if err := f.pool.QueryRow(f.ctx,
-		`SELECT proconfig FROM pg_proc WHERE proname = 'rebuild_position_daily'`).Scan(&config); err != nil {
+		`SELECT proconfig FROM pg_proc WHERE proname = 'crystallize_position_daily'`).Scan(&config); err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(config, " ")
 	for _, want := range []string{"timescaledb.enable_tiered_reads=on", "search_path=pg_catalog, public",
 		"work_mem=64MB", "lock_timeout=10s"} {
 		if !strings.Contains(joined, want) {
-			t.Errorf("rebuild_position_daily does not pin %q (proconfig = %v)", want, config)
+			t.Errorf("crystallize_position_daily does not pin %q (proconfig = %v)", want, config)
 		}
 	}
 }
 
-// The rebuild adds what the trigger missed and touches nothing else: over a complete table it is a
-// no-op, over an emptied one it restores exactly the day winners, and the rows it left alone keep
-// their created_at.
-func TestPositionDailyRebuildAppendsOnlyWhatIsMissing(t *testing.T) {
+// The crystallizer adds what is missing and touches nothing else: over a complete table it is a
+// no-op, over an emptied one it restores exactly the day winners, and rows it leaves alone keep
+// their created_at, which the as-of read depends on.
+func TestPositionDailyCrystallizerAppendsOnlyWhatIsMissing(t *testing.T) {
 	f := newPositionDailyFixture(t)
-	const id = "d-rebuild"
+	const id = "d-cryst"
 	f.observe(id, dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
 	f.observe(id, dailyObs{qty: 22, block: 200, ts: "2026-01-01T05:00:00Z", dealType: "LOAN"})
 	f.observe(id, dailyObs{qty: 33, block: 300, ts: "2026-01-02T05:00:00Z", dealType: "LOAN"})
+	f.crystallize()
 
 	before := dailyCacheDigest(f.ctx, t, f.pool, "position_daily_observation")
-	f.rebuild()
+	f.crystallize()
 	if after := dailyCacheDigest(f.ctx, t, f.pool, "position_daily_observation"); after != before {
-		t.Error("a rebuild over a complete table changed it; it may only append rows that are missing")
+		t.Error("a second run over a complete table changed it; it may only append what is missing")
+	}
+	if n := f.rowCount(); n != 2 {
+		t.Errorf("two observed dates crystallized %d row(s); want 2, one winner each -- the losing "+
+			"same-day observation is not a winner", n)
+	}
+	if got := strings.Join(f.daily(id), ","); got != "2026-01-01=22,2026-01-02=33" {
+		t.Errorf("series = %s; want 2026-01-01=22,2026-01-02=33", got)
 	}
 
 	// Emptied (superuser harness; the owner's DELETE is revoked in every deployed environment).
 	if _, err := f.pool.Exec(f.ctx, `DELETE FROM position_daily_observation`); err != nil {
 		t.Fatalf("empty the table: %v", err)
 	}
-	f.rebuild()
-	if n := f.rowCount(); n != 2 {
-		t.Errorf("a rebuild from empty appended %d row(s); want 2, one winner per observed date -- the losing same-day observation is not a winner", n)
-	}
+	f.crystallize()
 	if got := strings.Join(f.daily(id), ","); got != "2026-01-01=22,2026-01-02=33" {
-		t.Errorf("series after a rebuild from empty = %s; want 2026-01-01=22,2026-01-02=33", got)
+		t.Errorf("series after crystallizing from empty = %s; want the same two winners", got)
 	}
 
-	// A row the trigger wrote keeps its created_at through a later rebuild: the as-of reading depends on it.
 	var stamped time.Time
 	if err := f.pool.QueryRow(f.ctx,
 		`SELECT created_at FROM position_daily_observation WHERE position_id = sha256($1::bytea) AND as_of_date = '2026-01-02'`, id).Scan(&stamped); err != nil {
 		t.Fatal(err)
 	}
-	f.rebuild()
+	f.crystallize()
 	var again time.Time
 	if err := f.pool.QueryRow(f.ctx,
 		`SELECT created_at FROM position_daily_observation WHERE position_id = sha256($1::bytea) AND as_of_date = '2026-01-02'`, id).Scan(&again); err != nil {
 		t.Fatal(err)
 	}
 	if !again.Equal(stamped) {
-		t.Errorf("created_at moved %s -> %s across a rebuild that had nothing to add", stamped, again)
+		t.Errorf("created_at moved %s -> %s across a run that had nothing to add", stamped, again)
 	}
 }
 
-// A shadowing schema ahead of public must not capture the rebuild's writes.
-func TestPositionDailyRebuildResolvesUnderAShadowingSearchPath(t *testing.T) {
+// A shadowing schema ahead of public must not capture the crystallizer's writes.
+func TestPositionDailyCrystallizerResolvesUnderAShadowingSearchPath(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	f.observe("d-shadow", dailyObs{qty: 7, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
-	if _, err := f.pool.Exec(f.ctx, `DELETE FROM position_daily_observation`); err != nil {
-		t.Fatalf("empty the table: %v", err)
-	}
 	for _, stmt := range []string{
 		`CREATE SCHEMA IF NOT EXISTS shadow`,
 		`CREATE TABLE IF NOT EXISTS shadow.position_daily_observation (LIKE public.position_daily_observation)`,
@@ -679,7 +698,7 @@ func TestPositionDailyRebuildResolvesUnderAShadowingSearchPath(t *testing.T) {
 			t.Fatalf("%s: %v", stmt, err)
 		}
 	}
-	f.rebuild()
+	f.crystallize()
 	var public, shadowed int
 	if err := f.pool.QueryRow(f.ctx, `
 		SELECT (SELECT count(*) FROM public.position_daily_observation), (SELECT count(*) FROM shadow.position_daily_observation)`).
@@ -687,7 +706,7 @@ func TestPositionDailyRebuildResolvesUnderAShadowingSearchPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	if public != 1 || shadowed != 0 {
-		t.Errorf("under a shadowing search_path the rebuild wrote %d rows to public and %d to shadow; want 1 and 0", public, shadowed)
+		t.Errorf("under a shadowing search_path the crystallizer wrote %d rows to public and %d to shadow; want 1 and 0", public, shadowed)
 	}
 }
 
@@ -697,6 +716,7 @@ func TestPositionDailyIsAPlainTable(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	f.observe("d-plain", dailyObs{qty: 1, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
 	f.observe("d-plain", dailyObs{qty: 2, block: 200, ts: "2026-01-20T00:00:00Z", dealType: "LOAN"})
+	f.crystallize()
 
 	// position_state is a hypertable in this same database, read through the same views with the same
 	// filter shape: without it, a mistyped name or a renamed catalogue column reads as "plain" and the
@@ -741,6 +761,7 @@ func TestPositionDailyIsAPlainTable(t *testing.T) {
 func TestPositionDailyAsOfDateIsPinnedToBlockTimestamp(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	f.observe("d-date-chk", dailyObs{qty: 5, block: 100, ts: "2026-01-01T23:30:00Z", dealType: "LOAN"})
+	f.crystallize()
 	if got := f.dayRow("d-date-chk", "2026-01-01")["block_timestamp"]; !strings.HasPrefix(got, "2026-01-01") {
 		t.Errorf("block_timestamp = %q, want the 2026-01-01 instant", got)
 	}
@@ -816,6 +837,7 @@ func TestPositionDailyIndexesCoverTheHolderAndDateReads(t *testing.T) {
 func TestPositionDailyAsOfRefusesANullBound(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	f.observe("d-null-bound", dailyObs{qty: 9, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
+	f.crystallize()
 	var n int
 	err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM position_daily_as_of(NULL::timestamptz)`).Scan(&n)
 	if err == nil {
@@ -866,6 +888,7 @@ func TestPositionDailyHolderFilterIsPushedIntoTheScan(t *testing.T) {
 	for i := range 40 {
 		f.observe(fmt.Sprintf("d-push-%02d", i), dailyObs{qty: i + 1, block: 100 + i, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
 	}
+	f.crystallize()
 	var holder string
 	if err := f.pool.QueryRow(f.ctx,
 		`SELECT holder_id FROM position_daily_observation ORDER BY holder_id LIMIT 1`).Scan(&holder); err != nil {
@@ -909,11 +932,12 @@ func TestPositionDailyHolderFilterIsPushedIntoTheScan(t *testing.T) {
 }
 
 // The window created_at's COMMENT records, pinned so it cannot be quietly forgotten: created_at is
-// TRANSACTION START time but a row becomes visible at COMMIT, so a T taken after a writer began and
-// before it committed gains rows afterwards. This is the limit of the reproducibility claim.
-func TestPositionDailyAsOfIsUnstableWhileAWriterIsOpen(t *testing.T) {
+// TRANSACTION START time but a row becomes visible at COMMIT, so a T taken after a crystallization
+// began and before it committed gains rows afterwards. This is the limit of the reproducibility claim.
+func TestPositionDailyAsOfIsUnstableWhileACrystallizationIsOpen(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	const id, day = "d-inflight", "2026-01-01"
+	f.observe(id, dailyObs{qty: 5, block: 100, ts: "2026-01-01T10:00:00Z", dealType: "LOAN"})
 
 	writer, err := f.pool.Acquire(f.ctx)
 	if err != nil {
@@ -924,16 +948,11 @@ func TestPositionDailyAsOfIsUnstableWhileAWriterIsOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(f.ctx, `
-		INSERT INTO position_state
-		    (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
-		     block_number, block_version, processing_version, block_timestamp, projection, build_id, deal_type)
-		VALUES (sha256($1::bytea), 1, 1, 'inst-' || $1, repeat('d', 40), 5, 100, 0, 0,
-		        '2026-01-01T10:00:00Z', 'public.proj-0', 0, 'LOAN')`, id); err != nil {
-		t.Fatalf("append inside the open writer: %v", err)
+	if _, err := tx.Exec(f.ctx, `CALL crystallize_position_daily()`); err != nil {
+		t.Fatalf("crystallize inside the open transaction: %v", err)
 	}
 
-	// T is taken while that writer is still open, so its row is invisible.
+	// T is taken while that run is still open, so its row is invisible.
 	pinned := f.dbNow()
 	countAt := func(at time.Time) int {
 		f.t.Helper()
@@ -946,23 +965,22 @@ func TestPositionDailyAsOfIsUnstableWhileAWriterIsOpen(t *testing.T) {
 		return n
 	}
 	if before := countAt(pinned); before != 0 {
-		t.Fatalf("the open writer's row was visible before it committed (%d rows); this case cannot show the window", before)
+		t.Fatalf("the open run's row was visible before it committed (%d rows); this case cannot show the window", before)
 	}
 	if err := tx.Commit(f.ctx); err != nil {
 		t.Fatal(err)
 	}
 	// Same T, and now the row is there: its created_at is the transaction's start, before T.
-	after := countAt(pinned)
-	if after != 1 {
+	if after := countAt(pinned); after != 1 {
 		t.Errorf("after the commit the same pinned T reads %d row(s), want 1 -- if this is now 0 the stamp "+
 			"became commit-ordered and created_at's COMMENT plus this test must be rewritten", after)
 	}
 }
 
-// Two bulk batches over the same day for many positions: the table holds a row per batch per position,
-// the reading is the second batch everywhere, and a rebuild over the populated table -- the DISTINCT ON
-// sort the procedure pins work_mem for -- adds nothing.
-func TestPositionDailyHoldsARowPerBatchAtBulkAndTheRebuildAddsNothing(t *testing.T) {
+// At bulk, crystallizing writes one row per position per date however many observations each day
+// carried, and a second run adds nothing. The DISTINCT ON here is the sort the procedure pins
+// work_mem for.
+func TestPositionDailyCrystallizesOneRowPerPositionPerDateAtBulk(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	const positions = 20000
 	seed := func(qty, block int, ts, dealType string) {
@@ -979,13 +997,14 @@ func TestPositionDailyHoldsARowPerBatchAtBulkAndTheRebuildAddsNothing(t *testing
 	}
 	seed(5, 100, "2026-03-02T00:00:00Z", "LOAN")
 	seed(9, 200, "2026-03-02T06:00:00Z", "BORROW")
-	if n := f.rowCount(); n != 2*positions {
-		t.Fatalf("two batches over %d positions left %d rows; want %d, one per batch per position -- an upsert leaves %d",
-			positions, n, 2*positions, positions)
+	f.crystallize()
+	if n := f.rowCount(); n != positions {
+		t.Fatalf("two observations per position on one date crystallized %d rows; want %d, one per "+
+			"position -- a per-batch writer leaves %d", n, positions, 2*positions)
 	}
-	f.rebuild()
-	if n := f.rowCount(); n != 2*positions {
-		t.Errorf("the rebuild changed the row count to %d from %d; every winner was already present", n, 2*positions)
+	f.crystallize()
+	if n := f.rowCount(); n != positions {
+		t.Errorf("a second run changed the row count to %d; every winner was already present", n)
 	}
 	var newest, total int
 	if err := f.pool.QueryRow(f.ctx,
@@ -994,7 +1013,7 @@ func TestPositionDailyHoldsARowPerBatchAtBulkAndTheRebuildAddsNothing(t *testing
 		t.Fatal(err)
 	}
 	if newest != positions || total != positions {
-		t.Errorf("the reading carries the second batch for %d of %d positions (%d readings in total); want all %d",
+		t.Errorf("the reading carries the day's later observation for %d of %d positions (%d readings); want all %d",
 			newest, positions, total, positions)
 	}
 }
@@ -1003,6 +1022,7 @@ func TestPositionDailyHoldsARowPerBatchAtBulkAndTheRebuildAddsNothing(t *testing
 func TestPositionDailyMigrationIsReRunnable(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	f.observe("d-rerun", dailyObs{qty: 5, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
+	f.crystallize()
 	for _, name := range []string{positionDailyMigration, positionDailyBackfillMigration} {
 		raw, err := os.ReadFile(filepath.Join(getMigrationsPath(), name))
 		if err != nil {
@@ -1070,12 +1090,16 @@ func TestPositionDailyEqualsTheSpineArgmaxOverRandomHistories(t *testing.T) {
 				t.Fatalf("materialize the same-day observations: %v", err)
 			}
 
+			if _, err := pool.Exec(ctx, `CALL crystallize_position_daily()`); err != nil {
+				t.Fatalf("crystallize: %v", err)
+			}
+
 			const dailyGrain = ", (block_timestamp AT TIME ZONE 'utc')::date"
 			cols := dailySharedSpineColumns(ctx, t, pool, "position_daily")
 			if d := diffDailyCacheAgainstSpineArgmax(ctx, t, pool, "position_daily", dailyGrain, cols); d != "" {
-				t.Errorf("after the trigger: %s", d)
+				t.Errorf("after crystallizing: %s", d)
 			}
-			// Every table row is a spine row: the trigger copies, it does not invent.
+			// Every table row is a spine row: the crystallizer copies, it does not invent.
 			var orphans int
 			if err := pool.QueryRow(ctx, `
 				SELECT count(*) FROM position_daily_observation d
@@ -1089,23 +1113,23 @@ func TestPositionDailyEqualsTheSpineArgmaxOverRandomHistories(t *testing.T) {
 				t.Errorf("%d position_daily_observation row(s) have no position_state row at their coordinate", orphans)
 			}
 
-			// A rebuild over the complete table changes nothing; over one missing rows it fills them.
+			// A second run over the complete table changes nothing; over one missing rows it fills them.
 			before := dailyCacheDigest(ctx, t, pool, "position_daily_observation")
-			if _, err := pool.Exec(ctx, `CALL rebuild_position_daily()`); err != nil {
-				t.Fatalf("rebuild over a complete table: %v", err)
+			if _, err := pool.Exec(ctx, `CALL crystallize_position_daily()`); err != nil {
+				t.Fatalf("second run over a complete table: %v", err)
 			}
 			if dailyCacheDigest(ctx, t, pool, "position_daily_observation") != before {
-				t.Error("a rebuild over a complete table changed it")
+				t.Error("a second run over a complete table changed it")
 			}
 			if _, err := pool.Exec(ctx, `
 				DELETE FROM position_daily_observation WHERE (('x' || substr(md5(position_id::text), 1, 8))::bit(32)::int % 2) = 0`); err != nil {
 				t.Fatalf("remove half the rows: %v", err)
 			}
-			if _, err := pool.Exec(ctx, `CALL rebuild_position_daily()`); err != nil {
-				t.Fatalf("rebuild over a table missing rows: %v", err)
+			if _, err := pool.Exec(ctx, `CALL crystallize_position_daily()`); err != nil {
+				t.Fatalf("run over a table missing rows: %v", err)
 			}
 			if d := diffDailyCacheAgainstSpineArgmax(ctx, t, pool, "position_daily", dailyGrain, cols); d != "" {
-				t.Errorf("the rebuild did not restore the reading: %s", d)
+				t.Errorf("the run did not restore the reading: %s", d)
 			}
 		})
 	}
@@ -1219,9 +1243,10 @@ func TestPositionDailyNeverTouchesAnAppendedRow(t *testing.T) {
 	f.observe(id, dailyObs{qty: 20, block: 200, ts: "2026-01-01T05:00:00Z", dealType: "BORROW"})
 	// A second position, so a batch that touches one cannot be excused for rewriting the other.
 	f.observe("d-frozen-peer", dailyObs{qty: 77, block: 150, ts: "2026-01-01T03:00:00Z", dealType: "LOAN"})
+	f.crystallize()
 	before := f.rowImages()
-	if len(before) != 3 {
-		t.Fatalf("seeded %d row(s), want 3", len(before))
+	if len(before) != 2 {
+		t.Fatalf("seeded %d row(s), want 2: one winner per position for the day", len(before))
 	}
 
 	for _, step := range []struct {
@@ -1230,14 +1255,17 @@ func TestPositionDailyNeverTouchesAnAppendedRow(t *testing.T) {
 	}{
 		{"a newer observation for the same day", func() {
 			f.observe(id, dailyObs{qty: 30, block: 300, ts: "2026-01-01T09:00:00Z", dealType: "LOAN"})
+			f.crystallize()
 		}},
 		{"a correction at an existing coordinate's day", func() {
 			f.observe(id, dailyObs{qty: 44, block: 300, pv: 1, ts: "2026-01-01T09:00:00Z", dealType: "BORROW"})
+			f.crystallize()
 		}},
 		{"an observation on another day", func() {
 			f.observe(id, dailyObs{qty: 55, block: 400, ts: "2026-01-02T09:00:00Z", dealType: "LOAN"})
+			f.crystallize()
 		}},
-		{"a rebuild", func() { f.rebuild() }},
+		{"a run with nothing to add", func() { f.crystallize() }},
 	} {
 		t.Run(step.name, func(t *testing.T) {
 			step.run()
@@ -1259,8 +1287,8 @@ func TestPositionDailyNeverTouchesAnAppendedRow(t *testing.T) {
 
 	// Controls: the appends really landed, and the day's answer really moved, so the frozen-row
 	// assertions above are not passing over a writer that did nothing at all.
-	if n := f.dayRows(id, day); n != 4 {
-		t.Errorf("the day holds %d row(s) after four appends to it, want 4", n)
+	if n := f.dayRows(id, day); n != 3 {
+		t.Errorf("the day holds %d row(s), want 3: the close, the newer observation and the correction", n)
 	}
 	if q := f.dayQty(id, day); q != 44 {
 		t.Errorf("the day reads %d, want 44 -- the correction is the newest coordinate", q)
@@ -1268,9 +1296,9 @@ func TestPositionDailyNeverTouchesAnAppendedRow(t *testing.T) {
 }
 
 // Each leg of the REBUILD's ordering, which the from-empty tests exercise only on block_number. The
-// rebuild is what repairs the documented replica-bypass window, and a reorg (block_version) and a
+// crystallizer is the only writer, so a wrong leg is the day being wrong; a reorg (block_version) and a
 // correction (processing_version) are exactly what it has to get right there.
-func TestPositionDailyRebuildOrderingPrecedence(t *testing.T) {
+func TestPositionDailyCrystallizerOrderingPrecedence(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
 		id               string
@@ -1294,16 +1322,12 @@ func TestPositionDailyRebuildOrderingPrecedence(t *testing.T) {
 			f := newPositionDailyFixture(t)
 			f.observe(tc.id, tc.base)
 			f.observe(tc.id, tc.challenger)
-			// Empty the table so the REBUILD, not the trigger, is the writer under test.
-			if _, err := f.pool.Exec(f.ctx, `DELETE FROM position_daily_observation`); err != nil {
-				t.Fatalf("empty the table: %v", err)
-			}
-			f.rebuild()
+			f.crystallize()
 			if n := f.rowCount(); n != 1 {
-				t.Fatalf("the rebuild appended %d row(s) for one position on one date, want 1", n)
+				t.Fatalf("crystallizing appended %d row(s) for one position on one date, want 1", n)
 			}
 			if got := f.dayQty(tc.id, "2026-01-01"); got != tc.want {
-				t.Errorf("the rebuilt day reads %d, want %d", got, tc.want)
+				t.Errorf("the crystallized day reads %d, want %d", got, tc.want)
 			}
 		})
 	}
@@ -1323,8 +1347,9 @@ func TestPositionDailyIntraBatchPicksTheLaterInstantAtEqualVersions(t *testing.T
 		FROM (VALUES (11, '2026-01-01T01:00:00Z'), (22, '2026-01-01T09:00:00Z')) AS v(qty, ts)`); err != nil {
 		t.Fatalf("batch insert: %v", err)
 	}
+	f.crystallize()
 	if n := f.dayRows("d-ts-batch", "2026-01-01"); n != 1 {
-		t.Fatalf("one batch left %d row(s) for the day, want 1", n)
+		t.Fatalf("the day holds %d row(s), want 1", n)
 	}
 	if got := f.dayQty("d-ts-batch", "2026-01-01"); got != 22 {
 		t.Errorf("the day reads %d, want 22 -- at equal versions the later instant is the day's observation, "+
@@ -1385,6 +1410,7 @@ func TestPositionDailyAsOfBoundIsInclusive(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	const id, day = "d-bound", "2026-01-01"
 	f.observe(id, dailyObs{qty: 12, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+	f.crystallize()
 	var stamped time.Time
 	if err := f.pool.QueryRow(f.ctx,
 		`SELECT created_at FROM position_daily_observation WHERE position_id = sha256($1::bytea)`, id).Scan(&stamped); err != nil {
@@ -1413,6 +1439,7 @@ func TestPositionDailyDateFilterIsPushedIntoTheScan(t *testing.T) {
 		f.observe(fmt.Sprintf("d-date-push-%02d", i), dailyObs{qty: i + 1, block: 100 + i, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
 	}
 	f.observe("d-date-push-other", dailyObs{qty: 999, block: 900, ts: "2026-02-02T01:00:00Z", dealType: "LOAN"})
+	f.crystallize()
 	if _, err := f.pool.Exec(f.ctx, `SET LOCAL enable_seqscan = off`); err != nil {
 		t.Fatal(err)
 	}
