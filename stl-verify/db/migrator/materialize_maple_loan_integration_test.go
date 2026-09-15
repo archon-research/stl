@@ -718,7 +718,16 @@ func TestMapleLoanViewContract(t *testing.T) {
 		if !strings.Contains(err.Error(), "4-byte") {
 			t.Errorf("the refusal must name the actual width: %v", err)
 		}
+		// The check reads maple_loan alone (114 rows on staging): scoping it to loans with state
+		// planned every chunk of maple_loan_state, 190,992 kB against 312 kB without. So a bad
+		// address is refused whether or not the loan has a cycle yet, and taking the loan out of
+		// scope means removing the loan, not its state.
 		f.exec(t, `DELETE FROM maple_loan_state WHERE maple_loan_id = $1`, shortID)
+		if _, err := f.run(t); err == nil || !strings.Contains(err.Error(), "4-byte") {
+			t.Fatalf("a bad borrower address with no state row must still be refused, got %v", err)
+		}
+		f.exec(t, `DELETE FROM maple_loan WHERE id = $1`, shortID)
+		delete(f.loans, "short")
 	})
 
 	t.Run("a backfilled earlier cycle diverges the view from the spine, and the run says so", func(t *testing.T) {

@@ -183,12 +183,12 @@ BEGIN
 
     -- holder_id must be 40 hex chars for position_state's CHECK. "user" is written by every indexer
     -- and its address is a bare BYTEA, so one bad row would raise on a chunk constraint by name only.
+    -- Every loan row is checked: scoping to loans with state planned all of maple_loan_state (191 MB).
     SELECT string_agg(msg, '; ' ORDER BY msg) INTO v_bad FROM (
         SELECT format('loan %s (chain %s) has a %s-byte borrower address', l.id, l.chain_id, length(u.address)) AS msg
         FROM public.maple_loan l
         JOIN "user" u ON u.id = l.borrower_user_id
         WHERE length(u.address) <> 20
-          AND EXISTS (SELECT 1 FROM public.maple_loan_state s WHERE s.maple_loan_id = l.id)
         LIMIT 5) z;
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'materialize_maple_loan: a borrower address is not a 20-byte EVM address, so holder_id would fail position_state''s format check: %', v_bad;
