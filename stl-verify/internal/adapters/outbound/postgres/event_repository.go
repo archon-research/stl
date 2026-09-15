@@ -42,8 +42,8 @@ func (r *EventRepository) SaveEvent(ctx context.Context, tx pgx.Tx, event *entit
 	}
 
 	_, err := tx.Exec(ctx,
-		`INSERT INTO protocol_event (chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data, created_at, build_id, run_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		`INSERT INTO protocol_event (chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data, created_at, block_timestamp, build_id, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $11, $12)
 		 ON CONFLICT (chain_id, block_number, block_version, tx_hash, log_index, processing_version, created_at) DO NOTHING`,
 		event.ChainID, event.ProtocolID, event.BlockNumber, event.BlockVersion,
 		event.TxHash, event.LogIndex, event.ContractAddress, event.EventName, event.EventData,
@@ -67,8 +67,8 @@ func (r *EventRepository) SaveBatch(ctx context.Context, tx pgx.Tx, evts []*enti
 			return fmt.Errorf("event must not be nil")
 		}
 		batch.Queue(
-			`INSERT INTO protocol_event (chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data, created_at, build_id, run_id)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			`INSERT INTO protocol_event (chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data, created_at, block_timestamp, build_id, run_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $11, $12)
 			 ON CONFLICT (chain_id, block_number, block_version, tx_hash, log_index, processing_version, created_at) DO NOTHING`,
 			event.ChainID, event.ProtocolID, event.BlockNumber, event.BlockVersion,
 			event.TxHash, event.LogIndex, event.ContractAddress, event.EventName, event.EventData,
