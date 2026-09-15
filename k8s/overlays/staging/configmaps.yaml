@@ -794,9 +794,15 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelstaging"
   ENABLE_BACKFILL: "true"
+  # Robinhood produces ~10 blocks/s, the fastest chain we watch. On the 10/30s
+  # defaults a pass drained ~7 blk/s measured on staging — under live, so the
+  # gap grew and one gap-fill pass ran for the whole pod lifetime. 100 blocks
+  # every 5s = ~20 blk/s, matching the avalanche and arbitrum tuning above.
+  BACKFILL_BATCH_SIZE: "100"
+  BACKFILL_POLL_INTERVAL: "5s"
   # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
   # 2500 newHeads slots hold ~4 min at ~10 blocks/s, so a hung request drops
-  # nothing. Backfill keeps the client default (30s) for its batches.
+  # nothing. Backfill keeps the client default (30s) for its 100-block batches.
   LIVE_RPC_TIMEOUT: "10s"
   SUBSCRIBER_BUFFER_SIZE: "2500"
 ---
