@@ -16,7 +16,7 @@ import (
 // ORDER BY ord is what preserves the caller's order.
 //
 // subject names the domain in the error, since the three callers guard different
-// read-latest-then-insert decisions (ADR-0002 §3).
+// read-latest-then-insert decisions (ADR-0006).
 func lockAdvisoryKeys(ctx context.Context, tx pgx.Tx, keys []string, subject string) error {
 	if len(keys) == 0 {
 		return nil

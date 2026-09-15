@@ -438,7 +438,7 @@ twice. Re-running later means the same form with a new ID.
    retry free — but note the scope: `offchain_token_price`'s PK includes
    `processing_version`, and its trigger reuses a version only for the same
    `build_id`. A re-run from a *different* build appends a new version rather than
-   doing nothing (ADR-0002 §3). Additive, never destructive — but do not read
+   doing nothing (ADR-0006). Additive, never destructive — but do not read
    "idempotent" as "byte-identical across deploys".
 3. **Validate parameters in the workflow and fail non-retryably**
    (`temporalsdk.NewNonRetryableApplicationError`). Bad input fails identically on
