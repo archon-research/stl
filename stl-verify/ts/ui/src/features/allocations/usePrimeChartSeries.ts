@@ -2,7 +2,7 @@ import type { RangePreset, TimeRange } from '@archon-research/design-system';
 import { useMemo } from 'react';
 
 import {
-  formatChartTimestampLabel,
+  latestAllocationCoverage,
   parseNumericValue,
   toChartSeries,
   wadToUnits,
@@ -19,6 +19,9 @@ import { usePrimeChartData } from './usePrimeChartData';
 
 export type PrimeChartSeries = {
   allocationBalanceSeries: ChartDatum[];
+  // The latest bucket's own pricing coverage behind `allocationBalanceSeries`.
+  // Null once it prices every position it knows about (VEC-760).
+  allocationCoverage: { pricedEntityCount: number; entityCount: number } | null;
   primeDebtSeries: ChartDatum[];
   totalCapitalSeries: ChartDatum[];
   collateralSeries: ChartDatum[];
@@ -105,8 +108,9 @@ function getFrequencyForRange(
 /**
  * The trend series behind the metric cards, for one prime over one window.
  *
- * `primeTotalAllocationUsd` is the anchor the balance series is reconstructed
- * from, so it belongs to the caller that owns the rows, not to this hook.
+ * `primeTotalAllocationUsd` is the current whole-prime total, owned by the
+ * caller that owns the rows. Self mode falls back to it for the collateral
+ * figure it has no indexed equivalent for.
  */
 export function usePrimeChartSeries(
   primaryProxyAddress: string | null,
@@ -141,36 +145,24 @@ export function usePrimeChartSeries(
     },
   );
 
-  // Reconstruct the total-allocation balance over time: anchor at the current
-  // whole-prime total and walk backwards, undoing each bucket's signed USD net
-  // flow. The newest bucket therefore lands exactly on the current total.
-  // Flow-based, so it captures deposits/withdrawals but not price moves;
-  // clamped at 0 since a negative balance is meaningless.
-  //
-  // This is only valid when the window ends at "now" so the newest bucket truly
-  // is the current total. Presets always end now; a custom range is a fixed
-  // window whose end drifts into the past, so anchoring its newest (past) bucket
-  // at the current total would misstate every point. Suppress it for custom
-  // ranges until a range-end anchor is available.
-  const allocationBalanceSeries = useMemo<ChartDatum[]>(() => {
-    if (rangePreset === 'custom' || activityBuckets.length === 0) {
-      return [];
-    }
+  // Each bucket's own recorded position value, read server-side
+  // (`series=balance`). Clamped at 0 since a negative balance is meaningless.
+  // Needs no anchor, so it is valid for custom ranges too.
+  const allocationBalanceSeries = useMemo<ChartDatum[]>(
+    () =>
+      toChartSeries(activityBuckets, (bucket) => {
+        const value = parseNumericValue(bucket.balance_usd);
+        // Absent means "not known for this bucket" -- toChartSeries drops it,
+        // a gap in the line rather than a false floor at zero (VEC-537).
+        return value === null ? null : Math.max(value, 0);
+      }),
+    [activityBuckets],
+  );
 
-    // Walked newest-first because each point is the one after it less its own
-    // net flow, then flipped back into the ascending order the charts assume.
-    const newestFirst: ChartDatum[] = [];
-    let balance = primeTotalAllocationUsd;
-    for (const bucket of [...activityBuckets].reverse()) {
-      newestFirst.push({
-        label: formatChartTimestampLabel(bucket.bucket_start),
-        value: Math.max(balance, 0),
-        timestamp: Date.parse(bucket.bucket_start),
-      });
-      balance -= parseNumericValue(bucket.net_flow_usd) ?? 0;
-    }
-    return newestFirst.reverse();
-  }, [activityBuckets, primeTotalAllocationUsd, rangePreset]);
+  const allocationCoverage = useMemo(
+    () => latestAllocationCoverage(activityBuckets),
+    [activityBuckets],
+  );
 
   const primeDebtSeries = useMemo<ChartDatum[]>(
     () => toChartSeries(debtBuckets, (bucket) => wadToUnits(bucket.debt_wad)),
@@ -248,6 +240,7 @@ export function usePrimeChartSeries(
   return useMemo(
     () => ({
       allocationBalanceSeries,
+      allocationCoverage,
       primeDebtSeries,
       totalCapitalSeries,
       collateralSeries,
@@ -265,6 +258,7 @@ export function usePrimeChartSeries(
     }),
     [
       allocationBalanceSeries,
+      allocationCoverage,
       primeDebtSeries,
       totalCapitalSeries,
       collateralSeries,

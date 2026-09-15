@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
@@ -111,10 +112,13 @@ class AllocationService:
         bucket_seconds: float,
         limit: int = 100,
         allowed_vaults: Sequence[EthAddress] | None = None,
+        series: Literal["flow", "balance"] = "flow",
     ) -> list[AllocationActivityBucket]:
         # Same contract as the raw feed: the allow-list lands in the SQL WHERE,
-        # so an aggregate can only ever sum rows the caller may view.
+        # so an aggregate can only ever sum rows the caller may view. That holds
+        # for series="balance" too -- the allow-list is inside its window_rows.
         return await self._repository.list_activity_buckets(
+            series=series,
             proxy_addresses=await self._prime_proxies(prime_id),
             allowed_vaults=allowed_vaults,
             chain_id=chain_id,
