@@ -2042,10 +2042,15 @@ or non-existent token.
   to the PositionManager as well as the chain, so a correcting registry version
   landing mid-run makes the next attempt rescan from the deploy block under the
   new surrogate id instead of inheriting a cursor that would skip everything below
-  it. Timeouts are 12h `StartToClose`, 36h `ScheduleToClose`, 3 attempts, 60 s
-  heartbeat. As for the position run, heartbeat details belong to one activity
-  execution, so a run started again by hand rescans from the deploy block, which
-  is safe and costs only RPC time.
+  it. Timeouts are 12h `StartToClose`, 75h `ScheduleToClose`, 10 attempts, 60 s
+  heartbeat. **Each pod roll spends one attempt**: the activity dies with its
+  worker, Temporal notices 180 s later (heartbeat × 3), and the next attempt picks
+  up the recorded cursor — so a deploy, a spot reclaim and a drain in one afternoon
+  cost three of the ten and no rescanning beyond the window that was in flight.
+  As for the position run, heartbeat details belong to one activity execution, so a
+  run started again by hand rescans from the deploy block, which is safe and costs
+  RPC time plus an archive read per height. That is the reason the attempt budget
+  is 10: exhausting it is what turns a resumable interruption into a full rescan.
 - **A run that scans the whole history and decodes nothing logs a Warn**, not an
   error. On a chain with no posm activity yet that is the truth; on mainnet it is
   what a wrong `uniswap_v4_position_manager` protocol address looks like (the

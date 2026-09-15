@@ -437,15 +437,29 @@ func newMulticaller(
 // hash read for each height carrying more than one archived version, which is the
 // ~100k in the band two archive writers overlapped. StartToClose therefore has to
 // clear a run of several hours end to end — 12h leaves room for provider slowness
-// and for a chain with an order of magnitude more tokens, and ScheduleToClose
-// admits three attempts of it.
+// and for a chain with an order of magnitude more tokens.
 //
-// A later attempt is cheaper than the first: the scan resumes from the recorded
-// cursor, so committed windows are neither re-listed nor re-read.
+// MaximumAttempts is the interruption budget, and each pod roll spends one: the
+// activity dies with its worker, Temporal notices Heartbeat*3 later, and the next
+// attempt resumes from the recorded cursor, so committed windows are neither
+// re-listed nor re-read. A rolled-out deploy, a spot reclaim and a node drain in
+// one afternoon are three, and the attempt that follows the last one is the one
+// that finishes the sweep — so the budget is 10 rather than a number a normal
+// week of cluster churn can exhaust. Spending the budget is not a data risk, it
+// costs the cursor: heartbeat details are readable only within one activity
+// EXECUTION, so a hand-started run after the workflow fails begins at the
+// PositionManager deploy block again and re-reads the archive for every height
+// it already stamped.
+//
+// ScheduleToClose bounds the total across those attempts. It is deliberately the
+// full 10 * the 7.5h a measured whole-history run takes, because an attempt that
+// dies without recording anything leaves the next one the same work, and the
+// ceiling has to keep admitting full attempts instead of truncating the last few
+// into windows too short to finish in.
 var transferActivityTimeouts = temporal.ActivityTimeouts{
 	StartToClose:    12 * time.Hour,
-	ScheduleToClose: 36 * time.Hour,
-	MaximumAttempts: 3,
+	ScheduleToClose: 75 * time.Hour,
+	MaximumAttempts: 10,
 	Heartbeat:       time.Minute,
 }
 
