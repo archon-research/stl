@@ -17,6 +17,8 @@ stl-verify/dist/
 # Deliberately NOT listed: `internal` and `stress-test` — those names are also tracked
 # directories at stl-verify/, and an ignore on the bare name would hide new files
 # inside them. Build those two with -o dist/ (the Makefile targets already do).
+/stl-verify/allocation-underlying-value-backfill
+/allocation-underlying-value-backfill
 /stl-verify/aave-like-user-snapshot-indexer
 /aave-like-user-snapshot-indexer
 /stl-verify/anchorage-indexer
@@ -106,7 +108,7 @@ __pycache__/
 htmlcov/
 
 # Go
-.gopath/
+.gopath
 
 # Skillfile (github.com/eljulians/skillfile)
 # Skill sources live in skills/ (local) or are pinned by SHA in Skillfile.lock

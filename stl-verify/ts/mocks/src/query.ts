@@ -14,7 +14,7 @@
  */
 import { DAY_MS, HOUR_MS, MINUTE_MS, floorToInterval, iso } from './clock.ts';
 import type { Parsed } from './problem.ts';
-import { invalidQueryParam, unprocessable } from './problem.ts';
+import { invalidQueryParam, rejection } from './problem.ts';
 import type {
   AggregationMethod,
   Provenance,
@@ -241,7 +241,9 @@ export function resolveWindow(
   if (requested.value !== null && method === null) {
     return {
       ok: false,
-      problem: unprocessable(
+      problem: rejection(
+        'frequency_requires_aggregation_method',
+        'Frequency requires an aggregation method',
         'frequency names the grid an aggregation_method cuts on; ' +
           'supply aggregation_method=end-period or omit frequency',
       ),
@@ -254,7 +256,9 @@ export function resolveWindow(
   if (fromMs > toMs) {
     return {
       ok: false,
-      problem: unprocessable(
+      problem: rejection(
+        'invalid_time_range',
+        'Invalid time range',
         'from_timestamp must be less than or equal to to_timestamp',
       ),
     };
@@ -264,7 +268,9 @@ export function resolveWindow(
   if (windowMs > MAX_WINDOW_MS) {
     return {
       ok: false,
-      problem: unprocessable(
+      problem: rejection(
+        'window_too_large',
+        'Window too large',
         `requested window of ${windowMs}ms exceeds the maximum allowed of ${MAX_WINDOW_MS}ms`,
       ),
     };
@@ -275,7 +281,9 @@ export function resolveWindow(
   if (MS_BY_FREQUENCY[frequency] < MS_BY_FREQUENCY[floor]) {
     return {
       ok: false,
-      problem: unprocessable(
+      problem: rejection(
+        'frequency_too_fine',
+        'Frequency too fine',
         `frequency is too fine for the selected window; minimum allowed frequency is ${floor}`,
       ),
     };

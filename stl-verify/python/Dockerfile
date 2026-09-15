@@ -1,9 +1,8 @@
 # syntax=docker/dockerfile:1.10
-ARG PYTHON_VERSION
 
 # Build UI on the native builder architecture — the output is static JS/HTML/CSS,
 # so there's no reason to run npm under QEMU arm64 emulation (which crashes node).
-FROM --platform=$BUILDPLATFORM node:24-alpine AS ui-builder
+FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:50c8e8ca1d27439048670df5883f32d57cf81cff6233222c893fd0d9884cbd81 AS ui-builder
 
 WORKDIR /ui
 
@@ -20,7 +19,7 @@ RUN npm run prepare --workspace=@stl-verify/ui
 RUN npm run build --workspace=@stl-verify/ui
 
 # Build Python dependencies
-FROM python:${PYTHON_VERSION}-slim AS builder
+FROM python:3.12.14-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.5 /uv /uvx /bin/
 
@@ -39,7 +38,7 @@ COPY python/app/ app/
 COPY python/suraf/ suraf/
 RUN uv sync --frozen --no-dev
 
-FROM python:${PYTHON_VERSION}-slim
+FROM python:3.12.14-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
 
 # groupadd/useradd live in the passwd package, which the hardening step below
 # removes — user creation must stay above it.

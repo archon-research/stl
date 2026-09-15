@@ -25,7 +25,7 @@ import {
 import { PRIMES } from '../fixtures/registry.ts';
 import { decimalString, usdString } from '../fixtures/series.ts';
 import { LIST_DELAY_MS, SERIES_DELAY_MS, mock } from '../mock-api.ts';
-import { notFound, problemResponse, unprocessable } from '../problem.ts';
+import { notFound, problemResponse, rejection } from '../problem.ts';
 import {
   bucketStarts,
   equalsInsensitive,
@@ -328,7 +328,9 @@ export function allocationHandlers(): MockHandler[] {
       if (series.value !== 'flow') {
         return response.untyped(
           problemResponse(
-            unprocessable(
+            rejection(
+              'invalid_request',
+              'Invalid request',
               'series is only applicable with aggregation_method=end-period',
             ),
           ),

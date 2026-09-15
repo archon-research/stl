@@ -113,8 +113,10 @@ details, which live on the Temporal server:
 - resume must be alignment-safe: record a position only once the unit that reached it is
   fully done, and scope the record so a record computed for different inputs is refused.
 
-`morpho-v2-bootstrap` is the worked example. A job with nothing to resume leaves
-`Progress` nil and heartbeats exactly as before.
+`morpho-v2-bootstrap` is the worked example; `uniswap-v4-position-bootstrap` records
+the block it pinned and the pools it has finished, so a retry continues the same
+snapshot instead of pinning afresh. A job with nothing to resume leaves `Progress` nil
+and heartbeats exactly as before.
 
 ## Recipe: add a new cronjob
 
@@ -221,6 +223,62 @@ already covered by `alerts/vector-cronjobs.yaml`. Add job-specific data-quality 
 matching runbook sections in `docs/runbooks/` only if the generic error path cannot catch a
 silent hole (e.g. "ran successfully but wrote zero rows").
 
+## Recipe: remove a cronjob
+
+Deleting the code and the manifests is not enough. A schedule lives in Temporal's
+database, not in this repo, so it outlives the code that created it and keeps firing into
+a task queue nobody polls. Work the steps in this order, in every environment the job
+reached (staging, prod, and your local kind cluster).
+
+### Step 1 - Delete the schedule, then its leftover run
+
+```bash
+temporal schedule delete --schedule-id <your-job> --namespace vector
+```
+
+Deleting the schedule stops new ticks but leaves the run already in flight. Terminate
+that too: a run whose first workflow task was never picked up stays `Running` forever,
+because a workflow task has no schedule-to-start timeout. In the UI it looks like a
+workflow with a two-event history and a pending workflow task, dated whenever the worker
+went away.
+
+This step comes first because it is the only one no reviewer can see in the diff. Once
+the Deployment is gone, `VectorCronjobWorkerDown` can no longer fire for the job - it
+reads `kube_deployment_*` series that a deleted Deployment stops producing - so a
+schedule orphaned after the manifests are removed is invisible to every rule in
+`alerts/vector-cronjobs.yaml`.
+
+### Step 2 - Remove its alerting
+
+Drop the Deployment name from both regexes in `VectorCronjobWorkerDown` (or
+`VectorOnDemandWorkerDown`) in `alerts/vector-cronjobs.yaml`, together with any
+job-specific rules and their sections in `docs/runbooks/vector-cronjobs.md`.
+
+### Step 3 - Remove its deployment
+
+Delete `k8s/base/<your-job>/`, its entries in the `k8s/overlays/{dev,staging,prod}/`
+kustomizations, and its line in `k8s/image-roster.txt`.
+
+### Step 4 - Remove its code
+
+Delete `stl-verify/cmd/cronjobs/<your-job>/`, its `dev-env` block in
+`stl-verify/Makefile`, and its row in [Current cronjobs](#current-cronjobs).
+
+### Finding schedules that are already orphaned
+
+Compare what the namespace holds against the jobs that still exist:
+
+```bash
+curl -s http://temporal-staging:8080/api/v1/namespaces/vector/schedules \
+  | jq -r '.schedules[].scheduleId' | sort
+ls stl-verify/cmd/cronjobs
+```
+
+A schedule with no job behind it is an orphan. The two sides are not one-to-one:
+`watcher-data-validator` serves one schedule per chain through `SERVICE_NAME`
+(`arbitrum-watcher-data-validator`, `unichain-watcher-data-validator`, ...), and the
+on-demand jobs under `cmd/cronjobs/` carry no schedule at all.
+
 ## On-demand jobs (no schedule, started by hand)
 
 Some work is not periodic. A backfill's range is an argument, decided by whoever
@@ -254,6 +312,7 @@ whatever input the job declares. Nothing here has a schedule or a button.
 | `cmd/backfillers/morpho-vault-backfill` | `morpho-vault-backfill` | `MorphoVaultBackfill` | `{"from":24765588,"to":24786366}` (or `{"to":24786366,"fromV2Deploy":true}` for the whole VaultV2 era) |
 | `cmd/cronjobs/morpho-v2-bootstrap` | `morpho-v2-bootstrap` | `MorphoV2Bootstrap` | none (`{}` is accepted and ignored) |
 | `cmd/backfillers/block-republisher` | `block-republisher` (ethereum), `<chain>-block-republisher` elsewhere | `BlockRepublish` | `{"blocks":[25395651,25087888]}` (the version is derived per height from the raw archive; naming one, or any other field, fails the run) |
+| `cmd/backfillers/uniswap-v4-position-bootstrap` | `uniswap-v4-position-bootstrap` | `UniswapV4PositionBootstrap` | none (`{}` is accepted and ignored); the run pins its own finalized head and resumes it across attempts from the activity's heartbeat details |
 
 ### Shape of an on-demand job
 
@@ -450,11 +509,16 @@ select namespace `vector` to watch schedules and executions.
 
 ## Gotchas
 
-1. **Schedule interval is set only on creation.** `ensureSchedule` skips an existing
-   schedule, so changing the default or env var has no effect until you delete the schedule
-   (`temporal schedule delete --schedule-id <name> --namespace <ns>`) and let the worker
+1. **A schedule's timing is reconciled; its action is frozen at creation.**
+   `ensureSchedule` rewrites the spec on every worker start, so a changed `IntervalDefault`
+   or interval env var takes effect on the next redeploy. The action - workflow type,
+   workflow ID, task queue, and the `ActivityTimeouts` carried in its args - is written once,
+   when the schedule is created. Changing one of those means deleting the schedule
+   (`temporal schedule delete --schedule-id <name> --namespace <ns>`) and letting the worker
    recreate it.
-2. **Renaming `Name` orphans the old schedule** - it keeps firing until deleted manually.
+2. **Renaming or removing a job orphans its schedule** - it keeps firing into a task queue
+   nobody polls, until someone deletes it by hand, and nothing alerts on it. See
+   [Recipe: remove a cronjob](#recipe-remove-a-cronjob).
 3. **Workflows must be deterministic.** No `time.Now()`, `rand`, network calls, or
    goroutines in the workflow. All side effects go through the activity (your `Runner`).
 4. **Make your `Runner` idempotent.** Activities retry (5x by default) and every retry sees
