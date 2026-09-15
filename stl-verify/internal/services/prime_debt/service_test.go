@@ -566,11 +566,8 @@ func TestSync_WritesSnapshotPerPrime(t *testing.T) {
 	_ = svc.Stop()
 }
 
-// TestSync_StampsSnapshotsWithBlockTime asserts synced_at carries the swept
-// block's on-chain timestamp rather than the sweep's wall clock. synced_at is
-// in prime_debt's natural key, so a wall-clock value makes every redelivery of
-// the same block a fresh row that ON CONFLICT DO NOTHING cannot dedupe
-// (VEC-709).
+// synced_at is in prime_debt's natural key, so only an on-chain value keeps a
+// redelivery of the same block at the same key.
 func TestSync_StampsSnapshotsWithBlockTime(t *testing.T) {
 	prime := sparkPrime()
 

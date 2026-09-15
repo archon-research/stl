@@ -522,8 +522,13 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 	sqsServer, sqsState := testutil.StartMockSQS(t)
 	defer sqsServer.Close()
 
-	const wantRows = 3
-	enqueueBlockEvents(t, sqsState, 20971520, wantRows+2, 1)
+	const (
+		wantRows    = 3
+		startBlock  = 20971520
+		enqueued    = wantRows + 2
+		replayBlock = startBlock + enqueued
+	)
+	enqueueBlockEvents(t, sqsState, startBlock, enqueued, 1)
 
 	testutil.SetBuildGitHash(t)
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
@@ -559,6 +564,31 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 	}
 	if distinctTimes < wantRows {
 		t.Errorf("expected %d distinct synced_at values, got %d", wantRows, distinctTimes)
+	}
+
+	// SQS is at-least-once. Re-queue every block, then one unseen block whose row
+	// proves the redeliveries ahead of it in the queue have been drained.
+	enqueueBlockEvents(t, sqsState, startBlock, enqueued, 1)
+	enqueueBlockEvents(t, sqsState, replayBlock, 1, 1)
+
+	testutil.WaitForWorkerCondition(t, errCh, 15*time.Second, func() bool {
+		var count int
+		err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt WHERE block_number = $1`, replayBlock).Scan(&count)
+		return err == nil && count == 1
+	}, "snapshot for the post-redelivery block")
+
+	var duplicated int
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM (
+			SELECT 1
+			FROM prime_debt
+			GROUP BY prime_id, block_number, block_version
+			HAVING COUNT(*) > 1
+		) dupes`).Scan(&duplicated); err != nil {
+		t.Fatalf("query duplicated snapshots: %v", err)
+	}
+	if duplicated != 0 {
+		t.Errorf("expected redelivered blocks to dedupe, got %d block(s) with multiple rows", duplicated)
 	}
 
 	cancel()
