@@ -8,10 +8,8 @@
 #
 # Scoped to build-mechanism inputs, not ordinary source/dependency changes:
 # those are expected to change layers, so catching them here would not be a
-# regression. .go-version/.python-version are included because the script
-# reads them directly to pick the base image, not because they are "code".
-# Four image builds per run, two of which run the arm64 runtime stage under
-# QEMU.
+# regression. Four image builds per run, two of which run the arm64 runtime
+# stage under QEMU.
 name: Build Reproducibility
 
 on:
@@ -22,8 +20,6 @@ on:
       - "stl-verify/python/Dockerfile"
       - "stl-verify/.dockerignore"
       - "stl-verify/internal/pkg/buildinfo/**"
-      - ".go-version"
-      - ".python-version"
       - "scripts/deploy/check-build-reproducible.sh"
       - ".github/workflows/build-reproducibility.yml"
   push:
@@ -34,8 +30,6 @@ on:
       - "stl-verify/python/Dockerfile"
       - "stl-verify/.dockerignore"
       - "stl-verify/internal/pkg/buildinfo/**"
-      - ".go-version"
-      - ".python-version"
       - "scripts/deploy/check-build-reproducible.sh"
       - ".github/workflows/build-reproducibility.yml"
   workflow_dispatch:

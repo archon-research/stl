@@ -12,6 +12,7 @@ export type { operations, paths };
 
 type Schemas = components['schemas'];
 
+export type ApiError = Schemas['ApiErrorResponse'];
 export type Allocation = Schemas['AllocationResponse'];
 export type AllocationActivity = Schemas['AllocationActivityResponse'];
 export type AllocationActivityBucket =
