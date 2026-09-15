@@ -378,7 +378,7 @@ export function MetricCardError({
 const metricsCardClassName = css({
   borderRadius: 'sm',
   borderStyle: 'solid',
-  borderWidth: '1px',
+  borderWidth: 'hairline',
   borderColor: 'border.default',
   bg: 'surface.subtle',
   p: { base: '3', md: '3.5' },

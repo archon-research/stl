@@ -32,7 +32,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
   return (
     <div
       className={css({
-        borderWidth: '1px',
+        borderWidth: 'hairline',
         borderStyle: 'solid',
         borderColor: 'border.subtle',
         borderRadius: 'sm',

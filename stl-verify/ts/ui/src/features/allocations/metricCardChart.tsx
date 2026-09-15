@@ -107,7 +107,7 @@ export function MetricCardLegend({
 const chartTooltipSurfaceClassName = css({
   borderColor: 'border.subtle',
   borderStyle: 'solid',
-  borderWidth: '1px',
+  borderWidth: 'hairline',
   borderRadius: 'md',
   background: 'surface.default',
   boxShadow: 'sm',
