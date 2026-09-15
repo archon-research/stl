@@ -183,91 +183,6 @@ func (f *positionDailyFixture) dbNow() time.Time {
 	return at
 }
 
-// One case per leg of the ordering, each holding the earlier legs equal and both rows on the SAME UTC
-// date so they compete for the day and the ordering actually decides.
-func TestPositionDailyNewerWinsPrecedence(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	for _, tc := range []struct {
-		name             string
-		id               string
-		base, challenger dailyObs
-		keepBase         bool
-		why              string
-	}{
-		{name: "a newer block wins", id: "d-block",
-			base:       dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"},
-			challenger: dailyObs{qty: 22, block: 200, ts: "2026-01-01T02:00:00Z", dealType: "LOAN"}},
-		{name: "an older block does not win even at a higher processing_version", id: "d-order",
-			base:       dailyObs{qty: 11, block: 200, ts: "2026-01-01T02:00:00Z", dealType: "LOAN"},
-			challenger: dailyObs{qty: 22, block: 100, pv: 1, ts: "2026-01-01T03:00:00Z", dealType: "LOAN"},
-			keepBase:   true, why: "the ordering must lead with block_number, or a reprocess of old history rolls the day back"},
-		{name: "a newer block_version at the same block wins", id: "d-bv",
-			base:       dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"},
-			challenger: dailyObs{qty: 22, block: 100, bv: 1, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"}},
-		{name: "a newer processing_version at the same block and block_version wins", id: "d-pv",
-			base:       dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"},
-			challenger: dailyObs{qty: 22, block: 100, pv: 1, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"}},
-		{name: "a later block_timestamp on the same day at equal versions wins", id: "d-ts",
-			base:       dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"},
-			challenger: dailyObs{qty: 22, block: 100, ts: "2026-01-01T05:00:00Z", dealType: "LOAN"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f.observe(tc.id, tc.base)
-			f.observe(tc.id, tc.challenger)
-			f.crystallize()
-			want := tc.challenger.qty
-			if tc.keepBase {
-				want = tc.base.qty
-			}
-			if got := f.dayQty(tc.id, "2026-01-01"); got != want {
-				t.Errorf("the day reads %d; want %d. %s", got, want, tc.why)
-			}
-		})
-	}
-}
-
-// An older observation arriving later cannot regress the day it lands on.
-func TestPositionDailyOlderObservationArrivingLaterCannotRegressTheDay(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	f.observe("d-late", dailyObs{qty: 22, block: 200, ts: "2026-01-01T05:00:00Z", dealType: "LOAN"})
-	f.observe("d-late", dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
-	f.crystallize()
-	if got := f.dayQty("d-late", "2026-01-01"); got != 22 {
-		t.Errorf("the day reads %d; want 22 -- an older observation arriving later must not win", got)
-	}
-}
-
-// Only observed dates get a row, and every observed date gets one. No carry-forward.
-func TestPositionDailyRetainsEveryObservedDateAndOnlyThose(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	for _, o := range []dailyObs{
-		{qty: 10, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"},
-		{qty: 20, block: 200, ts: "2026-01-03T00:00:00Z", dealType: "LOAN"},
-		{qty: 30, block: 300, ts: "2026-01-06T00:00:00Z", dealType: "LOAN"},
-	} {
-		f.observe("d-dates", o)
-	}
-	f.crystallize()
-	got := strings.Join(f.daily("d-dates"), ",")
-	if got != "2026-01-01=10,2026-01-03=20,2026-01-06=30" {
-		t.Errorf("series = %s; want only the three observed dates, with no carry-forward into 01-02 or 01-04/05", got)
-	}
-}
-
-// A correction on the same day supersedes that day's reading; a correction across UTC midnight is a
-// row on its own date and leaves the old date's reading standing.
-func TestPositionDailyCorrectionsLandOnTheirOwnDate(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	f.observe("d-corr", dailyObs{qty: 10, block: 100, ts: "2026-01-01T23:00:00Z", dealType: "LOAN"})
-	f.observe("d-corr", dailyObs{qty: 15, block: 100, pv: 1, ts: "2026-01-01T23:30:00Z", dealType: "LOAN"})
-	f.observe("d-corr", dailyObs{qty: 99, block: 200, ts: "2026-01-02T00:30:00Z", dealType: "LOAN"})
-	f.crystallize()
-	got := strings.Join(f.daily("d-corr"), ",")
-	if got != "2026-01-01=15,2026-01-02=99" {
-		t.Errorf("series = %s; want the same-day reprocess to supersede 01-01 and the next day to be its own row", got)
-	}
-}
-
 // One row per (position, date), and a late arrival only adds one when it actually changes the answer.
 // This is the shape the whole design turns on: crystallize once per settled day, never per batch.
 func TestPositionDailyCrystallizesOnceADayAndAppendsOnlyOnChange(t *testing.T) {
@@ -470,40 +385,6 @@ func TestPositionDailyEqualsTheWinningSpineRowOnEveryColumn(t *testing.T) {
 	}
 }
 
-// A NULL deal_type is carried as NULL.
-func TestPositionDailyCarriesANullDealType(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	f.observe("d-null", dailyObs{qty: 5, block: 100, ts: "2026-01-01T00:00:00Z"})
-	f.crystallize()
-	if got := f.dayRow("d-null", "2026-01-01")["deal_type"]; got != "NULL" {
-		t.Errorf("deal_type = %q, want NULL", got)
-	}
-}
-
-// One batch carrying several observations of one position on one day appends that day's newest, once.
-func TestPositionDailyIntraBatchPick(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	if _, err := f.pool.Exec(f.ctx, `
-		INSERT INTO position_state
-		    (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
-		     block_number, block_version, processing_version, block_timestamp, projection, build_id, deal_type)
-		SELECT sha256('d-batch'::bytea), 1, 1, 'inst-d-batch', repeat('a', 40), v.qty, v.bn, 0, 0,
-		       v.ts::timestamptz, 'public.proj-0', 0, v.dt
-		FROM (VALUES (11, 100, '2026-01-01T01:00:00Z', 'LOAN'),
-		             (33, 300, '2026-01-01T09:00:00Z', 'BORROW'),
-		             (22, 200, '2026-01-01T05:00:00Z', 'LOAN')) AS v(qty, bn, ts, dt)`); err != nil {
-		t.Fatalf("batch insert: %v", err)
-	}
-	f.crystallize()
-	if n := f.dayRows("d-batch", "2026-01-01"); n != 1 {
-		t.Errorf("the day holds %d row(s); want 1, its winning observation", n)
-	}
-	got := f.dayRow("d-batch", "2026-01-01")
-	if got["quantity"] != "33" || got["block_number"] != "300" || got["deal_type"] != "BORROW" {
-		t.Errorf("the day reads quantity %s at block %s deal_type %s; want 33 at 300 BORROW", got["quantity"], got["block_number"], got["deal_type"])
-	}
-}
-
 // The app role reads and cannot write; the owner can only append. The owner half is read from the
 // ACL rather than has_table_privilege because the harness's owner is a superuser, for whom that
 // function answers true regardless.
@@ -649,32 +530,6 @@ func TestPositionDailyCrystallizerResolvesUnderAShadowingSearchPath(t *testing.T
 // A plain postgres table, which is the house default: no hypertable, no chunks, and no native
 // partitioning either. A migration that reaches for create_hypertable again fails here.
 
-// The as_of_date CHECK pins both writers' date derivation, and rejects a hand-written mismatch.
-func TestPositionDailyAsOfDateIsPinnedToBlockTimestamp(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	f.observe("d-date-chk", dailyObs{qty: 5, block: 100, ts: "2026-01-01T23:30:00Z", dealType: "LOAN"})
-	f.crystallize()
-	if got := f.dayRow("d-date-chk", "2026-01-01")["block_timestamp"]; !strings.HasPrefix(got, "2026-01-01") {
-		t.Errorf("block_timestamp = %q, want the 2026-01-01 instant", got)
-	}
-	if _, err := f.pool.Exec(f.ctx, `
-		INSERT INTO position_daily_observation (position_id, as_of_date, instrument_key, holder_id, quantity,
-		    block_number, block_version, processing_version, block_timestamp, projection, build_id)
-		VALUES (sha256('d-date-chk'::bytea), '2026-02-02', 'x', repeat('a', 40), 1, 1, 0, 0, '2026-01-01T23:30:00Z', 'p', 0)`); err == nil {
-		t.Error("a row landed on a date its block_timestamp does not fall on; the CHECK is missing")
-	} else if !strings.Contains(err.Error(), "check constraint") {
-		t.Errorf("rejected for the wrong reason: %v", err)
-	}
-	var onParent int
-	if err := f.pool.QueryRow(f.ctx,
-		`SELECT count(*) FROM pg_constraint WHERE conrelid = 'position_daily_observation'::regclass AND conname = 'position_daily_observation_as_of_date_chk'`).Scan(&onParent); err != nil {
-		t.Fatal(err)
-	}
-	if onParent != 1 {
-		t.Errorf("position_daily_observation_as_of_date_chk is not declared on position_daily_observation (%d), so nothing pins as_of_date to block_timestamp", onParent)
-	}
-}
-
 // The PK leads with (position_id, as_of_date) so a day's rows are one prefix scan, and the two
 // secondary indexes serve the holder series and the whole book on one date. Read from the catalogue
 // rather than the indexdef text, so a partial, expression or INCLUDE-only index fails.
@@ -686,7 +541,9 @@ func TestPositionDailyAsOfRefusesANullBound(t *testing.T) {
 	f.observe("d-null-bound", dailyObs{qty: 9, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
 	f.crystallize()
 	var n int
-	err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM position_daily_as_of(NULL::timestamptz)`).Scan(&n)
+	err := f.pool.QueryRow(f.ctx,
+		`SELECT count(*) FROM position_daily_as_of(NULL::timestamptz) WHERE position_id = sha256($1::bytea)`,
+		"d-null-bound").Scan(&n)
 	if err == nil {
 		t.Fatalf("position_daily_as_of(NULL) returned %d row(s) instead of raising; an unset bound reads as an empty series", n)
 	}
@@ -695,7 +552,8 @@ func TestPositionDailyAsOfRefusesANullBound(t *testing.T) {
 	}
 	// Negative control: a real bound still answers, so the guard rejects NULL rather than everything.
 	if err := f.pool.QueryRow(f.ctx,
-		`SELECT count(*) FROM position_daily_as_of('infinity'::timestamptz)`).Scan(&n); err != nil {
+		`SELECT count(*) FROM position_daily_as_of('infinity'::timestamptz) WHERE position_id = sha256($1::bytea)`,
+		"d-null-bound").Scan(&n); err != nil {
 		t.Fatalf("a real bound must still answer: %v", err)
 	}
 	if n != 1 {
@@ -1163,30 +1021,6 @@ func TestPositionDailyCrystallizerOrderingPrecedence(t *testing.T) {
 	}
 }
 
-// The TRIGGER's last ordering leg. position_state's PK carries block_timestamp, so one batch can hold
-// two rows sharing every earlier leg on one UTC date; the loser is never appended, so getting this
-// wrong makes the day permanently wrong with no trace.
-func TestPositionDailyIntraBatchPicksTheLaterInstantAtEqualVersions(t *testing.T) {
-	f := newPositionDailyFixture(t)
-	if _, err := f.pool.Exec(f.ctx, `
-		INSERT INTO position_state
-		    (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
-		     block_number, block_version, processing_version, block_timestamp, projection, build_id, deal_type)
-		SELECT sha256('d-ts-batch'::bytea), 1, 1, 'inst-d-ts-batch', repeat('a', 40), v.qty, 100, 0, 0,
-		       v.ts::timestamptz, 'public.proj-0', 0, 'LOAN'
-		FROM (VALUES (11, '2026-01-01T01:00:00Z'), (22, '2026-01-01T09:00:00Z')) AS v(qty, ts)`); err != nil {
-		t.Fatalf("batch insert: %v", err)
-	}
-	f.crystallize()
-	if n := f.dayRows("d-ts-batch", "2026-01-01"); n != 1 {
-		t.Fatalf("the day holds %d row(s), want 1", n)
-	}
-	if got := f.dayQty("d-ts-batch", "2026-01-01"); got != 22 {
-		t.Errorf("the day reads %d, want 22 -- at equal versions the later instant is the day's observation, "+
-			"and the loser is never appended, so this is unrecoverable", got)
-	}
-}
-
 // The owner revoke's guard, under a NON-superuser owner. The harness owner is a superuser, for whom
 // has_table_privilege answers true regardless, so the migration skips the check and its RAISE arm
 // never runs in any other test: dropping the guard passes the whole suite.
@@ -1248,9 +1082,11 @@ func TestPositionDailyAsOfBoundIsInclusive(t *testing.T) {
 	}
 	var atStamp, justBefore int
 	if err := f.pool.QueryRow(f.ctx, `
-		SELECT (SELECT count(*) FROM position_daily_as_of($1) WHERE as_of_date = $2),
-		       (SELECT count(*) FROM position_daily_as_of($1 - interval '1 microsecond') WHERE as_of_date = $2)`,
-		stamped, day).Scan(&atStamp, &justBefore); err != nil {
+		SELECT (SELECT count(*) FROM position_daily_as_of($1)
+		         WHERE as_of_date = $2 AND position_id = sha256($3::bytea)),
+		       (SELECT count(*) FROM position_daily_as_of($1 - interval '1 microsecond')
+		         WHERE as_of_date = $2 AND position_id = sha256($3::bytea))`,
+		stamped, day, id).Scan(&atStamp, &justBefore); err != nil {
 		t.Fatal(err)
 	}
 	if atStamp != 1 {
@@ -1266,14 +1102,14 @@ func TestPositionDailyAsOfBoundIsInclusive(t *testing.T) {
 func TestPositionDailyDateFilterIsPushedIntoTheScan(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	for i := range 40 {
-		f.observe(fmt.Sprintf("d-date-push-%02d", i), dailyObs{qty: i + 1, block: 100 + i, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+		f.observe(fmt.Sprintf("d-date-push-%02d", i), dailyObs{qty: i + 1, block: 100 + i, ts: "2026-07-07T01:00:00Z", dealType: "LOAN"})
 	}
 	f.observe("d-date-push-other", dailyObs{qty: 999, block: 900, ts: "2026-02-02T01:00:00Z", dealType: "LOAN"})
 	f.crystallize()
 	if _, err := f.pool.Exec(f.ctx, `SET LOCAL enable_seqscan = off`); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := f.pool.Query(f.ctx, `EXPLAIN SELECT * FROM position_daily WHERE as_of_date = '2026-01-01'`)
+	rows, err := f.pool.Query(f.ctx, `EXPLAIN SELECT * FROM position_daily WHERE as_of_date = '2026-07-07'`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1294,7 +1130,7 @@ func TestPositionDailyDateFilterIsPushedIntoTheScan(t *testing.T) {
 	}
 	var got int
 	if err := f.pool.QueryRow(f.ctx,
-		`SELECT count(*) FROM position_daily WHERE as_of_date = '2026-01-01'`).Scan(&got); err != nil {
+		`SELECT count(*) FROM position_daily WHERE as_of_date = '2026-07-07'`).Scan(&got); err != nil {
 		t.Fatal(err)
 	}
 	if got != 40 {
@@ -1510,6 +1346,175 @@ func TestPositionDailySchema(t *testing.T) {
 		}
 		if rows := f.rowCount(); rows != 2 {
 			t.Errorf("the two observations stored %d row(s), want 2", rows)
+		}
+	})
+}
+
+// The per-day semantics, sharing one database: every case owns its position, and the
+// assertions are per position or per date, so a database each would only cost time.
+// db/migrator builds its own database per fixture rather than cloning a template, which
+// is ~3s in CI, and this package sits close to its per-package timeout.
+func TestPositionDailySemantics(t *testing.T) {
+	f := newPositionDailyFixture(t)
+
+	// One case per leg of the ordering, each holding the earlier legs equal and both rows on the SAME UTC
+	// date so they compete for the day and the ordering actually decides.
+	t.Run("newer wins precedence", func(t *testing.T) {
+		for _, tc := range []struct {
+			name             string
+			id               string
+			base, challenger dailyObs
+			keepBase         bool
+			why              string
+		}{
+			{name: "a newer block wins", id: "d-block",
+				base:       dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"},
+				challenger: dailyObs{qty: 22, block: 200, ts: "2026-01-01T02:00:00Z", dealType: "LOAN"}},
+			{name: "an older block does not win even at a higher processing_version", id: "d-order",
+				base:       dailyObs{qty: 11, block: 200, ts: "2026-01-01T02:00:00Z", dealType: "LOAN"},
+				challenger: dailyObs{qty: 22, block: 100, pv: 1, ts: "2026-01-01T03:00:00Z", dealType: "LOAN"},
+				keepBase:   true, why: "the ordering must lead with block_number, or a reprocess of old history rolls the day back"},
+			{name: "a newer block_version at the same block wins", id: "d-bv",
+				base:       dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"},
+				challenger: dailyObs{qty: 22, block: 100, bv: 1, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"}},
+			{name: "a newer processing_version at the same block and block_version wins", id: "d-pv",
+				base:       dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"},
+				challenger: dailyObs{qty: 22, block: 100, pv: 1, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"}},
+			{name: "a later block_timestamp on the same day at equal versions wins", id: "d-ts",
+				base:       dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"},
+				challenger: dailyObs{qty: 22, block: 100, ts: "2026-01-01T05:00:00Z", dealType: "LOAN"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f.observe(tc.id, tc.base)
+				f.observe(tc.id, tc.challenger)
+				f.crystallize()
+				want := tc.challenger.qty
+				if tc.keepBase {
+					want = tc.base.qty
+				}
+				if got := f.dayQty(tc.id, "2026-01-01"); got != want {
+					t.Errorf("the day reads %d; want %d. %s", got, want, tc.why)
+				}
+			})
+		}
+	})
+
+	// An older observation arriving later cannot regress the day it lands on.
+	t.Run("older observation arriving later cannot regress the day", func(t *testing.T) {
+		f.observe("d-late", dailyObs{qty: 22, block: 200, ts: "2026-01-01T05:00:00Z", dealType: "LOAN"})
+		f.observe("d-late", dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		if got := f.dayQty("d-late", "2026-01-01"); got != 22 {
+			t.Errorf("the day reads %d; want 22 -- an older observation arriving later must not win", got)
+		}
+	})
+
+	// Only observed dates get a row, and every observed date gets one. No carry-forward.
+	t.Run("retains every observed date and only those", func(t *testing.T) {
+		for _, o := range []dailyObs{
+			{qty: 10, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"},
+			{qty: 20, block: 200, ts: "2026-01-03T00:00:00Z", dealType: "LOAN"},
+			{qty: 30, block: 300, ts: "2026-01-06T00:00:00Z", dealType: "LOAN"},
+		} {
+			f.observe("d-dates", o)
+		}
+		f.crystallize()
+		got := strings.Join(f.daily("d-dates"), ",")
+		if got != "2026-01-01=10,2026-01-03=20,2026-01-06=30" {
+			t.Errorf("series = %s; want only the three observed dates, with no carry-forward into 01-02 or 01-04/05", got)
+		}
+	})
+
+	// A correction on the same day supersedes that day's reading; a correction across UTC midnight is a
+	// row on its own date and leaves the old date's reading standing.
+	t.Run("corrections land on their own date", func(t *testing.T) {
+		f.observe("d-corr", dailyObs{qty: 10, block: 100, ts: "2026-01-01T23:00:00Z", dealType: "LOAN"})
+		f.observe("d-corr", dailyObs{qty: 15, block: 100, pv: 1, ts: "2026-01-01T23:30:00Z", dealType: "LOAN"})
+		f.observe("d-corr", dailyObs{qty: 99, block: 200, ts: "2026-01-02T00:30:00Z", dealType: "LOAN"})
+		f.crystallize()
+		got := strings.Join(f.daily("d-corr"), ",")
+		if got != "2026-01-01=15,2026-01-02=99" {
+			t.Errorf("series = %s; want the same-day reprocess to supersede 01-01 and the next day to be its own row", got)
+		}
+	})
+
+	// A NULL deal_type is carried as NULL.
+	t.Run("carries a null deal type", func(t *testing.T) {
+		f.observe("d-null", dailyObs{qty: 5, block: 100, ts: "2026-01-01T00:00:00Z"})
+		f.crystallize()
+		if got := f.dayRow("d-null", "2026-01-01")["deal_type"]; got != "NULL" {
+			t.Errorf("deal_type = %q, want NULL", got)
+		}
+	})
+
+	// One batch carrying several observations of one position on one day appends that day's newest, once.
+	t.Run("intra batch pick", func(t *testing.T) {
+		if _, err := f.pool.Exec(f.ctx, `
+			INSERT INTO position_state
+			    (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
+			     block_number, block_version, processing_version, block_timestamp, projection, build_id, deal_type)
+			SELECT sha256('d-batch'::bytea), 1, 1, 'inst-d-batch', repeat('a', 40), v.qty, v.bn, 0, 0,
+			       v.ts::timestamptz, 'public.proj-0', 0, v.dt
+			FROM (VALUES (11, 100, '2026-01-01T01:00:00Z', 'LOAN'),
+			             (33, 300, '2026-01-01T09:00:00Z', 'BORROW'),
+			             (22, 200, '2026-01-01T05:00:00Z', 'LOAN')) AS v(qty, bn, ts, dt)`); err != nil {
+			t.Fatalf("batch insert: %v", err)
+		}
+		f.crystallize()
+		if n := f.dayRows("d-batch", "2026-01-01"); n != 1 {
+			t.Errorf("the day holds %d row(s); want 1, its winning observation", n)
+		}
+		got := f.dayRow("d-batch", "2026-01-01")
+		if got["quantity"] != "33" || got["block_number"] != "300" || got["deal_type"] != "BORROW" {
+			t.Errorf("the day reads quantity %s at block %s deal_type %s; want 33 at 300 BORROW", got["quantity"], got["block_number"], got["deal_type"])
+		}
+	})
+
+	// The as_of_date CHECK pins both writers' date derivation, and rejects a hand-written mismatch.
+	t.Run("as of date is pinned to block timestamp", func(t *testing.T) {
+		f.observe("d-date-chk", dailyObs{qty: 5, block: 100, ts: "2026-01-01T23:30:00Z", dealType: "LOAN"})
+		f.crystallize()
+		if got := f.dayRow("d-date-chk", "2026-01-01")["block_timestamp"]; !strings.HasPrefix(got, "2026-01-01") {
+			t.Errorf("block_timestamp = %q, want the 2026-01-01 instant", got)
+		}
+		if _, err := f.pool.Exec(f.ctx, `
+			INSERT INTO position_daily_observation (position_id, as_of_date, instrument_key, holder_id, quantity,
+			    block_number, block_version, processing_version, block_timestamp, projection, build_id)
+			VALUES (sha256('d-date-chk'::bytea), '2026-02-02', 'x', repeat('a', 40), 1, 1, 0, 0, '2026-01-01T23:30:00Z', 'p', 0)`); err == nil {
+			t.Error("a row landed on a date its block_timestamp does not fall on; the CHECK is missing")
+		} else if !strings.Contains(err.Error(), "check constraint") {
+			t.Errorf("rejected for the wrong reason: %v", err)
+		}
+		var onParent int
+		if err := f.pool.QueryRow(f.ctx,
+			`SELECT count(*) FROM pg_constraint WHERE conrelid = 'position_daily_observation'::regclass AND conname = 'position_daily_observation_as_of_date_chk'`).Scan(&onParent); err != nil {
+			t.Fatal(err)
+		}
+		if onParent != 1 {
+			t.Errorf("position_daily_observation_as_of_date_chk is not declared on position_daily_observation (%d), so nothing pins as_of_date to block_timestamp", onParent)
+		}
+	})
+
+	// The TRIGGER's last ordering leg. position_state's PK carries block_timestamp, so one batch can hold
+	// two rows sharing every earlier leg on one UTC date; the loser is never appended, so getting this
+	// wrong makes the day permanently wrong with no trace.
+	t.Run("intra batch picks the later instant at equal versions", func(t *testing.T) {
+		if _, err := f.pool.Exec(f.ctx, `
+			INSERT INTO position_state
+			    (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
+			     block_number, block_version, processing_version, block_timestamp, projection, build_id, deal_type)
+			SELECT sha256('d-ts-batch'::bytea), 1, 1, 'inst-d-ts-batch', repeat('a', 40), v.qty, 100, 0, 0,
+			       v.ts::timestamptz, 'public.proj-0', 0, 'LOAN'
+			FROM (VALUES (11, '2026-01-01T01:00:00Z'), (22, '2026-01-01T09:00:00Z')) AS v(qty, ts)`); err != nil {
+			t.Fatalf("batch insert: %v", err)
+		}
+		f.crystallize()
+		if n := f.dayRows("d-ts-batch", "2026-01-01"); n != 1 {
+			t.Fatalf("the day holds %d row(s), want 1", n)
+		}
+		if got := f.dayQty("d-ts-batch", "2026-01-01"); got != 22 {
+			t.Errorf("the day reads %d, want 22 -- at equal versions the later instant is the day's observation, "+
+				"and the loser is never appended, so this is unrecoverable", got)
 		}
 	})
 }
