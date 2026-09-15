@@ -29,8 +29,7 @@ type Config struct {
 	MinWindow     int64
 	MaxWindow     int64
 	PositionBatch int
-	// TransferBatch sizes the posm transfer backfill's transactions; the position
-	// bootstrap does not read it, nor it PositionBatch.
+	// TransferBatch sizes the posm transfer backfill's transactions.
 	TransferBatch int
 }
 

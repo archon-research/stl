@@ -1993,34 +1993,46 @@ or non-existent token.
   `INITIAL_WINDOW` of 500,000 is right — measured against 50,000 and 100,000, all
   three land within 68–75 windows and 106–114 s, because the adaptive window
   self-tunes to the provider's ~10,000-log response cap within a few narrowings.
-- **It does NOT trip the growth tripwire.** 487,908 rows in minutes is ~22
-  rows/s over a 6h window, eight times
+- **It does NOT trip the live indexers' growth tripwire; it has its own.**
+  487,908 rows in minutes is ~22 rows/s over a 6h window, eight times
   [`VectorUniswapV4NFTTransferGrowthHigh`](#vectoruniswapv4nfttransfergrowthhigh)'s
   budget, so both `uniswap_v4_position_nft_transfer` rules exclude this worker's
-  `service_name`. The run still records through the same `dextelemetry` counters,
-  so its rows stay visible on
-  `uniswap_v4_nft_transfer_rows_written_total{service_name="uniswap-v4-position-bootstrap"}`
-   — they just do not decide the hypertable question, and they do not satisfy
-  `VectorUniswapV4IndexerNoNFTTransfers`'s silent-empty check on the live
-  indexer's behalf. Remember the exclusion when reconciling the table's row count
-  against the live rate: the count includes one whole posm history per chain
-  backfilled.
-- **A killed attempt resumes near where it stopped.** The run records its pin and
-  a `NextBlock` cursor in the activity's heartbeat details, advanced one scan
-  window at a time once that window's rows have committed, so a resumed attempt
-  redoes at most one window — and redoing one writes nothing. It never re-derives
-  a fresh pin. Timeouts are 4h `StartToClose`, 12h `ScheduleToClose`, 3 attempts,
-  60 s heartbeat. As for the position run, heartbeat details belong to one
-  activity execution, so a run started again by hand rescans from the deploy
-  block, which is safe and costs only RPC time.
-- **A run that decodes nothing logs a Warn, not an error.** On a chain with no
-  posm activity yet that is the truth; on mainnet it is what a wrong
-  `uniswap_v4_position_manager` protocol address looks like (the address is the
-  FK'd `protocol` row's, never a column here). The line names both readings.
+  `service_name`: its bulk load is neither a growth regime nor evidence the live
+  decoder is healthy. The run still records through the same `dextelemetry`
+  counters, so its rows stay visible on
+  `uniswap_v4_nft_transfer_rows_written_total{service_name="uniswap-v4-position-bootstrap"}`,
+  and
+  [`VectorUniswapV4NFTTransferBackfillGrowthHigh`](#vectoruniswapv4nfttransferbackfillgrowthhigh)
+  watches exactly that series at a threshold a single run cannot reach. Remember
+  both when reconciling the table's row count against the live rate: the count
+  includes one whole posm history per chain backfilled.
+- **A killed attempt resumes near where it stopped.** The run records the chain,
+  the PositionManager registry row, its pin and a `NextBlock` cursor in the
+  activity's heartbeat details, advanced one scan window at a time once that
+  window's rows have committed, so a resumed attempt redoes at most one window —
+  and redoing one writes nothing. It never re-derives a fresh pin. A cursor
+  already past the pin means an earlier attempt finished the scan and only its
+  closing pin check failed; that attempt logs `already scanned to its pin on an
+  earlier attempt` and succeeds rather than failing the run. The record is scoped
+  to the PositionManager as well as the chain, so a correcting registry version
+  landing mid-run makes the next attempt rescan from the deploy block under the
+  new surrogate id instead of inheriting a cursor that would skip everything below
+  it. Timeouts are 4h `StartToClose`, 12h `ScheduleToClose`, 3 attempts, 60 s
+  heartbeat. As for the position run, heartbeat details belong to one activity
+  execution, so a run started again by hand rescans from the deploy block, which
+  is safe and costs only RPC time.
+- **A run that scans the whole history and decodes nothing logs a Warn**, not an
+  error. On a chain with no posm activity yet that is the truth; on mainnet it is
+  what a wrong `uniswap_v4_position_manager` protocol address looks like (the
+  address is the FK'd `protocol` row's, never a column here). The line names both
+  readings. A *resumed* attempt covers only a tail, so it never raises this — a
+  quiet tail says nothing about the address.
 - **An unseeded `deploy_block` refuses the run**, naming the chain: scanning from
-  genesis is not a sensible fallback. The live indexer never reads that column,
-  so it boots fine either way — fix it by appending a correcting registry version
-  ([Fixing a bad registry row](#fixing-a-bad-registry-row)).
+  genesis is not a sensible fallback. It refuses the RUN, not the worker: the
+  workflow type still registers and the pod logs the reason at Error on boot, so
+  `UniswapV4PositionBootstrap` stays startable. The live indexer never reads that
+  column either, so it boots fine — fix it by appending a correcting registry
+  version ([Fixing a bad registry row](#fixing-a-bad-registry-row)).
 
 **Tables:** `uniswap_v4_pool_state`, `uniswap_v4_swap`,
 `uniswap_v4_liquidity_event`, `uniswap_v4_tick`, `uniswap_v4_pool_event`,
@@ -3323,6 +3335,95 @@ sum(rate(uniswap_v4_nft_transfer_rows_written_total[6h])) <= 2.9
 ```
 
 After a conversion the rule no longer describes the table — remove it in that PR.
+
+---
+
+## VectorUniswapV4NFTTransferBackfillGrowthHigh
+
+**Severity:** warning · **For:** 2h
+
+The companion to
+[`VectorUniswapV4NFTTransferGrowthHigh`](#vectoruniswapv4nfttransfergrowthhigh),
+covering the one writer that rule excludes: the `UniswapV4PosmTransferBackfill`
+runs on `uniswap-v4-position-bootstrap`. Between them the two rules watch every
+writer of `uniswap_v4_position_nft_transfer`, which a plain table owes
+(`stl-verify/db/migrations/AGENTS.md`).
+
+### What it means
+
+The backfill has written above 3M rows/day into
+`uniswap_v4_position_nft_transfer` for two hours. Nothing is broken — this is a
+volume signal on a plain table, not a fault.
+
+Why the threshold is so much higher than the live rule's 2.9 rows/s: the two
+measure different things. A live indexer's rate is a *regime* that continues; the
+backfill's is a **bounded burst that ends**. One chain's whole posm history is
+~490k rows (487,908 on mainnet, 2026-09) and lands in minutes, which is 5.7
+rows/s averaged over the 24h window. A rerun adds close to nothing, because
+`SaveNFTTransfersIfAbsent` appends only log sites that hold no row and the counter
+counts rows *persisted* — so **a backfill stuck in a loop cannot fire this**, and
+neither can an ordinary run.
+
+| | |
+|---|---|
+| One mainnet posm history | ~490k rows → 5.7 rows/s over 24h |
+| Alert threshold | 3M rows/day = **34.7 rows/s**, about 6 histories in a day |
+| Plain-table comfort ceiling | ~100M rows (shared with the live rule) |
+
+### First checks
+
+1. **Which chains are being backfilled, and how much each contributed.**
+   `created_at` is the insertion time, so it is what shows where the growth
+   landed — a backfill writes rows whose `block_timestamp` is years old:
+
+   ```sql
+   SELECT m.chain_id,
+          date_trunc('hour', t.created_at) AS hour,
+          count(*)                         AS rows_inserted
+   FROM uniswap_v4_position_nft_transfer t
+   JOIN uniswap_v4_position_manager m ON m.id = t.position_manager_id
+   WHERE t.created_at > now() - INTERVAL '2 days'
+   GROUP BY 1, 2 ORDER BY 2, 1;
+   ```
+
+2. **Confirm the runs are deliberate.** Temporal UI, namespace `vector`, task
+   queue `uniswap-v4-position-bootstrap`, workflow type
+   `UniswapV4PosmTransferBackfill`. A run closes with one
+   `uniswap-v4 posm transfer backfill finished` line carrying `transfersWritten`.
+   Several chains being seeded in one day is the expected cause.
+
+3. **The real row count**, which is what the conversion decision turns on:
+
+   ```sql
+   SELECT n_live_tup, pg_size_pretty(pg_total_relation_size(relid)) AS total_size
+   FROM pg_stat_user_tables
+   WHERE relname = 'uniswap_v4_position_nft_transfer';
+   ```
+
+### Common causes
+
+- **Several chains backfilled the same day** — the expected cause. Let the runs
+  finish; the rate decays out of the 24h window on its own.
+- **A chain with far more posm history than mainnet.** Legitimate, and exactly
+  the measurement the plain-table decision was deferred to: take the row count
+  from step 3 to the conversion path below.
+- **A rerun writing real rows** where you expected a no-op. That means the sites
+  were genuinely absent, so it closed a real gap — check `transfersWritten` in the
+  run's closing log line against what you expected.
+
+### Remediation
+
+Nothing to remediate unless step 3's row count is approaching ~100M, in which
+case the conversion is the one in
+[`VectorUniswapV4NFTTransferGrowthHigh`](#remediation--converting-to-a-hypertable).
+Its caveat applies unchanged: **no tiering policy**, because the holder read has
+no lower bound and `timescaledb.enable_tiered_reads` is off.
+
+### Verify recovery
+
+The rule clears once the 24h window no longer holds the burst — up to a day after
+the last run finishes. `sum by (service_name) (rate(uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector"}[24h]))`
+splits the backfill's contribution from the live indexers'.
 
 ---
 

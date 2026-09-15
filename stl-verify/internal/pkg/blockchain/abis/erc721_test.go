@@ -13,16 +13,16 @@ import (
 // argument type edited out from under it.
 func TestTransferTopic0_IsTheRealTransferSignature(t *testing.T) {
 	want := crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
-	if TransferTopic0 != want {
-		t.Fatalf("TransferTopic0 = %s, want keccak256 of the Transfer signature %s", TransferTopic0, want)
+	if TransferTopic0() != want {
+		t.Fatalf("TransferTopic0 = %s, want keccak256 of the Transfer signature %s", TransferTopic0(), want)
 	}
 
 	ev, err := ERC721TransferEvent()
 	if err != nil {
 		t.Fatalf("ERC721TransferEvent: %v", err)
 	}
-	if ev.ID != TransferTopic0 {
-		t.Fatalf("ERC721TransferEvent().ID = %s, want TransferTopic0 %s", ev.ID, TransferTopic0)
+	if ev.ID != TransferTopic0() {
+		t.Fatalf("ERC721TransferEvent().ID = %s, want TransferTopic0 %s", ev.ID, TransferTopic0())
 	}
 }
 

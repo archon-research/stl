@@ -8,6 +8,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
@@ -24,13 +25,13 @@ func scanPosm() RegisteredPositionManager {
 
 // tokenIDTopic renders a token id as the 32-byte hex word topics[3] carries.
 func tokenIDTopic(tokenID int64) string {
-	return "0x" + common.BigToHash(big.NewInt(tokenID)).Hex()[2:]
+	return common.BigToHash(big.NewInt(tokenID)).Hex()
 }
 
 func scannedTransferLog(mut ...func(*shared.Log)) shared.Log {
 	log := shared.Log{
 		Address:          scanPosmAddress,
-		Topics:           []string{ERC721TransferTopic0().Hex(), scanZeroTopic, scanHolderTopic, tokenIDTopic(388720)},
+		Topics:           []string{abis.TransferTopic0().Hex(), scanZeroTopic, scanHolderTopic, tokenIDTopic(388720)},
 		Data:             "0x",
 		BlockHash:        scanTxHash,
 		BlockNumber:      "0x18a1d36",
@@ -139,15 +140,5 @@ func TestNFTTransfersFromLogs_DecodesABurnToTheZeroAddress(t *testing.T) {
 	}
 	if got[0].To != (common.Address{}) {
 		t.Errorf("To = %s, want the zero address (a burn)", got[0].To)
-	}
-}
-
-func TestERC721TransferTopic0_MatchesTheFragmentTheDecoderUses(t *testing.T) {
-	ev, err := PositionManagerTransferEvent()
-	if err != nil {
-		t.Fatalf("PositionManagerTransferEvent: %v", err)
-	}
-	if ERC721TransferTopic0() != ev.ID {
-		t.Fatalf("the scan filters on %s but the decoder accepts %s: the scan would return logs the decoder refuses", ERC721TransferTopic0(), ev.ID)
 	}
 }

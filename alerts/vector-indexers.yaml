@@ -3055,6 +3055,50 @@ groups:
             described in the runbook.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4nfttransfergrowthhigh
 
+      - alert: VectorUniswapV4NFTTransferBackfillGrowthHigh
+        # The companion to the rule above, covering the writer that one excludes:
+        # uniswap-v4-position-bootstrap's posm transfer backfill. Without it that
+        # writer would grow a PLAIN table with nothing watching, which
+        # alerts/AGENTS.md does not allow.
+        #
+        # Different question, so a different shape. The backfill's legitimate
+        # signature is a BOUNDED burst that ends: one chain's whole posm history is
+        # ~490k rows (487,908 on mainnet, 2026-09), landing in minutes. Over a 24h
+        # window that is 5.7 rows/s, and a rerun adds ~nothing because the writer
+        # appends only log sites that hold no row. So a rerun loop cannot fire this
+        # — the counter counts rows PERSISTED — and what can is genuine volume: many
+        # chains backfilled at once, or one chain with far more history than mainnet.
+        #
+        # 3M rows/day = 34.7 rows/s trips at ~6 mainnet histories in a day, five
+        # times the largest run anyone has cause to start and still two orders under
+        # the 100M-row plain-table budget, so there is room to react. The 24h window
+        # is what keeps a single legitimate burst under it; `for: 2h` then wants the
+        # rate sustained rather than sampled once.
+        expr: |
+          sum by (cluster) (
+            rate(uniswap_v4_nft_transfer_rows_written_total{
+              k8s_namespace_name="vector",
+              service_name="uniswap-v4-position-bootstrap"
+            }[24h])
+          ) > 34.7
+        for: 2h
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v4-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector posm transfer backfill writing more than 3M rows/day into uniswap_v4_position_nft_transfer"
+          description: |
+            The `UniswapV4PosmTransferBackfill` runs on
+            `uniswap-v4-position-bootstrap` have written above 3M rows/day into
+            `uniswap_v4_position_nft_transfer` for 2h — several times a whole
+            mainnet posm history (~490k rows), which is the most one run has cause
+            to write. Nothing is broken, but this is a plain table: check which
+            chains are being backfilled and the real row count, then decide whether
+            the total now argues for the hypertable conversion the runbook carries.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4nfttransferbackfillgrowthhigh
+
       # =====================================================================
       # VEC-572 — design-decision watchdog. Self-contained; keep it last in
       # this group.

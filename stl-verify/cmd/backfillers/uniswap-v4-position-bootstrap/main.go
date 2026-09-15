@@ -325,9 +325,14 @@ func buildRunnerJobs(deps temporal.Dependencies, w runnerWiring) ([]temporal.Run
 		return nil, err
 	}
 
-	transfers, err := newTransferService(deps.Logger, w)
-	if err != nil {
-		return nil, err
+	// Deferred rather than returned: this job's refusals would otherwise fail the
+	// whole worker's registration and CrashLoop the Deployment, taking the
+	// unrelated position bootstrap with it. Its workflow type carries the refusal
+	// instead, so only a run of it fails.
+	transfers, transferErr := newTransferService(deps.Logger, w)
+	if transferErr != nil {
+		deps.Logger.Error("the uniswap-v4 posm transfer backfill is not runnable; its workflow type is registered but will refuse every run",
+			"chainId", chainID, "error", transferErr)
 	}
 
 	return []temporal.RunnerJob{
@@ -341,7 +346,11 @@ func buildRunnerJobs(deps temporal.Dependencies, w runnerWiring) ([]temporal.Run
 		},
 		{
 			WorkflowType: transferWorkflowTypeName,
+			ActivityName: transferWorkflowTypeName + "Execute",
 			Runner: temporal.RunnerFunc(func(ctx context.Context) error {
+				if transferErr != nil {
+					return fmt.Errorf("the posm transfer backfill was refused at worker startup on chain %d: %w", chainID, transferErr)
+				}
 				return runTransferBackfill(ctx, deps.Logger, transfers, chainID)
 			}),
 			Timeouts: transferActivityTimeouts,

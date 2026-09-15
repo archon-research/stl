@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/activity"
@@ -94,6 +95,20 @@ type RunnerJob struct {
 	// through — the SAME instance the runner holds, because the liveness
 	// heartbeat re-sends what it holds rather than erasing it with a bare ping.
 	Progress ProgressHeartbeater
+
+	// ActivityName is the name this job's activity registers under, and so the
+	// ActivityType its workflow histories carry.
+	//
+	// Empty means cronjobActivityMethod, which is what the SDK derives from the
+	// activity's method name and what every job deployed before this field existed
+	// already records. That name must not move under a job: a run in flight across
+	// a rollout replays its history, and an ActivityType that disagrees with the
+	// recorded one is a non-determinism error that wedges the run until
+	// ScheduleToClose.
+	//
+	// So a worker's FIRST runner job leaves this empty and every later one sets it.
+	// Two jobs sharing a name is not silent — the SDK panics at registration.
+	ActivityName string
 }
 
 // RegisterRunner registers job as a workflow that accepts no input, plus the
@@ -108,6 +123,11 @@ func RegisterRunner(r worker.Registry, job RunnerJob) error {
 	if job.WorkflowType == "" {
 		return fmt.Errorf("RunnerJob.WorkflowType is required")
 	}
+	// The SDK derives an activity name by appending the method to the prefix, so a
+	// name that does not end in it could never be registered.
+	if job.ActivityName != "" && !strings.HasSuffix(job.ActivityName, cronjobActivityMethod) {
+		return fmt.Errorf("RunnerJob.ActivityName %q must end in %q, the activity's method name", job.ActivityName, cronjobActivityMethod)
+	}
 	// A job that bothers to record resumable progress runs long, and with no
 	// heartbeat timeout a dead worker goes undetected until StartToClose.
 	if job.Progress != nil && job.Timeouts.Heartbeat <= 0 {
@@ -118,24 +138,27 @@ func RegisterRunner(r worker.Registry, job RunnerJob) error {
 		return fmt.Errorf("creating the runner activity: %w", err)
 	}
 	r.RegisterWorkflowWithOptions(runnerWorkflow(job.Timeouts, job.activityName()), workflow.RegisterOptions{Name: job.WorkflowType})
-	r.RegisterActivityWithOptions(activities, activity.RegisterOptions{Name: job.WorkflowType})
+	r.RegisterActivityWithOptions(activities, activity.RegisterOptions{Name: job.activityPrefix()})
 	return nil
 }
 
-// activityName is the name the SDK registers cronjobActivities.Execute under
-// once RegisterActivityWithOptions prefixes it with the workflow type.
-//
-// Prefixed because the prefix is what lets two jobs share one worker: the method
-// is called Execute on both, and the registry rejects the second — or, without
-// the check, would route both workflows to whichever Runner registered first.
 func (j RunnerJob) activityName() string {
-	return j.WorkflowType + cronjobActivityMethod
+	if j.ActivityName == "" {
+		return cronjobActivityMethod
+	}
+	return j.ActivityName
+}
+
+// activityPrefix is what RegisterActivityWithOptions prepends to the struct's
+// method name, so it is the desired name minus that method name.
+func (j RunnerJob) activityPrefix() string {
+	return strings.TrimSuffix(j.activityName(), cronjobActivityMethod)
 }
 
 // runnerWorkflow is cronjobWorkflow with its bounds closed over instead of
 // arriving as an argument, so a run starts with no input payload at all, and with
-// its activity named rather than referenced: the method reference resolves to the
-// bare method name, which is not what a prefixed registration answers to.
+// its activity named rather than referenced, since a prefixed registration does
+// not answer to the bare method name a method reference resolves to.
 func runnerWorkflow(timeouts ActivityTimeouts, activityName string) func(workflow.Context) error {
 	return func(ctx workflow.Context) error { return runActivityWorkflow(ctx, timeouts, activityName) }
 }

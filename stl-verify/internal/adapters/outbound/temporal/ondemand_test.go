@@ -248,20 +248,25 @@ func TestNewBootstrap_SurfacesACancelledContextWithoutDialingTemporal(t *testing
 
 // Two jobs on one worker is what a worker that owns more than one backfill of the
 // same data needs (the Uniswap V4 bootstrap owns two). Both register a method
-// called Execute, so without a per-job activity name a real worker panics on the
-// second registration, and the test environment — which disables that check —
-// silently routes BOTH workflow types to whichever Runner registered last. Each
-// case therefore starts one of the two and demands its own Runner.
+// called Execute, so the second one names its activity; without that a real
+// worker panics, and the test environment — which disables that check — silently
+// routes BOTH workflow types to whichever Runner registered last. Each case
+// therefore starts one of the two and demands its own Runner.
 func TestRegisterRunner_HostsTwoJobsOnOneWorkerWithoutCrossingThem(t *testing.T) {
 	for _, started := range []string{"FirstBackfill", "SecondBackfill"} {
 		t.Run(started, func(t *testing.T) {
 			env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 			var ran []string
 
-			for _, workflowType := range []string{"FirstBackfill", "SecondBackfill"} {
-				name := workflowType
+			// The first job keeps the default name, as a deployed one must.
+			for _, job := range []struct{ workflowType, activityName string }{
+				{"FirstBackfill", ""},
+				{"SecondBackfill", "SecondBackfillExecute"},
+			} {
+				name := job.workflowType
 				err := RegisterRunner(env, RunnerJob{
 					WorkflowType: name,
+					ActivityName: job.activityName,
 					Runner: RunnerFunc(func(context.Context) error {
 						ran = append(ran, name)
 						return nil
@@ -285,14 +290,43 @@ func TestRegisterRunner_HostsTwoJobsOnOneWorkerWithoutCrossingThem(t *testing.T)
 	}
 }
 
-// A scheduled cronjob's workflow history names its activity "Execute"; a replay
-// after this worker upgrades has to find that name still registered.
-func TestRunnerJobActivityName_LeavesTheScheduledPathsNameAlone(t *testing.T) {
+// Every job deployed before ActivityName existed records "Execute" in its
+// workflow histories, so a run in flight across a rollout replays that name. An
+// unnamed job must keep it, and the scheduled cronjob path must keep it too.
+func TestRunnerJobActivityName_DefaultsToTheAlreadyDeployedName(t *testing.T) {
 	if cronjobActivityMethod != "Execute" {
-		t.Fatalf("cronjobActivityMethod = %q, want Execute: an in-flight scheduled run replays against that name", cronjobActivityMethod)
+		t.Fatalf("cronjobActivityMethod = %q, want Execute: an in-flight run replays against that name", cronjobActivityMethod)
 	}
-	job := RunnerJob{WorkflowType: "UniswapV4PositionBootstrap"}
-	if got := job.activityName(); got != "UniswapV4PositionBootstrapExecute" {
-		t.Fatalf("activityName() = %q, want the workflow type prefixed onto the method name", got)
+	unnamed := RunnerJob{WorkflowType: "UniswapV4PositionBootstrap"}
+	if got := unnamed.activityName(); got != "Execute" {
+		t.Errorf("an unnamed job's activity is %q, want Execute", got)
+	}
+	// Empty prefix leaves the SDK's own derivation from the method name alone.
+	if got := unnamed.activityPrefix(); got != "" {
+		t.Errorf("an unnamed job's registration prefix is %q, want empty", got)
+	}
+
+	named := RunnerJob{WorkflowType: "X", ActivityName: "UniswapV4PosmTransferBackfillExecute"}
+	if got := named.activityName(); got != "UniswapV4PosmTransferBackfillExecute" {
+		t.Errorf("a named job's activity is %q", got)
+	}
+	if got := named.activityPrefix(); got != "UniswapV4PosmTransferBackfill" {
+		t.Errorf("a named job's registration prefix is %q, want the name minus the method", got)
+	}
+}
+
+// The SDK builds the name as prefix+method, so a name that does not end in the
+// method could never be registered under it — caught here rather than at boot.
+func TestRegisterRunner_RefusesAnActivityNameThatCannotBeRegistered(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+
+	err := RegisterRunner(env, RunnerJob{
+		WorkflowType: "SomeBackfill",
+		ActivityName: "SomeBackfillRun",
+		Runner:       RunnerFunc(func(context.Context) error { return nil }),
+		Timeouts:     ActivityTimeouts{StartToClose: time.Minute, MaximumAttempts: 1},
+	})
+	if err == nil || !strings.Contains(err.Error(), "must end in") {
+		t.Fatalf("RegisterRunner error = %v, want it to reject a name that does not end in the method name", err)
 	}
 }

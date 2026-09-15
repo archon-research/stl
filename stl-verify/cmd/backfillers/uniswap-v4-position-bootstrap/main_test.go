@@ -15,21 +15,15 @@ func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
 		taskQueueName:            "uniswap-v4-position-bootstrap",
 		positionWorkflowTypeName: "UniswapV4PositionBootstrap",
 		transferWorkflowTypeName: "UniswapV4PosmTransferBackfill",
-		metricPrefix:             "uniswap_v4",
+		// uniswapV4Factory.MetricPrefix()'s value: the backfill's rows have to land
+		// on the counter VectorUniswapV4NFTTransferGrowthHigh reads, the live
+		// indexer's, or they grow the table on a series no rule looks at.
+		metricPrefix: "uniswap_v4",
 	}
 	for got, want := range names {
 		if got != want {
 			t.Errorf("deployed name %q, want %q", got, want)
 		}
-	}
-}
-
-// The transfer backfill's rows must land on the counter
-// VectorUniswapV4NFTTransferGrowthHigh reads, which is the live indexer's, so the
-// prefix has to be the one uniswapV4Factory.MetricPrefix() declares.
-func TestMetricPrefix_IsTheLiveIndexers(t *testing.T) {
-	if metricPrefix != "uniswap_v4" {
-		t.Errorf("metricPrefix = %q, want uniswap_v4: the backfill would grow the table on a counter no rule reads", metricPrefix)
 	}
 }
 

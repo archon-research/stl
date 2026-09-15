@@ -3329,3 +3329,138 @@ func TestUniswapV4Repository_SaveNFTTransfersIfAbsent_WritesAndThenReportsTheRer
 		t.Errorf("site holds %d rows, want 3: one per log index, none duplicated", rowCount)
 	}
 }
+
+// The race finding 1 of the VEC-790 review caught. With the existence check and
+// the lock in ONE statement, both parameters are constants, so the check compiles
+// to an InitPlan gating a Result node ABOVE the lock: two cross-build writers both
+// decide "absent", and the loser's trigger then assigns processing_version 1 — a
+// correction version for a log fact nothing corrected.
+//
+// Deterministic rather than timing-dependent: the first writer holds its
+// transaction open until it can SEE the second blocked on the site lock in
+// pg_locks, which is the exact moment the second has made its decision.
+func TestUniswapV4Repository_SaveNFTTransfersIfAbsent_HoldsTheSiteAgainstAConcurrentWriter(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x5b)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	const blockNumber = int64(25004000)
+	site := func() []*entity.UniswapV4PositionNFTTransfer {
+		transfer := &entity.UniswapV4PositionNFTTransfer{
+			PositionManagerID: managerID,
+			TokenID:           big.NewInt(31337),
+			BlockNumber:       blockNumber,
+			BlockTimestamp:    uniswapV4TestBlockTime(blockNumber),
+			TxHash:            uniswapV4MintFixtureTx,
+			LogIndex:          11,
+			From:              common.Address{},
+			To:                uniswapV4MintFixtureTo,
+		}
+		if err := transfer.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		return []*entity.UniswapV4PositionNFTTransfer{transfer}
+	}
+
+	firstWrote := make(chan struct{})
+	secondDone := make(chan struct{})
+	var firstCount, secondCount int64
+	var firstErr, secondErr error
+
+	go func() {
+		defer close(secondDone)
+		<-firstWrote
+		secondCount, secondErr = writeNFTTransfersInTx(ctx, t, testUniswapV4RebuildID, site())
+	}()
+
+	firstErr = func() error {
+		tx, err := uniswapV4TestPool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+
+		firstCount, err = NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4BuildID).
+			SaveNFTTransfersIfAbsent(ctx, tx, site())
+		if err != nil {
+			return err
+		}
+		close(firstWrote)
+		waitForBlockedAdvisoryLock(ctx, t)
+		return tx.Commit(ctx)
+	}()
+	<-secondDone
+
+	if firstErr != nil {
+		t.Fatalf("first writer: %v", firstErr)
+	}
+	if secondErr != nil {
+		t.Fatalf("second writer: %v", secondErr)
+	}
+	if total := firstCount + secondCount; total != 1 {
+		t.Errorf("the two writers reported %d rows written between them, want exactly 1", total)
+	}
+
+	var rowCount int
+	if err := uniswapV4TestPool.QueryRow(ctx, `
+		SELECT count(*) FROM uniswap_v4_position_nft_transfer
+		WHERE position_manager_id = $1 AND block_number = $2`, managerID, blockNumber).Scan(&rowCount); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if rowCount != 1 {
+		t.Errorf("site holds %d rows, want 1: the second writer appended a correction version that corrects nothing", rowCount)
+	}
+}
+
+func writeNFTTransfersInTx(
+	ctx context.Context,
+	t *testing.T,
+	buildID buildregistry.BuildID,
+	transfers []*entity.UniswapV4PositionNFTTransfer,
+) (int64, error) {
+	t.Helper()
+	tx, err := uniswapV4TestPool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	written, err := NewUniswapV4Repository(uniswapV4TestPool, buildID).SaveNFTTransfersIfAbsent(ctx, tx, transfers)
+	if err != nil {
+		return 0, err
+	}
+	return written, tx.Commit(ctx)
+}
+
+// waitForBlockedAdvisoryLock blocks until another backend in THIS database is
+// waiting on an advisory lock, which is what proves the concurrent writer has
+// reached the site lock — and, under the defect this guards, has already decided
+// the row is absent.
+//
+// Scoped to the current database and to other backends: pg_locks is cluster-wide,
+// and one Postgres container is shared by every package in a CI shard (VEC-565),
+// so an unscoped count is satisfied by any other suite's advisory wait. That
+// would let the first writer commit before the second had contended at all — a
+// pass in the silent direction, on the one test that must not give one.
+func waitForBlockedAdvisoryLock(ctx context.Context, t *testing.T) {
+	t.Helper()
+	const blockedInThisDatabase = `
+		SELECT count(*) FROM pg_locks
+		WHERE locktype = 'advisory'
+		  AND NOT granted
+		  AND pid <> pg_backend_pid()
+		  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`
+
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		var waiting int
+		if err := uniswapV4TestPool.QueryRow(ctx, blockedInThisDatabase).Scan(&waiting); err != nil {
+			t.Fatalf("polling pg_locks: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("no backend ever blocked on the site advisory lock: the concurrent writer never contended, so this test proves nothing")
+}

@@ -139,6 +139,9 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 	if positionManagerAddress == nil {
 		return row, fmt.Errorf("uniswap_v4_position_manager row %d for chain %d references protocol %d, which is not on chain %d", *positionManagerID, chainID, *positionManagerProtoID, chainID)
 	}
+	if positionManagerDeployBlk == nil {
+		return row, fmt.Errorf("uniswap_v4_position_manager row %d for chain %d has a NULL deploy_block", *positionManagerID, chainID)
+	}
 
 	currency0Decimals, err := currencyTokenDecimals(id, "currency0", common.BytesToAddress(currency0), token0, decimals0)
 	if err != nil {
@@ -243,22 +246,13 @@ func (r *UniswapV4Repository) SavePositions(ctx context.Context, tx pgx.Tx, posi
 	return r.writePositions(ctx, tx, positions)
 }
 
-// The advisory lock is the same key, and the same hash, the table's
-// assign_processing_version trigger takes. It has to be held BEFORE the NOT
-// EXISTS is evaluated, not just inside the trigger: the trigger fires per row
-// after the row has been chosen, so two builds racing one site would both see it
-// empty and the loser's trigger would then assign it version 1. Re-entrant, so
-// the trigger's own acquisition inside the same transaction is free.
+// This NOT EXISTS decides whether a row lands, so lockNFTTransferSitesV4 must
+// already hold the site's lock when the statement runs (ADR-0002 §3).
 const insertUniswapV4NFTTransferIfAbsentSQL = `
-	WITH site_lock AS (
-	    SELECT pg_advisory_xact_lock(hashtextextended(
-	        format('u4pnt|%s|%s|%s|%s', $1::bigint, $3::bigint, $4::int, $7::int), 0))
-	)
 	INSERT INTO uniswap_v4_position_nft_transfer
 	   (position_manager_id, token_id, block_number, block_version, block_timestamp,
 	    tx_hash, log_index, from_address, to_address, build_id)
 	SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
-	FROM site_lock
 	WHERE NOT EXISTS (
 	    SELECT 1 FROM uniswap_v4_position_nft_transfer
 	    WHERE position_manager_id = $1
@@ -279,6 +273,9 @@ func (r *UniswapV4Repository) SaveNFTTransfersIfAbsent(ctx context.Context, tx p
 	if err != nil {
 		return 0, err
 	}
+	if err := lockNFTTransferSitesV4(ctx, tx, transfers); err != nil {
+		return 0, err
+	}
 
 	batch := &pgx.Batch{}
 	for _, c := range rows {
@@ -289,6 +286,71 @@ func (r *UniswapV4Repository) SaveNFTTransfersIfAbsent(ctx context.Context, tx p
 		)
 	}
 	return sendNFTTransferIfAbsentBatch(ctx, tx, batch, len(rows))
+}
+
+// lockNFTTransferSitesV4 takes every log site's advisory lock in one round-trip,
+// ahead of the existence check that decides the insert, so a concurrent writer
+// cannot pass the same check and land a second row at processing_version 1.
+//
+// Same key and hash as the table's assign_processing_version trigger, so the
+// trigger's own acquisition is re-entrant and free.
+func lockNFTTransferSitesV4(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) error {
+	lockKeys := distinctSortedNFTTransferSiteKeys(transfers)
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended(k, 0))
+		 FROM unnest($1::text[]) WITH ORDINALITY AS u(k, ord)
+		 ORDER BY ord`,
+		lockKeys,
+	); err != nil {
+		return fmt.Errorf("locking %d uniswap_v4 nft transfer sites: %w", len(lockKeys), err)
+	}
+	return nil
+}
+
+type v4NFTTransferSite struct {
+	positionManagerID int64
+	blockNumber       int64
+	blockVersion      int
+	logIndex          int
+}
+
+// The 'u4pnt|…' spelling is the trigger's, so both acquisitions name one lock.
+func (s v4NFTTransferSite) lockKey() string {
+	return fmt.Sprintf("u4pnt|%d|%d|%d|%d", s.positionManagerID, s.blockNumber, s.blockVersion, s.logIndex)
+}
+
+// Ordered by the key's COMPONENTS numerically, which is ascending log order
+// within a block — the order the live path's per-row trigger acquisitions already
+// arrive in, so two overlapping writers agree and cannot deadlock. Sorting the
+// formatted strings instead would put "…|10" below "…|7".
+func distinctSortedNFTTransferSiteKeys(transfers []*entity.UniswapV4PositionNFTTransfer) []string {
+	seen := make(map[v4NFTTransferSite]struct{}, len(transfers))
+	for _, t := range transfers {
+		seen[v4NFTTransferSite{
+			positionManagerID: t.PositionManagerID,
+			blockNumber:       t.BlockNumber,
+			blockVersion:      t.BlockVersion,
+			logIndex:          t.LogIndex,
+		}] = struct{}{}
+	}
+	sites := make([]v4NFTTransferSite, 0, len(seen))
+	for site := range seen {
+		sites = append(sites, site)
+	}
+	slices.SortFunc(sites, func(a, b v4NFTTransferSite) int {
+		return cmp.Or(
+			cmp.Compare(a.positionManagerID, b.positionManagerID),
+			cmp.Compare(a.blockNumber, b.blockNumber),
+			cmp.Compare(a.blockVersion, b.blockVersion),
+			cmp.Compare(a.logIndex, b.logIndex),
+		)
+	})
+
+	keys := make([]string, len(sites))
+	for i, site := range sites {
+		keys[i] = site.lockKey()
+	}
+	return keys
 }
 
 func sendNFTTransferIfAbsentBatch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, count int) (inserted int64, err error) {

@@ -54,7 +54,7 @@ func (d *receiptDecoder) buildNFTTransfer(ev abi.Event, log shared.Log, logIndex
 // indexer and the historical scan so a change to the field names, the entity or
 // the validation cannot reach one path without the other; coords is the only
 // thing they disagree about, the live path taking it from the receipt's block and
-// the scan from the log itself. coords.hash goes unread here.
+// the scan from the log itself.
 func newNFTTransferRow(
 	ev abi.Event,
 	log shared.Log,

@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4indexer"
 )
@@ -150,7 +151,7 @@ func TestLiveValidation_AdaptiveScanCoversTheRangeAgainstTheRealProvider(t *test
 func livePosmFilter() outbound.LogFilter {
 	return outbound.LogFilter{
 		Address: common.HexToAddress(livePosmAddr),
-		Topic0:  uniswapv4indexer.ERC721TransferTopic0(),
+		Topic0:  abis.TransferTopic0(),
 	}
 }
 

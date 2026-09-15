@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4indexer"
 )
@@ -137,6 +138,16 @@ func (s *TransferService) Run(ctx context.Context) (TransferSummary, error) {
 	}
 	summary := TransferSummary{PinnedBlock: pin.number, PinnedHash: pin.hash, ResumedFromBlock: resumeFrom}
 
+	// A cursor past the pin means an earlier attempt finished the scan, so this one
+	// is done: resumePoint has just re-read that pin against the recorded hash,
+	// which is everything the closing check would have verified.
+	if resumeFrom == pin.number+1 {
+		summary.FromBlock = resumeFrom
+		s.logger.Info("uniswap-v4 posm transfer backfill already scanned to its pin on an earlier attempt",
+			"chainId", s.cfg.ChainID, "pinnedBlock", pin.number, "nextBlock", resumeFrom)
+		return summary, nil
+	}
+
 	from, err := s.scanStart(pin, resumeFrom)
 	if err != nil {
 		return summary, err
@@ -162,7 +173,7 @@ func (s *TransferService) resumePoint(ctx context.Context) (pinnedBlock, int64, 
 	if err != nil {
 		return pinnedBlock{}, 0, fmt.Errorf("loading transfer backfill progress: %w", err)
 	}
-	if found && recorded.ChainID == s.cfg.ChainID {
+	if found && recorded.scopeMatches(s.cfg.ChainID, s.positionManager.ID) {
 		pin, err := reReadPin(ctx, s.logScan, recorded.PinnedBlock, common.HexToHash(recorded.PinnedHash), "when this run's progress was recorded")
 		if err != nil {
 			return pinnedBlock{}, 0, fmt.Errorf("resuming the recorded transfer scan: %w", err)
@@ -172,8 +183,9 @@ func (s *TransferService) resumePoint(ctx context.Context) (pinnedBlock, int64, 
 		return pin, recorded.NextBlock, nil
 	}
 	if found {
-		s.logger.Warn("recorded transfer backfill progress belongs to another chain, pinning afresh",
-			"chainId", s.cfg.ChainID, "recordedChainId", recorded.ChainID)
+		s.logger.Warn("recorded transfer backfill progress belongs to another chain or PositionManager, pinning afresh",
+			"chainId", s.cfg.ChainID, "recordedChainId", recorded.ChainID,
+			"positionManagerRowId", s.positionManager.ID, "recordedPositionManagerRowId", recorded.PositionManagerID)
 	}
 
 	pin, err := pinBlock(ctx, s.logScan, s.cfg.FinalityDepth, s.cfg.PinBlock)
@@ -259,10 +271,11 @@ func (s *TransferService) persistWindow(ctx context.Context, w logWindow, summar
 // committed.
 func (s *TransferService) recordWindowDone(ctx context.Context, w logWindow, summary *TransferSummary) error {
 	progress := TransferProgress{
-		ChainID:     s.cfg.ChainID,
-		PinnedBlock: summary.PinnedBlock,
-		PinnedHash:  summary.PinnedHash.Hex(),
-		NextBlock:   w.to + 1,
+		ChainID:           s.cfg.ChainID,
+		PositionManagerID: s.positionManager.ID,
+		PinnedBlock:       summary.PinnedBlock,
+		PinnedHash:        summary.PinnedHash.Hex(),
+		NextBlock:         w.to + 1,
 	}
 	if err := s.progress.SaveProgress(ctx, progress); err != nil {
 		return fmt.Errorf("recording transfer backfill progress after blocks %d-%d: %w", w.from, w.to, err)
@@ -286,21 +299,22 @@ func (s *TransferService) persist(ctx context.Context, transfers []*entity.Unisw
 	return written, nil
 }
 
-// No Topic1 narrowing: the question is every token's whole history, so the
-// emitting ADDRESS is the only filter, and it is the only thing separating a
-// posm transfer from every other ERC-20 and ERC-721 transfer on the chain.
+// The emitting ADDRESS is what makes the result the posm's: this topic0 is shared
+// by every ERC-20 and ERC-721 transfer on the chain.
 func (s *TransferService) baseFilter() outbound.LogFilter {
 	return outbound.LogFilter{
 		Address: s.positionManager.Address,
-		Topic0:  uniswapv4indexer.ERC721TransferTopic0(),
+		Topic0:  abis.TransferTopic0(),
 	}
 }
 
-// A scan that covered real history and decoded nothing is what a wrong
-// PositionManager address looks like; it is also what a chain with no posm
-// activity yet looks like, so it cannot be an error.
+// A scan of the WHOLE history that decoded nothing is what a wrong PositionManager
+// address looks like; it is also what a chain with no posm activity yet looks
+// like, so it cannot be an error. Gated on having started at the deploy block: a
+// resumed attempt covers only a tail, and a quiet tail says nothing about the
+// address.
 func (s *TransferService) warnIfHistoryLooksEmpty(summary TransferSummary) {
-	if summary.ScanLogs > 0 || summary.ScanWindows == 0 {
+	if summary.ScanLogs > 0 || summary.FromBlock != s.positionManager.DeployBlock {
 		return
 	}
 	s.logger.Warn("uniswap-v4 posm transfer backfill decoded no transfers at all",

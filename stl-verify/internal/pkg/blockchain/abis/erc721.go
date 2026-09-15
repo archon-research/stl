@@ -8,14 +8,21 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// TransferTopic0 is keccak256("Transfer(address,address,uint256)"), the topic0
+// transferTopic0 is keccak256("Transfer(address,address,uint256)"), the topic0
 // of BOTH the ERC-20 and the ERC-721 Transfer log: the signatures are identical
 // and indexed flags are not hashed into it. So it never tells which standard —
 // or which token — emitted a log, and a decoder that keys on it alone will read
 // an ERC-20 transfer as an ERC-721 one. Two things do discriminate: the emitting
 // address, and arity, because ERC-721 indexes tokenId (four topics, empty data)
 // where ERC-20 carries the value in data (three topics, 32 bytes).
-var TransferTopic0 = common.HexToHash("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
+var transferTopic0 = common.HexToHash("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
+
+// TransferTopic0 returns that hash. An accessor rather than an exported var, which
+// any importing package could reassign and silently repoint every decoder and log
+// filter in the service.
+func TransferTopic0() common.Hash {
+	return transferTopic0
+}
 
 const transferEventName = "Transfer"
 

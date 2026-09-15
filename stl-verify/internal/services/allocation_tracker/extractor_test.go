@@ -19,7 +19,7 @@ func makeTransferLog(token, from, to common.Address, amount *big.Int, index uint
 	return types.Log{
 		Address: token,
 		Topics: []common.Hash{
-			abis.TransferTopic0,
+			abis.TransferTopic0(),
 			common.BytesToHash(from.Bytes()),
 			common.BytesToHash(to.Bytes()),
 		},
@@ -187,7 +187,7 @@ func TestTransferExtractor_Extract_TooFewTopics(t *testing.T) {
 			{
 				Address: common.HexToAddress("0x1111111111111111111111111111111111111111"),
 				Topics: []common.Hash{
-					abis.TransferTopic0,
+					abis.TransferTopic0(),
 				},
 				Data:  common.LeftPadBytes(big.NewInt(1).Bytes(), 32),
 				Index: 0,

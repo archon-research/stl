@@ -47,12 +47,12 @@ spec:
               cpu: "100m"
               memory: "128Mi"
             limits:
-              # Peak memory is whichever run is larger. Positions: the distinct
-              # keys plus one window's logs plus one multicall batch, ~70 B per
-              # key, so ~10^6 keys fit. Transfers: one window's logs and their
-              # decoded rows, nothing accumulated across windows, and the
-              # provider caps a window near 10^4 logs — ~20 MB at mainnet's
-              # density.
+              # Sized for BOTH runs at once, since nothing stops that: the
+              # position run's distinct keys plus one window's logs plus one
+              # multicall batch (~70 B per key, so ~10^6 keys fit), and the
+              # transfer run's one window of logs plus their decoded rows,
+              # nothing accumulated across windows and capped near 10^4 logs by
+              # the provider's response limit (~20 MB at mainnet's density).
               cpu: "1000m"
               memory: "512Mi"
       # An in-flight run is cancelled on shutdown and Temporal retries it on the

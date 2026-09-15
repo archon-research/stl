@@ -25,6 +25,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4bootstrap"
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4indexer"
@@ -193,7 +194,7 @@ func posmTransferLogJSON(t *testing.T) map[string]any {
 	return map[string]any{
 		"address": posmAddr,
 		"topics": []string{
-			uniswapv4indexer.ERC721TransferTopic0().Hex(),
+			abis.TransferTopic0().Hex(),
 			common.BytesToHash(common.HexToAddress(transferFrom).Bytes()).Hex(),
 			common.BytesToHash(common.HexToAddress(transferTo).Bytes()).Hex(),
 			common.BigToHash(big.NewInt(transferTokenID)).Hex(),

@@ -3,6 +3,7 @@ package uniswapv4bootstrap
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math/big"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4indexer"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -36,7 +38,7 @@ func transferFilteredLog(tokenID, blockNumber int64, logIndex int, from, to stri
 	return outbound.FilteredLog{
 		Address: posmAddr,
 		Topics: []string{
-			uniswapv4indexer.ERC721TransferTopic0().Hex(),
+			abis.TransferTopic0().Hex(),
 			common.BytesToHash(common.HexToAddress(from).Bytes()).Hex(),
 			common.BytesToHash(common.HexToAddress(to).Bytes()).Hex(),
 			common.BigToHash(big.NewInt(tokenID)).Hex(),
@@ -215,7 +217,7 @@ func TestTransferRun_FiltersOnTheAddressAndTopic0Only(t *testing.T) {
 		if filter.Address != common.HexToAddress(posmAddr) {
 			t.Errorf("filter %d address = %s, want the posm %s", i, filter.Address, posmAddr)
 		}
-		if filter.Topic0 != uniswapv4indexer.ERC721TransferTopic0() {
+		if filter.Topic0 != abis.TransferTopic0() {
 			t.Errorf("filter %d topic0 = %s, want the ERC-721 Transfer topic0", i, filter.Topic0)
 		}
 		if len(filter.Topic1) != 0 {
@@ -313,7 +315,8 @@ func TestTransferRun_RecordsTheResumePointPastEachFinishedWindow(t *testing.T) {
 	if last.NextBlock != testPinned+1 {
 		t.Errorf("final NextBlock = %d, want %d (one past the pin)", last.NextBlock, testPinned+1)
 	}
-	if last.ChainID != testChainID || last.PinnedBlock != testPinned || last.PinnedHash != pinHash {
+	if last.ChainID != testChainID || last.PositionManagerID != posmRowID ||
+		last.PinnedBlock != testPinned || last.PinnedHash != pinHash {
 		t.Errorf("progress %+v does not carry the scope it is true for", last)
 	}
 	for i, save := range f.progress.Saves {
@@ -327,7 +330,8 @@ func TestTransferRun_ResumesFromTheRecordedNextBlock(t *testing.T) {
 	resumeAt := posmDeployBlock + 1_000_000
 	f := newTransferFixture(t, nil)
 	f.progress.Recorded = TransferProgress{
-		ChainID: testChainID, PinnedBlock: testPinned, PinnedHash: pinHash, NextBlock: resumeAt,
+		ChainID: testChainID, PositionManagerID: posmRowID,
+		PinnedBlock: testPinned, PinnedHash: pinHash, NextBlock: resumeAt,
 	}
 	f.progress.Found = true
 	f.client.GetLogsFn = logsAt()
@@ -350,7 +354,8 @@ func TestTransferRun_ResumesFromTheRecordedNextBlock(t *testing.T) {
 func TestTransferRun_RefusesToResumeAPinThatWasReorged(t *testing.T) {
 	f := newTransferFixture(t, nil)
 	f.progress.Recorded = TransferProgress{
-		ChainID: testChainID, PinnedBlock: testPinned, PinnedHash: forkHash, NextBlock: posmDeployBlock + 10,
+		ChainID: testChainID, PositionManagerID: posmRowID,
+		PinnedBlock: testPinned, PinnedHash: forkHash, NextBlock: posmDeployBlock + 10,
 	}
 	f.progress.Found = true
 
@@ -363,7 +368,8 @@ func TestTransferRun_RefusesToResumeAPinThatWasReorged(t *testing.T) {
 func TestTransferRun_PinsAfreshWhenTheRecordBelongsToAnotherChain(t *testing.T) {
 	f := newTransferFixture(t, nil)
 	f.progress.Recorded = TransferProgress{
-		ChainID: 8453, PinnedBlock: 99, PinnedHash: forkHash, NextBlock: 500,
+		ChainID: 8453, PositionManagerID: posmRowID,
+		PinnedBlock: 99, PinnedHash: forkHash, NextBlock: 500,
 	}
 	f.progress.Found = true
 	f.client.GetLogsFn = logsAt()
@@ -448,5 +454,120 @@ func TestNewTransferService_RefusesIncompleteDeps(t *testing.T) {
 				t.Fatalf("NewTransferService error = %v, want it to contain %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// A correcting uniswap_v4_position_manager version gives the chain a new surrogate
+// id. Honouring a cursor written under the old one would leave every transfer
+// below it unwritten under the new id, and SaveNFTTransfersIfAbsent keys on that
+// id, so no rerun of this execution would look there again.
+func TestTransferRun_IgnoresACursorWrittenUnderAnotherPositionManager(t *testing.T) {
+	f := newTransferFixture(t, nil)
+	f.progress.Recorded = TransferProgress{
+		ChainID: testChainID, PositionManagerID: posmRowID + 1,
+		PinnedBlock: testPinned, PinnedHash: pinHash, NextBlock: posmDeployBlock + 2_000_000,
+	}
+	f.progress.Found = true
+	f.client.GetLogsFn = logsAt()
+
+	summary, err := f.svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if summary.FromBlock != posmDeployBlock {
+		t.Errorf("FromBlock = %d, want the deploy block %d: a cursor from another PositionManager must not move this scan",
+			summary.FromBlock, posmDeployBlock)
+	}
+}
+
+// A cursor one past the pin means an earlier attempt finished the scan and only
+// its closing pin check failed. Failing every remaining attempt would report a
+// run that wrote every row as red, and send the operator to rescan from scratch.
+func TestTransferRun_TreatsACursorPastThePinAsAFinishedScan(t *testing.T) {
+	f := newTransferFixture(t, nil)
+	f.progress.Recorded = TransferProgress{
+		ChainID: testChainID, PositionManagerID: posmRowID,
+		PinnedBlock: testPinned, PinnedHash: pinHash, NextBlock: testPinned + 1,
+	}
+	f.progress.Found = true
+
+	summary, err := f.svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(f.client.Filters) != 0 {
+		t.Errorf("scanned %d windows, want none: the scan was already complete", len(f.client.Filters))
+	}
+	if summary.FromBlock != testPinned+1 {
+		t.Errorf("FromBlock = %d, want %d", summary.FromBlock, testPinned+1)
+	}
+}
+
+// capturingHandler records the records a run logs, so the empty-history warning —
+// which is the only signal a wrong PositionManager address produces — can be
+// asserted rather than assumed.
+type capturingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *capturingHandler) warned(substring string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Level == slog.LevelWarn && strings.Contains(r.Message, substring) {
+			return true
+		}
+	}
+	return false
+}
+
+const emptyHistoryWarning = "decoded no transfers at all"
+
+// A scan of the WHOLE history that finds nothing is what a wrong PositionManager
+// address looks like, so it must say so.
+func TestTransferRun_WarnsWhenAWholeHistoryScanDecodesNothing(t *testing.T) {
+	logs := &capturingHandler{}
+	f := newTransferFixture(t, func(d *TransferDeps) { d.Logger = slog.New(logs) })
+	f.client.GetLogsFn = logsAt()
+
+	if _, err := f.svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !logs.warned(emptyHistoryWarning) {
+		t.Error("a full-history scan that decoded nothing logged no warning; a wrong PositionManager address would pass unnoticed")
+	}
+}
+
+// A resumed attempt covers only a tail, and a quiet tail says nothing about the
+// address — blaming the registry there sends the operator after a bug that is not
+// there, on a run that just backfilled the whole chain.
+func TestTransferRun_DoesNotWarnWhenAResumedAttemptScansAQuietTail(t *testing.T) {
+	logs := &capturingHandler{}
+	f := newTransferFixture(t, func(d *TransferDeps) { d.Logger = slog.New(logs) })
+	f.progress.Recorded = TransferProgress{
+		ChainID: testChainID, PositionManagerID: posmRowID,
+		PinnedBlock: testPinned, PinnedHash: pinHash, NextBlock: posmDeployBlock + 1_000_000,
+	}
+	f.progress.Found = true
+	f.client.GetLogsFn = logsAt()
+
+	if _, err := f.svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if logs.warned(emptyHistoryWarning) {
+		t.Error("a resumed attempt over a quiet tail blamed the PositionManager address")
 	}
 }

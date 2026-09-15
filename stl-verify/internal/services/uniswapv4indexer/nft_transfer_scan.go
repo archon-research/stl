@@ -8,20 +8,12 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 // Past finality a height has one canonical block, so a scanned row's version can
 // only be 0; the live indexer's reorg versioning has nothing to disagree with.
 const scannedBlockVersion = 0
-
-// ERC721TransferTopic0 is the topic0 the posm transfer scan filters on at the
-// node. It narrows nothing by itself — every ERC-20 transfer on the chain shares
-// it — so the filter's ADDRESS is what makes the result the posm's.
-func ERC721TransferTopic0() common.Hash {
-	return abis.TransferTopic0
-}
 
 // NFTTransfersFromLogs decodes a window of scanned posm logs into transfer rows.
 //

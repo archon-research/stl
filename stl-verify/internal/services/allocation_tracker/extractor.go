@@ -47,7 +47,7 @@ func (e *TransferExtractor) Extract(receipt TransactionReceipt) []*TransferEvent
 		if len(log.Topics) < 3 {
 			continue
 		}
-		if log.Topics[0] != abis.TransferTopic0 {
+		if log.Topics[0] != abis.TransferTopic0() {
 			continue
 		}
 
