@@ -4,6 +4,8 @@ package migrator_test
 
 import (
 	"context"
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -533,4 +535,70 @@ func TestMaterializeAnchorageCustodyForwardsTheWriterRun(t *testing.T) {
 			t.Errorf("materialize_anchorage_custody declares %v, missing %s -- the runner calls it by name", args, want)
 		}
 	}
+}
+
+// position_anchorage_custody_since is the view's SELECT with the bound inside the snapshot scan
+// (VEC-566). It emits exactly the view's rows when the bound precedes everything, and a tail bound opens
+// only the tail's chunks. No outside-the-view control here: this view has no DISTINCT ON, so a bound
+// above it pushes down as well -- the function is for one shape across every projection.
+func TestAnchorageCustodyBoundedSourceMatchesTheViewAndPrunes(t *testing.T) {
+	ctx, pool, _ := seedAnchorage(t)
+
+	var drift, rows int
+	if err := pool.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM (
+		          (TABLE position_anchorage_custody EXCEPT ALL SELECT * FROM position_anchorage_custody_since('-infinity'))
+		          UNION ALL
+		          (SELECT * FROM position_anchorage_custody_since('-infinity') EXCEPT ALL TABLE position_anchorage_custody)) d),
+		       (SELECT count(*) FROM position_anchorage_custody)`).Scan(&drift, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows == 0 || drift != 0 {
+		t.Fatalf("view rows=%d, rows differing from the bounded source at -infinity=%d; want >0 and 0", rows, drift)
+	}
+	var after int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_anchorage_custody_since('infinity')`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != 0 {
+		t.Fatalf("a bound after every snapshot still returned %d rows", after)
+	}
+
+	// Ten more daily snapshots of PKG-1 in March, ahead of the fixture's two April days.
+	for d := 1; d <= 10; d++ {
+		addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-1", qty: float64(d), snapTS: fmt.Sprintf("2026-03-%02dT00:00:00Z", d)})
+	}
+	all := anchorageChunkScans(t, ctx, pool, `SELECT * FROM position_anchorage_custody`)
+	inside := anchorageChunkScans(t, ctx, pool, `SELECT * FROM position_anchorage_custody_since('2026-04-06T00:00:00Z'::timestamptz)`)
+	t.Logf("chunk scans: unbounded %d, bound inside the source %d", all, inside)
+	if all < 12 {
+		t.Fatalf("the unbounded view plans %d chunk scans, want at least the 12 seeded days", all)
+	}
+	if inside > 3 {
+		t.Errorf("a bound inside the source planned %d chunk scans, want at most 3", inside)
+	}
+}
+
+// anchorageChunkScans counts the DISTINCT hypertable chunks a statement's plan reads: EXPLAIN names each
+// as _hyper_N_M_chunk, and a chunk can appear on more than one plan line.
+func anchorageChunkScans(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string) int {
+	t.Helper()
+	rows, err := pool.Query(ctx, "EXPLAIN (COSTS OFF) "+sql)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	plan := ""
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		plan += line + "\n"
+	}
+	seen := map[string]bool{}
+	for _, m := range regexp.MustCompile(`_hyper_\d+_\d+_chunk`).FindAllString(plan, -1) {
+		seen[m] = true
+	}
+	return len(seen)
 }
