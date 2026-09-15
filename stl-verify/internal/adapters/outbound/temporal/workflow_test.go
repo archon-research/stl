@@ -359,6 +359,30 @@ func TestCronjobActivities_Execute_StartsEachExecutionWithACleanProgressStore(t 
 	}
 }
 
+// TestCronjobActivities_Execute_DropsTheExecutionsRecordWhenItEnds: the store is
+// built once per worker process and holds a record per execution, so a worker
+// that has served weeks of runs would carry one for every run it has finished
+// unless the activity releases its own on the way out.
+func TestCronjobActivities_Execute_DropsTheExecutionsRecordWhenItEnds(t *testing.T) {
+	progress := NewActivityProgress[sweepPoint]()
+	var sent [][]any
+	progress.record = func(_ context.Context, details ...any) { sent = append(sent, details) }
+
+	var executionCtx context.Context
+	recordProgress := RunnerFunc(func(ctx context.Context) error {
+		executionCtx = ctx
+		return progress.SaveProgress(ctx, sweepPoint{Scope: "chain-1", Block: 23_400_000})
+	})
+	runExecution(t, &testsuite.WorkflowTestSuite{}, progress, 0, recordProgress)
+
+	sent = nil
+	progress.Beat(executionCtx)
+
+	if len(sent) != 0 {
+		t.Errorf("the store beat %v for an execution that has ended, so its record outlived it", sent)
+	}
+}
+
 // runExecution drives one activity execution of runner against the shared store.
 func runExecution(t *testing.T, suite *testsuite.WorkflowTestSuite, progress ProgressHeartbeater, heartbeat time.Duration, runner Runner) {
 	t.Helper()
@@ -379,7 +403,7 @@ type fakeProgressHeartbeater struct {
 
 func (f *fakeProgressHeartbeater) Beat(context.Context) { f.onBeat() }
 
-func (f *fakeProgressHeartbeater) Reset() {}
+func (f *fakeProgressHeartbeater) Reset(context.Context) {}
 
 func goroutineStacks(t *testing.T) string {
 	t.Helper()

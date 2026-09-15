@@ -95,12 +95,9 @@ type RunnerJob struct {
 	// through — the SAME instance the runner holds, because the liveness
 	// heartbeat re-sends what it holds rather than erasing it with a bare ping.
 	//
-	// One instance per job for the PROCESS, while heartbeat details belong to one
-	// activity execution: ONE execution of a job may be in flight at a time. Two
-	// share the store, so the second's Reset silences the first's liveness beats
-	// until its next unit of work lands, and its beats then carry the first's
-	// resume point. Temporal's duplicate guard is per Workflow ID, so an operator
-	// starting one job under two IDs is what reaches this (VEC-801).
+	// One instance per job for the process, holding one record per activity
+	// execution, so concurrent executions of a job — Temporal's duplicate guard is
+	// per Workflow ID — keep their own resume points and liveness beats.
 	Progress ProgressHeartbeater
 
 	// ActivityName is the name this job's activity registers under, and so the
