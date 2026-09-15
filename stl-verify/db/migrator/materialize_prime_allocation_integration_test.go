@@ -602,3 +602,84 @@ func TestMaterializePrimeAllocationForwardsTheWriterRun(t *testing.T) {
 		}
 	}
 }
+
+// position_prime_allocation_since is the view's SELECT with the bound inside the allocation_position
+// scan (VEC-566). Two things pin it: it emits exactly the view's rows when the bound precedes everything,
+// and a bound near the tail opens only the tail's chunks, where the same bound applied outside the view
+// -- above its DISTINCT ON -- opens every chunk, which is the control that says the placement matters.
+func TestPrimeAllocationBoundedSourceMatchesTheViewAndPrunes(t *testing.T) {
+	ctx, pool, _ := seedPrimeAllocation(t)
+
+	t.Run("bounded before all history it is the view", func(t *testing.T) {
+		var drift, rows int
+		if err := pool.QueryRow(ctx, `
+			SELECT (SELECT count(*) FROM (
+			          (TABLE position_prime_allocation EXCEPT ALL SELECT * FROM position_prime_allocation_since('-infinity'))
+			          UNION ALL
+			          (SELECT * FROM position_prime_allocation_since('-infinity') EXCEPT ALL TABLE position_prime_allocation)) d),
+			       (SELECT count(*) FROM position_prime_allocation)`).Scan(&drift, &rows); err != nil {
+			t.Fatal(err)
+		}
+		if rows == 0 {
+			t.Fatal("the fixture projects no rows; the comparison would be vacuous")
+		}
+		if drift != 0 {
+			t.Errorf("%d rows differ between the view and its bounded source at -infinity; the function has drifted from the view's SELECT", drift)
+		}
+	})
+
+	t.Run("bounded after all history it is empty", func(t *testing.T) {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_prime_allocation_since('infinity')`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Errorf("a bound after every observation still returned %d rows", n)
+		}
+	})
+
+	t.Run("a bound inside the scan opens only the tail's chunks", func(t *testing.T) {
+		// Ten more days of history, one observation per day, on a 1-day-chunked source.
+		for d := 1; d <= 10; d++ {
+			alloc(t, ctx, pool, allocProxyA, allocTokenX, float64(d), 10000+d, 1,
+				"2026-03-"+twoDigits(d)+"T12:00:00Z", "in")
+		}
+		chunks := func(sql string) int {
+			// EXPLAIN returns one row per plan line; a chunk scan names its _hyper_ relation.
+			rows, err := pool.Query(ctx, "EXPLAIN (COSTS OFF) "+sql)
+			if err != nil {
+				t.Fatalf("explain: %v", err)
+			}
+			defer rows.Close()
+			plan := ""
+			for rows.Next() {
+				var line string
+				if err := rows.Scan(&line); err != nil {
+					t.Fatal(err)
+				}
+				plan += line + "\n"
+			}
+			return strings.Count(plan, "_hyper_")
+		}
+		all := chunks(`SELECT * FROM position_prime_allocation`)
+		if all < 10 {
+			t.Fatalf("the unbounded view plans %d chunk scans, want at least the 10 seeded days; is allocation_position still 1-day chunked?", all)
+		}
+		outside := chunks(`SELECT * FROM position_prime_allocation WHERE block_timestamp > '2026-03-09T00:00:00Z'::timestamptz`)
+		inside := chunks(`SELECT * FROM position_prime_allocation_since('2026-03-09T00:00:00Z'::timestamptz)`)
+		t.Logf("chunk scans: unbounded %d, bound outside the view %d, bound inside the source %d", all, outside, inside)
+		if outside != all {
+			t.Errorf("a bound outside the view planned %d chunk scans against %d unbounded; the control no longer shows the DISTINCT ON blocking pushdown", outside, all)
+		}
+		if inside > 3 {
+			t.Errorf("a bound inside the source planned %d chunk scans, want at most 3", inside)
+		}
+	})
+}
+
+func twoDigits(d int) string {
+	if d < 10 {
+		return "0" + string(rune('0'+d))
+	}
+	return string(rune('0'+d/10)) + string(rune('0'+d%10))
+}
