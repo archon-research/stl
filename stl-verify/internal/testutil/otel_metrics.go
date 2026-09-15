@@ -52,3 +52,40 @@ func CollectCounterByAttr(t *testing.T, reader sdkmetric.Reader, name, attrKey s
 	}
 	return out
 }
+
+// CollectGaugeDataPoints collects the current state of reader and returns the
+// int64 gauge data points of the metric named name. It fails the test if the
+// metric is absent or is not an int64 Gauge.
+func CollectGaugeDataPoints(t *testing.T, reader sdkmetric.Reader, name string) []metricdata.DataPoint[int64] {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != name {
+				continue
+			}
+			gauge, ok := m.Data.(metricdata.Gauge[int64])
+			if !ok {
+				t.Fatalf("metric %q is %T, want metricdata.Gauge[int64]", name, m.Data)
+			}
+			return gauge.DataPoints
+		}
+	}
+	t.Fatalf("metric %q not found", name)
+	return nil
+}
+
+// CollectGaugeByAttr collects the named metric's int64 gauge data points and
+// maps the last value seen for each string value of attrKey. A gauge is a
+// level, so values are not summed the way CollectCounterByAttr sums a counter.
+func CollectGaugeByAttr(t *testing.T, reader sdkmetric.Reader, name, attrKey string) map[string]int64 {
+	t.Helper()
+	out := make(map[string]int64)
+	for _, dp := range CollectGaugeDataPoints(t, reader, name) {
+		out[AttrValue(dp, attrKey)] = dp.Value
+	}
+	return out
+}

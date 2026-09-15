@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
@@ -166,8 +167,32 @@ func buildPoolConfig(cfg DBConfig) (*pgxpool.Config, error) {
 	if err := attachQueryTracer(poolConfig, cfg.MeterProvider); err != nil {
 		return nil, err
 	}
+	attachNoticeLogger(poolConfig)
 
 	return poolConfig, nil
+}
+
+// attachNoticeLogger surfaces server notices. Without a handler pgx discards them,
+// so a RAISE WARNING reaches nothing: the position materializer signals a withheld
+// position that way, and those warnings were invisible in every deployed service.
+func attachNoticeLogger(poolConfig *pgxpool.Config) {
+	poolConfig.ConnConfig.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
+		if n == nil {
+			return
+		}
+		attrs := []any{"severity", n.Severity, "code", n.Code, "message", n.Message}
+		if n.Detail != "" {
+			attrs = append(attrs, "detail", n.Detail)
+		}
+		if n.Hint != "" {
+			attrs = append(attrs, "hint", n.Hint)
+		}
+		if n.Severity == "WARNING" || n.Severity == "EXCEPTION" {
+			slog.Warn("postgres notice", attrs...)
+			return
+		}
+		slog.Info("postgres notice", attrs...)
+	}
 }
 
 // attachQueryTracer gives the pool the pgx tracer behind the fleet-wide database

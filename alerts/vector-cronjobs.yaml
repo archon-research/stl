@@ -219,7 +219,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|reference-capital-indexer|core-model-runner"
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|reference-capital-indexer|core-model-runner|position-materializer"
               }
             ) < 1
           )
@@ -227,7 +227,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|reference-capital-indexer|core-model-runner"
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|reference-capital-indexer|core-model-runner|position-materializer"
               }
             ) > 0
           )
@@ -710,3 +710,153 @@ groups:
             /debt and /total-capital series is now frozen on its last value via
             locf.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerbalancesheetstalled
+      - alert: VectorPositionMaterializerSilentlyEmpty
+        # Runs are succeeding but no observation has been appended for any view in
+        # 6 hours. On a chain producing blocks that is not a plausible steady
+        # state: it means every projection is returning rows already stored, which
+        # is what an upstream indexer stall looks like from here. Warning, not a
+        # page: the data is stale, not wrong, and nothing is corrupted — the append
+        # is idempotent, so recovery is the next successful run.
+        expr: |
+          (
+            sum by (service_name, cluster) (
+              increase(position_materializer_projection_runs_total{
+                status="ok",
+                k8s_namespace_name="vector"
+              }[6h])
+            ) > 0
+          )
+          and
+          (
+            sum by (service_name, cluster) (
+              increase(position_materializer_rows_changed_total{
+                k8s_namespace_name="vector"
+              }[6h])
+            ) == 0
+          )
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "position-materializer has appended no observations in 6h"
+          description: >-
+            Runs are succeeding on {{ $labels.cluster }} but
+            position_materializer_rows_changed_total has not moved in 6 hours, so
+            position_state is not tracking new positions. Most likely an upstream
+            indexer has stalled, or a projection view's join has gone empty.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializersilentlyempty"
+
+      - alert: VectorPositionMaterializerWithholdingPositions
+        # The shared function withholds a position whose new observations conflict and
+        # continues, so a projection reports success every tick while a position stays frozen
+        # at a stale value. Sustained, not instant: one tick's refusal is often a source
+        # correction arriving out of order and clears itself on the next run.
+        expr: |
+          max by (projection, cluster) (
+            position_materializer_positions_refused{k8s_namespace_name="vector"}
+          ) > 0
+        for: 3h
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "position-materializer is withholding positions in {{ $labels.projection }}"
+          description: >-
+            {{ $labels.projection }} has withheld or declined {{ $value }} position(s) on
+            {{ $labels.cluster }} for 3h. A withheld position reads as current downstream while
+            sitting at a stale value; a declined correction means the view and the spine disagree.
+            The runbook has a query per class.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerwithholdingpositions"
+
+      - alert: VectorPositionMaterializerViewFailing
+        # One view is failing while others succeed. The generic cronjob alerts fire
+        # on the RUN, so a single bad view among several is visible there only as a
+        # whole-run error; this names the view, which is what the runbook needs.
+        expr: |
+          sum by (materializer, cluster) (
+            increase(position_materializer_projection_runs_total{
+              status="error",
+              k8s_namespace_name="vector"
+            }[15m])
+          ) > 0
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "position-materializer view {{ $labels.materializer }} is failing"
+          description: >-
+            Projection {{ $labels.materializer }} returned an error on
+            {{ $labels.cluster }} in the last 15m. The runner logs the failure
+            and continues, so the other views in the same run did write; only
+            this one did not.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerviewfailing"
+
+      - alert: VectorPositionMaterializerCacheTableGrowthHigh
+        # position_current is a PLAIN table (db/migrations/AGENTS.md, "create
+        # every table plain; convert on measured need"), and any further
+        # trigger-fed cache off position_state registers with the same gauge.
+        # This rule is the tripwire that rule charges for: nothing else notices
+        # a plain table growing. Nothing is broken when it fires.
+        #
+        # A LEVEL, not a rate, unlike VectorUniswapV4AppendOnChangeGrowthHigh.
+        # That rule reads counters an indexer increments as it writes; these
+        # caches are written by database triggers on position_state, so no
+        # process can count the rows they persisted. The runner reads their
+        # estimated size once per run instead, and the question a level answers
+        # -- "is this table too big to stay plain" -- is the one the budget is
+        # about.
+        #
+        # Threshold derivation:
+        #   - the plain-table budget this repo already works to is ~100M rows
+        #     (VectorUniswapV4AppendOnChangeGrowthHigh, alerts/vector-indexers.yaml:
+        #     index depth, autovacuum, bloat on rewrite);
+        #   - trip at half of it, 50M, so the conversion can be planned and
+        #     shipped while the table is still comfortable rather than already
+        #     past the budget;
+        #   - the cache collapses position_state to one row per position, which
+        #     bounds it BELOW the spine -- a ratio, not a ceiling, since the
+        #     spine grows with blocks.
+        # Unlike the uniswap rule, no runway in TIME is claimed here: the spine
+        # has no production write rate yet to derive one from. Revisit the
+        # threshold once one exists.
+        #
+        # `max by (table, cluster)`: the budget is per TABLE, so caches are
+        # compared separately rather than summed.
+        # No zero-fill: the gauge is recorded every run for every cache the
+        # query returns, and `0 > 5e7` is false anyway. Note what an absent
+        # series does NOT mean: the SDK exports cumulatively, so a failing read
+        # leaves the last value standing for the life of the pod rather than
+        # going absent. A read that keeps failing is visible only in the run
+        # logs today -- covering it needs its own signal (VEC-402 follow-up).
+        #
+        # position_current cannot act on this by converting: its PK is
+        # position_id alone and create_hypertable refuses a unique index without
+        # the partition column, so the runbook's action is to find the upstream
+        # cause of the position count, not to partition.
+        expr: |
+          max by (table, cluster) (
+            position_materializer_cache_rows{k8s_namespace_name="vector"}
+          ) > 5e7
+        for: 6h
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "Vector {{ $labels.table }} outgrowing its plain-table budget"
+          description: >-
+            {{ $labels.table }} holds an estimated {{ $value | humanize }} rows on
+            {{ $labels.cluster }}, past the 50M mark at which a plain table needs
+            revisiting. Nothing is broken; the runbook carries the action. The
+            figure is an estimate from planner statistics, so it moves with
+            autovacuum rather than continuously.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializercachetablegrowthhigh"

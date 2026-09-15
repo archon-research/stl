@@ -101,3 +101,15 @@ func TestBuildPoolConfig_SeedsErrorClassesWhenTelemetryStartsLast(t *testing.T) 
 		}
 	}
 }
+
+// Without a handler pgx discards server notices, so a RAISE WARNING reaches
+// nothing. The position materializer signals a withheld position that way.
+func TestBuildPoolConfig_LogsServerNotices(t *testing.T) {
+	poolConfig, err := buildPoolConfig(DBConfig{URL: "postgres://u:p@localhost:5432/d?sslmode=disable"})
+	if err != nil {
+		t.Fatalf("buildPoolConfig() error: %v", err)
+	}
+	if poolConfig.ConnConfig.OnNotice == nil {
+		t.Fatal("ConnConfig.OnNotice is nil, so every server WARNING is discarded")
+	}
+}
