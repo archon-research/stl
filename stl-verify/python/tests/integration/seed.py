@@ -3473,7 +3473,8 @@ async def seed_balance_series_positions(db_url: str) -> None:
     try:
         async with conn.transaction():
             prime_id = await conn.fetchval(
-                "INSERT INTO prime (name, vault_address) VALUES ('bs_balance', $1) RETURNING id",
+                "INSERT INTO prime (external_id, name, vault_address) "
+                "VALUES (gen_random_uuid(), 'bs_balance', $1) RETURNING id",
                 bytes.fromhex(BS_VAULT_HEX),
             )
             protocol_id = await conn.fetchval(
