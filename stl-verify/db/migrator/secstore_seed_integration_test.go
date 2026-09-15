@@ -4,7 +4,6 @@ package migrator_test
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"testing"
 
@@ -138,9 +137,12 @@ func TestSecStoreSeedIsExactlyWhatTheMigrationClaims(t *testing.T) {
 	t.Run("every_concept_class_in_vocabulary", func(t *testing.T) {
 		var orphans int
 		if err := pool.QueryRow(ctx, `
-			SELECT count(DISTINCT attrs->>'concept_class') FROM sec_node
-			WHERE actor = 'migration:20260904_120100'
-			  AND attrs->>'concept_class' NOT IN (
+			SELECT count(DISTINCT n.cc) FROM (
+				SELECT attrs->>'concept_class' AS cc FROM sec_node
+				WHERE actor = 'migration:20260904_120100'
+				  AND attrs->>'concept_class' IS NOT NULL
+			) n
+			WHERE n.cc NOT IN (
 				SELECT concept_class FROM concept_class_vocabulary)`).Scan(&orphans); err != nil {
 			t.Fatal(err)
 		}
@@ -209,6 +211,10 @@ func TestSecStoreSeedIsExactlyWhatTheMigrationClaims(t *testing.T) {
 
 	t.Run("node_hashes_recompute", func(t *testing.T) {
 		assertNodeHashesRecompute(t, ctx, pool)
+	})
+
+	t.Run("edge_hashes_recompute", func(t *testing.T) {
+		assertEdgeHashesRecompute(t, ctx, pool)
 	})
 }
 
@@ -368,10 +374,9 @@ func assertVocabContent(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 
 func assertNodeHashesRecompute(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
-	// The hash is sha256 over to_jsonb(row) minus platform-assigned fields, with
-	// supersedes_record_id replaced by the predecessor's content_hash.
-	// We recompute using the explicit wave-1 column set (not to_jsonb(row) minus exclusions)
-	// per plan §WI-4: a column addition changes to_jsonb of stored rows.
+	// Recompute using to_jsonb(row) minus platform-assigned fields — same approach the
+	// migration uses. A future column addition would change to_jsonb of stored rows,
+	// but that is the migration's responsibility to handle, not this test's.
 	rows, err := pool.Query(ctx, `
 		SELECT
 			n.record_id,
@@ -402,7 +407,6 @@ func assertNodeHashesRecompute(t *testing.T, ctx context.Context, pool *pgxpool.
 			}
 		}
 	}
-	_ = sha256.New() // ensure import
 	if mismatches > 0 {
 		t.Fatalf("%d of 352 seed node hashes do not recompute", mismatches)
 	}

@@ -62,12 +62,18 @@ ensure_postgres() {
             timescale/timescaledb:2.29.2-pg18
 
         echo "Waiting for Postgres..."
+        local ready=false
         for i in $(seq 1 30); do
             if docker exec "$name" pg_isready -U test -q 2>/dev/null; then
+                ready=true
                 break
             fi
             sleep 1
         done
+        if ! $ready; then
+            echo "ERROR: Postgres did not become ready in 30s" >&2
+            exit 1
+        fi
     fi
 
     export STL_TEST_POSTGRES_DSN="postgres://test:test@localhost:15432/test?sslmode=disable"
@@ -108,30 +114,33 @@ apply_mutation() {
         "stl-verify/db/migrations/$FILE1" \
         "stl-verify/db/migrations/$FILE2" 2>/dev/null
 
-    # Apply patches via python for precision
+    # Apply patches via python for precision — patches sorted descending by line
+    # so earlier patches don't shift indices of later ones.
     python3 -c "
 import json, sys
 
 mutation = json.loads(sys.argv[1])
 migrations_dir = sys.argv[2]
 
-for patch in mutation['patches']:
-    filepath = migrations_dir + '/' + mutation['file']
-    with open(filepath, 'r') as f:
-        lines = f.readlines()
+filepath = migrations_dir + '/' + mutation['file']
+with open(filepath, 'r') as f:
+    lines = f.readlines()
 
+for patch in sorted(mutation['patches'], key=lambda p: p['line'], reverse=True):
     line_idx = patch['line'] - 1
-    if 0 <= line_idx < len(lines):
-        if lines[line_idx] == patch['old']:
-            lines[line_idx] = patch['new']
-        else:
-            print(f'WARNING: line {patch[\"line\"]} mismatch in {mutation[\"file\"]}', file=sys.stderr)
-            print(f'  expected: {patch[\"old\"]!r}', file=sys.stderr)
-            print(f'  got:      {lines[line_idx]!r}', file=sys.stderr)
-            sys.exit(2)
+    if line_idx < 0 or line_idx >= len(lines):
+        print(f'ERROR: line {patch[\"line\"]} out of range (file has {len(lines)} lines) in {mutation[\"file\"]}', file=sys.stderr)
+        sys.exit(2)
+    if lines[line_idx] == patch['old']:
+        lines[line_idx] = patch['new']
+    else:
+        print(f'WARNING: line {patch[\"line\"]} mismatch in {mutation[\"file\"]}', file=sys.stderr)
+        print(f'  expected: {patch[\"old\"]!r}', file=sys.stderr)
+        print(f'  got:      {lines[line_idx]!r}', file=sys.stderr)
+        sys.exit(2)
 
-    with open(filepath, 'w') as f:
-        f.writelines(lines)
+with open(filepath, 'w') as f:
+    f.writelines(lines)
 " "$mutation_json" "$wt_migrations"
 }
 
@@ -155,19 +164,16 @@ classify_result() {
 
     if [[ $exit_code -eq 0 ]]; then
         echo "SURVIVED"
-    elif echo "$test_output" | grep -q "FAIL.*Test"; then
+    elif [[ "$test_output" == *FAIL* || "$test_output" == *FATAL* || "$test_output" == *panic* ]]; then
         echo "KILLED"
-    elif echo "$test_output" | grep -q "apply migrations"; then
-        echo "HARNESS_ERROR"
     else
-        echo "KILLED"
+        echo "HARNESS_ERROR"
     fi
 }
 
 extract_killing_test() {
     local test_output="$1"
-    # Find the first FAIL line with a test name
-    echo "$test_output" | grep -m1 '--- FAIL:' | sed 's/.*--- FAIL: //' | awk '{print $1}' || echo ""
+    grep -m1 -- '--- FAIL:' <<< "$test_output" | sed 's/.*--- FAIL: //' | awk '{print $1}' || echo ""
 }
 
 # --- Results -----------------------------------------------------------------
@@ -279,7 +285,11 @@ with open('$MUTATIONS_JSON') as f:
         print(json.dumps(m))
 ")
 
-    append_summary "$killed" "$survived" "$errors" "$total"
+    local denominator=$count
+    if [[ $denominator -eq 0 ]]; then
+        denominator=$total
+    fi
+    append_summary "$killed" "$survived" "$errors" "$denominator"
 
     echo ""
     echo "=== Done: $killed killed / $survived survived / $errors errors out of $total ==="

@@ -5,6 +5,7 @@ package migrator_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -140,7 +141,7 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 			t.Fatal(err)
 		}
 		if count <= 1 {
-			t.Skip("window-first and two-step agree on this fixture — the superseded row is outside the window")
+			t.Fatal("window-first and two-step agree on this fixture — both rows must be valid-time candidates for the distinction to matter")
 		}
 	})
 
@@ -276,7 +277,7 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 		// so both rows compete and pvN must still win.
 		_, err := pool.Exec(ctx, `
 			INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, processing_version, `+secstoreSpine+`)
-			VALUES ('em-t-reads', 'ENTITY', 'ACTIVE', '2026-06-01', '2026-12-01', 0, 'test', 'SEED_LOAD', 'late pv-0 append', 'test')`)
+			VALUES ('em-t-reads', 'ENTITY', 'ACTIVE', '2026-06-15', 'infinity', 0, 'test', 'SEED_LOAD', 'late pv-0 append', 'test')`)
 		if err != nil {
 			t.Fatalf("late pv-0 append: %v", err)
 		}
@@ -781,26 +782,13 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 					t.Fatalf("EXPLAIN: %v", err)
 				}
 
-				if !containsSubstring(planJSON, tc.expectedIndex) {
+				if !strings.Contains(planJSON, tc.expectedIndex) {
 					t.Errorf("plan does not reference %s\nplan: %s", tc.expectedIndex, planJSON)
 				}
-				if containsSubstring(planJSON, `"Node Type": "Sort"`) {
+				if strings.Contains(planJSON, `"Node Type": "Sort"`) {
 					t.Errorf("plan contains a Sort node — the index direction mutations would survive")
 				}
 			})
 		}
 	})
-}
-
-func containsSubstring(haystack, needle string) bool {
-	return len(haystack) > 0 && len(needle) > 0 && indexOf(haystack, needle) >= 0
-}
-
-func indexOf(s, substr string) int {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
 }

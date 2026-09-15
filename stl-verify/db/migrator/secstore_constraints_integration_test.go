@@ -217,6 +217,7 @@ func TestSecStoreEveryEngineRuleRejectsItsInput(t *testing.T) {
 		if err == nil {
 			t.Skip("guard assigns edge_disc before CHECK fires; disc shape checked indirectly via the guard")
 		}
+		assertSQLState(t, err, "P0001", "sec_edge guard rejects invalid edge_disc shape")
 	})
 
 	t.Run("sec_edge_valid_from_finite_chk", func(t *testing.T) {
@@ -244,6 +245,9 @@ func TestSecStoreEveryEngineRuleRejectsItsInput(t *testing.T) {
 	})
 
 	t.Run("vocabulary_immutability_delete", func(t *testing.T) {
+		// Accepts both P0001 (immutability trigger) and 23503 (FK from sec_node/sec_edge):
+		// Postgres evaluates FK constraints before EACH ROW triggers, so tables referenced
+		// by edges hit 23503 before the trigger fires.
 		vocabs := []string{
 			"rel_type_vocabulary",
 			"weight_basis_vocabulary",
