@@ -60,6 +60,8 @@ set -euo pipefail
 die() { echo "::error::$*" >&2; exit 1; }
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=lib/overlay-tag-parser.sh
+source "${REPO_ROOT}/scripts/deploy/lib/overlay-tag-parser.sh"
 ROSTER="${REPO_ROOT}/k8s/image-roster.txt"
 ENV_NAME=""
 TAG=""
@@ -220,8 +222,7 @@ $shas"
 # name + newName + newTag; anything else (digest, a missing key, an unknown key)
 # fails closed, because kustomize would happily render it and no check would see.
 region_entries() {
-  awk -v target="$TARGET" '
-    function val(s) { sub(/^[^:]*:[[:space:]]*/, "", s); sub(/[[:space:]]+#.*$/, "", s); gsub(/^"|"$/, "", s); return s }
+  awk -v target="$TARGET" "$OVERLAY_SCALAR_AWK_FN"'
     function bad(msg) { printf "::error::%s: %s\n", target, msg > "/dev/stderr"; ok = 0 }
     function flush() {
       if (name == "") {
@@ -238,14 +239,14 @@ region_entries() {
     /^images:/                          { next }
     /^[[:space:]]*$/                    { next }
     /^[[:space:]]*#/                    { next }
-    /^[[:space:]]*-[[:space:]]*name:/   { flush(); name = val($0); if (name == "") bad("images entry with an empty name"); next }
-    /^[[:space:]]*newName:/             { nn = val($0); next }
+    /^[[:space:]]*-[[:space:]]*name:/   { flush(); name = overlay_scalar_value($0); if (name == "") bad("images entry with an empty name"); next }
+    /^[[:space:]]*newName:/             { nn = overlay_scalar_value($0); next }
     /^[[:space:]]*newTag:/              {
       # Canonical form only: deploy-prod'\''s BAD_TAGS guard requires the quoted
       # tag on every prod deploy, so an unquoted one (kustomize edit output)
       # must fail here at PR time, not there.
       if ($0 !~ /^[[:space:]]*newTag:[[:space:]]*"[^"]*"[[:space:]]*(#.*)?$/) bad("newTag must be double-quoted (the renderer'\''s canonical form): " $0)
-      nt = val($0); next
+      nt = overlay_scalar_value($0); next
     }
     { bad("unexpected line in the images block (only name/newName/newTag are allowed): " $0) }
     END { flush(); if (!ok) exit 1 }
