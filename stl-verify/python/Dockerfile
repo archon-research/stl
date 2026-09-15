@@ -19,7 +19,7 @@ RUN npm run prepare --workspace=@stl-verify/ui
 RUN npm run build --workspace=@stl-verify/ui
 
 # Build Python dependencies
-FROM python:3.12.14-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS builder
+FROM python:3.14.7-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6 AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.5 /uv /uvx /bin/
 
@@ -38,7 +38,7 @@ COPY python/app/ app/
 COPY python/suraf/ suraf/
 RUN uv sync --frozen --no-dev
 
-FROM python:3.12.14-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+FROM python:3.14.7-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6
 
 # groupadd/useradd live in the passwd package, which the hardening step below
 # removes — user creation must stay above it.
