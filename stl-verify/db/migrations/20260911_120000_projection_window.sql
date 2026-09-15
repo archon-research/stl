@@ -1,10 +1,15 @@
--- VEC-566: give materialize_position_projection an optional window, so a scheduled run re-reads only
--- the tail instead of opening every chunk of its source. Measured on prod by review: unbounded reads
--- predict 1,023,295 kB (208 chunk scan nodes) to 2,636,525 kB (442); a 2-day bound cuts 98.9-99.3%.
+-- VEC-566: materialize_position_projection takes an optional p_window, so a scheduled run reads only
+-- the tail of a projection's source (<view>_since) instead of the whole view. Bounded runs are recorded.
 
 -- Dropped rather than left beside the new list: with both present a three-argument call matches the
 -- old function exactly AND the new one by default, which is ambiguous and fails at parse time.
 DROP FUNCTION IF EXISTS materialize_position_projection(regclass, integer, bigint);
+
+-- Append-only table: a run's window can never be reconstructed later, so it is stamped on the record.
+ALTER TABLE position_projection_run ADD COLUMN IF NOT EXISTS window_interval interval;
+COMMENT ON COLUMN position_projection_run.window_interval IS 'Roles: Audit. The p_window this run was called with: it read only observations with block_timestamp > created_at - window_interval, so a position it did not touch may have been outside the window rather than unchanged. NULL means unbounded, the whole source swept.';
+COMMENT ON TABLE position_projection_run IS '[Operational] One row per COMPLETED materialize_position_projection() run, written in the run''s own transaction. Only for a run with window_interval NULL does a position whose latest observation trails its projection''s latest row here mean swept and not re-observed; a bounded run saw only the window, so a trailing position may simply have fallen outside it. Plain table: volume is one row per run per projection, so no compression or tiering.';
+COMMENT ON COLUMN position_projection_run.block_timestamp IS 'Roles: Derived. Latest block_timestamp among the observations this run accepted; NULL when it accepted nothing, which is still a completed sweep of the whole source when window_interval is NULL and of the window alone otherwise. Comparable across on-chain and off-chain observations, unlike block_number.';
 
 CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_build_id integer DEFAULT 0,
                                                            p_run_id bigint DEFAULT NULL,
@@ -20,11 +25,8 @@ BEGIN
     IF p_view IS NULL THEN
         RAISE EXCEPTION 'materialize_position_projection: p_view must not be NULL';
     END IF;
-    -- A bounded run re-reads only the tail. Closure survives it because the LAG below falls back to
-    -- prev_qty/opened_before probed from stored position_state, so a position whose opening sits outside
-    -- the window still closes. What it cannot do is DISCOVER history: on an empty spine, or after an
-    -- outage longer than the window, a bounded run appends nothing for those positions and they are
-    -- silently absent. NULL therefore means unbounded, and bootstrap and recovery must pass NULL.
+    -- NULL is unbounded. A bounded run cannot discover history outside its window (see the function
+    -- COMMENT), so bootstrap and recovery pass NULL.
     IF p_window IS NOT NULL AND p_window <= interval '0' THEN
         RAISE EXCEPTION 'materialize_position_projection: p_window must be positive, got %', p_window;
     END IF;
@@ -78,13 +80,9 @@ BEGIN
     DROP TABLE IF EXISTS pg_temp._mpp_new;
     DROP TABLE IF EXISTS pg_temp._mpp_drift;
     DROP TABLE IF EXISTS pg_temp._mpp_refused;
-    -- A bound cannot sit OUTSIDE the view: every projection dedupes with a DISTINCT ON whose key leaves
-    -- out the timestamp, and a qualifier above a DISTINCT does not push below it, so the whole source is
-    -- still read (measured on staging: 194 chunks with the bound outside, 3 with it inside the scan).
-    -- A bounded run therefore reads the projection's bounded source, <view>_since(timestamptz): an
-    -- inlinable SQL function carrying the same SELECT with the bound on its source's partition column.
-    -- The instant is interpolated as a literal, never bound, so it is constified at plan time and the
-    -- chunk exclusion this exists for happens (AGENTS.md, "A time window on a hypertable is a SQL literal").
+    -- A bound outside the view does not push below its DISTINCT ON, so a bounded run reads <view>_since,
+    -- the same SELECT with the bound on the source's partition column. The instant is a literal, never a
+    -- bind parameter (AGENTS.md, "A time window on a hypertable is a SQL literal").
     IF p_window IS NULL THEN
         v_source := v_qualname;
     ELSE
@@ -331,8 +329,8 @@ BEGIN
     GET DIAGNOSTICS n = ROW_COUNT;
 
     INSERT INTO public.position_projection_run
-        (projection, build_id, run_id, block_timestamp, rows_emitted, rows_appended, positions_refused)
-    SELECT v_qualname, p_build_id, p_run_id, max(block_timestamp), v_emitted, n, v_refused FROM pg_temp._mpp_src;
+        (projection, build_id, run_id, block_timestamp, rows_emitted, rows_appended, positions_refused, window_interval)
+    SELECT v_qualname, p_build_id, p_run_id, max(block_timestamp), v_emitted, n, v_refused, p_window FROM pg_temp._mpp_src;
 
     DROP TABLE pg_temp._mpp_src;
     DROP TABLE pg_temp._mpp_new;
@@ -342,6 +340,6 @@ BEGIN
     RETURN n;
 END $fn$;
 
-COMMENT ON FUNCTION materialize_position_projection(regclass, integer, bigint, interval) IS '[Operational] Appends a projection view''s observations to position_state, applying closure, the column contract, ownership and refusals. p_window bounds the batch: the snapshot is read from <view>_since(now() - p_window), the projection''s bounded source with the bound inside its own scan (a bound outside the view does not push below its DISTINCT ON), the instant interpolated as a literal so chunk pruning actually happens; a windowed call on a projection without that function is refused. NULL means unbounded and reads the view. A bounded run keeps closure correct (the LAG falls back to history probed from position_state) but cannot discover positions whose observations all fall outside the window, so bootstrap and any recovery after an outage longer than the window must pass NULL.';
+COMMENT ON FUNCTION materialize_position_projection(regclass, integer, bigint, interval) IS '[Operational] VEC-402..407 shared materializer: evaluate a per-protocol projection view ONCE into a temp table, validate it against the position_state column contract (each RAISE in the body names its own check), then apply closure and APPEND the new observations, recording the completed run with its counts in position_projection_run, all in one transaction. A view bug (NULLs, a wrong type, a double-emitted key, a negative quantity, the off-chain block_number rule) aborts the run BEFORE closure can drop the offending row; a position_id owned by another projection aborts it too, but after closure, because the check reads what the run would actually append. A data conflict aborts nothing: a position whose new observations invert block against instant is withheld this run, and a stored key re-emitted with a different value keeps the stored row, each recorded in position_projection_refusal and warned. deal_type is copied through; the FK to ref_deal_type constrains the value. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent for a fixed source; run out of band. p_build_id and p_run_id are stamped on every row it appends, on the refusals and on the run record (NULL run means pre-tracking). Returns rows INSERTED. p_window (VEC-566) bounds the batch: a bounded run reads <view>_since(now() - p_window) in place of the view, the projection''s own SELECT with the bound on its source''s partition column, because a WHERE outside the view sits above its DISTINCT ON and prunes nothing; the instant is interpolated as a literal. Whether chunks are excluded is that function''s contract, not this one''s. A projection without a <view>_since(timestamptz) refuses a window rather than running unbounded. NULL is unbounded and reads the view. A bounded run keeps closure correct (the LAG falls back to history probed from position_state) but cannot discover positions whose observations all fall outside the window, so bootstrap and any recovery after an outage longer than the window must pass NULL. The window is stamped on the run record as window_interval.';
 
 INSERT INTO migrations (filename) VALUES ('20260911_120000_projection_window.sql') ON CONFLICT (filename) DO NOTHING;

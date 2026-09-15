@@ -147,19 +147,58 @@ func TestProjectionWindowNullIsUnbounded(t *testing.T) {
 }
 
 // The trap the parameter's COMMENT documents: bounded from cold, everything outside the window is
-// silently never discovered. Pinned so the documented limitation cannot quietly stop being true.
+// silently never discovered. Pinned so the documented limitation cannot quietly stop being true. Two
+// days back selects exactly the g=1 row and the closing zero, so the count is exact, not a ceiling: a
+// window anchored on the wrong column or the wrong instant lands on a different number.
 func TestProjectionWindowBoundedFromColdCannotDiscoverHistory(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
 	windowFixture(t, ctx, pool)
 
-	appended := materializeWindow(t, ctx, pool, "2 days")
-	if appended >= 41 {
-		t.Fatalf("bounded run appended %d; it must see only the tail, not all 41 observations", appended)
+	if appended := materializeWindow(t, ctx, pool, "2 days"); appended != 2 {
+		t.Fatalf("bounded cold run appended %d, want exactly 2 (the g=1 row and the closing zero)", appended)
 	}
-	if rows := storedWindowRows(t, ctx, pool); rows != int(appended) || rows == 41 {
-		t.Errorf("stored %d rows from a bounded cold run (appended %d); the pre-window history must be absent", rows, appended)
+	if rows := storedWindowRows(t, ctx, pool); rows != 2 {
+		t.Errorf("stored %d rows from a bounded cold run, want 2; the pre-window history must be absent", rows)
+	}
+}
+
+// position_projection_run is append-only and its table COMMENT reads a trailing position as "swept and
+// not re-observed". That inference holds only for an unbounded run, so the window a run was called with
+// is stamped on its record: NULL for unbounded, the interval otherwise.
+func TestProjectionWindowIsStampedOnTheRunRecord(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	windowFixture(t, ctx, pool)
+
+	materializeWindow(t, ctx, pool, nil)
+	materializeWindow(t, ctx, pool, "2 days")
+	rows, err := pool.Query(ctx, `
+		SELECT window_interval::text FROM position_projection_run
+		 WHERE projection = 'public.position_win' ORDER BY created_at`)
+	if err != nil {
+		t.Fatalf("read the run records: %v", err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var w *string
+		if err := rows.Scan(&w); err != nil {
+			t.Fatal(err)
+		}
+		if w == nil {
+			got = append(got, "NULL")
+		} else {
+			got = append(got, *w)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"NULL", "2 days"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("run records carry window_interval %v, want %v", got, want)
 	}
 }
 
