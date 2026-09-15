@@ -387,6 +387,26 @@ func (r *MorphoRepository) ObserveAdapterMembership(ctx context.Context, tx pgx.
 	return adapterID, appended, nil
 }
 
+// AdapterSetEnumeratedAt answers whether the adapter carries an end-of-block set
+// enumeration at this block position. entity.EndOfBlockLogIndex IS the "read from
+// end-of-block state" position, so matching on it covers every enumerating writer.
+func (r *MorphoRepository) AdapterSetEnumeratedAt(ctx context.Context, tx pgx.Tx, morphoAdapterID int64, at entity.BlockPosition) (bool, error) {
+	var enumerated bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM morpho_adapter_membership
+		   WHERE morpho_adapter_id = $1
+		     AND block_number = $2
+		     AND block_version = $3
+		     AND log_index = $4
+		 )`,
+		morphoAdapterID, at.BlockNumber, at.BlockVersion, entity.EndOfBlockLogIndex,
+	).Scan(&enumerated); err != nil {
+		return false, fmt.Errorf("reading set enumeration for adapter %d at block %d: %w", morphoAdapterID, at.BlockNumber, err)
+	}
+	return enumerated, nil
+}
+
 // adapterIdentityID returns the stable id of the (vault, address) identity row,
 // creating it on first sight. Every column it writes is immutable, so a row that
 // already exists is returned as-is and never converged — that is what keeps the id a

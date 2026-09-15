@@ -4016,87 +4016,113 @@ have consciously accepted.
 
 ### What it means
 
-More than 3 adapter memberships were **inferred from an allocation** in 6 hours on
-the labelled `chain`. An `Allocate` / `Deallocate` proves its adapter is in the
-vault's set — the contract cannot allocate to an unregistered adapter — so when the
-membership log has no answer at that position the indexer classifies the adapter
-on-chain and records the membership the event implies, rather than hard-failing and
-poisoning the FIFO queue.
+At least one adapter membership was **inferred from an allocation** in 6 hours on the
+labelled `chain` **in a block where that vault's adapter set was not being enumerated**.
+An `Allocate` / `Deallocate` proves its adapter is in the vault's set — the contract
+cannot allocate to an unregistered adapter — so when the membership log has no answer at
+that position the indexer classifies the adapter on-chain and records the membership the
+event implies, rather than hard-failing and poisoning the FIFO queue.
 
-A `RemoveAdapter` for an unknown adapter is **not** part of this path and does not
-count here: it is recorded as one untyped `is_member = false` observation, which is
-the truthful record and needs no classification.
+A `RemoveAdapter` for an unknown adapter is **not** part of this path and does not count
+here: it is recorded as one untyped `is_member = false` observation, which is the
+truthful record and needs no classification.
 
-The inference itself is correct. What it *signals* is a discovery gap: vault
-discovery enumerates the vault's **current** adapter set (`adaptersLength()` /
-`adapters(i)`, hash-pinned) and records every entry, so once a vault is discovered
-the log already answers every allocation, nothing is appended, and this counter's
-steady-state rate is **zero**.
+The inference itself is correct. What it *signals* is a discovery gap: vault discovery
+enumerates the vault's **current** adapter set (`adaptersLength()` / `adapters(i)`,
+hash-pinned) and records every entry, so once a vault is discovered the log already
+answers every allocation and nothing is appended.
 
-**The one benign source is deterministic, not a race.** Discovery records its
-enumeration at `log_index = EndOfBlockLogIndex` (MaxInt32) so it orders above every
-log in the discovery block, while the membership read is position-scoped
-(`(block_number, block_version, log_index) <= …`). A VaultV2 emits `AccrueInterest`
-— the discovery trigger — first in the very transaction that allocates, so every
-allocation in that same block reads strictly *below* the seed, finds no answer, and
-appends. Expect exactly one append per adapter allocated in the discovery block,
-every single time; nothing has to have changed between two reads. Its signature in
-the query below is `blocks_after_discovery = 0`.
+**The one benign source is excluded at the source, not by a threshold.** Discovery
+records its enumeration at `log_index = EndOfBlockLogIndex` (MaxInt32) so it orders above
+every log in the discovery block, while the membership read is position-scoped
+(`(block_number, block_version, log_index) <= …`). A VaultV2 emits `AccrueInterest` — the
+discovery trigger — first in the very transaction that allocates, so every allocation in
+that same block reads strictly *below* the seed, finds no answer, and appends. That is
+deterministic, not a race. The indexer asks whether an end-of-block enumeration exists for
+that adapter at that block and labels the append `at_discovery_block="true"` or `"false"`;
+**this rule reads `"false"` only**, so the benign source never reaches it and the
+comparison is `> 0`.
+
+> **Before 2026-09 this rule was `> 3` over 6h with no label.** It had to tolerate the
+> benign source in bulk, and a burst of 4–5 newly discovered VaultV2 vaults on base — by
+> then ordinary — fired it three times in 14 days with nothing wrong. If you are reading
+> a series from before the label shipped, `at_discovery_block` is absent on those samples
+> and the rule matches none of them.
 
 It also costs data quality — but not the way a mutable registry did. Nothing is
 approximated: an adapter known only from an `Allocate` simply has **no**
-`add_adapter_event` observation, so its add block is NULL until its history is
-replayed. Current membership and classification are correct in the meantime.
+`add_adapter_event` observation, so its add block is NULL until its history is replayed.
+Current membership and classification are correct in the meantime.
 
-**Replays are excluded.** The rule counts every `service_name` except the two
-on-demand replay workers —
-`service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"` — so a chain
-added later needs no edit here. Every rule in the `vector-morpho-v2` group
-carries the same exclusion. `morpho-vault-backfill` and `morpho-v2-bootstrap` run
-historical `Allocate` logs through the same handlers under their own
-`service_name`, and replaying a mid-life discovery is exactly how the missing
-`add_adapter_event` history gets filled in — so a run drives this counter by
-design, and firing on it would page for the fix. The question the alert asks — is
-the LIVE enumeration missing adapters — is only answerable from the live indexer's
-own series.
+**Replays are excluded.** The rule counts every `service_name` except the two on-demand
+replay workers — `service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"` — so
+a chain added later needs no edit here. Every rule in the `vector-morpho-v2` group carries
+the same exclusion. `morpho-vault-backfill` and `morpho-v2-bootstrap` run historical
+`Allocate` logs through the same handlers under their own `service_name`, and replaying a
+mid-life discovery is exactly how the missing `add_adapter_event` history gets filled in —
+so a run drives this counter by design, and firing on it would page for the fix. The
+question the alert asks — is the LIVE enumeration missing adapters — is only answerable
+from the live indexer's own series.
 
 ### First checks
 
-1. **Is it one new vault or many?** A mid-life discovery produces one append per
-   adapter the vault allocates to in the discovery block — deterministically, per
-   the mechanism above — so a wave of new vaults produces a small, one-off burst.
-   Correlate with the discovery path:
-   `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total{service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[6h]))`
-   — `allocation_event` observations with **no** matching `vault_discovery`
-   traffic in the same window are the suspicious case.
-2. **Identify them** — the indexer logs one WARN per inference:
-   `kubectl -n vector logs -l 'app in (morpho-indexer,base-morpho-indexer)' | grep "membership inferred from an Allocate"`
+1. **Confirm the split.** The benign appends still happen; they are just labelled and no
+   longer alert. Compare the two:
+   `sum by (at_discovery_block) (increase(morpho_v2_adapter_registrations_total{observed_via="allocation_event", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[6h]))`
+   — only the `"false"` series is a fault. A non-zero `"false"` alongside heavy `"true"`
+   traffic means a discovery wave is also underway, not that the wave caused it.
+2. **Identify them** — the indexer logs one WARN per inference, carrying the same split:
+   `kubectl -n vector logs -l 'app in (morpho-indexer,base-morpho-indexer)' | grep "membership inferred from an Allocate" | grep 'at_discovery_block=false'`
    (carries vault, adapter, block).
-3. **Was the vault genuinely new?** Compare the block the membership was inferred
-   at against its vault's first-seen block (`db-query`):
+3. **Confirm against the DB** — metrics could be lying. Compare the block the membership
+   was inferred at against the block its vault's set was actually **enumerated** at
+   (`db-query`):
 
    ```sql
-   SELECT '0x' || encode(v.address, 'hex') AS vault,
-          v.created_at_block AS vault_first_seen_block,
+   SELECT m.timestamp,
+          '0x' || encode(v.address, 'hex') AS vault,
           '0x' || encode(a.address, 'hex') AS adapter,
-          MIN(m.block_number) FILTER (WHERE m.observed_via = 'allocation_event') AS inferred_at_block,
-          MIN(m.block_number) FILTER (WHERE m.is_member AND m.observed_via = 'add_adapter_event') AS added_at_block,
-          MIN(m.block_number) FILTER (WHERE m.observed_via = 'allocation_event') - v.created_at_block
-              AS blocks_after_discovery
+          m.block_number AS inferred_at_block,
+          (e.morpho_adapter_id IS NOT NULL) AS at_discovery_block,
+          (SELECT MIN(d.block_number) FROM morpho_adapter_membership d
+            WHERE d.morpho_adapter_id = m.morpho_adapter_id
+              AND d.log_index = 2147483647) AS ever_enumerated_at_block,
+          (SELECT MIN(x.block_number) FROM morpho_adapter_membership x
+            WHERE x.morpho_adapter_id = m.morpho_adapter_id
+              AND x.is_member AND x.observed_via = 'add_adapter_event') AS added_at_block
    FROM morpho_adapter_membership m
    JOIN morpho_adapter a ON a.id = m.morpho_adapter_id
    JOIN morpho_vault v ON v.id = a.morpho_vault_id
-   WHERE v.vault_version = 3
-   GROUP BY v.address, v.created_at_block, a.address
-   HAVING MIN(m.block_number) FILTER (WHERE m.observed_via = 'allocation_event') IS NOT NULL
-   ORDER BY blocks_after_discovery DESC
-   LIMIT 50;
+   LEFT JOIN morpho_adapter_membership e
+          ON e.morpho_adapter_id = m.morpho_adapter_id
+         AND e.block_number = m.block_number
+         AND e.block_version = m.block_version
+         AND e.log_index = 2147483647           -- EndOfBlockLogIndex
+   WHERE m.observed_via = 'allocation_event'
+     AND v.vault_version = 3
+     AND m.timestamp > now() - interval '7 days'
+   ORDER BY m.timestamp DESC;
    ```
 
-   `blocks_after_discovery = 0` is the same-block signature above — benign, and the
-   expected shape, not a coincidence. A large positive value on a long-known vault
-   means enumeration missed the adapter, which is the bug. A NULL `added_at_block`
-   is the replay backlog, not a second fault.
+   `at_discovery_block` is the metric label, recomputed from the table — the two must
+   agree, and `false` rows are the ones the alert counted. A `false` row is a real gap:
+   the adapter was inferred at a block its vault's set enumeration did not cover.
+   `ever_enumerated_at_block IS NULL` is the worst shape — **no** enumeration for that
+   adapter at any block, so discovery never ran for the vault or never returned the
+   adapter. A NULL `added_at_block` is the replay backlog, not a second fault.
+
+   Widen the interval to sweep the whole backlog, but expect history: a chain onboarded
+   before its vaults were ever enumerated carries a standing population of `false` rows
+   (staging mainnet, 2026-08-24 → 08-27: 37 of them), and they clear by replay, not on
+   their own.
+
+   **Do not compare against `morpho_vault.created_at_block`.** It is the vault's creation
+   block, not the block this indexer enumerated it at: `GetOrCreateVault` returns a
+   pre-existing row untouched, so a vault re-discovered long after it was first written
+   shows a gap of millions of blocks and reads as a catastrophic regression. Measured on
+   the staging database in 2026-09, that framing made 177 of 194 healthy mainnet rows look
+   broken; every one of them had its `add_adapter_event` history written by a replay
+   *after* the live append, which is the design working.
 4. **Cross-check the chain** — for a suspect vault, ask the contract directly and
    compare with the registry:
 
@@ -4107,21 +4133,27 @@ own series.
 
 ### Common causes
 
-- A wave of newly discovered V2 vaults → benign and expected: each contributes one
-  append per adapter allocated in its discovery block. Confirm via
-  `blocks_after_discovery = 0` and let it clear.
 - `readV2Adapters` enumeration regression (truncated list, wrong selector, a
   failed sub-read defaulting to empty) → adapters are missing from every newly
   discovered vault; this is the bug the alert exists to catch.
+- A vault whose row predates the V2 discovery path → it is already in the registry, so
+  discovery never enumerates it, and every adapter it holds is learned one `Allocate` at a
+  time. `ever_enumerated_at_block IS NULL` with a long-established vault is this shape; replay
+  the vault.
 - Vault registry losing known vaults (e.g. repeated re-discovery after restarts)
   → adapters look absent on every restart.
+- A wave of newly discovered V2 vaults is **not** a cause any more — those appends carry
+  `at_discovery_block="true"` and the rule does not read them. Seeing this alert during a
+  discovery wave means something else is also wrong.
 
 ### Verify recovery
 
-`increase(morpho_v2_adapter_registrations_total{observed_via="allocation_event", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[6h]) <= 3`
-for the affected chain. If the cause was an enumeration bug, also replay the
-affected vaults: the replay appends each adapter's real `AddAdapter` observation
-at its own block, which is what turns a NULL add block into the true one.
+`increase(morpho_v2_adapter_registrations_total{observed_via="allocation_event", at_discovery_block="false", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[6h])`
+returns **no data or 0** for the affected chain. Recovered is usually *no data*: the
+`"false"` series only exists once something appended one, so do not read an empty result
+as a broken query — the `"true"` series beside it proves the counter is still reporting.
+Also replay the affected vaults: the replay appends each adapter's real `AddAdapter`
+observation at its own block, which is what turns a NULL add block into the true one.
 
 ---
 
