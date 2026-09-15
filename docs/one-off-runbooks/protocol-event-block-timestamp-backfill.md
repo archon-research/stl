@@ -32,8 +32,9 @@ VEC-735's, and must not run until Step 3 reports zero.
 `protocol_event` tiers to object storage after 1 year (`policy_movechunk_to_s3`), and a tiered
 chunk is read-only: an `UPDATE` cannot reach its rows, so they stay undated until someone calls
 `untier_chunk` on each one first. Check the headroom before planning the run — the oldest chunk's
-`range_start` plus a year is the deadline, and at the time of writing the oldest was 2025-09-22
-with nothing tiered yet:
+`range_start` plus a year is the deadline. On prod on 2026-09-15 the oldest chunk was 2025-09-22
+with nothing tiered yet, and `policy_movechunk_to_s3` runs hourly, so the first chunk tiers within
+an hour of becoming eligible:
 
 ```sql
 SELECT count(*) AS chunks, min(range_start)::date AS oldest FROM timescaledb_information.chunks
@@ -53,12 +54,12 @@ SET timescaledb.enable_tiered_reads = 'on';
 
 Each window decompresses the chunks it touches, rewrites every row in them, and leaves them
 uncompressed until `policy_compression` (`compress_after` 2 days) catches up. Two consequences to
-size before starting: the table needs disk headroom for its decompressed form (2.1 GB compressed
-across 358 chunks at the time of writing, several times that uncompressed), and the recompression
-that follows is its own background load.
+size before starting: the table needs disk headroom for its decompressed form (prod holds 2.0 GB
+compressed across 358 chunks, several times that uncompressed), and the recompression that follows
+is its own background load.
 
-Decompression itself is not the bottleneck — a warm read of 135k rows including `event_data`
-measured 285 ms. The write path is, and it cannot be measured without writing, so treat the first
+Decompression itself is not the bottleneck — a warm prod read of 136k rows including `event_data`
+measured 149 ms. The write path is, and it cannot be measured without writing, so treat the first
 window as the calibration run and extrapolate from what it reports rather than from a guess.
 
 ## Where the two cohorts come from
@@ -69,8 +70,8 @@ value, so `created_at` on a row written today *is* event time. That has held sin
 `DEFAULT NOW()` and holds ingest time.
 
 The two are told apart without a join: a block-header timestamp is whole-second, `NOW()` is not.
-Re-measure both cohorts before running anything — the numbers below are the prod measurement taken
-when this doc was written, not an invariant:
+Re-measure both cohorts before running anything — the numbers below were measured on prod on
+2026-09-15, and are a measurement, not an invariant:
 
 ```sql
 SELECT count(*) FILTER (WHERE created_at =  date_trunc('second', created_at)) AS whole_sec,
@@ -80,9 +81,9 @@ SELECT count(*) FILTER (WHERE created_at =  date_trunc('second', created_at)) AS
 FROM protocol_event;
 ```
 
-At the time of writing that reported 15.0M whole-second rows against 1.2M sub-second ones, the
-latter confined to `2026-02-18 14:23:15.93Z .. 2026-04-14 12:02:18.12Z`. Rows older than that
-window are whole-second too: they were written by backfillers that always supplied block time.
+On prod that reported 15.3M whole-second rows of 16.5M, against 1.2M sub-second ones confined to
+`2026-02-18 14:23:15.93Z .. 2026-04-14 12:02:18.12Z`. Rows older than that window are whole-second
+too: they were written by backfillers that always supplied block time.
 
 Spot-checked against mainnet before relying on the split:
 
@@ -132,7 +133,8 @@ the loader stops enumerating this table's blocks, silently, and every value here
 entry goes when Step 3 reports zero, in the PR that retires this file.
 
 Size the residual first — it is the distinct-block count the `block_meta` load has to cover, and at
-the time of writing it was ~242k mainnet and ~57k Avalanche blocks:
+the time of writing it was 242,328 mainnet and 57,233 Avalanche blocks, with `block_meta` still
+empty on prod:
 
 ```sql
 SELECT chain_id, count(*) AS distinct_blocks
