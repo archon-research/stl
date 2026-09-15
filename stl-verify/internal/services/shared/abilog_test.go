@@ -62,6 +62,30 @@ func TestLogBelongsTo(t *testing.T) {
 	}
 }
 
+func TestIsHexWord(t *testing.T) {
+	const word = "0x2222222222222222222222222222222222222222222222222222222222222222"
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{"32-byte hex word", word, true},
+		{"mixed-case digits", "0x" + strings.ToUpper(word[2:]), true},
+		{"too short", "0xdeadbeef", false},
+		{"too long", word + "00", false},
+		{"no 0x prefix", word[2:], false},
+		{"empty", "", false},
+		{"right length, not hex", "0x" + strings.Repeat("z", 64), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsHexWord(tc.value); got != tc.want {
+				t.Errorf("IsHexWord(%q) = %v, want %v", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
 // ============================================================================
 // DecodeLog
 // ============================================================================

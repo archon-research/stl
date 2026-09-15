@@ -27,12 +27,12 @@
 # template's `Cluster:` header is populated. `namespace` is a static rule label
 # (mimir-rules-sync lint forbids `cluster`/`env` as static labels but allows it).
 #
-# Seven jobs are EXCLUDED from VectorCronjobAllRunsFailing by service_name:
+# Eight jobs are EXCLUDED from VectorCronjobAllRunsFailing by service_name:
 # maple-graphql-indexer, which has richer dedicated rules in
-# vector-indexers.yaml (VEC-320); the five on-demand ones —
+# vector-indexers.yaml (VEC-320); the six on-demand ones —
 # offchain-price-backfill, reference-capital-backfill, morpho-vault-backfill,
-# morpho-v2-bootstrap and block-republisher (one deployment per chain, below),
-# none of which carries a schedule;
+# morpho-v2-bootstrap, uniswap-v4-position-bootstrap and block-republisher (one
+# deployment per chain, below), none of which carries a schedule;
 # and core-model-runner, which does carry a schedule but ticks only every 24h with
 # no retry (RetryPolicy.maximum_attempts=1) — see VectorCronjobAllRunsFailing
 # for why "no successes in an hour" is their healthy state. Every other
@@ -107,8 +107,8 @@ groups:
         #
         # On-demand jobs (temporal.RunWorker: offchain-price-backfill,
         # reference-capital-backfill, morpho-vault-backfill,
-        # morpho-v2-bootstrap, and every chain's block-republisher) are
-        # excluded: they run only
+        # morpho-v2-bootstrap, uniswap-v4-position-bootstrap, and every chain's
+        # block-republisher) are excluded: they run only
         # when a human starts them, so "zero successes in the last hour" is their
         # healthy state and a single failed run is by definition
         # errors=1/successes=0, which would page critical for a run the operator
@@ -135,6 +135,7 @@ groups:
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
                 service_name!="morpho-vault-backfill",
+                service_name!="uniswap-v4-position-bootstrap",
                 service_name!~"([a-z0-9-]+-)?block-republisher",
                 service_name!="core-model-runner",
                 k8s_namespace_name="vector"
@@ -151,6 +152,7 @@ groups:
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
                 service_name!="morpho-vault-backfill",
+                service_name!="uniswap-v4-position-bootstrap",
                 service_name!~"([a-z0-9-]+-)?block-republisher",
                 service_name!="core-model-runner",
                 k8s_namespace_name="vector"
@@ -191,6 +193,12 @@ groups:
         # indexer`. maple-graphql-indexer is excluded (it has its own
         # VectorMapleIndexerDown). When a new SCHEDULED cronjob ships, add its
         # Deployment name to both regexes below.
+        #
+        # Retiring one is the mirror image: drop it from both regexes AND delete
+        # its Temporal schedule (docs/temporal_guide.md, "Recipe: remove a
+        # cronjob"). A deleted Deployment stops producing the kube_deployment_*
+        # series this rule reads, so a schedule left behind keeps firing into an
+        # unpolled task queue that no rule in this file can see.
         #
         # On-demand workers (temporal.RunWorker) are deliberately NOT listed here.
         # This rule pages because a dead scheduled worker means ticks are firing
@@ -249,7 +257,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|([a-z0-9-]+-)?block-republisher"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|uniswap-v4-position-bootstrap|([a-z0-9-]+-)?block-republisher"
               }
             ) < 1
           )
@@ -257,7 +265,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|([a-z0-9-]+-)?block-republisher"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|uniswap-v4-position-bootstrap|([a-z0-9-]+-)?block-republisher"
               }
             ) > 0
           )

@@ -266,7 +266,7 @@ func sharePriceUSD(
 		return 0, false, nil
 	}
 
-	assets, err := unpackConvertToAssets(shareABI, convertResult.ReturnData)
+	assets, err := UnpackConvertToAssets(shareABI, convertResult.ReturnData)
 	if err != nil {
 		return 0, false, fmt.Errorf("unpacking convertToAssets for token %d at block %d: %w", vault.TokenID, blockNum, err)
 	}
@@ -291,10 +291,17 @@ func sharePriceUSD(
 	return shareRatio * underlyingUSD, true, nil
 }
 
-func unpackConvertToAssets(shareABI *abi.ABI, data []byte) (*big.Int, error) {
+// UnpackConvertToAssets decodes an ERC-4626 convertToAssets(shares) return
+// value. Exported so callers reading a per-row historical conversion (rather
+// than this file's per-vault USD share price) can reuse the same decode
+// instead of re-deriving it from the ABI.
+func UnpackConvertToAssets(shareABI *abi.ABI, data []byte) (*big.Int, error) {
 	unpacked, err := shareABI.Unpack("convertToAssets", data)
 	if err != nil {
 		return nil, err
+	}
+	if len(unpacked) == 0 {
+		return nil, fmt.Errorf("convertToAssets: no return values unpacked")
 	}
 	assets, ok := unpacked[0].(*big.Int)
 	if !ok {
