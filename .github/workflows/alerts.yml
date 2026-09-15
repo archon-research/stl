@@ -57,7 +57,7 @@ jobs:
           aws-region: eu-west-1
 
       - name: Fetch Grafana Cloud Mimir token (staging)
-        uses: aws-actions/aws-secretsmanager-get-secrets@2cb1a461cbd4865ac4299648312e4704c646cd53  # v2.0.10
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88  # v2.0.10
         with:
           secret-ids: |
             GC,archonstaging-mimir-rules-token-vector
@@ -92,7 +92,7 @@ jobs:
       slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
       gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
 
-  # Prod only runs on push to main, and only after a `vector-engineers`
+  # Prod only runs on push to main, and only after a `stl-engineers`
   # reviewer approves the `production` environment. PRs never reach this job
   # and the prod IAM role's trust policy should not include `:pull_request`.
   prod:
@@ -126,7 +126,7 @@ jobs:
           aws-region: eu-west-1
 
       - name: Fetch Grafana Cloud Mimir token (prod)
-        uses: aws-actions/aws-secretsmanager-get-secrets@2cb1a461cbd4865ac4299648312e4704c646cd53  # v2.0.10
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88  # v2.0.10
         with:
           secret-ids: |
             GC,archonprod-mimir-rules-token-vector

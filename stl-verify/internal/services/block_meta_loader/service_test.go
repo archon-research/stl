@@ -1,0 +1,500 @@
+package block_meta_loader
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"go.opentelemetry.io/otel"
+	metricsdk "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+)
+
+// tsBase makes each block's synthetic on-chain timestamp a deterministic function of its number,
+// so a test can assert the loader wrote the right block_timestamp without an S3 fixture.
+const tsBase = int64(1_700_000_000)
+
+// mockS3Reader implements outbound.S3Reader. Only StreamFile is exercised; it returns plain JSON
+// (the real adapter auto-decompresses .gz, so the port contract yields already-decompressed bytes).
+type mockS3Reader struct {
+	streamFn func(ctx context.Context, bucket, key string) (io.ReadCloser, error)
+}
+
+func (m *mockS3Reader) ListFiles(context.Context, string, string) ([]outbound.S3File, error) {
+	return nil, nil
+}
+func (m *mockS3Reader) ListPrefix(context.Context, string, string) ([]string, error) { return nil, nil }
+func (m *mockS3Reader) StreamFile(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+	return m.streamFn(ctx, bucket, key)
+}
+
+// streamTimestampByBlock returns a reader whose header timestamp encodes tsBase + blockNumber.
+func streamTimestampByBlock(_ context.Context, _ string, key string) (io.ReadCloser, error) {
+	parsed, ok := s3key.Parse(key)
+	if !ok {
+		return nil, fmt.Errorf("unparseable key %q", key)
+	}
+	body := fmt.Sprintf(`{"timestamp":"0x%x"}`, tsBase+parsed.BlockNumber)
+	return io.NopCloser(strings.NewReader(body)), nil
+}
+
+// mockBlockMetaRepo implements outbound.BlockMetaRepository over an in-memory universe of pending
+// blocks. Like the SQL adapter, the universe is snapshotted when the work list is opened and paged
+// with a keyset cursor, so a block that appears mid-run is not picked up until the next run.
+type mockBlockMetaRepo struct {
+	universe  []outbound.BlockRef // sorted by (Number, Version)
+	upserted  []outbound.BlockMetaRow
+	upsertErr error
+	openErr   error
+	nextErr   error
+	calls     int
+	opened    int
+	closed    int
+}
+
+type mockWorkList struct {
+	repo  *mockBlockMetaRepo
+	snap  []outbound.BlockRef
+	after outbound.BlockRef
+}
+
+func (m *mockBlockMetaRepo) OpenWorkList(_ context.Context, _ int64, _ int64) (outbound.BlockWorkList, error) {
+	if m.openErr != nil {
+		return nil, m.openErr
+	}
+	m.opened++
+	snap := make([]outbound.BlockRef, len(m.universe))
+	copy(snap, m.universe)
+	return &mockWorkList{repo: m, snap: snap, after: outbound.BlockRef{Number: -1, Version: -1}}, nil
+}
+
+func (w *mockWorkList) Next(_ context.Context, limit int) ([]outbound.BlockRef, error) {
+	if w.repo.nextErr != nil {
+		return nil, w.repo.nextErr
+	}
+	w.repo.calls++
+	var out []outbound.BlockRef
+	for _, b := range w.snap {
+		if b.Number > w.after.Number || (b.Number == w.after.Number && b.Version > w.after.Version) {
+			out = append(out, b)
+			if len(out) == limit {
+				break
+			}
+		}
+	}
+	if len(out) > 0 {
+		w.after = out[len(out)-1]
+	}
+	return out, nil
+}
+
+func (w *mockWorkList) Close(context.Context) { w.repo.closed++ }
+
+func (m *mockBlockMetaRepo) Upsert(_ context.Context, rows []outbound.BlockMetaRow) (int64, error) {
+	if m.upsertErr != nil {
+		return 0, m.upsertErr
+	}
+	m.upserted = append(m.upserted, rows...)
+	// Consume from the universe, as the real anti-join against block_meta does, so a service that
+	// re-opened the work list per batch terminates with a wrong open count instead of spinning.
+	if len(rows) <= len(m.universe) {
+		m.universe = m.universe[len(rows):]
+	}
+	return int64(len(rows)), nil
+}
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func newTestService(t *testing.T, repo outbound.BlockMetaRepository, reader outbound.S3Reader, batch int) *Service {
+	t.Helper()
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: batch}, repo, reader, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return svc
+}
+
+func TestRun_FillsAllPendingBlocksAcrossBatches(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
+		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 20, Version: 1}, {Number: 30, Version: 0},
+	}}
+	reader := &mockS3Reader{streamFn: streamTimestampByBlock}
+	svc := newTestService(t, repo, reader, 2) // batch size 2 -> multiple iterations + cursor advance
+
+	total, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if total != 4 {
+		t.Errorf("total upserted = %d, want 4", total)
+	}
+	if len(repo.upserted) != 4 {
+		t.Fatalf("upserted rows = %d, want 4", len(repo.upserted))
+	}
+	// Every row carries the chain and the block-derived timestamp.
+	for _, row := range repo.upserted {
+		if row.ChainID != 1 {
+			t.Errorf("row chain_id = %d, want 1", row.ChainID)
+		}
+		if want := tsBase + row.BlockNumber; row.BlockTimestamp.Unix() != want {
+			t.Errorf("block %d/%d timestamp = %d, want %d", row.BlockNumber, row.BlockVersion, row.BlockTimestamp.Unix(), want)
+		}
+	}
+	if repo.calls < 2 {
+		t.Errorf("expected at least 2 PendingBlocks calls (batched), got %d", repo.calls)
+	}
+}
+
+func TestRun_NoPendingBlocksIsNoop(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: nil}
+	svc := newTestService(t, repo, &mockS3Reader{streamFn: streamTimestampByBlock}, 500)
+
+	total, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if total != 0 {
+		t.Errorf("total = %d, want 0", total)
+	}
+	if len(repo.upserted) != 0 {
+		t.Errorf("upserted %d rows, want 0", len(repo.upserted))
+	}
+}
+
+func TestRun_FailsHardOnMissingArchivedBlock(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 42, Version: 0}}}
+	reader := &mockS3Reader{streamFn: func(context.Context, string, string) (io.ReadCloser, error) {
+		return nil, errors.New("NoSuchKey")
+	}}
+	svc := newTestService(t, repo, reader, 500)
+
+	total, err := svc.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected Run to fail hard on a missing archived block, got nil")
+	}
+	if !strings.Contains(err.Error(), "block 42/0") {
+		t.Errorf("error = %v, want it to identify block 42/0", err)
+	}
+	if total != 0 {
+		t.Errorf("total = %d, want 0 (nothing upserted before the failure)", total)
+	}
+	if len(repo.upserted) != 0 {
+		t.Errorf("upserted %d rows, want 0", len(repo.upserted))
+	}
+}
+
+func TestRun_SurfacesUpsertError(t *testing.T) {
+	repo := &mockBlockMetaRepo{
+		universe:  []outbound.BlockRef{{Number: 1, Version: 0}},
+		upsertErr: errors.New("deadlock detected"),
+	}
+	svc := newTestService(t, repo, &mockS3Reader{streamFn: streamTimestampByBlock}, 500)
+
+	_, err := svc.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "upserting block_meta") {
+		t.Fatalf("expected an upsert error, got %v", err)
+	}
+}
+
+func TestRun_StopsOnCancelledContext(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 1, Version: 0}}}
+	svc := newTestService(t, repo, &mockS3Reader{streamFn: streamTimestampByBlock}, 500)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	total, err := svc.Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if total != 0 {
+		t.Errorf("total = %d, want 0", total)
+	}
+	if repo.calls != 0 {
+		t.Errorf("expected no PendingBlocks calls after cancellation, got %d", repo.calls)
+	}
+}
+
+func TestNew_Validation(t *testing.T) {
+	repo := &mockBlockMetaRepo{}
+	reader := &mockS3Reader{streamFn: streamTimestampByBlock}
+	tests := []struct {
+		name    string
+		cfg     Config
+		repo    outbound.BlockMetaRepository
+		reader  outbound.S3Reader
+		wantErr string
+	}{
+		{"valid", Config{ChainID: 1, Bucket: "b"}, repo, reader, ""},
+		{"zero chain", Config{ChainID: 0, Bucket: "b"}, repo, reader, "chain id"},
+		{"negative chain", Config{ChainID: -1, Bucket: "b"}, repo, reader, "chain id"},
+		{"empty bucket", Config{ChainID: 1, Bucket: ""}, repo, reader, "bucket"},
+		{"nil repo", Config{ChainID: 1, Bucket: "b"}, nil, reader, "repository"},
+		{"nil reader", Config{ChainID: 1, Bucket: "b"}, repo, nil, "s3 reader"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(tt.cfg, tt.repo, tt.reader, testLogger())
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestNew_DefaultsBatchSize(t *testing.T) {
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 0}, &mockBlockMetaRepo{}, &mockS3Reader{streamFn: streamTimestampByBlock}, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if svc.cfg.BatchSize != 500 {
+		t.Errorf("BatchSize default = %d, want 500", svc.cfg.BatchSize)
+	}
+}
+
+// The work list is opened once per run and closed, even when the run fails: the referenced set is
+// expensive to compute (measured ~7s per evaluation against staging's 1.4M referenced blocks), so
+// re-evaluating it per batch is what this shape exists to avoid.
+func TestRunOpensTheWorkListOnceAndAlwaysClosesIt(t *testing.T) {
+	universe := []outbound.BlockRef{{Number: 1}, {Number: 2}, {Number: 3}, {Number: 4}, {Number: 5}}
+	for _, c := range []struct {
+		name    string
+		repo    *mockBlockMetaRepo
+		wantErr bool
+	}{
+		{name: "a clean run", repo: &mockBlockMetaRepo{universe: universe}},
+		{name: "a run whose upsert fails",
+			repo:    &mockBlockMetaRepo{universe: universe, upsertErr: errors.New("boom")},
+			wantErr: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			svc := newTestService(t, c.repo, &mockS3Reader{streamFn: streamTimestampByBlock}, 2)
+			_, err := svc.Run(context.Background())
+			if (err != nil) != c.wantErr {
+				t.Fatalf("Run error = %v, wantErr %v", err, c.wantErr)
+			}
+			if c.repo.opened != 1 {
+				t.Errorf("work list opened %d times, want exactly 1 -- the referenced set must not be re-evaluated per batch", c.repo.opened)
+			}
+			if c.repo.closed != 1 {
+				t.Errorf("work list closed %d times, want 1 -- it holds a pooled connection and an open transaction", c.repo.closed)
+			}
+		})
+	}
+}
+
+// A failure opening the work list is reported, not silently treated as an empty run.
+func TestRunReportsAWorkListOpenFailure(t *testing.T) {
+	repo := &mockBlockMetaRepo{openErr: errors.New("no connection")}
+	svc := newTestService(t, repo, &mockS3Reader{streamFn: streamTimestampByBlock}, 2)
+	n, err := svc.Run(context.Background())
+	if err == nil {
+		t.Fatalf("Run succeeded with %d rows; want the open failure surfaced", n)
+	}
+	if !strings.Contains(err.Error(), "opening the work list") {
+		t.Errorf("error = %v; want it to name the work-list open", err)
+	}
+	if repo.closed != 0 {
+		t.Errorf("closed %d work lists after a failed open, want 0", repo.closed)
+	}
+}
+
+// A hole no longer stops the chain. The list is paged ascending and the read used to return on the
+// first absent object, so one deep-tail hole left every later block unloaded and every re-run
+// stopped in the same place. The misses are carried to the end instead: what could be read is
+// committed, and the run still fails naming what was absent.
+func TestRun_AbsentObjectsAreCarriedToTheEndNotFatalMidRun(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
+		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0}, {Number: 40, Version: 0},
+	}}
+	// Block 20 is the hole; everything after it must still load.
+	reader := &mockS3Reader{streamFn: func(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+		parsed, ok := s3key.Parse(key)
+		if !ok {
+			return nil, fmt.Errorf("unparseable key %q", key)
+		}
+		if parsed.BlockNumber == 20 {
+			return nil, outbound.ErrObjectNotFound
+		}
+		return streamTimestampByBlock(ctx, bucket, key)
+	}}
+	svc := newTestService(t, repo, reader, 2)
+
+	total, err := svc.Run(context.Background())
+	if err == nil {
+		t.Fatal("want a failure naming the absent block, got none")
+	}
+	if !strings.Contains(err.Error(), "20/0") {
+		t.Errorf("error %q does not name the absent block", err)
+	}
+	if total != 3 {
+		t.Errorf("loaded %d rows, want 3 — the blocks after the hole must still be committed", total)
+	}
+	for _, r := range repo.upserted {
+		if r.BlockNumber == 20 {
+			t.Error("the absent block was upserted")
+		}
+	}
+}
+
+// A transport error is not a miss: it says nothing about whether the block exists, so it must fail
+// the run rather than be recorded as an absent object and leave a real hole hidden in a list.
+func TestRun_TransportErrorFailsRatherThanCountingAsAMiss(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 10, Version: 0}}}
+	reader := &mockS3Reader{streamFn: func(context.Context, string, string) (io.ReadCloser, error) {
+		return nil, fmt.Errorf("connection reset")
+	}}
+	svc := newTestService(t, repo, reader, 2)
+
+	if _, err := svc.Run(context.Background()); err == nil || strings.Contains(err.Error(), "absent from the archive") {
+		t.Fatalf("want the transport error surfaced, got %v", err)
+	}
+}
+
+// Concurrency is the reason the run fits in an hour rather than seven, so the reads have to actually
+// overlap. Asserted by holding every read until the expected number are in flight at once: a
+// sequential implementation never reaches the barrier and the test times out on its own context.
+func TestRun_ReadsWithinABatchOverlap(t *testing.T) {
+	const batch = 8
+	universe := make([]outbound.BlockRef, 0, batch)
+	for i := range batch {
+		universe = append(universe, outbound.BlockRef{Number: int64(10 + i), Version: 0})
+	}
+	repo := &mockBlockMetaRepo{universe: universe}
+
+	var mu sync.Mutex
+	inFlight, peak := 0, 0
+	release := make(chan struct{})
+	reader := &mockS3Reader{streamFn: func(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+		mu.Lock()
+		inFlight++
+		if inFlight > peak {
+			peak = inFlight
+		}
+		reached := inFlight >= batch
+		mu.Unlock()
+		if reached {
+			close(release) // everyone is in flight; let them all finish
+		}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return streamTimestampByBlock(ctx, bucket, key)
+	}}
+
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: batch, Concurrency: batch}, repo, reader, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v (a sequential reader never reaches the barrier)", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if peak < batch {
+		t.Errorf("peak concurrent reads = %d, want %d", peak, batch)
+	}
+}
+
+// nextErr was declared and honoured by the mock but never set, so Run's "loading pending blocks"
+// branch was unexercised: a paging failure mid-run has to surface, not read as an empty page and
+// end the run reporting success.
+func TestRun_PagingFailureSurfaces(t *testing.T) {
+	repo := &mockBlockMetaRepo{
+		universe: []outbound.BlockRef{{Number: 10, Version: 0}},
+		nextErr:  fmt.Errorf("connection reset"),
+	}
+	reader := &mockS3Reader{streamFn: streamTimestampByBlock}
+	svc := newTestService(t, repo, reader, 2)
+
+	total, err := svc.Run(context.Background())
+	if err == nil {
+		t.Fatal("a paging failure ended the run cleanly; a partial pass would look complete")
+	}
+	if !strings.Contains(err.Error(), "loading pending blocks") {
+		t.Errorf("error %q does not name the paging step", err)
+	}
+	if total != 0 {
+		t.Errorf("reported %d rows loaded after a paging failure, want 0", total)
+	}
+}
+
+// The growth tripwire reads this counter, so it has to carry the run's real pending-set size and it
+// has to exist before the first run: an unseeded counter first appears at its first increment, and
+// rate() never observes the 0->1.
+func TestRun_RecordsTheWorkListRowsItPages(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
+		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0},
+	}}
+	// New resolves the global meter, so it must run after SetMeterProvider above.
+	svc := newTestService(t, repo, &mockS3Reader{streamFn: streamTimestampByBlock}, 2)
+
+	if got, ok := collectPagedRows(t, reader); !ok || got != 0 {
+		t.Fatalf("before the run the counter reads %d (present=%t), want 0 and present", got, ok)
+	}
+	if _, err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Three blocks over two batches: the counter is the pending set, not the number of batches.
+	if got, ok := collectPagedRows(t, reader); !ok || got != 3 {
+		t.Errorf("block_meta.worklist.rows.paged = %d (present=%t), want 3", got, ok)
+	}
+}
+
+func collectPagedRows(t *testing.T, r *metricsdk.ManualReader) (int64, bool) {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := r.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "block_meta.worklist.rows.paged" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric is %T, want Sum[int64]", m.Data)
+			}
+			var total int64
+			for _, dp := range sum.DataPoints {
+				total += dp.Value
+			}
+			return total, true
+		}
+	}
+	return 0, false
+}

@@ -5,7 +5,6 @@ import (
 	"maps"
 	"math/big"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -95,6 +94,7 @@ func DecodeEvents(
 	receipt shared.TransactionReceipt,
 	poolsByID map[common.Hash]RegisteredPool,
 	poolManager common.Address,
+	positionManager RegisteredPositionManager,
 	blockNumber int64,
 	version int,
 	ts time.Time,
@@ -105,13 +105,14 @@ func DecodeEvents(
 	}
 
 	d := &receiptDecoder{
-		events:      events,
-		poolsByID:   poolsByID,
-		poolManager: poolManager,
-		blockNumber: blockNumber,
-		version:     version,
-		ts:          ts,
-		touched:     make(map[int64]bool),
+		events:          events,
+		poolsByID:       poolsByID,
+		poolManager:     poolManager,
+		positionManager: positionManager,
+		blockNumber:     blockNumber,
+		version:         version,
+		ts:              ts,
+		touched:         make(map[int64]bool),
 	}
 	for _, log := range receipt.Logs {
 		if err := d.decodeLog(log); err != nil {
@@ -122,12 +123,13 @@ func DecodeEvents(
 }
 
 type receiptDecoder struct {
-	events      map[common.Hash]*abi.Event
-	poolsByID   map[common.Hash]RegisteredPool
-	poolManager common.Address
-	blockNumber int64
-	version     int
-	ts          time.Time
+	events          map[common.Hash]*abi.Event
+	poolsByID       map[common.Hash]RegisteredPool
+	poolManager     common.Address
+	positionManager RegisteredPositionManager
+	blockNumber     int64
+	version         int
+	ts              time.Time
 
 	out     DecodedEvents
 	touched map[int64]bool
@@ -144,6 +146,9 @@ func (d *receiptDecoder) decodeLog(log shared.Log) error {
 		return fmt.Errorf("invalid log address %q", log.Address)
 	}
 	addr := common.HexToAddress(log.Address)
+	if shared.LogBelongsTo(addr, d.positionManager.Address) {
+		return d.decodePositionManagerLog(log)
+	}
 	if !shared.LogBelongsTo(addr, d.poolManager) {
 		return nil
 	}
@@ -213,19 +218,15 @@ func indexedPoolID(ev abi.Event, log shared.Log) (common.Hash, error) {
 // character, so one corrupted character would silently become a registry miss or
 // a wrong sender or transaction hash on a persisted row.
 func assertHexWords(log shared.Log) error {
-	if !isHexWord(log.TransactionHash) {
+	if !shared.IsHexWord(log.TransactionHash) {
 		return fmt.Errorf("log (index %s) transaction hash %q is not a 32-byte hex word", log.LogIndex, log.TransactionHash)
 	}
 	for i, topic := range log.Topics {
-		if !isHexWord(topic) {
+		if !shared.IsHexWord(topic) {
 			return fmt.Errorf("log (index %s) topic %d %q is not a 32-byte hex word", log.LogIndex, i, topic)
 		}
 	}
 	return nil
-}
-
-func isHexWord(value string) bool {
-	return len(value) == 66 && strings.HasPrefix(value, "0x") && common.IsHexHash(value)
 }
 
 func (d *receiptDecoder) decodeAndCapture(ev abi.Event, log shared.Log, site logSite) (map[string]any, error) {
@@ -321,23 +322,11 @@ func (d *receiptDecoder) buildSwap(data map[string]any, pool RegisteredPool, sit
 }
 
 func (d *receiptDecoder) buildLiquidityEvent(data map[string]any, pool RegisteredPool, site logSite) (*entity.UniswapV4LiquidityEvent, error) {
-	fields, err := bigIntFields(data, "tickLower", "tickUpper", "liquidityDelta")
+	key, err := modifyLiquidityKey(data)
 	if err != nil {
 		return nil, err
 	}
-	sender, err := shared.GetAddrField(data, "sender")
-	if err != nil {
-		return nil, err
-	}
-	salt, err := shared.GetHashField(data, "salt")
-	if err != nil {
-		return nil, err
-	}
-	tickLower, err := int24Value("tickLower", fields["tickLower"])
-	if err != nil {
-		return nil, err
-	}
-	tickUpper, err := int24Value("tickUpper", fields["tickUpper"])
+	liquidityDelta, err := shared.GetBigIntField(data, "liquidityDelta")
 	if err != nil {
 		return nil, err
 	}
@@ -349,11 +338,11 @@ func (d *receiptDecoder) buildLiquidityEvent(data map[string]any, pool Registere
 		BlockTimestamp: d.ts,
 		TxHash:         site.txHash,
 		LogIndex:       int(site.logIndex),
-		Sender:         sender,
-		TickLower:      tickLower,
-		TickUpper:      tickUpper,
-		LiquidityDelta: fields["liquidityDelta"],
-		Salt:           salt,
+		Sender:         key.Owner,
+		TickLower:      key.TickLower,
+		TickUpper:      key.TickUpper,
+		LiquidityDelta: liquidityDelta,
+		Salt:           key.Salt,
 	}
 	if err := e.Validate(); err != nil {
 		return nil, fmt.Errorf("validating ModifyLiquidity: %w", err)
