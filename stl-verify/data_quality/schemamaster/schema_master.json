@@ -1804,7 +1804,7 @@
     "protocol_event": {
       "type": "raw_pipeline",
       "owner": "infra",
-      "transform_defer": "VEC-711: block_timestamp is native, but NULL until the backfill in docs/one-off-runbooks/protocol-event-block-timestamp-backfill.md completes"
+      "transform_defer": "VEC-711: block_timestamp is native, but NULL until the backfill in docs/one-off-runbooks/protocol-event-block-timestamp-backfill.md completes; its block_meta fill stays until then, since the loader enumerates from it"
     },
     "protocol_oracle": {
       "type": "config",
@@ -2426,6 +2426,11 @@
     },
     {
       "table": "allocation_position",
+      "column": "block_timestamp",
+      "block_meta": true
+    },
+    {
+      "table": "protocol_event",
       "column": "block_timestamp",
       "block_meta": true
     },

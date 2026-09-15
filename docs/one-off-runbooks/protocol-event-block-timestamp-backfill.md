@@ -118,10 +118,18 @@ Record wall-clock and chunk count per window; that is the cost the ticket asks f
 ## Step 2 — the sub-second rows (needs `block_meta`)
 
 These carry ingest time in `created_at`, so their event time has to come from
-`block_meta (chain_id, block_number, block_version) -> block_timestamp` (VEC-491). `block_meta` is
-loaded out of band from the block headers in the S3 raw-block archive; covering these blocks is that
-loader's work and a prerequisite of this step, not part of it. `block_states` alone cannot serve: it
-is a rolling ~1-month reorg window and holds none of these blocks.
+`block_meta (chain_id, block_number, block_version) -> block_timestamp` (VEC-491). `block_states`
+alone cannot serve: it is a rolling ~1-month reorg window and holds none of these blocks.
+
+`block_meta` is filled by `block-meta-loader`, an on-demand Temporal worker, one deployment per
+chain, started by hand from the Temporal UI (`--type BlockMetaLoad`). It needs a run per chain this
+step covers — mainnet and Avalanche — and that is a prerequisite of this step, not part of it.
+
+Nothing has to hand it a block list: it enumerates what a chain references and `block_meta` lacks,
+deriving the tables it scans from `schema_master.json`'s `block_meta` fills. `protocol_event` keeps
+its fill entry for exactly that reason, even though the column is native now — drop the entry and
+the loader stops enumerating this table's blocks, silently, and every value here resolves NULL. The
+entry goes when Step 3 reports zero, in the PR that retires this file.
 
 Size the residual first — it is the distinct-block count the `block_meta` load has to cover, and at
 the time of writing it was ~242k mainnet and ~57k Avalanche blocks:
