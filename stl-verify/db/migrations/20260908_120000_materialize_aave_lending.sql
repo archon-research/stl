@@ -102,7 +102,10 @@ DROP FUNCTION IF EXISTS materialize_aave_lending(integer);
 CREATE OR REPLACE FUNCTION materialize_aave_lending(p_build_id integer DEFAULT 0,
                                                     p_run_id bigint DEFAULT NULL) RETURNS bigint
     LANGUAGE plpgsql
-    SET search_path FROM CURRENT AS $fn$
+    SET search_path FROM CURRENT
+    -- Superuser-context GUC: creating and calling this needs SET ON PARAMETER temp_file_limit, which
+    -- Timescale Cloud grants to PUBLIC and k8s/dev-infra/jobs/bootstrap-db.yaml grants for kind.
+    SET temp_file_limit = '4GB' AS $fn$
 DECLARE
     v_bad  text;
     v_msgs text[];
@@ -218,6 +221,6 @@ BEGIN
 END
 $fn$;
 
-COMMENT ON FUNCTION materialize_aave_lending(integer, bigint) IS '[Operational] VEC-404: materialize Aave-family lending positions into position_state via materialize_position_projection(position_aave_lending). Records each reserve it cannot key in aave_unmapped_reserve (tagged no_variable_debt_token or no_receipt_token) and projects the rest. Refuses to run, naming up to ten offenders, only for inputs that would key WRONGLY: a reserve mapped to several receipt tokens, one variable-debt token shared across reserves, or a ledger row mixing chains. Idempotent; run out of band. p_build_id is stamped on every appended row (build_registry.id; 0 = pre-tracking). Returns position_state rows appended. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2).';
+COMMENT ON FUNCTION materialize_aave_lending(integer, bigint) IS '[Operational] VEC-404: materialize Aave-family lending positions into position_state via materialize_position_projection(position_aave_lending). Records each reserve it cannot key in aave_unmapped_reserve (tagged no_variable_debt_token or no_receipt_token) and projects the rest. Refuses to run, naming up to ten offenders, only for inputs that would key WRONGLY: a reserve mapped to several receipt tokens, one variable-debt token shared across reserves, or a ledger row mixing chains. Idempotent; run out of band. Caps its temp files at 4 GB per backend process (temp_file_limit; each parallel worker holds its own): one call spills 3.0 to 4.3 GB on a clone at 90% of prod against a 200 GB server default, so a runaway aborts with SQLSTATE 53400 whichever role calls it. p_build_id (build_registry.id; 0 = pre-tracking) and p_run_id (writer_run.id) are stamped on every row appended (ADR-0006 §2). Returns position_state rows appended.';
 
 INSERT INTO migrations (filename) VALUES ('20260908_120000_materialize_aave_lending.sql') ON CONFLICT (filename) DO NOTHING;

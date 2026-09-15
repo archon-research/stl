@@ -121,6 +121,18 @@ func asReadWritePool(ctx context.Context, t *testing.T, owner *pgxpool.Pool) (*p
 	}
 }
 
+// functionSettings returns the SET clauses of the function with this exact signature, e.g.
+// "f(integer, bigint)", as pg_proc stores them ("name=value"); empty when it has none.
+func functionSettings(ctx context.Context, t *testing.T, pool *pgxpool.Pool, signature string) []string {
+	t.Helper()
+	var cfg []string
+	if err := pool.QueryRow(ctx,
+		`SELECT coalesce(proconfig, '{}') FROM pg_proc WHERE oid = $1::regprocedure`, signature).Scan(&cfg); err != nil {
+		t.Fatalf("read %s settings: %v", signature, err)
+	}
+	return cfg
+}
+
 func readMigration(name string) (string, error) {
 	raw, err := os.ReadFile(filepath.Join(getMigrationsPath(), name))
 	return string(raw), err
