@@ -44,6 +44,14 @@ canonical `id`=`int8`, and both stores' `valid_from` is a UTC `date` against can
 `timestamptz`, because graph validity is calendar-dated (ADR-0007 §3) and joins the block-time
 dimension at the block's UTC date.
 
+Its two identifier registers (VEC-616) are classified on the same terms: `instrument_register`
+and `alias_register` are `dimension`, their vocabularies (`key_namespace_vocabulary`,
+`id_scheme_vocabulary`) are `config`, and each register's `valid_from` takes the same `date`
+override the stores' do. Note what the register entries do **not** say: `security_id` and
+`node_id` are canonically `text` because they name a `sec_node.id`, which the `sec_node.id`
+override already establishes as opaque text — they are not the ingest layer's `int8` surrogate
+keys and are deliberately not foreign keys, so nothing here ties them to a parent table.
+
 A few `maple_*` entries (`maple_ftl_loan`, `maple_ftl_loan_state`, `maple_loan_meta`, `maple_pool_meta`, `maple_sky_strategy_meta`) are intentionally left untyped for now, so the required-key pass (gated on `type`) skips them, and because `CheckTransformCoverage` only walks `raw_pipeline` tables they are outside transform coverage too until typed (the gap stays visible until then); they still get the per-column, table-coverage, and nullability checks. Typing them is pending per-table classification.
 
 ### `transforms`

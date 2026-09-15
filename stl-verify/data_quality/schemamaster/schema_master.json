@@ -101,6 +101,11 @@
       "class": "A",
       "semantics": "processing_time"
     },
+    "applies_to": {
+      "type": "ARRAY",
+      "class": "R",
+      "not_null": true
+    },
     "approved_by": {
       "type": "text",
       "class": "A"
@@ -258,6 +263,11 @@
     "chain_id": {
       "type": "int4",
       "class": "R"
+    },
+    "chain_scope": {
+      "type": "int4",
+      "class": "D",
+      "not_null": true
     },
     "change": {
       "type": "numeric",
@@ -624,6 +634,16 @@
       "type": "bytea",
       "class": "S"
     },
+    "id_scheme": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
+    },
+    "id_value": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
+    },
     "idle_assets_usd": {
       "type": "numeric",
       "class": "S"
@@ -716,6 +736,11 @@
     "junior_risk_capital_usd": {
       "type": "numeric",
       "class": "S"
+    },
+    "key_namespace": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
     },
     "last_update_at": {
       "type": "timestamptz",
@@ -909,6 +934,11 @@
       "type": "timestamptz",
       "class": "R",
       "semantics": "event_time"
+    },
+    "node_id": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
     },
     "notes": {
       "type": "text",
@@ -1140,6 +1170,11 @@
     "secured_party_id": {
       "type": "text",
       "class": "R"
+    },
+    "security_id": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
     },
     "seed_source": {
       "type": "text",
@@ -1387,6 +1422,11 @@
       "type": "numeric",
       "class": "D"
     },
+    "unique_current": {
+      "type": "bool",
+      "class": "R",
+      "not_null": true
+    },
     "updated_at": {
       "type": "timestamptz",
       "class": "A",
@@ -1421,6 +1461,11 @@
       "type": "date",
       "class": "A",
       "semantics": "effective_time",
+      "not_null": true
+    },
+    "value_form": {
+      "type": "text",
+      "class": "R",
       "not_null": true
     },
     "variable_borrow_index": {
@@ -1528,6 +1573,10 @@
     }
   },
   "tables": {
+    "alias_register": {
+      "type": "dimension",
+      "owner": "refdata"
+    },
     "allocation_position": {
       "type": "raw_pipeline",
       "owner": "prime",
@@ -1536,6 +1585,18 @@
     "allocation_position_current": {
       "type": "derived",
       "owner": "prime"
+    },
+    "id_scheme_vocabulary": {
+      "type": "config",
+      "owner": "refdata"
+    },
+    "instrument_register": {
+      "type": "dimension",
+      "owner": "refdata"
+    },
+    "key_namespace_vocabulary": {
+      "type": "config",
+      "owner": "refdata"
     },
     "position_current": {
       "type": "derived",
@@ -2122,6 +2183,20 @@
       "canonical": "valid_from",
       "accepted_type": "date",
       "reason": "VEC-617: as sec_node.valid_from — UTC calendar date per ADR-0007 §3."
+    },
+    {
+      "table": "instrument_register",
+      "column": "valid_from",
+      "canonical": "valid_from",
+      "accepted_type": "date",
+      "reason": "VEC-616: as sec_node.valid_from — the combined master's valid time is a UTC calendar date per ADR-0007 §3, and the register is read as of a block's UTC date through block_meta (§9.3)."
+    },
+    {
+      "table": "alias_register",
+      "column": "valid_from",
+      "canonical": "valid_from",
+      "accepted_type": "date",
+      "reason": "VEC-616: as instrument_register.valid_from — UTC calendar date per ADR-0007 §3."
     }
   ],
   "fills": [
