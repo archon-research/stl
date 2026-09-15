@@ -34,10 +34,11 @@ type fakeUniswapRepo struct {
 	saveBlockCalls int
 	// Override the PERSISTED counts only; pointers so a test can stage an
 	// explicit 0, the ON CONFLICT DO NOTHING replay or an unchanged slot.
-	stateRowsReturn    *int64
-	tickRowsReturn     *int64
-	positionRowsReturn *int64
-	err                error
+	stateRowsReturn       *int64
+	tickRowsReturn        *int64
+	positionRowsReturn    *int64
+	nftTransferRowsReturn *int64
+	err                   error
 
 	priorTicks        map[fakePoolBlockKey][]int32
 	ticksForPoolCalls []fakePoolBlockKey
@@ -114,10 +115,11 @@ func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.Unis
 	}
 	r.lastWrites = w
 	counts := outbound.StateRowCounts{
-		Attempted:          int64(len(w.States)),
-		Persisted:          int64(len(w.States)),
-		TicksPersisted:     int64(len(w.Ticks)),
-		PositionsPersisted: int64(len(w.Positions)),
+		Attempted:             int64(len(w.States)),
+		Persisted:             int64(len(w.States)),
+		TicksPersisted:        int64(len(w.Ticks)),
+		PositionsPersisted:    int64(len(w.Positions)),
+		NFTTransfersPersisted: int64(len(w.NFTTransfers)),
 	}
 	if r.stateRowsReturn != nil {
 		counts.Persisted = *r.stateRowsReturn
@@ -127,6 +129,9 @@ func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.Unis
 	}
 	if r.positionRowsReturn != nil {
 		counts.PositionsPersisted = *r.positionRowsReturn
+	}
+	if r.nftTransferRowsReturn != nil {
+		counts.NFTTransfersPersisted = *r.nftTransferRowsReturn
 	}
 	return counts, nil
 }
@@ -373,6 +378,8 @@ func servicePool() RegisteredPool {
 		ID:                7,
 		PoolManager:       poolManagerAddress(),
 		StateView:         common.HexToAddress(stateViewAddr),
+		PositionManagerID: positionManagerRowID,
+		PositionManager:   common.HexToAddress(positionManagerAddr),
 		PoolIDHash:        common.HexToHash(wbtcWstethPoolID),
 		Currency0:         common.HexToAddress(wbtcAddress),
 		Currency1:         common.HexToAddress(wstethAddress),
@@ -703,6 +710,32 @@ func TestBlockHandler_MixedEventsPersistsBlockWrites(t *testing.T) {
 	}
 	if len(w.Positions) != 1 {
 		t.Errorf("Positions = %d, want 1 (the modify event's position)", len(w.Positions))
+	}
+}
+
+// A posm transfer touches no pool, so hasEvents is the only thing that keeps the
+// block from returning before the write.
+func TestBlockHandler_PosmTransferOnlyBlockPersistsTheTransfer(t *testing.T) {
+	pool := servicePool()
+	svc, repo, mc, txMgr := newTestService(t, pool)
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{posmMoveFixtureLog()}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	if txMgr.calls != 1 {
+		t.Fatalf("WithTransaction calls = %d, want 1", txMgr.calls)
+	}
+	if mc.executeAtHashCalls != 0 {
+		t.Errorf("ExecuteAtHash calls = %d, want 0 (a transfer touches no pool, so nothing is snapshotted)", mc.executeAtHashCalls)
+	}
+	w := repo.lastWrites
+	if len(w.NFTTransfers) != 1 || w.NFTTransfers[0].TokenID.Int64() != 388720 {
+		t.Errorf("NFTTransfers = %+v, want the one decoded transfer of token 388720", w.NFTTransfers)
+	}
+	if len(w.States) != 0 || len(w.Ticks) != 0 || len(w.Positions) != 0 {
+		t.Errorf("states/ticks/positions = %d/%d/%d, want none", len(w.States), len(w.Ticks), len(w.Positions))
 	}
 }
 
@@ -2208,5 +2241,113 @@ func TestNewUniswapV4Service_ReadsEverSnapshottedForItsOwnChain(t *testing.T) {
 	if !slices.Equal(repo.everSnapshottedChains, []int64{testChainID}) {
 		t.Errorf("PoolIDsEverSnapshotted called with chains %v, want exactly [%d]",
 			repo.everSnapshottedChains, testChainID)
+	}
+}
+
+func posmRegistryPair() (RegisteredPool, RegisteredPool) {
+	first := servicePool()
+	first.PositionManagerID = positionManagerRowID
+	first.PositionManager = common.HexToAddress(positionManagerAddr)
+	second := secondServicePool()
+	second.PositionManagerID = positionManagerRowID
+	second.PositionManager = common.HexToAddress(positionManagerAddr)
+	return first, second
+}
+
+func TestPositionManagerFor_ReturnsTheSharedDeployment(t *testing.T) {
+	first, second := posmRegistryPair()
+
+	got, err := PositionManagerFor([]RegisteredPool{first, second})
+	if err != nil {
+		t.Fatalf("PositionManagerFor on one deployment: %v", err)
+	}
+	if got != testPositionManager() {
+		t.Errorf("PositionManagerFor = %+v, want %+v", got, testPositionManager())
+	}
+}
+
+func TestPositionManagerFor_RejectsAMixedRegistry(t *testing.T) {
+	first, second := posmRegistryPair()
+
+	for _, tc := range []struct {
+		name string
+		mut  func(*RegisteredPool)
+	}{
+		{"two addresses", func(p *RegisteredPool) { p.PositionManager = common.HexToAddress("0xdead") }},
+		{"two registry rows", func(p *RegisteredPool) { p.PositionManagerID = positionManagerRowID + 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			odd := second
+			tc.mut(&odd)
+			if _, err := PositionManagerFor([]RegisteredPool{first, odd}); err == nil {
+				t.Fatal("PositionManagerFor: want an error for a registry naming two PositionManagers, got nil")
+			}
+		})
+	}
+}
+
+// A registry that lost the posm hands every pool address(0), which no log is
+// emitted by: every real transfer is dropped and no decode ever errors.
+func TestPositionManagerFor_RejectsARegistryWithoutAPositionManager(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mut  func(*RegisteredPool)
+	}{
+		{"no address", func(p *RegisteredPool) { p.PositionManager = common.Address{} }},
+		{"no registry row id", func(p *RegisteredPool) { p.PositionManagerID = 0 }},
+		{"negative registry row id", func(p *RegisteredPool) { p.PositionManagerID = -1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first, second := posmRegistryPair()
+			tc.mut(&first)
+			tc.mut(&second)
+			if _, err := PositionManagerFor([]RegisteredPool{first, second}); err == nil {
+				t.Fatal("PositionManagerFor: want an error for a registry carrying no PositionManager, got nil")
+			}
+		})
+	}
+}
+
+// A posm row pointing at the PoolManager's protocol row collides the two
+// addresses, and the posm branch runs first: every pool event would vanish with
+// nothing raising an error.
+func TestNewUniswapV4Service_RefusesAPositionManagerThatIsThePoolManager(t *testing.T) {
+	pool := servicePool()
+	pool.PositionManager = pool.PoolManager
+
+	deps, _, _, _ := validServiceDeps(t, []RegisteredPool{pool})
+	_, err := NewUniswapV4Service(context.Background(), deps)
+	if err == nil {
+		t.Fatal("NewUniswapV4Service: want an error when the PositionManager address is the PoolManager's, got nil")
+	}
+	if !strings.Contains(err.Error(), pool.PoolManager.String()) {
+		t.Errorf("error %q does not name the colliding address %s", err, pool.PoolManager)
+	}
+}
+
+// VectorUniswapV4IndexerNoNFTTransfers keys on rows ATTEMPTED so a same-build
+// redelivery, which decodes fine and lands nothing, cannot page. Swapping the
+// two arguments would key it on rows written and do exactly that, and no other
+// test reads the counters back.
+func TestBlockHandler_NFTTransferCountersSeparateAttemptedFromWritten(t *testing.T) {
+	pool := servicePool()
+	svc, repo, _, reader := newTelemetryService(t, []RegisteredPool{pool})
+	noneLanded := int64(0)
+	repo.nftTransferRowsReturn = &noneLanded
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{posmMintFixtureLog()}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+	if got := len(repo.lastWrites.NFTTransfers); got != 1 {
+		t.Fatalf("offered nft transfers = %d, want 1 (the block must offer more than the repository persists for this test to discriminate)", got)
+	}
+
+	rm := collect(t, reader)
+	if rows, ok := sumCounter(t, rm, "uniswap_v4.nft.transfer.rows.attempted"); !ok || rows != 1 {
+		t.Errorf("uniswap_v4.nft.transfer.rows.attempted = %d (present=%t), want 1 (the offered count, which is what the alert keys on)", rows, ok)
+	}
+	if rows, ok := sumCounter(t, rm, "uniswap_v4.nft.transfer.rows.written"); ok {
+		t.Errorf("uniswap_v4.nft.transfer.rows.written = %d, want the counter absent (0 persisted is a no-op)", rows)
 	}
 }

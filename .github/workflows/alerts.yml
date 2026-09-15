@@ -92,7 +92,7 @@ jobs:
       slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
       gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
 
-  # Prod only runs on push to main, and only after a `vector-engineers`
+  # Prod only runs on push to main, and only after a `stl-engineers`
   # reviewer approves the `production` environment. PRs never reach this job
   # and the prod IAM role's trust policy should not include `:pull_request`.
   prod:
