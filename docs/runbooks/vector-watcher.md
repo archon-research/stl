@@ -14,17 +14,27 @@ head of the pipeline — if it stalls, everything downstream goes idle.
 
 ### What it means
 
-`stl-watcher` on the labelled `chain` has not issued a single
-`eth_getBlockByNumber` call to Alchemy in the last 1 minute (rate over a
-1m lookback + `for: 1m`, so effective time-to-fire is ~2m). A healthy
-watcher polls every block (~12s on L1, ~2s on L2s) so a 1-minute gap is
-already abnormal.
+The watcher named by `service_name` has not issued a single **block fetch** to
+Alchemy in the last 1 minute (rate over a 1m lookback + `for: 1m`, so effective
+time-to-fire is ~2m). "Block fetch" spans both ingestion paths, and either one
+alone keeps the rule quiet:
+
+| path | methods |
+|---|---|
+| live (newHeads → fetch by hash) | `eth_getBlockByHash`, `eth_getBlockReceipts`, `trace_block` |
+| backfill (gap ranges, boundary + reorg checks) | `batch`, `eth_getBlockByNumber` |
+
+Silence across *all* of them means the Alchemy HTTP client itself has stopped —
+a wedged process, an unreachable endpoint, or a rejected key. A live path that
+has died while backfill keeps running does **not** fire this; that is
+[`VectorWatcherNoHeadersReceived`](#vectorwatchernoheadersreceived).
 
 ### First checks (≤5 min)
 
-1. **Pod status** — `kubectl -n vector get pods -l app=stl-watcher` (filter
-   to the chain via the `chain` env var or the pod label your overlay uses).
-   Look for `CrashLoopBackOff`, `OOMKilled`, or `0/1 Ready`.
+1. **Pod status** — `kubectl -n vector get pods -l app=<chain>-watcher` (the
+   Ethereum deployment is plain `watcher`; the rest are `<chain>-watcher`,
+   matching `service_name` on the alert). Look for `CrashLoopBackOff`,
+   `OOMKilled`, or `0/1 Ready`.
 2. **Recent logs** — `kubectl -n vector logs <pod> --tail=200`. Look for
    panics, `context deadline exceeded`, or auth/quota errors from Alchemy.
 3. **Alchemy status page** — https://status.alchemy.com/ — confirm the
@@ -42,8 +52,9 @@ already abnormal.
 
 ### Verify recovery
 
-The alert auto-resolves once `rate(alchemy_client_requests_total{rpc_method="eth_getBlockByNumber"}) > 0`
-for the chain. Cross-check downstream lag in the Vector dashboard.
+The alert auto-resolves once the watcher issues any block fetch again —
+`rate(alchemy_client_requests_total{rpc_method=~"batch|eth_getBlockByHash|eth_getBlockByNumber|eth_getBlockReceipts|trace_block"}) > 0`
+for that `service_name`. Cross-check downstream lag in the Vector dashboard.
 
 ---
 
@@ -68,12 +79,10 @@ full, every header discarded — also drives it to zero. In that case
 downstream of the socket, not in it.
 
 This is the counterpart to `VectorWatcherNoBlocks`, and the two are not
-interchangeable. `VectorWatcherNoBlocks` watches
-`alchemy_client_requests_total{rpc_method="eth_getBlockByNumber"}`, which the live
-path and the backfill loop both feed through one shared HTTP client. Backfill
-re-verifies its boundary blocks on every poll (30s by default; 5s on the
-avalanche and arbitrum watchers), so that counter stays busy even when the socket
-has gone completely silent — a dead subscriber does not fire it. This rule reads
+interchangeable. `VectorWatcherNoBlocks` watches the block-fetch methods on
+`alchemy_client_requests_total`, which the live path and the backfill loop both
+feed through one shared HTTP client, so backfill alone keeps that counter busy
+while the socket is silent — a dead subscriber does not fire it. This rule reads
 the subscriber itself, and pairs it with the shared request counter so that a
 subscriber which never delivered a single header — and therefore has no series to
 go flat — still alerts.

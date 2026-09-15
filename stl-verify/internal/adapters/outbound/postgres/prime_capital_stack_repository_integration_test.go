@@ -44,7 +44,7 @@ func TestPrimeCapitalStackRepositoryPreservesEighteenDecimalPrecision(t *testing
 
 	var primeID int64
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO prime (name, vault_address) VALUES ('spark-pcs-precision', decode('aabbccddeeff00112233445566778899aabbccdd','hex'))
+		INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'spark-pcs-precision', decode('aabbccddeeff00112233445566778899aabbccdd','hex'))
 		ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`).Scan(&primeID); err != nil {
 		t.Fatalf("seeding prime: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestPrimeCapitalStackRepositoryIsIdempotentWithinABuild(t *testing.T) {
 
 	var primeID int64
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO prime (name, vault_address) VALUES ('spark-pcs-idem', decode('aabbccddeeff00112233445566778899aabbccde','hex'))
+		INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'spark-pcs-idem', decode('aabbccddeeff00112233445566778899aabbccde','hex'))
 		ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`).Scan(&primeID); err != nil {
 		t.Fatalf("seeding prime: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestPrimeCapitalStackRepositoryAppendsACorrectionForANewBuild(t *testing.T)
 
 	var primeID int64
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO prime (name, vault_address) VALUES ('spark-pcs-correction', decode('aabbccddeeff00112233445566778899aabbccdf','hex'))
+		INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'spark-pcs-correction', decode('aabbccddeeff00112233445566778899aabbccdf','hex'))
 		ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`).Scan(&primeID); err != nil {
 		t.Fatalf("seeding prime: %v", err)
 	}

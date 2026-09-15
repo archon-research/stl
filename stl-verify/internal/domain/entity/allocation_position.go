@@ -44,6 +44,15 @@ type AllocationPosition struct {
 	ToAddress      *common.Address
 	CreatedAtBlock int64
 	CreatedAt      time.Time // block timestamp — deterministic for hypertable dedup
+	// CorrectsVersion is the processing_version of the row this one supersedes,
+	// set only by a corrector that read it. It makes the insert carry an
+	// explicit processing_version instead of the column default, so the tuple
+	// reaches the unique index as a key TimescaleDB has not got in the
+	// columnstore — without it a correction to a compressed chunk is discarded
+	// before assign_processing_version_allocation_position can run (VEC-759).
+	// The trigger still owns the final value; this only decides what the
+	// conflict is resolved against.
+	CorrectsVersion *int
 }
 
 func (p *AllocationPosition) Validate() error {
@@ -81,6 +90,9 @@ func (p *AllocationPosition) Validate() error {
 	// masquerading as genesis) would clobber the stored block.
 	if p.CreatedAtBlock <= 0 {
 		return fmt.Errorf("created_at_block must be positive, got %d", p.CreatedAtBlock)
+	}
+	if p.CorrectsVersion != nil && *p.CorrectsVersion < 0 {
+		return fmt.Errorf("corrects_version must not be negative, got %d", *p.CorrectsVersion)
 	}
 	if p.Underlying != nil {
 		if p.Underlying.Value == nil {

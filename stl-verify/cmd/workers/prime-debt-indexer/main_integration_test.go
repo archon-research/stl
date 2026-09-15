@@ -262,8 +262,8 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 		t.Fatalf("truncate prime: %v", err)
 	}
 	_, err := pool.Exec(ctx, `
-		INSERT INTO prime (name, vault_address)
-		VALUES ('spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')
+		INSERT INTO prime (external_id, name, vault_address)
+		VALUES (gen_random_uuid(), 'spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')
 	`)
 	if err != nil {
 		t.Fatalf("seed prime: %v", err)
@@ -402,7 +402,7 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode vault address for prime %q: %v", p.name, err)
 		}
-		if _, err := pool.Exec(ctx, `INSERT INTO prime (name, vault_address) VALUES ($1, $2) ON CONFLICT DO NOTHING`, p.name, addrBytes); err != nil {
+		if _, err := pool.Exec(ctx, `INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), $1, $2) ON CONFLICT DO NOTHING`, p.name, addrBytes); err != nil {
 			t.Fatalf("seed prime %s: %v", p.name, err)
 		}
 	}
@@ -500,7 +500,7 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 	if _, err := pool.Exec(ctx, `TRUNCATE prime CASCADE`); err != nil {
 		t.Fatalf("truncate prime: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO prime (name, vault_address) VALUES ('spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')`); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')`); err != nil {
 		t.Fatalf("seed prime: %v", err)
 	}
 
@@ -576,7 +576,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	if _, err := pool.Exec(ctx, `TRUNCATE prime CASCADE`); err != nil {
 		t.Fatalf("truncate prime: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO prime (name, vault_address) VALUES ('spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')`); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')`); err != nil {
 		t.Fatalf("seed prime: %v", err)
 	}
 
