@@ -134,12 +134,43 @@ The sub-second rows are confined to `2026-02-18 14:23:15.93Z .. 2026-04-14 12:02
 older than that window are whole-second too: they were written by backfillers that always supplied
 block time.
 
-Spot-checked against mainnet before relying on the split:
+### The whole second is not a truncated ingest time
 
-| Row | Stored `created_at` | Block-header time | Verdict |
-| --- | --- | --- | --- |
-| block 24558876 (whole-second) | `2026-03-01 00:01:47Z` | `2026-03-01 00:01:47Z` | event time |
-| block 24659163 (sub-second) | `2026-03-14 23:59:59.xx`+2.4s and +2.6s, two rows | `2026-03-14 23:59:59Z` | ingest time — one block cannot have two header times |
+The obvious objection to the test is that a writer could have stored `date_trunc('second', now())`,
+which is whole-second and still ingest time. It did not, and the check that settles it is the delta
+against the chain: a truncated ingest time carries the ingest lag, which is 2.0-3.5s on the rows
+that demonstrably hold one, so it can only land at +2 or +3, never at +0.
+
+21 whole-second mainnet rows sampled across every era — including before the writer change, and the
+whole-second rows interleaved with sub-second ones in 2026-02..04 — matched their block header
+exactly, delta +0 in all 21. Three Avalanche whole-second rows did too. The control is the other
+cohort: two Avalanche sub-second rows came in at +2, which is the signature a truncating writer
+would have left everywhere.
+
+| Cohort | Chain | Samples | Delta vs block header |
+| --- | --- | ---: | --- |
+| whole-second | mainnet, 2025-09 .. 2026-09 | 21 | +0 on every one |
+| whole-second | Avalanche | 3 | +0 on every one |
+| sub-second | Avalanche | 2 | +2 — the ingest lag |
+| sub-second | mainnet, block 24659163 | 2 rows, one block | +2.4s and +2.6s; one block cannot have two header times |
+
+The code says the same: before VEC-80 the INSERT did not name `created_at` at all, so that era's
+live rows fell to `DEFAULT NOW()` — which is why they are sub-second. No truncating branch ever
+existed on that path, and the whole-second rows from that era came from backfillers passing their
+own value.
+
+Re-sample before Step 1 if the run is much later than this doc, with any archive RPC:
+
+```sql
+SELECT chain_id, block_number, extract(epoch FROM created_at)::bigint AS stored_epoch
+FROM protocol_event
+WHERE chain_id = 1 AND created_at >= '<window start>' AND created_at < '<window end>'
+  AND created_at = date_trunc('second', created_at)
+ORDER BY created_at LIMIT 5;
+```
+
+Compare each against `eth_getBlockByNumber`. A non-zero delta means the cohort test is wrong for
+that era and Step 1 must not run on it.
 
 ## Step 1 — the whole-second rows (no external source needed)
 
