@@ -39,7 +39,7 @@ func NewBalanceOfSource(multicaller outbound.Multicaller, erc20ABI *abi.ABI, ato
 			"superstate": true,
 			"proxy":      true,
 			// A centrifuge_feeder entry is the Centrifuge share token itself, so
-			// balanceOf(wallet) is the whole position.
+			// balanceOf(wallet) is the claimed position.
 			"centrifuge_feeder": true,
 		},
 	}
