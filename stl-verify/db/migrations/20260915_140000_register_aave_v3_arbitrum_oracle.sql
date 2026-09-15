@@ -10,8 +10,11 @@
 -- reserves (getSourceOfAsset returns 0x0), so they must NOT be added to this
 -- oracle unit (an aave unit reverts wholesale if any asset is unpriceable).
 -- aArbUSDCn receipt token: 0x724dc807b04555b71ed48a6896b6f41593b8c637
--- On-chain verification (BASE_CURRENCY_UNIT, getAssetsPrices, getSourceOfAsset)
--- pending per the PR checklist.
+
+INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
+VALUES (42161, '\x794a61358D6845594F94dc1DB02A252b5b4814aD'::bytea,
+        'Aave V3 Arbitrum', 'lending', 7742429, NOW(), '{}'::jsonb)
+ON CONFLICT (chain_id, address) DO NOTHING;
 
 INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, price_decimals, enabled)
 VALUES ('aave_v3_arbitrum', 'Aave V3 Arbitrum', 42161,

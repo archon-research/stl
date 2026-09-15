@@ -5,8 +5,6 @@
 -- Feed address from the Chainlink RDD for Robinhood:
 --   USDG/USD  proxy 0x61B7e5650328764B076A108EFF5fa7282a1B9aD2  (8 decimals, path usdg-usd)
 -- Source: https://reference-data-directory.vercel.app/feeds-robinhood-mainnet.json
--- On-chain verification (decimals, description, latestRoundData, Multicall3 presence)
--- pending per the PR checklist.
 --
 -- groveUSDG is a Morpho Vault V2 (curator Steakhouse) on Robinhood. It is priced
 -- through the receipt-token path: the tracker writes underlying_value in USDG

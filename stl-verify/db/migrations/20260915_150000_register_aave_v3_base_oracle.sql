@@ -12,7 +12,6 @@
 -- Pool created at block 2357134 (protocols.go).
 -- USDC on Base: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 (6 decimals)
 -- aBasUSDC receipt token already exists (20260909_130000).
--- On-chain verification (BASE_CURRENCY_UNIT, getAssetsPrices) pending per PR checklist.
 
 INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, price_decimals, enabled)
 VALUES ('aave_v3_base', 'Aave V3 Base', 8453,

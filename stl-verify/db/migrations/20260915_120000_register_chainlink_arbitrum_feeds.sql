@@ -7,7 +7,6 @@
 --   USDC/USD  proxy 0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3  (8 decimals, path usdc-usd)
 -- The USDS/USD feed is a dex_state_price feed (24h heartbeat, 0.5% deviation), weaker
 -- than mainnet's Chainlink USDS/USD. PSM3 itself values USDS at exactly $1.
--- On-chain verification (decimals, description, latestRoundData) pending per the PR checklist.
 
 INSERT INTO token (chain_id, address, symbol, decimals)
 VALUES
