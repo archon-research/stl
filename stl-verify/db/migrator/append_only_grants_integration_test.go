@@ -188,7 +188,7 @@ var triggerOnlyCacheTables = []string{
 	// VEC-636: append-only itself, and written only by its SECURITY DEFINER trigger and
 	// rebuild_position_daily(). It belongs here rather than in convertedAppendOnlyTables
 	// because the app role holds no INSERT either: appending a day is the trigger's job.
-	"position_daily",
+	"position_daily_observation",
 	"morpho_market_position_current",
 	// VEC-659: the two Morpho state caches the backed-breakdown read joins beside it.
 	"morpho_vault_state_current",

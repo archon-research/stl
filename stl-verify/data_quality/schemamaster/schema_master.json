@@ -1761,7 +1761,7 @@
       "type": "infrastructure",
       "owner": "prime"
     },
-    "position_daily": {
+    "position_daily_observation": {
       "type": "derived",
       "owner": "prime"
     },

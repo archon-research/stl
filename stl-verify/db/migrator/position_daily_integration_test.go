@@ -70,11 +70,11 @@ func (f *positionDailyFixture) observe(id string, o dailyObs) {
 }
 
 // daily returns one position's series as (as_of_date, quantity) pairs, oldest first, through the
-// latest view: the read a consumer makes.
+// position_daily view: the read a consumer makes.
 func (f *positionDailyFixture) daily(id string) []string {
 	f.t.Helper()
 	rows, err := f.pool.Query(f.ctx,
-		`SELECT as_of_date::text || '=' || quantity::text FROM position_daily_latest
+		`SELECT as_of_date::text || '=' || quantity::text FROM position_daily
 		  WHERE position_id = sha256($1::bytea) ORDER BY as_of_date`, id)
 	if err != nil {
 		f.t.Fatalf("daily(%s): %v", id, err)
@@ -96,11 +96,11 @@ func (f *positionDailyFixture) daily(id string) []string {
 	return out
 }
 
-// dayRow is the day's answer for one (position, date) as the latest view gives it; dayWinner is the
-// same shape read from the spine.
+// dayRow is the day's answer for one (position, date) as the view gives it; dayWinner is the same
+// shape read from the spine.
 func (f *positionDailyFixture) dayRow(id, date string) map[string]string {
 	f.t.Helper()
-	return f.rowOf(`SELECT to_jsonb(d) - 'position_id' - 'as_of_date' - 'created_at' FROM position_daily_latest d
+	return f.rowOf(`SELECT to_jsonb(d) - 'position_id' - 'as_of_date' - 'created_at' FROM position_daily d
 	                 WHERE d.position_id = sha256($1::bytea) AND d.as_of_date = $2`, id, date)
 }
 
@@ -130,12 +130,12 @@ func (f *positionDailyFixture) rowOf(q, id, date string) map[string]string {
 	return out
 }
 
-// dayQty is the day's answer through the latest view.
+// dayQty is the day's answer through the view.
 func (f *positionDailyFixture) dayQty(id, date string) int {
 	f.t.Helper()
 	var q int
 	if err := f.pool.QueryRow(f.ctx,
-		`SELECT quantity FROM position_daily_latest WHERE position_id = sha256($1::bytea) AND as_of_date = $2`,
+		`SELECT quantity FROM position_daily WHERE position_id = sha256($1::bytea) AND as_of_date = $2`,
 		id, date).Scan(&q); err != nil {
 		f.t.Fatalf("dayQty(%s, %s): %v", id, date, err)
 	}
@@ -147,7 +147,7 @@ func (f *positionDailyFixture) dayRows(id, date string) int {
 	f.t.Helper()
 	var n int
 	if err := f.pool.QueryRow(f.ctx,
-		`SELECT count(*) FROM position_daily WHERE position_id = sha256($1::bytea) AND as_of_date = $2`,
+		`SELECT count(*) FROM position_daily_observation WHERE position_id = sha256($1::bytea) AND as_of_date = $2`,
 		id, date).Scan(&n); err != nil {
 		f.t.Fatalf("dayRows(%s, %s): %v", id, date, err)
 	}
@@ -157,8 +157,8 @@ func (f *positionDailyFixture) dayRows(id, date string) int {
 func (f *positionDailyFixture) rowCount() int {
 	f.t.Helper()
 	var n int
-	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM position_daily`).Scan(&n); err != nil {
-		f.t.Fatalf("count position_daily: %v", err)
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM position_daily_observation`).Scan(&n); err != nil {
+		f.t.Fatalf("count position_daily_observation: %v", err)
 	}
 	return n
 }
@@ -283,7 +283,7 @@ func TestPositionDailyAppendsOneRowPerBatchAndNeverRewrites(t *testing.T) {
 	}
 	// Each row still carries the coordinate and quantity it was appended with, in ascending created_at.
 	rows, err := f.pool.Query(f.ctx, `
-		SELECT block_number, quantity::int FROM position_daily
+		SELECT block_number, quantity::int FROM position_daily_observation
 		 WHERE position_id = sha256($1::bytea) AND as_of_date = $2 ORDER BY created_at, block_number`, id, day)
 	if err != nil {
 		t.Fatal(err)
@@ -326,7 +326,7 @@ func TestPositionDailyAnswersAsOfATimeReproducibly(t *testing.T) {
 	// Pinned read over the raw table: what a report that recorded its own run time can reconstruct.
 	var pinned []int
 	rows, err := f.pool.Query(f.ctx, `
-		SELECT DISTINCT ON (position_id, as_of_date) quantity::int FROM position_daily
+		SELECT DISTINCT ON (position_id, as_of_date) quantity::int FROM position_daily_observation
 		 WHERE position_id = sha256($1::bytea) AND as_of_date = $2 AND created_at <= $3
 		 ORDER BY position_id, as_of_date, block_number DESC, block_version DESC, processing_version DESC, block_timestamp DESC`,
 		id, day, reportRanAt)
@@ -389,7 +389,7 @@ func TestPositionDailyLatestViewIsInlined(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	f.observe("d-inline", dailyObs{qty: 1, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
 	for _, q := range []string{
-		`EXPLAIN SELECT * FROM position_daily_latest WHERE position_id = sha256('d-inline'::bytea)`,
+		`EXPLAIN SELECT * FROM position_daily WHERE position_id = sha256('d-inline'::bytea)`,
 		`EXPLAIN SELECT * FROM position_daily_as_of(now()) WHERE position_id = sha256('d-inline'::bytea)`,
 	} {
 		rows, err := f.pool.Query(f.ctx, q)
@@ -412,8 +412,8 @@ func TestPositionDailyLatestViewIsInlined(t *testing.T) {
 		if strings.Contains(joined, "Function Scan") {
 			t.Errorf("%s\nplans as a Function Scan, so position_daily_as_of is not inlined:\n%s", q, joined)
 		}
-		if !strings.Contains(joined, "position_daily") {
-			t.Errorf("%s\nplan does not touch position_daily at all, so this control is not reading the right object:\n%s", q, joined)
+		if !strings.Contains(joined, "position_daily_observation") {
+			t.Errorf("%s\nplan does not touch position_daily_observation at all, so this control is not reading the right object:\n%s", q, joined)
 		}
 	}
 }
@@ -428,7 +428,7 @@ func TestPositionDailyEqualsTheWinningSpineRowOnEveryColumn(t *testing.T) {
 			f.observe(id, dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
 			f.observe(id, dailyObs{qty: 22, block: 200, pv: 1, ts: "2026-01-01T05:00:00Z", dealType: "BORROW"})
 			if writer == "rebuild" {
-				if _, err := f.pool.Exec(f.ctx, `DELETE FROM position_daily`); err != nil {
+				if _, err := f.pool.Exec(f.ctx, `DELETE FROM position_daily_observation`); err != nil {
 					t.Fatalf("empty the table (superuser harness): %v", err)
 				}
 				f.rebuild()
@@ -496,21 +496,21 @@ func TestPositionDailyGrantsAreReadForTheAppRoleAndAppendOnlyForTheOwner(t *test
 	} {
 		var got bool
 		if err := f.pool.QueryRow(f.ctx,
-			`SELECT has_table_privilege($1, 'position_daily', $2)`, c.role, c.priv).Scan(&got); err != nil {
+			`SELECT has_table_privilege($1, 'position_daily_observation', $2)`, c.role, c.priv).Scan(&got); err != nil {
 			t.Fatalf("has_table_privilege(%s, %s): %v", c.role, c.priv, err)
 		}
 		if got != c.want {
-			t.Errorf("%s %s on position_daily = %v; want %v", c.role, c.priv, got, c.want)
+			t.Errorf("%s %s on position_daily_observation = %v; want %v", c.role, c.priv, got, c.want)
 		}
 	}
 	for _, view := range []string{"stl_readonly", "stl_readwrite"} {
 		var got bool
 		if err := f.pool.QueryRow(f.ctx,
-			`SELECT has_table_privilege($1, 'position_daily_latest', 'SELECT')`, view).Scan(&got); err != nil {
+			`SELECT has_table_privilege($1, 'position_daily', 'SELECT')`, view).Scan(&got); err != nil {
 			t.Fatal(err)
 		}
 		if !got {
-			t.Errorf("%s cannot SELECT position_daily_latest, the read the table exists for", view)
+			t.Errorf("%s cannot SELECT position_daily, the read the table exists for", view)
 		}
 	}
 
@@ -518,7 +518,7 @@ func TestPositionDailyGrantsAreReadForTheAppRoleAndAppendOnlyForTheOwner(t *test
 	if err := f.pool.QueryRow(f.ctx, `
 		SELECT COALESCE(array_agg(a.privilege_type ORDER BY a.privilege_type), '{}')
 		  FROM pg_class c, aclexplode(c.relacl) a
-		 WHERE c.oid = 'position_daily'::regclass AND a.grantee = c.relowner`).Scan(&ownerPrivs); err != nil {
+		 WHERE c.oid = 'position_daily_observation'::regclass AND a.grantee = c.relowner`).Scan(&ownerPrivs); err != nil {
 		t.Fatalf("read the owner's ACL: %v", err)
 	}
 	if !slices.Contains(ownerPrivs, "INSERT") || !slices.Contains(ownerPrivs, "SELECT") {
@@ -526,7 +526,7 @@ func TestPositionDailyGrantsAreReadForTheAppRoleAndAppendOnlyForTheOwner(t *test
 	}
 	for _, p := range []string{"UPDATE", "DELETE", "TRUNCATE"} {
 		if slices.Contains(ownerPrivs, p) {
-			t.Errorf("the owner still holds %s on position_daily (ACL %v); the creating migration revokes it", p, ownerPrivs)
+			t.Errorf("the owner still holds %s on position_daily_observation (ACL %v); the creating migration revokes it", p, ownerPrivs)
 		}
 	}
 }
@@ -543,16 +543,17 @@ func TestPositionDailyIsWrittenOnlyByItsTriggerUnderTheRealRole(t *testing.T) {
 	defer appPool.Close()
 
 	for name, stmt := range map[string]string{
-		"INSERT": `INSERT INTO position_daily (position_id, as_of_date, instrument_key, holder_id, quantity,
+		"INSERT": `INSERT INTO position_daily_observation (position_id, as_of_date, instrument_key, holder_id, quantity,
 		               block_number, block_version, processing_version, block_timestamp, projection, build_id)
 		           VALUES (sha256('x'::bytea), '2026-01-01', 'x', repeat('a', 40), 1, 1, 0, 0, '2026-01-01T00:00:00Z', 'p', 0)`,
 		// A WHERE that matches nothing: privileges are checked at executor start.
-		"UPDATE": `UPDATE position_daily SET quantity = quantity WHERE block_number = -1`,
-		"DELETE": `DELETE FROM position_daily WHERE block_number = -1`,
+		"UPDATE":   `UPDATE position_daily_observation SET quantity = quantity WHERE block_number = -1`,
+		"DELETE":   `DELETE FROM position_daily_observation WHERE block_number = -1`,
+		"TRUNCATE": `TRUNCATE position_daily_observation`,
 	} {
 		_, err := appPool.Exec(f.ctx, stmt)
 		if err == nil {
-			t.Errorf("%s on position_daily succeeded as stl_read_write; only the trigger and the rebuild may write it", name)
+			t.Errorf("%s on position_daily_observation succeeded as stl_read_write; only the trigger and the rebuild may write it", name)
 			continue
 		}
 		var pgErr *pgconn.PgError
@@ -571,7 +572,7 @@ func TestPositionDailyIsWrittenOnlyByItsTriggerUnderTheRealRole(t *testing.T) {
 	}
 	var qty int
 	if err := appPool.QueryRow(f.ctx,
-		`SELECT quantity FROM position_daily_latest WHERE position_id = sha256('d-role'::bytea) AND as_of_date = '2026-01-01'`).
+		`SELECT quantity FROM position_daily WHERE position_id = sha256('d-role'::bytea) AND as_of_date = '2026-01-01'`).
 		Scan(&qty); err != nil {
 		t.Fatalf("no row after the append -- the SECURITY DEFINER trigger did not write it, or the role lost SELECT: %v", err)
 	}
@@ -592,8 +593,10 @@ func TestPositionDailyTriggerFunctionIsSecurityDefinerWithAPinnedPath(t *testing
 	if !definer {
 		t.Error("append_position_daily is not SECURITY DEFINER, so the appending role would need a write grant on the table")
 	}
-	if !strings.Contains(strings.Join(config, " "), "search_path=") {
-		t.Errorf("append_position_daily does not pin search_path (proconfig = %v); mandatory on SECURITY DEFINER", config)
+	// The exact value, not merely the presence of the setting: the path IS the security boundary on a
+	// SECURITY DEFINER function, and `SET search_path = pg_temp` satisfies a presence check.
+	if !strings.Contains(strings.Join(config, " "), "search_path=pg_catalog, public") {
+		t.Errorf("append_position_daily pins proconfig = %v; want search_path=pg_catalog, public", config)
 	}
 }
 
@@ -606,7 +609,8 @@ func TestPositionDailyRebuildPinsItsSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(config, " ")
-	for _, want := range []string{"timescaledb.enable_tiered_reads=on", "search_path=pg_catalog, public", "work_mem="} {
+	for _, want := range []string{"timescaledb.enable_tiered_reads=on", "search_path=pg_catalog, public",
+		"work_mem=64MB", "lock_timeout=10s"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("rebuild_position_daily does not pin %q (proconfig = %v)", want, config)
 		}
@@ -623,14 +627,14 @@ func TestPositionDailyRebuildAppendsOnlyWhatIsMissing(t *testing.T) {
 	f.observe(id, dailyObs{qty: 22, block: 200, ts: "2026-01-01T05:00:00Z", dealType: "LOAN"})
 	f.observe(id, dailyObs{qty: 33, block: 300, ts: "2026-01-02T05:00:00Z", dealType: "LOAN"})
 
-	before := dailyCacheDigest(f.ctx, t, f.pool, "position_daily")
+	before := dailyCacheDigest(f.ctx, t, f.pool, "position_daily_observation")
 	f.rebuild()
-	if after := dailyCacheDigest(f.ctx, t, f.pool, "position_daily"); after != before {
+	if after := dailyCacheDigest(f.ctx, t, f.pool, "position_daily_observation"); after != before {
 		t.Error("a rebuild over a complete table changed it; it may only append rows that are missing")
 	}
 
 	// Emptied (superuser harness; the owner's DELETE is revoked in every deployed environment).
-	if _, err := f.pool.Exec(f.ctx, `DELETE FROM position_daily`); err != nil {
+	if _, err := f.pool.Exec(f.ctx, `DELETE FROM position_daily_observation`); err != nil {
 		t.Fatalf("empty the table: %v", err)
 	}
 	f.rebuild()
@@ -644,13 +648,13 @@ func TestPositionDailyRebuildAppendsOnlyWhatIsMissing(t *testing.T) {
 	// A row the trigger wrote keeps its created_at through a later rebuild: the as-of reading depends on it.
 	var stamped time.Time
 	if err := f.pool.QueryRow(f.ctx,
-		`SELECT created_at FROM position_daily WHERE position_id = sha256($1::bytea) AND as_of_date = '2026-01-02'`, id).Scan(&stamped); err != nil {
+		`SELECT created_at FROM position_daily_observation WHERE position_id = sha256($1::bytea) AND as_of_date = '2026-01-02'`, id).Scan(&stamped); err != nil {
 		t.Fatal(err)
 	}
 	f.rebuild()
 	var again time.Time
 	if err := f.pool.QueryRow(f.ctx,
-		`SELECT created_at FROM position_daily WHERE position_id = sha256($1::bytea) AND as_of_date = '2026-01-02'`, id).Scan(&again); err != nil {
+		`SELECT created_at FROM position_daily_observation WHERE position_id = sha256($1::bytea) AND as_of_date = '2026-01-02'`, id).Scan(&again); err != nil {
 		t.Fatal(err)
 	}
 	if !again.Equal(stamped) {
@@ -662,12 +666,12 @@ func TestPositionDailyRebuildAppendsOnlyWhatIsMissing(t *testing.T) {
 func TestPositionDailyRebuildResolvesUnderAShadowingSearchPath(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	f.observe("d-shadow", dailyObs{qty: 7, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
-	if _, err := f.pool.Exec(f.ctx, `DELETE FROM position_daily`); err != nil {
+	if _, err := f.pool.Exec(f.ctx, `DELETE FROM position_daily_observation`); err != nil {
 		t.Fatalf("empty the table: %v", err)
 	}
 	for _, stmt := range []string{
 		`CREATE SCHEMA IF NOT EXISTS shadow`,
-		`CREATE TABLE IF NOT EXISTS shadow.position_daily (LIKE public.position_daily)`,
+		`CREATE TABLE IF NOT EXISTS shadow.position_daily_observation (LIKE public.position_daily_observation)`,
 		`CREATE TABLE IF NOT EXISTS shadow.position_state (LIKE public.position_state)`,
 		`SET search_path = shadow, public`,
 	} {
@@ -678,7 +682,7 @@ func TestPositionDailyRebuildResolvesUnderAShadowingSearchPath(t *testing.T) {
 	f.rebuild()
 	var public, shadowed int
 	if err := f.pool.QueryRow(f.ctx, `
-		SELECT (SELECT count(*) FROM public.position_daily), (SELECT count(*) FROM shadow.position_daily)`).
+		SELECT (SELECT count(*) FROM public.position_daily_observation), (SELECT count(*) FROM shadow.position_daily_observation)`).
 		Scan(&public, &shadowed); err != nil {
 		t.Fatal(err)
 	}
@@ -699,11 +703,11 @@ func TestPositionDailyIsAPlainTable(t *testing.T) {
 	// test passes on the pre-change code too.
 	var dimensions, chunks, spineDimensions, spineChunks, jobs int
 	if err := f.pool.QueryRow(f.ctx, `
-		SELECT (SELECT count(*) FROM timescaledb_information.dimensions WHERE hypertable_name = 'position_daily'),
-		       (SELECT count(*) FROM timescaledb_information.chunks     WHERE hypertable_name = 'position_daily'),
+		SELECT (SELECT count(*) FROM timescaledb_information.dimensions WHERE hypertable_name = 'position_daily_observation'),
+		       (SELECT count(*) FROM timescaledb_information.chunks     WHERE hypertable_name = 'position_daily_observation'),
 		       (SELECT count(*) FROM timescaledb_information.dimensions WHERE hypertable_name = 'position_state'),
 		       (SELECT count(*) FROM timescaledb_information.chunks     WHERE hypertable_name = 'position_state'),
-		       (SELECT count(*) FROM timescaledb_information.jobs       WHERE hypertable_name = 'position_daily')`).
+		       (SELECT count(*) FROM timescaledb_information.jobs       WHERE hypertable_name = 'position_daily_observation')`).
 		Scan(&dimensions, &chunks, &spineDimensions, &spineChunks, &jobs); err != nil {
 		t.Fatal(err)
 	}
@@ -712,21 +716,21 @@ func TestPositionDailyIsAPlainTable(t *testing.T) {
 			"the catalogue views or the filter are not reporting, so zeroes below prove nothing", spineDimensions, spineChunks)
 	}
 	if dimensions != 0 || chunks != 0 {
-		t.Errorf("position_daily has %d partitioning dimension(s) and %d chunk(s); a plain table has neither", dimensions, chunks)
+		t.Errorf("position_daily_observation has %d partitioning dimension(s) and %d chunk(s); a plain table has neither", dimensions, chunks)
 	}
 	if jobs != 0 {
-		t.Errorf("position_daily carries %d scheduled policy job(s); the table COMMENT says it has none", jobs)
+		t.Errorf("position_daily_observation carries %d scheduled policy job(s); the table COMMENT says it has none", jobs)
 	}
 
 	var relkind string
 	var partitions int
 	if err := f.pool.QueryRow(f.ctx, `
 		SELECT c.relkind::text, (SELECT count(*) FROM pg_inherits WHERE inhparent = c.oid)
-		  FROM pg_class c WHERE c.oid = 'public.position_daily'::regclass`).Scan(&relkind, &partitions); err != nil {
+		  FROM pg_class c WHERE c.oid = 'public.position_daily_observation'::regclass`).Scan(&relkind, &partitions); err != nil {
 		t.Fatal(err)
 	}
 	if relkind != "r" || partitions != 0 {
-		t.Errorf("position_daily is relkind %q with %d partition(s); want an ordinary table ('r') with none", relkind, partitions)
+		t.Errorf("position_daily_observation is relkind %q with %d partition(s); want an ordinary table ('r') with none", relkind, partitions)
 	}
 	if rows := f.rowCount(); rows != 2 {
 		t.Errorf("the two observations stored %d row(s), want 2", rows)
@@ -741,7 +745,7 @@ func TestPositionDailyAsOfDateIsPinnedToBlockTimestamp(t *testing.T) {
 		t.Errorf("block_timestamp = %q, want the 2026-01-01 instant", got)
 	}
 	if _, err := f.pool.Exec(f.ctx, `
-		INSERT INTO position_daily (position_id, as_of_date, instrument_key, holder_id, quantity,
+		INSERT INTO position_daily_observation (position_id, as_of_date, instrument_key, holder_id, quantity,
 		    block_number, block_version, processing_version, block_timestamp, projection, build_id)
 		VALUES (sha256('d-date-chk'::bytea), '2026-02-02', 'x', repeat('a', 40), 1, 1, 0, 0, '2026-01-01T23:30:00Z', 'p', 0)`); err == nil {
 		t.Error("a row landed on a date its block_timestamp does not fall on; the CHECK is missing")
@@ -750,11 +754,11 @@ func TestPositionDailyAsOfDateIsPinnedToBlockTimestamp(t *testing.T) {
 	}
 	var onParent int
 	if err := f.pool.QueryRow(f.ctx,
-		`SELECT count(*) FROM pg_constraint WHERE conrelid = 'position_daily'::regclass AND conname = 'position_daily_as_of_date_chk'`).Scan(&onParent); err != nil {
+		`SELECT count(*) FROM pg_constraint WHERE conrelid = 'position_daily_observation'::regclass AND conname = 'position_daily_observation_as_of_date_chk'`).Scan(&onParent); err != nil {
 		t.Fatal(err)
 	}
 	if onParent != 1 {
-		t.Errorf("position_daily_as_of_date_chk is not declared on position_daily (%d), so nothing pins as_of_date to block_timestamp", onParent)
+		t.Errorf("position_daily_observation_as_of_date_chk is not declared on position_daily_observation (%d), so nothing pins as_of_date to block_timestamp", onParent)
 	}
 }
 
@@ -767,9 +771,9 @@ func TestPositionDailyIndexesCoverTheHolderAndDateReads(t *testing.T) {
 		name string
 		cols []string
 	}{
-		{name: "position_daily_pkey", cols: []string{"position_id", "as_of_date", "block_number", "block_version", "processing_version", "block_timestamp"}},
-		{name: "position_daily_holder_idx", cols: []string{"holder_id", "as_of_date"}},
-		{name: "position_daily_as_of_date_idx", cols: []string{"as_of_date", "position_id"}},
+		{name: "position_daily_observation_pkey", cols: []string{"position_id", "as_of_date", "block_number", "block_version", "processing_version", "block_timestamp"}},
+		{name: "position_daily_observation_holder_idx", cols: []string{"holder_id", "as_of_date"}},
+		{name: "position_daily_observation_as_of_date_idx", cols: []string{"as_of_date", "position_id"}},
 	} {
 		var cols []string
 		var notPartial, notExpression, noInclude, valid bool
@@ -790,6 +794,168 @@ func TestPositionDailyIndexesCoverTheHolderAndDateReads(t *testing.T) {
 			t.Errorf("%s: partial=%t expression=%t include=%t valid=%t; want a plain, complete, valid btree",
 				want.name, !notPartial, !notExpression, !noInclude, valid)
 		}
+	}
+
+	// Only the PK may be unique. Both writers name it as their ON CONFLICT target, so a UNIQUE index
+	// added later would not silently swallow their rows -- but it would reject them outright, and the
+	// two secondary indexes are over columns that legitimately repeat once rows are per-batch.
+	for _, name := range []string{"position_daily_observation_holder_idx", "position_daily_observation_as_of_date_idx"} {
+		var unique bool
+		if err := f.pool.QueryRow(f.ctx,
+			`SELECT indisunique FROM pg_index WHERE indexrelid = ('public.' || $1)::regclass`, name).Scan(&unique); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if unique {
+			t.Errorf("%s is UNIQUE; holder_id and as_of_date both repeat across batches, so it would reject legitimate appends", name)
+		}
+	}
+}
+
+// A NULL as-of bound must raise. Left to the created_at comparison it is NULL for every row, so the
+// read returns an empty set and a caller with an unset timestamp reads "held nothing" as an answer.
+func TestPositionDailyAsOfRefusesANullBound(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	f.observe("d-null-bound", dailyObs{qty: 9, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
+	var n int
+	err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM position_daily_as_of(NULL::timestamptz)`).Scan(&n)
+	if err == nil {
+		t.Fatalf("position_daily_as_of(NULL) returned %d row(s) instead of raising; an unset bound reads as an empty series", n)
+	}
+	if !strings.Contains(err.Error(), "as-of time is required") {
+		t.Errorf("raised for the wrong reason: %v", err)
+	}
+	// Negative control: a real bound still answers, so the guard rejects NULL rather than everything.
+	if err := f.pool.QueryRow(f.ctx,
+		`SELECT count(*) FROM position_daily_as_of('infinity'::timestamptz)`).Scan(&n); err != nil {
+		t.Fatalf("a real bound must still answer: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("a real bound read %d row(s), want 1", n)
+	}
+}
+
+// The view must expose every column of the table. The function RETURNS SETOF the table, so a later
+// ADD COLUMN widens the function; the view's SELECT * was expanded and frozen when it was created, so
+// the two documented reads would then disagree on shape and CREATE OR REPLACE VIEW could not fix it.
+func TestPositionDailyViewExposesEveryTableColumn(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	var tableCols, viewCols []string
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT (SELECT array_agg(attname ORDER BY attnum) FROM pg_attribute
+		         WHERE attrelid = 'position_daily_observation'::regclass AND attnum > 0 AND NOT attisdropped),
+		       (SELECT array_agg(attname ORDER BY attnum) FROM pg_attribute
+		         WHERE attrelid = 'position_daily'::regclass AND attnum > 0 AND NOT attisdropped)`).
+		Scan(&tableCols, &viewCols); err != nil {
+		t.Fatal(err)
+	}
+	if len(tableCols) == 0 {
+		t.Fatal("read no columns for the table, so the comparison below is vacuous")
+	}
+	if !slices.Equal(tableCols, viewCols) {
+		t.Errorf("the view exposes %v; the table has %v -- re-create the view so a consumer of either read sees the same shape",
+			viewCols, tableCols)
+	}
+}
+
+// A holder filter must reach the table as an index condition. holder_id is in the DISTINCT ON key only
+// so the planner may push it below: left out, it becomes a post-filter over every row of every
+// position, measured at 1.9s against 34ms. A plan assertion is the only thing that catches that,
+// because the ANSWER is identical either way.
+func TestPositionDailyHolderFilterIsPushedIntoTheScan(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	for i := range 40 {
+		f.observe(fmt.Sprintf("d-push-%02d", i), dailyObs{qty: i + 1, block: 100 + i, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+	}
+	var holder string
+	if err := f.pool.QueryRow(f.ctx,
+		`SELECT holder_id FROM position_daily_observation ORDER BY holder_id LIMIT 1`).Scan(&holder); err != nil {
+		t.Fatal(err)
+	}
+	// Planning against a tiny table would choose a seq scan whatever the qual can do, so force the
+	// index path: what is under test is whether the qual can descend at all, not the planner's choice.
+	if _, err := f.pool.Exec(f.ctx, `SET LOCAL enable_seqscan = off`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := f.pool.Query(f.ctx,
+		`EXPLAIN SELECT * FROM position_daily WHERE holder_id = $1`, holder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, line)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(plan, "\n")
+	if !strings.Contains(joined, "position_daily_observation_holder_idx") {
+		t.Errorf("a holder filter does not reach position_daily_observation_holder_idx, so it is a post-filter over the whole table:\n%s", joined)
+	}
+	// And the answer is right, so a plan that reads the index is not reading it wrongly.
+	var got int
+	if err := f.pool.QueryRow(f.ctx,
+		`SELECT count(*) FROM position_daily WHERE holder_id = $1`, holder).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 1 {
+		t.Errorf("the holder read returned %d row(s), want 1", got)
+	}
+}
+
+// The window created_at's COMMENT records, pinned so it cannot be quietly forgotten: created_at is
+// TRANSACTION START time but a row becomes visible at COMMIT, so a T taken after a writer began and
+// before it committed gains rows afterwards. This is the limit of the reproducibility claim.
+func TestPositionDailyAsOfIsUnstableWhileAWriterIsOpen(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	const id, day = "d-inflight", "2026-01-01"
+
+	writer, err := f.pool.Acquire(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Release()
+	tx, err := writer.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(f.ctx, `
+		INSERT INTO position_state
+		    (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
+		     block_number, block_version, processing_version, block_timestamp, projection, build_id, deal_type)
+		VALUES (sha256($1::bytea), 1, 1, 'inst-' || $1, repeat('d', 40), 5, 100, 0, 0,
+		        '2026-01-01T10:00:00Z', 'public.proj-0', 0, 'LOAN')`, id); err != nil {
+		t.Fatalf("append inside the open writer: %v", err)
+	}
+
+	// T is taken while that writer is still open, so its row is invisible.
+	pinned := f.dbNow()
+	countAt := func(at time.Time) int {
+		f.t.Helper()
+		var n int
+		if err := f.pool.QueryRow(f.ctx,
+			`SELECT count(*) FROM position_daily_as_of($1) WHERE position_id = sha256($2::bytea) AND as_of_date = $3`,
+			at, id, day).Scan(&n); err != nil {
+			t.Fatalf("read at the pinned time: %v", err)
+		}
+		return n
+	}
+	if before := countAt(pinned); before != 0 {
+		t.Fatalf("the open writer's row was visible before it committed (%d rows); this case cannot show the window", before)
+	}
+	if err := tx.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Same T, and now the row is there: its created_at is the transaction's start, before T.
+	after := countAt(pinned)
+	if after != 1 {
+		t.Errorf("after the commit the same pinned T reads %d row(s), want 1 -- if this is now 0 the stamp "+
+			"became commit-ordered and created_at's COMMENT plus this test must be rewritten", after)
 	}
 }
 
@@ -823,7 +989,7 @@ func TestPositionDailyHoldsARowPerBatchAtBulkAndTheRebuildAddsNothing(t *testing
 	}
 	var newest, total int
 	if err := f.pool.QueryRow(f.ctx,
-		`SELECT count(*) FILTER (WHERE quantity = 9 AND deal_type = 'BORROW'), count(*) FROM position_daily_latest`).
+		`SELECT count(*) FILTER (WHERE quantity = 9 AND deal_type = 'BORROW'), count(*) FROM position_daily`).
 		Scan(&newest, &total); err != nil {
 		t.Fatal(err)
 	}
@@ -905,14 +1071,14 @@ func TestPositionDailyEqualsTheSpineArgmaxOverRandomHistories(t *testing.T) {
 			}
 
 			const dailyGrain = ", (block_timestamp AT TIME ZONE 'utc')::date"
-			cols := dailySharedSpineColumns(ctx, t, pool, "position_daily_latest")
-			if d := diffDailyCacheAgainstSpineArgmax(ctx, t, pool, "position_daily_latest", dailyGrain, cols); d != "" {
+			cols := dailySharedSpineColumns(ctx, t, pool, "position_daily")
+			if d := diffDailyCacheAgainstSpineArgmax(ctx, t, pool, "position_daily", dailyGrain, cols); d != "" {
 				t.Errorf("after the trigger: %s", d)
 			}
 			// Every table row is a spine row: the trigger copies, it does not invent.
 			var orphans int
 			if err := pool.QueryRow(ctx, `
-				SELECT count(*) FROM position_daily d
+				SELECT count(*) FROM position_daily_observation d
 				 WHERE NOT EXISTS (SELECT 1 FROM position_state p
 				                    WHERE (p.position_id, p.block_number, p.block_version, p.processing_version, p.block_timestamp)
 				                        = (d.position_id, d.block_number, d.block_version, d.processing_version, d.block_timestamp))`).
@@ -920,25 +1086,25 @@ func TestPositionDailyEqualsTheSpineArgmaxOverRandomHistories(t *testing.T) {
 				t.Fatal(err)
 			}
 			if orphans != 0 {
-				t.Errorf("%d position_daily row(s) have no position_state row at their coordinate", orphans)
+				t.Errorf("%d position_daily_observation row(s) have no position_state row at their coordinate", orphans)
 			}
 
 			// A rebuild over the complete table changes nothing; over one missing rows it fills them.
-			before := dailyCacheDigest(ctx, t, pool, "position_daily")
+			before := dailyCacheDigest(ctx, t, pool, "position_daily_observation")
 			if _, err := pool.Exec(ctx, `CALL rebuild_position_daily()`); err != nil {
 				t.Fatalf("rebuild over a complete table: %v", err)
 			}
-			if dailyCacheDigest(ctx, t, pool, "position_daily") != before {
+			if dailyCacheDigest(ctx, t, pool, "position_daily_observation") != before {
 				t.Error("a rebuild over a complete table changed it")
 			}
 			if _, err := pool.Exec(ctx, `
-				DELETE FROM position_daily WHERE (('x' || substr(md5(position_id::text), 1, 8))::bit(32)::int % 2) = 0`); err != nil {
+				DELETE FROM position_daily_observation WHERE (('x' || substr(md5(position_id::text), 1, 8))::bit(32)::int % 2) = 0`); err != nil {
 				t.Fatalf("remove half the rows: %v", err)
 			}
 			if _, err := pool.Exec(ctx, `CALL rebuild_position_daily()`); err != nil {
 				t.Fatalf("rebuild over a table missing rows: %v", err)
 			}
-			if d := diffDailyCacheAgainstSpineArgmax(ctx, t, pool, "position_daily_latest", dailyGrain, cols); d != "" {
+			if d := diffDailyCacheAgainstSpineArgmax(ctx, t, pool, "position_daily", dailyGrain, cols); d != "" {
 				t.Errorf("the rebuild did not restore the reading: %s", d)
 			}
 		})
@@ -1014,4 +1180,267 @@ func dailyCacheDigest(ctx context.Context, t *testing.T, pool *pgxpool.Pool, rel
 		t.Fatalf("digest %s: %v", rel, err)
 	}
 	return d
+}
+
+// rowImages is every stored row with its physical identity: the whole row, its ctid and its xmin.
+// An UPDATE moves ctid and stamps a new xmin, so comparing these catches a rewrite that leaves the
+// row COUNT and the winning values untouched -- which a count-based or winners-only check cannot.
+func (f *positionDailyFixture) rowImages() map[string]string {
+	f.t.Helper()
+	rows, err := f.pool.Query(f.ctx, `
+		SELECT (position_id, as_of_date, block_number, block_version, processing_version, block_timestamp)::text,
+		       d.ctid::text, d.xmin::text, to_jsonb(d)::text
+		  FROM position_daily_observation d`)
+	if err != nil {
+		f.t.Fatalf("read row images: %v", err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var key, ctid, xmin, body string
+		if err := rows.Scan(&key, &ctid, &xmin, &body); err != nil {
+			f.t.Fatal(err)
+		}
+		out[key] = ctid + " " + xmin + " " + body
+	}
+	if err := rows.Err(); err != nil {
+		f.t.Fatalf("row image iteration: %v", err)
+	}
+	return out
+}
+
+// The invariant the whole change rests on: a row, once appended, is never touched again. Every other
+// assertion in this file reads the day's WINNER, so a writer that rewrote superseded rows in place
+// would pass all of them while silently rewriting the history position_daily_as_of(T) reads.
+func TestPositionDailyNeverTouchesAnAppendedRow(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	const id, day = "d-frozen", "2026-01-01"
+	f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+	f.observe(id, dailyObs{qty: 20, block: 200, ts: "2026-01-01T05:00:00Z", dealType: "BORROW"})
+	// A second position, so a batch that touches one cannot be excused for rewriting the other.
+	f.observe("d-frozen-peer", dailyObs{qty: 77, block: 150, ts: "2026-01-01T03:00:00Z", dealType: "LOAN"})
+	before := f.rowImages()
+	if len(before) != 3 {
+		t.Fatalf("seeded %d row(s), want 3", len(before))
+	}
+
+	for _, step := range []struct {
+		name string
+		run  func()
+	}{
+		{"a newer observation for the same day", func() {
+			f.observe(id, dailyObs{qty: 30, block: 300, ts: "2026-01-01T09:00:00Z", dealType: "LOAN"})
+		}},
+		{"a correction at an existing coordinate's day", func() {
+			f.observe(id, dailyObs{qty: 44, block: 300, pv: 1, ts: "2026-01-01T09:00:00Z", dealType: "BORROW"})
+		}},
+		{"an observation on another day", func() {
+			f.observe(id, dailyObs{qty: 55, block: 400, ts: "2026-01-02T09:00:00Z", dealType: "LOAN"})
+		}},
+		{"a rebuild", func() { f.rebuild() }},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			step.run()
+			after := f.rowImages()
+			for key, img := range before {
+				got, ok := after[key]
+				if !ok {
+					t.Errorf("the row at %s is gone after %s; appended rows are never removed", key, step.name)
+					continue
+				}
+				if got != img {
+					t.Errorf("the row at %s changed after %s:\n  before %s\n  after  %s\nappended rows are never rewritten -- ctid or xmin moving means an UPDATE touched it",
+						key, step.name, img, got)
+				}
+			}
+			before = after
+		})
+	}
+
+	// Controls: the appends really landed, and the day's answer really moved, so the frozen-row
+	// assertions above are not passing over a writer that did nothing at all.
+	if n := f.dayRows(id, day); n != 4 {
+		t.Errorf("the day holds %d row(s) after four appends to it, want 4", n)
+	}
+	if q := f.dayQty(id, day); q != 44 {
+		t.Errorf("the day reads %d, want 44 -- the correction is the newest coordinate", q)
+	}
+}
+
+// Each leg of the REBUILD's ordering, which the from-empty tests exercise only on block_number. The
+// rebuild is what repairs the documented replica-bypass window, and a reorg (block_version) and a
+// correction (processing_version) are exactly what it has to get right there.
+func TestPositionDailyRebuildOrderingPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		id               string
+		base, challenger dailyObs
+		want             int
+	}{
+		{name: "a newer block_version wins", id: "r-bv",
+			base:       dailyObs{qty: 11, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"},
+			challenger: dailyObs{qty: 22, block: 100, bv: 1, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"}, want: 22},
+		{name: "a newer processing_version wins", id: "r-pv",
+			base:       dailyObs{qty: 33, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"},
+			challenger: dailyObs{qty: 44, block: 100, pv: 1, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"}, want: 44},
+		{name: "a later block_timestamp on the same day wins", id: "r-ts",
+			base:       dailyObs{qty: 55, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"},
+			challenger: dailyObs{qty: 66, block: 100, ts: "2026-01-01T07:00:00Z", dealType: "LOAN"}, want: 66},
+		{name: "an older block does not win at a higher processing_version", id: "r-order",
+			base:       dailyObs{qty: 77, block: 200, ts: "2026-01-01T02:00:00Z", dealType: "LOAN"},
+			challenger: dailyObs{qty: 88, block: 100, pv: 1, ts: "2026-01-01T03:00:00Z", dealType: "LOAN"}, want: 77},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPositionDailyFixture(t)
+			f.observe(tc.id, tc.base)
+			f.observe(tc.id, tc.challenger)
+			// Empty the table so the REBUILD, not the trigger, is the writer under test.
+			if _, err := f.pool.Exec(f.ctx, `DELETE FROM position_daily_observation`); err != nil {
+				t.Fatalf("empty the table: %v", err)
+			}
+			f.rebuild()
+			if n := f.rowCount(); n != 1 {
+				t.Fatalf("the rebuild appended %d row(s) for one position on one date, want 1", n)
+			}
+			if got := f.dayQty(tc.id, "2026-01-01"); got != tc.want {
+				t.Errorf("the rebuilt day reads %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// The TRIGGER's last ordering leg. position_state's PK carries block_timestamp, so one batch can hold
+// two rows sharing every earlier leg on one UTC date; the loser is never appended, so getting this
+// wrong makes the day permanently wrong with no trace.
+func TestPositionDailyIntraBatchPicksTheLaterInstantAtEqualVersions(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	if _, err := f.pool.Exec(f.ctx, `
+		INSERT INTO position_state
+		    (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
+		     block_number, block_version, processing_version, block_timestamp, projection, build_id, deal_type)
+		SELECT sha256('d-ts-batch'::bytea), 1, 1, 'inst-d-ts-batch', repeat('a', 40), v.qty, 100, 0, 0,
+		       v.ts::timestamptz, 'public.proj-0', 0, 'LOAN'
+		FROM (VALUES (11, '2026-01-01T01:00:00Z'), (22, '2026-01-01T09:00:00Z')) AS v(qty, ts)`); err != nil {
+		t.Fatalf("batch insert: %v", err)
+	}
+	if n := f.dayRows("d-ts-batch", "2026-01-01"); n != 1 {
+		t.Fatalf("one batch left %d row(s) for the day, want 1", n)
+	}
+	if got := f.dayQty("d-ts-batch", "2026-01-01"); got != 22 {
+		t.Errorf("the day reads %d, want 22 -- at equal versions the later instant is the day's observation, "+
+			"and the loser is never appended, so this is unrecoverable", got)
+	}
+}
+
+// The owner revoke's guard, under a NON-superuser owner. The harness owner is a superuser, for whom
+// has_table_privilege answers true regardless, so the migration skips the check and its RAISE arm
+// never runs in any other test: dropping the guard passes the whole suite.
+func TestPositionDailyOwnerRevokeHoldsUnderANonSuperuserOwner(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	if _, err := f.pool.Exec(f.ctx, `
+		DROP ROLE IF EXISTS pd_owner;
+		CREATE ROLE pd_owner NOSUPERUSER;
+		GRANT pd_owner TO CURRENT_USER;
+		ALTER TABLE position_daily_observation OWNER TO pd_owner;
+		GRANT UPDATE, DELETE, TRUNCATE ON position_daily_observation TO pd_owner;`); err != nil {
+		t.Fatalf("hand the table to a non-superuser owner: %v", err)
+	}
+	var owner string
+	var superuser, hadUpdate bool
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT pg_get_userbyid(relowner), (SELECT rolsuper FROM pg_roles WHERE rolname = pg_get_userbyid(relowner)),
+		       has_table_privilege(pg_get_userbyid(relowner), 'position_daily_observation', 'UPDATE')
+		  FROM pg_class WHERE oid = 'position_daily_observation'::regclass`).Scan(&owner, &superuser, &hadUpdate); err != nil {
+		t.Fatal(err)
+	}
+	if owner != "pd_owner" || superuser {
+		t.Fatalf("owner is %q (superuser %v); the guard's arm only runs for a non-superuser owner", owner, superuser)
+	}
+	if !hadUpdate {
+		t.Fatal("the owner does not hold UPDATE before the re-apply, so the revoke below has nothing to remove")
+	}
+
+	raw, err := os.ReadFile(filepath.Join(getMigrationsPath(), positionDailyMigration))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The migration raises rather than returning quietly if the revoke did not land, so a failure here
+	// IS the guard firing.
+	if _, err := f.pool.Exec(f.ctx, string(raw)); err != nil {
+		t.Fatalf("re-applying over a non-superuser-owned table: %v", err)
+	}
+	var stillHasUpdate bool
+	if err := f.pool.QueryRow(f.ctx,
+		`SELECT has_table_privilege('pd_owner', 'position_daily_observation', 'UPDATE')`).Scan(&stillHasUpdate); err != nil {
+		t.Fatal(err)
+	}
+	if stillHasUpdate {
+		t.Error("a non-superuser owner still holds UPDATE after the migration; append-only is not enforced where it matters")
+	}
+}
+
+// The as-of bound is inclusive, which is what lets a report pin the exact instant it read. A caller
+// passing a T it read back from a row must see that row.
+func TestPositionDailyAsOfBoundIsInclusive(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	const id, day = "d-bound", "2026-01-01"
+	f.observe(id, dailyObs{qty: 12, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+	var stamped time.Time
+	if err := f.pool.QueryRow(f.ctx,
+		`SELECT created_at FROM position_daily_observation WHERE position_id = sha256($1::bytea)`, id).Scan(&stamped); err != nil {
+		t.Fatal(err)
+	}
+	var atStamp, justBefore int
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT (SELECT count(*) FROM position_daily_as_of($1) WHERE as_of_date = $2),
+		       (SELECT count(*) FROM position_daily_as_of($1 - interval '1 microsecond') WHERE as_of_date = $2)`,
+		stamped, day).Scan(&atStamp, &justBefore); err != nil {
+		t.Fatal(err)
+	}
+	if atStamp != 1 {
+		t.Errorf("a T equal to the row's own created_at reads %d row(s), want 1 -- the bound must be inclusive", atStamp)
+	}
+	if justBefore != 0 {
+		t.Errorf("a T one microsecond earlier reads %d row(s), want 0; without this the case above passes on any bound", justBefore)
+	}
+}
+
+// The whole-book-on-one-date read must reach its index, as the holder read must reach its own. A
+// catalogue check of the index columns passes whether or not any plan can use them.
+func TestPositionDailyDateFilterIsPushedIntoTheScan(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	for i := range 40 {
+		f.observe(fmt.Sprintf("d-date-push-%02d", i), dailyObs{qty: i + 1, block: 100 + i, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+	}
+	f.observe("d-date-push-other", dailyObs{qty: 999, block: 900, ts: "2026-02-02T01:00:00Z", dealType: "LOAN"})
+	if _, err := f.pool.Exec(f.ctx, `SET LOCAL enable_seqscan = off`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := f.pool.Query(f.ctx, `EXPLAIN SELECT * FROM position_daily WHERE as_of_date = '2026-01-01'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, line)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if joined := strings.Join(plan, "\n"); !strings.Contains(joined, "position_daily_observation_as_of_date_idx") {
+		t.Errorf("a date filter does not reach position_daily_observation_as_of_date_idx:\n%s", joined)
+	}
+	var got int
+	if err := f.pool.QueryRow(f.ctx,
+		`SELECT count(*) FROM position_daily WHERE as_of_date = '2026-01-01'`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 40 {
+		t.Errorf("the date read returned %d row(s), want 40", got)
+	}
 }
