@@ -30,7 +30,8 @@ type TransferDeps struct {
 	PositionManager uniswapv4indexer.RegisteredPositionManager
 	LogScan         outbound.LogScanClient
 	// Versions answers each scanned height's block_version from the raw archive;
-	// block_states is the watchers' and retains far less than this range.
+	// block_states is the watchers' operational table, off limits here, and retains
+	// far less than this range anyway.
 	Versions  uniswapv4indexer.BlockVersionResolver
 	Repo      outbound.UniswapV4NFTTransferWriter
 	TxManager outbound.TxManager
