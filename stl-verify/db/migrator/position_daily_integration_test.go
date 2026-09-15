@@ -1471,3 +1471,37 @@ func TestPositionDailyDateFilterIsPushedIntoTheScan(t *testing.T) {
 		t.Errorf("the date read returned %d row(s), want 40", got)
 	}
 }
+
+// The procedure reports what it wrote. Zero is the steady state, so a caller that logs
+// or alerts on it can only tell a repair from a quiet night if the count is real.
+func TestPositionDailyCrystallizerReportsWhatItWrote(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	count := func() int64 {
+		t.Helper()
+		var appended int64
+		if err := f.pool.QueryRow(f.ctx,
+			`CALL crystallize_position_daily(interval '1 hour', NULL)`).Scan(&appended); err != nil {
+			t.Fatalf("crystallize: %v", err)
+		}
+		return appended
+	}
+	if got := count(); got != 0 {
+		t.Errorf("an empty spine reported %d rows written, want 0", got)
+	}
+
+	f.observe("d-count", dailyObs{qty: 1, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+	f.observe("d-count", dailyObs{qty: 2, block: 200, ts: "2026-01-02T01:00:00Z", dealType: "LOAN"})
+	f.observe("d-count-peer", dailyObs{qty: 3, block: 150, ts: "2026-01-01T02:00:00Z", dealType: "LOAN"})
+	if got := count(); got != 3 {
+		t.Errorf("reported %d rows written, want 3: two dates for one position and one for its peer", got)
+	}
+	if got := count(); got != 0 {
+		t.Errorf("a second pass reported %d rows written, want 0", got)
+	}
+
+	// A correction to a settled day is one more row, and is reported as one.
+	f.observe("d-count", dailyObs{qty: 9, block: 200, pv: 1, ts: "2026-01-02T01:00:00Z", dealType: "LOAN"})
+	if got := count(); got != 1 {
+		t.Errorf("a correction reported %d rows written, want 1", got)
+	}
+}

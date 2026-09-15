@@ -69,3 +69,4 @@
 ./cmd/cronjobs/reference-capital-indexer
 ./cmd/cronjobs/morpho-v2-bootstrap
 ./internal/services/block_republish
+./internal/services/position_daily_crystallizer

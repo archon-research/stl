@@ -12,25 +12,8 @@ CREATE INDEX IF NOT EXISTS position_daily_observation_as_of_date_idx
 
 ANALYZE public.position_daily_observation;
 
--- Daily, through TimescaleDB's job runner, which already runs this database's policies. The procedure
--- is idempotent, so a missed or repeated run costs a scan and writes nothing.
-CREATE OR REPLACE PROCEDURE crystallize_position_daily_job(job_id integer, config jsonb)
-    LANGUAGE plpgsql
-    SET search_path = pg_catalog, public
-AS $$
-BEGIN
-    CALL public.crystallize_position_daily(COALESCE((config ->> 'settle_after')::interval, interval '1 hour'));
-END;
-$$;
-
-COMMENT ON PROCEDURE crystallize_position_daily_job(integer, jsonb) IS '[Operational] TimescaleDB job entry point for crystallize_position_daily (VEC-636). Takes settle_after from the job config, so the settling window is retunable with alter_job rather than a migration.';
-
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM timescaledb_information.jobs WHERE proc_name = 'crystallize_position_daily_job') THEN
-        PERFORM add_job('crystallize_position_daily_job', INTERVAL '1 day',
-                        config => '{"settle_after": "1 hour"}'::jsonb);
-    END IF;
-END $$;
+-- The daily schedule is the position-daily-crystallizer cronjob (cmd/cronjobs), Temporal-scheduled
+-- like every other cronjob here. Its tick is one CALL, and the procedure is idempotent, so a missed
+-- or retried tick costs a scan and writes nothing.
 
 INSERT INTO public.migrations (filename) VALUES ('20260824_120100_backfill_position_daily.sql') ON CONFLICT (filename) DO NOTHING;

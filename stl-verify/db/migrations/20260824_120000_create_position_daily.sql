@@ -81,13 +81,16 @@ END $$;
 -- settle_after buys quiet, not correctness: a day crystallized early is repaired by the next run
 -- appending its new winner. Pins enable_tiered_reads because newest-per-day over the spine's local
 -- chunks alone reads a PARTIAL history, and work_mem because the DISTINCT ON sorts it.
-CREATE OR REPLACE PROCEDURE crystallize_position_daily(settle_after interval DEFAULT '1 hour')
-    LANGUAGE sql
+CREATE OR REPLACE PROCEDURE crystallize_position_daily(
+    settle_after interval DEFAULT '1 hour',
+    INOUT appended bigint DEFAULT NULL)
+    LANGUAGE plpgsql
     SET search_path = pg_catalog, public
     SET timescaledb.enable_tiered_reads = 'on'
     SET lock_timeout = '10s'
     SET work_mem = '64MB'
 AS $proc$
+BEGIN
     INSERT INTO public.position_daily_observation
         (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
          block_number, block_version, processing_version, block_timestamp, projection, build_id,
@@ -105,9 +108,14 @@ AS $proc$
              p.block_number DESC, p.block_version DESC, p.processing_version DESC, p.block_timestamp DESC
     -- Named, so a unique or exclusion constraint added later cannot silently swallow rows here.
     ON CONFLICT ON CONSTRAINT position_daily_observation_pkey DO NOTHING;
+
+    -- What this run actually wrote, so a scheduled caller can report progress instead of
+    -- reporting that it ran. Zero is the normal result: nothing changed.
+    GET DIAGNOSTICS appended = ROW_COUNT;
+END;
 $proc$;
 
-COMMENT ON PROCEDURE crystallize_position_daily(interval) IS '[Operational] Writes each settled UTC day''s winning position_state observation into position_daily_observation (VEC-636): CALL crystallize_position_daily(). Insert-only and idempotent -- it offers the recomputed winner per (position, date), and conflicts do nothing, so a re-run and a late observation that loses both write nothing while a genuine change appends exactly one row. settle_after (default 1 hour) holds back days that have just closed; it reduces churn rather than buying correctness, since a later correction is picked up by the next run. What it cannot repair: a row whose spine source was re-stamped in place, and the as-of history of a window it never saw. Pins enable_tiered_reads so the winner is computed over the whole spine, tiered chunks included.';
+COMMENT ON PROCEDURE crystallize_position_daily(interval, bigint) IS '[Operational] Writes each settled UTC day''s winning position_state observation into position_daily_observation (VEC-636): CALL crystallize_position_daily(). Returns the number of rows it wrote, normally zero. Insert-only and idempotent -- it offers the recomputed winner per (position, date), and conflicts do nothing, so a re-run and a late observation that loses both write nothing while a genuine change appends exactly one row. settle_after (default 1 hour) holds back days that have just closed; it reduces churn rather than buying correctness, since a later correction is picked up by the next run. What it cannot repair: a row whose spine source was re-stamped in place, and the as-of history of a window it never saw. Pins enable_tiered_reads so the winner is computed over the whole spine, tiered chunks included.';
 
 -- A NULL bound would make every created_at <= NULL comparison NULL, so the read would return an empty
 -- set and a caller with an unset timestamp would read "held nothing" as an answer. Raise instead.
