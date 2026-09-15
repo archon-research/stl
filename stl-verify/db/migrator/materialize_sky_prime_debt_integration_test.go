@@ -56,9 +56,9 @@ BEGIN
   -- UNIQUE, so reusing those names collides. The assertions key on the vault_address (the holder_id the
   -- projection emits), not the name, so a distinct name changes nothing under test.
   SELECT id INTO STRICT vat FROM protocol WHERE chain_id = 1 AND address = '\x35d1b3f3d7966a1dfe207aa4514c12a259a0492b';
-  INSERT INTO prime (name, vault_address) VALUES ('itest-a', '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') RETURNING id INTO paid;
-  INSERT INTO prime (name, vault_address) VALUES ('itest-b', '\xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') RETURNING id INTO pbid;
-  INSERT INTO prime (name, vault_address) VALUES ('itest-c', '\xcccccccccccccccccccccccccccccccccccccccc') RETURNING id INTO pcid;
+  INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'itest-a', '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') RETURNING id INTO paid;
+  INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'itest-b', '\xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') RETURNING id INTO pbid;
+  INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'itest-c', '\xcccccccccccccccccccccccccccccccccccccccc') RETURNING id INTO pcid;
   INSERT INTO prime_debt (prime_id, protocol_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id) VALUES
     (paid, vat, 'ILK-A', 1000, 100, 0, '2026-01-01T00:00:00Z', 0, 0),
     (paid, vat, 'ILK-A', 1500, 200, 0, '2026-01-02T00:00:00Z', 0, 0),
@@ -175,7 +175,7 @@ func TestSkyPrimeDebtCarriesTheProtocolStampedOnTheRow(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 	DO $s$ DECLARE pid bigint; v2 bigint; BEGIN
 	  INSERT INTO protocol (chain_id, address, name, protocol_type) VALUES (1, '\x02', 'sky-two', 'lending') RETURNING id INTO v2;
-	  INSERT INTO prime (name, vault_address) VALUES ('itest-d', '\xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee') RETURNING id INTO pid;
+	  INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'itest-d', '\xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee') RETURNING id INTO pid;
 	  INSERT INTO prime_debt (prime_id, protocol_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id) VALUES
 	    (pid, v2, 'ILK-A', 42, 100, 0, '2026-01-01T00:00:00Z', 0, 0);
 	END $s$`); err != nil {
@@ -215,7 +215,7 @@ func TestSkyPrimeDebtRefusesASnapshotItCannotKey(t *testing.T) {
 			pool, cleanup := setupMigratedPostgres(ctx, t)
 			defer cleanup()
 			if _, err := pool.Exec(ctx, `
-			WITH p AS (INSERT INTO prime (name, vault_address) VALUES ('orphan', decode($2, 'hex')) RETURNING id)
+			WITH p AS (INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'orphan', decode($2, 'hex')) RETURNING id)
 			INSERT INTO prime_debt (prime_id, protocol_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id)
 			SELECT p.id, `+c.protocolExpr+`, $1, 7, 100, 0, '2026-01-01T00:00:00Z', 0, 0 FROM p`, c.ilk, c.vaultHex); err != nil {
 				t.Fatalf("seed: %v", err)
@@ -248,7 +248,7 @@ func TestSkyPrimeDebtSameKeyEarlierSyncedAtWins(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 	DO $s$ DECLARE pid bigint; vat bigint; BEGIN
 	  SELECT id INTO STRICT vat FROM protocol WHERE chain_id = 1 AND address = '\x35d1b3f3d7966a1dfe207aa4514c12a259a0492b';
-	  INSERT INTO prime (name, vault_address) VALUES ('tie', '\xdddddddddddddddddddddddddddddddddddddddd') RETURNING id INTO pid;
+	  INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'tie', '\xdddddddddddddddddddddddddddddddddddddddd') RETURNING id INTO pid;
 	  INSERT INTO prime_debt (prime_id, protocol_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id) VALUES
 	    (pid, vat, 'TIE-A', 250, 500, 0, '2026-06-01T11:00:00Z', 0, 0),   -- the LATER sync is inserted first, so
 	    (pid, vat, 'TIE-A', 100, 500, 0, '2026-06-01T10:00:00Z', 0, 0);   -- heap order cannot stand in for the ORDER BY
@@ -309,7 +309,7 @@ func TestSkyPrimeDebtBackfillStampsLegacyRowsInCompressedChunks(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `
 	DO $s$ DECLARE pid bigint; BEGIN
-	  INSERT INTO prime (name, vault_address) VALUES ('legacy', '\x1111111111111111111111111111111111111111') RETURNING id INTO pid;
+	  SELECT id INTO STRICT pid FROM prime WHERE name = 'spark';
 	  INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id) VALUES
 	    (pid, 'ILK-L', 10, 100, 0, '2026-01-01T00:00:00Z', 0, 0),
 	    (pid, 'ILK-L', 20, 200, 0, '2026-01-02T00:00:00Z', 0, 0),
@@ -396,7 +396,7 @@ func TestSkyStampsLegacyRowsWithoutDecompressing(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `
 	DO $s$ DECLARE pid bigint; BEGIN
-	  INSERT INTO prime (name, vault_address) VALUES ('legacy', '\x1111111111111111111111111111111111111111') RETURNING id INTO pid;
+	  SELECT id INTO STRICT pid FROM prime WHERE name = 'spark';
 	  INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id)
 	  SELECT pid, 'ILK-L', 10 + g, 100 + g, 0, TIMESTAMPTZ '2026-01-01' + (g * interval '1 day'), 0, 0
 	  FROM generate_series(0, 11) g;
