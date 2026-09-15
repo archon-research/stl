@@ -69,7 +69,7 @@ def test_list_prime_exposure_returns_aggregated_buckets():
         app.dependency_overrides.pop(exposure._get_service, None)
 
 
-def test_list_prime_exposure_sets_public_cache_control_on_pinned_window():
+def test_list_prime_exposure_sets_private_cache_control_on_a_settled_pinned_window():
     from app.api.v1 import exposure
 
     service = _make_service(buckets=[])
@@ -86,7 +86,7 @@ def test_list_prime_exposure_sets_public_cache_control_on_pinned_window():
         )
 
         assert response.status_code == 200
-        assert response.headers["cache-control"] == "public, max-age=300"
+        assert response.headers["cache-control"] == "private, max-age=300"
     finally:
         app.dependency_overrides.pop(exposure._get_service, None)
 
