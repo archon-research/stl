@@ -63,7 +63,7 @@ from decimal import Decimal
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import TextClause, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.adapters.postgres.core_model_orderbook_reader import BTC_GROUP, ETH_GROUP
@@ -95,14 +95,24 @@ _ORACLE_ID = text("""
     LIMIT 1
 """)
 
+
 # A feed that wrote nothing at all in the window is the dead-indexer case; a
 # single token's old row is not (rows are written only when a price changes).
-_FEED_ALIVE = text("""
-    SELECT 1
-    FROM onchain_token_price
-    WHERE oracle_id = :oracle_id AND "timestamp" > now() - CAST(:max_age AS interval)
-    LIMIT 1
-""")
+#
+# The window is interpolated as a SQL literal, never bound: `now() - $n` is not
+# constified, so a bound interval planned every chunk of onchain_token_price
+# (21.8 MB / 754 ms on staging, VEC-672) while the literal excludes all but the
+# window's chunks at plan time (100 kB / 0.4 ms). The value is config, an int of
+# seconds, never user input.
+def _feed_alive_sql(max_age: timedelta) -> TextClause:
+    seconds = max(int(max_age.total_seconds()), 0)
+    return text(f"""
+        SELECT 1
+        FROM onchain_token_price
+        WHERE oracle_id = :oracle_id AND "timestamp" > now() - interval '{seconds} seconds'
+        LIMIT 1
+    """)
+
 
 # Newest state per (user, token) per side from the trigger-fed *_current caches,
 # not DISTINCT ON over the histories: those hypertables tier chunks older than a
@@ -801,6 +811,7 @@ class PostgresPositionsReader:
         self._engine = engine
         self._chain_id = chain_id
         self._max_feed_age = max_feed_age
+        self._feed_alive = _feed_alive_sql(max_feed_age)
 
     async def _live_oracle_id(self, conn: AsyncConnection, protocol_key: str) -> int:
         """Id of the protocol's valuation oracle, refusing a binding that is missing or a feed that is silent."""
@@ -812,7 +823,7 @@ class PostgresPositionsReader:
                 f"oracle {oracle_name!r} is not bound to protocol {protocol_name!r} on chain {self._chain_id} "
                 "in protocol_oracle; refusing to value positions with an unregistered oracle"
             )
-        alive = await conn.execute(_FEED_ALIVE, {"oracle_id": oracle_id, "max_age": self._max_feed_age})
+        alive = await conn.execute(self._feed_alive, {"oracle_id": oracle_id})
         if alive.scalar_one_or_none() is None:
             raise ValueError(
                 f"oracle feed {oracle_name!r} wrote no price in the last {self._max_feed_age}; "

@@ -46,6 +46,9 @@ const (
 	uniswapV4RepoXChainMgrChainID    = 490020
 	uniswapV4RepoXChainMgrDonorChID  = 490021
 	uniswapV4RepoXChainMgrVerChainID = 490022
+	uniswapV4RepoNoPosmChainID       = 490023
+	uniswapV4RepoPosmVerChainID      = 490024
+	uniswapV4RepoXChainPosmChainID   = 490025
 )
 
 const (
@@ -124,14 +127,20 @@ type uniswapV4RepoManagerFixture struct {
 	stateView       common.Address
 	deployBlock     int64
 	buildID         int
+	// The zero address seeds no uniswap_v4_position_manager row at all, which is
+	// the missing-registry defect.
+	positionManager common.Address
+	// posmProtocolChainID is the posm protocol row's chain; 0 means chainID.
+	posmProtocolChainID int
 }
 
 func newUniswapV4RepoManagerFixture(chainID int) uniswapV4RepoManagerFixture {
 	return uniswapV4RepoManagerFixture{
-		chainID:     chainID,
-		manager:     common.HexToAddress("0x00000000000000000000000000000000000044c5"),
-		stateView:   common.HexToAddress("0x0000000000000000000000000000000000007ffe"),
-		deployBlock: 1,
+		chainID:         chainID,
+		manager:         common.HexToAddress("0x00000000000000000000000000000000000044c5"),
+		stateView:       common.HexToAddress("0x0000000000000000000000000000000000007ffe"),
+		deployBlock:     1,
+		positionManager: common.HexToAddress("0x00000000000000000000000000000000000bd216"),
 	}
 }
 
@@ -168,6 +177,54 @@ func seedUniswapV4RepoPoolManager(t *testing.T, ctx context.Context, f uniswapV4
 	); err != nil {
 		t.Fatalf("seed pool manager on chain %d: %v", f.chainID, err)
 	}
+
+	seedUniswapV4RepoPositionManager(t, ctx, f)
+}
+
+func seedUniswapV4RepoPositionManager(t *testing.T, ctx context.Context, f uniswapV4RepoManagerFixture) {
+	t.Helper()
+	if f.positionManager == (common.Address{}) {
+		return
+	}
+	protocolChainID := f.posmProtocolChainID
+	if protocolChainID == 0 {
+		protocolChainID = f.chainID
+	}
+	seedUniswapV4RepoChain(t, ctx, protocolChainID)
+	if _, err := uniswapV4TestPool.Exec(ctx,
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, metadata)
+		 VALUES ($1, $2, 'UniswapV4PositionManager', 'dex', $3, '{"role":"position_manager"}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO NOTHING`,
+		protocolChainID, f.positionManager.Bytes(), f.deployBlock,
+	); err != nil {
+		t.Fatalf("seed posm protocol on chain %d: %v", protocolChainID, err)
+	}
+	var protocolID int64
+	if err := uniswapV4TestPool.QueryRow(ctx,
+		`SELECT id FROM protocol WHERE chain_id = $1 AND address = $2`,
+		protocolChainID, f.positionManager.Bytes(),
+	).Scan(&protocolID); err != nil {
+		t.Fatalf("read back posm protocol on chain %d: %v", protocolChainID, err)
+	}
+	if _, err := uniswapV4TestPool.Exec(ctx,
+		`INSERT INTO uniswap_v4_position_manager (chain_id, protocol_id, deploy_block, build_id)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (chain_id, processing_version) DO NOTHING`,
+		f.chainID, protocolID, f.deployBlock, f.buildID,
+	); err != nil {
+		t.Fatalf("seed position manager on chain %d: %v", f.chainID, err)
+	}
+}
+
+func currentUniswapV4RepoPositionManagerID(t *testing.T, ctx context.Context, chainID int) int64 {
+	t.Helper()
+	var id int64
+	if err := uniswapV4TestPool.QueryRow(ctx,
+		`SELECT id FROM uniswap_v4_position_manager WHERE chain_id = $1
+		 ORDER BY processing_version DESC LIMIT 1`, chainID).Scan(&id); err != nil {
+		t.Fatalf("reading current uniswap_v4_position_manager on chain %d: %v", chainID, err)
+	}
+	return id
 }
 
 type uniswapV4RepoPoolFixture struct {
@@ -787,7 +844,7 @@ func TestUniswapV4Repository_SaveBlock_IdenticalReplayInsertsNothing(t *testing.
 		t.Errorf("replay = %+v, want {Attempted:1 Persisted:0} (ON CONFLICT DO NOTHING appends nothing, but the block still tried)", got)
 	}
 
-	for _, table := range uniswapV4BatchedFactTables {
+	for _, table := range uniswapV4FactTablesWithPositions {
 		t.Run(table, func(t *testing.T) {
 			if got := uniswapV4RowCount(t, ctx, table, poolID, blockNumber); got != 1 {
 				t.Errorf("%s row count = %d, want 1 (a replay must not duplicate)", table, got)
@@ -796,13 +853,18 @@ func TestUniswapV4Repository_SaveBlock_IdenticalReplayInsertsNothing(t *testing.
 	}
 }
 
-// Ticks are absent: they go through the append-on-change writer, not the batch.
+// uniswapV4BatchedFactTables are the pool-keyed tables SaveBlock persists
+// through its pgx.Batch; ticks go through the append-on-change writer, and the
+// NFT transfers hang off uniswap_v4_position_manager instead of a pool.
 var uniswapV4BatchedFactTables = []string{
 	"uniswap_v4_pool_state",
 	"uniswap_v4_swap",
 	"uniswap_v4_liquidity_event",
 	"uniswap_v4_pool_event",
 }
+
+// uniswapV4FactTablesWithPositions is every table one SaveBlock writes a row to.
+var uniswapV4FactTablesWithPositions = append(slices.Clone(uniswapV4BatchedFactTables), "uniswap_v4_position")
 
 func uniswapV4RowCount(t *testing.T, ctx context.Context, table string, poolID int64, blockNumber int64) int {
 	t.Helper()
@@ -831,7 +893,7 @@ func TestUniswapV4Repository_SaveBlock_ReorgVersionAppendsAtProcessingVersionZer
 		})
 	}
 
-	for _, table := range uniswapV4BatchedFactTables {
+	for _, table := range uniswapV4FactTablesWithPositions {
 		t.Run(table, func(t *testing.T) {
 			got := uniswapV4RowVersions(t, ctx, table, poolID, blockNumber)
 			want := [][2]int{{0, 0}, {1, 0}}
@@ -894,6 +956,13 @@ func TestUniswapV4Repository_SaveBlock_NewBuildBumpsProcessingVersion(t *testing
 			}
 		})
 	}
+	t.Run("uniswap_v4_position", func(t *testing.T) {
+		got := uniswapV4RowBuilds(t, ctx, "uniswap_v4_position", poolID, blockNumber)
+		want := [][2]int{{0, int(testUniswapV4BuildID)}}
+		if !slices.Equal(got, want) {
+			t.Errorf("(processing_version, build_id) = %v, want %v (append-on-change: identical values under a rebuild are not a change)", got, want)
+		}
+	})
 }
 
 // Once a chunk is columnstored, TimescaleDB resolves ON CONFLICT before row triggers
@@ -993,13 +1062,13 @@ func TestUniswapV4Repository_SaveBlock_NamesTheRejectedRowsBatchSection(t *testi
 	for _, tc := range []struct {
 		name          string
 		discriminator byte
-		reject        func(outbound.UniswapV4BlockWrites)
+		reject        func(w *outbound.UniswapV4BlockWrites, managerID int64)
 		wantNamed     string
 	}{
 		{
 			name:          "liquidity_event",
 			discriminator: 0x1c,
-			reject: func(w outbound.UniswapV4BlockWrites) {
+			reject: func(w *outbound.UniswapV4BlockWrites, _ int64) {
 				w.LiquidityEvents[0].TickUpper = w.LiquidityEvents[0].TickLower
 			},
 			wantNamed: "batch liquidity event 0",
@@ -1007,17 +1076,29 @@ func TestUniswapV4Repository_SaveBlock_NamesTheRejectedRowsBatchSection(t *testi
 		{
 			name:          "pool_event",
 			discriminator: 0x1d,
-			// SaveBlock never calls Validate, so the event_name CHECK rejects this.
-			reject: func(w outbound.UniswapV4BlockWrites) {
+			// SaveBlock never calls Validate, so an unknown name is the
+			// event_name CHECK's to reject.
+			reject: func(w *outbound.UniswapV4BlockWrites, _ int64) {
 				w.PoolEvents[0].EventName = entity.UniswapV4PoolEventName("bogus")
 			},
 			wantNamed: "batch pool event 0",
+		},
+		{
+			name:          "nft_transfer",
+			discriminator: 0x1e,
+			reject: func(w *outbound.UniswapV4BlockWrites, managerID int64) {
+				w.NFTTransfers = []*entity.UniswapV4PositionNFTTransfer{
+					newUniswapV4RepoNFTTransfer(managerID, 21800050, 0, 8, -1,
+						uniswapV4MoveFixtureFrom, uniswapV4MoveFixtureTo),
+				}
+			},
+			wantNamed: "batch nft transfer 0",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			poolID := seedUniswapV4RepoTestPool(t, ctx, tc.discriminator)
 			writes := newUniswapV4TestBlockWrites(t, poolID, 21800050, 0)
-			tc.reject(writes)
+			tc.reject(&writes, currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID))
 
 			repo := newUniswapV4Repo(t)
 			withUniswapV4RollbackTx(t, ctx, func(tx pgx.Tx) {
@@ -1397,6 +1478,541 @@ func TestUniswapV4Repository_TicksForPoolAtBlock_UnknownBlockIsEmpty(t *testing.
 	}
 	if len(got) != 0 {
 		t.Errorf("ticks = %v, want none: the pool's tick at block %d must not answer for block %d", got, writtenBlock, writtenBlock+1)
+	}
+}
+
+type uniswapV4PositionFixture struct {
+	t      *testing.T
+	ctx    context.Context
+	repo   *UniswapV4Repository
+	poolID int64
+}
+
+func newUniswapV4PositionFixture(t *testing.T, ctx context.Context, discriminator byte) uniswapV4PositionFixture {
+	t.Helper()
+	return uniswapV4PositionFixture{
+		t:      t,
+		ctx:    ctx,
+		repo:   newUniswapV4Repo(t),
+		poolID: seedUniswapV4RepoTestPool(t, ctx, discriminator),
+	}
+}
+
+func (f uniswapV4PositionFixture) save(positions ...*entity.UniswapV4Position) {
+	f.t.Helper()
+	withUniswapV4Tx(f.t, f.ctx, func(tx pgx.Tx) {
+		if _, err := f.repo.SaveBlock(f.ctx, tx, outbound.UniswapV4BlockWrites{Positions: positions}); err != nil {
+			f.t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+}
+
+func (f uniswapV4PositionFixture) rowCount(key entity.UniswapV4PositionKey) int {
+	f.t.Helper()
+	var count int
+	if err := uniswapV4TestPool.QueryRow(f.ctx,
+		`SELECT count(*) FROM uniswap_v4_position
+		 WHERE pool_id=$1 AND owner=$2 AND tick_lower=$3 AND tick_upper=$4 AND salt=$5`,
+		f.poolID, key.Owner.Bytes(), key.TickLower, key.TickUpper, key.Salt.Bytes(),
+	).Scan(&count); err != nil {
+		f.t.Fatalf("count positions for %+v: %v", key, err)
+	}
+	return count
+}
+
+// rowCountIn reads through tx: asserted before a rollback, the count reflects
+// what SaveBlock did rather than what the rollback undid.
+func (f uniswapV4PositionFixture) rowCountIn(tx pgx.Tx, key entity.UniswapV4PositionKey) int {
+	f.t.Helper()
+	var count int
+	if err := tx.QueryRow(f.ctx,
+		`SELECT count(*) FROM uniswap_v4_position
+		 WHERE pool_id=$1 AND owner=$2 AND tick_lower=$3 AND tick_upper=$4 AND salt=$5`,
+		f.poolID, key.Owner.Bytes(), key.TickLower, key.TickUpper, key.Salt.Bytes(),
+	).Scan(&count); err != nil {
+		f.t.Fatalf("count positions for %+v in tx: %v", key, err)
+	}
+	return count
+}
+
+func (f uniswapV4PositionFixture) latestValue(key entity.UniswapV4PositionKey, column string) string {
+	f.t.Helper()
+	var value string
+	if err := uniswapV4TestPool.QueryRow(f.ctx, fmt.Sprintf(
+		`SELECT %s::text FROM uniswap_v4_position
+		 WHERE pool_id=$1 AND owner=$2 AND tick_lower=$3 AND tick_upper=$4 AND salt=$5
+		 ORDER BY block_number DESC, block_version DESC, processing_version DESC LIMIT 1`, column),
+		f.poolID, key.Owner.Bytes(), key.TickLower, key.TickUpper, key.Salt.Bytes(),
+	).Scan(&value); err != nil {
+		f.t.Fatalf("query latest %s for %+v: %v", column, key, err)
+	}
+	return value
+}
+
+func (f uniswapV4PositionFixture) position(key entity.UniswapV4PositionKey, blockNumber int64, blockVersion int, values uniswapV4PositionValues) *entity.UniswapV4Position {
+	return newUniswapV4TestPosition(f.poolID, key, blockNumber, blockVersion, values)
+}
+
+func TestUniswapV4Repository_WritePositions_FirstWriteInserts(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4PositionFixture(t, ctx, 0x20)
+	key := defaultUniswapV4PositionKey()
+
+	f.save(f.position(key, 6000, 0, defaultUniswapV4PositionValues()))
+
+	if got := f.rowCount(key); got != 1 {
+		t.Fatalf("row count = %d, want 1", got)
+	}
+}
+
+func TestUniswapV4Repository_WritePositions_UnchangedValuesDoNotAppend(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4PositionFixture(t, ctx, 0x21)
+	key := defaultUniswapV4PositionKey()
+
+	f.save(f.position(key, 6000, 0, defaultUniswapV4PositionValues()))
+	f.save(f.position(key, 6001, 0, defaultUniswapV4PositionValues()))
+
+	if got := f.rowCount(key); got != 1 {
+		t.Fatalf("row count = %d, want 1 (unchanged values must not append)", got)
+	}
+}
+
+func TestUniswapV4Repository_WritePositions_ChangedValueAppends(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		column        string
+		discriminator byte
+		set           func(*uniswapV4PositionValues, *big.Int)
+	}{
+		{"liquidity", 0x22, func(v *uniswapV4PositionValues, n *big.Int) { v.liquidity = n }},
+		{"fee_growth_inside0_last_x128", 0x23, func(v *uniswapV4PositionValues, n *big.Int) { v.feeGrowthInside0LastX128 = n }},
+		{"fee_growth_inside1_last_x128", 0x24, func(v *uniswapV4PositionValues, n *big.Int) { v.feeGrowthInside1LastX128 = n }},
+	} {
+		t.Run(tc.column, func(t *testing.T) {
+			f := newUniswapV4PositionFixture(t, ctx, tc.discriminator)
+			key := defaultUniswapV4PositionKey()
+
+			f.save(f.position(key, 6000, 0, defaultUniswapV4PositionValues()))
+
+			changed := defaultUniswapV4PositionValues()
+			changedValue := big.NewInt(999)
+			tc.set(&changed, changedValue)
+			f.save(f.position(key, 6002, 0, changed))
+
+			if got := f.rowCount(key); got != 2 {
+				t.Fatalf("row count = %d, want 2", got)
+			}
+			if got := f.latestValue(key, tc.column); got != changedValue.String() {
+				t.Errorf("latest %s = %q, want %q", tc.column, got, changedValue)
+			}
+		})
+	}
+}
+
+func TestUniswapV4Repository_WritePositions_PokeMovesOnlyFeeGrowthAndStillAppends(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4PositionFixture(t, ctx, 0x25)
+	key := defaultUniswapV4PositionKey()
+
+	f.save(f.position(key, 6000, 0, defaultUniswapV4PositionValues()))
+
+	poked := defaultUniswapV4PositionValues()
+	poked.feeGrowthInside0LastX128 = big.NewInt(4242)
+	poked.feeGrowthInside1LastX128 = big.NewInt(4343)
+	f.save(f.position(key, 6003, 0, poked))
+
+	if got := f.rowCount(key); got != 2 {
+		t.Fatalf("row count = %d, want 2", got)
+	}
+	if got := f.latestValue(key, "liquidity"); got != "1000" {
+		t.Errorf("latest liquidity = %q, want 1000 (a poke does not move liquidity)", got)
+	}
+}
+
+func TestUniswapV4Repository_WritePositions_OutOfOrderWriteIsNotComparedAgainstANewerRow(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4PositionFixture(t, ctx, 0x33)
+	key := defaultUniswapV4PositionKey()
+
+	f.save(f.position(key, 6600, 0, defaultUniswapV4PositionValues()))
+	f.save(f.position(key, 6599, 0, defaultUniswapV4PositionValues()))
+
+	if got := f.rowCount(key); got != 2 {
+		t.Fatalf("row count = %d, want 2 (the earlier block has no prior row of its own to match)", got)
+	}
+}
+
+func TestUniswapV4Repository_WritePositions_ReorgReobservationAppends(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4PositionFixture(t, ctx, 0x26)
+	key := defaultUniswapV4PositionKey()
+
+	f.save(f.position(key, 6004, 0, defaultUniswapV4PositionValues()))
+	f.save(f.position(key, 6004, 1, defaultUniswapV4PositionValues()))
+
+	if got := f.rowCount(key); got != 2 {
+		t.Fatalf("row count = %d, want 2 (a reorg re-observation appends even with identical values)", got)
+	}
+}
+
+func TestUniswapV4Repository_WritePositions_MixedBatchSkipsOnlyUnchanged(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4PositionFixture(t, ctx, 0x27)
+
+	unchanged := defaultUniswapV4PositionKey()
+	changing := defaultUniswapV4PositionKey()
+	changing.TickUpper = 120
+	fresh := defaultUniswapV4PositionKey()
+	fresh.Salt = common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000009")
+
+	f.save(
+		f.position(unchanged, 6000, 0, defaultUniswapV4PositionValues()),
+		f.position(changing, 6000, 0, defaultUniswapV4PositionValues()),
+	)
+
+	moved := defaultUniswapV4PositionValues()
+	moved.liquidity = big.NewInt(777)
+	f.save(
+		f.position(unchanged, 6001, 0, defaultUniswapV4PositionValues()),
+		f.position(changing, 6001, 0, moved),
+		f.position(fresh, 6001, 0, defaultUniswapV4PositionValues()),
+	)
+
+	for _, tc := range []struct {
+		name string
+		key  entity.UniswapV4PositionKey
+		want int
+	}{
+		{"unchanged", unchanged, 1},
+		{"changed", changing, 2},
+		{"new", fresh, 1},
+	} {
+		if got := f.rowCount(tc.key); got != tc.want {
+			t.Errorf("%s position row count = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestUniswapV4Repository_WritePositions_EveryKeyComponentSeparatesHistories(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name          string
+		discriminator byte
+		vary          func(*entity.UniswapV4PositionKey)
+	}{
+		{"owner", 0x28, func(k *entity.UniswapV4PositionKey) {
+			k.Owner = common.HexToAddress("0x000000000022D473030F116dDEE9F6B43aC78BA3")
+		}},
+		{"tick_lower", 0x29, func(k *entity.UniswapV4PositionKey) { k.TickLower = -120 }},
+		{"tick_upper", 0x2a, func(k *entity.UniswapV4PositionKey) { k.TickUpper = 120 }},
+		{"salt", 0x2b, func(k *entity.UniswapV4PositionKey) {
+			k.Salt = common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000002")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newUniswapV4PositionFixture(t, ctx, tc.discriminator)
+			base := defaultUniswapV4PositionKey()
+			other := base
+			tc.vary(&other)
+
+			f.save(f.position(base, 6005, 0, defaultUniswapV4PositionValues()))
+			f.save(f.position(other, 6005, 0, defaultUniswapV4PositionValues()))
+
+			if got := f.rowCount(base); got != 1 {
+				t.Errorf("base row count = %d, want 1", got)
+			}
+			if got := f.rowCount(other); got != 1 {
+				t.Errorf("varied-%s row count = %d, want 1 (it must not be folded into the base history)", tc.name, got)
+			}
+		})
+	}
+}
+
+func TestUniswapV4Repository_WritePositions_RoundTripsExtremeNumerics(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4PositionFixture(t, ctx, 0x2c)
+	key := defaultUniswapV4PositionKey()
+
+	maxUint256 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+	maxUint128 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
+
+	f.save(f.position(key, 6010, 0, uniswapV4PositionValues{
+		liquidity:                maxUint128,
+		feeGrowthInside0LastX128: maxUint256,
+		feeGrowthInside1LastX128: maxUint256,
+	}))
+
+	if got := f.latestValue(key, "liquidity"); got != maxUint128.String() {
+		t.Errorf("liquidity = %q, want %q", got, maxUint128)
+	}
+	for _, column := range []string{"fee_growth_inside0_last_x128", "fee_growth_inside1_last_x128"} {
+		if got := f.latestValue(key, column); got != maxUint256.String() {
+			t.Errorf("%s = %q, want %q", column, got, maxUint256)
+		}
+	}
+}
+
+func TestUniswapV4Repository_WritePositions_TwoPoolsInOneCall(t *testing.T) {
+	ctx := context.Background()
+	poolA := seedUniswapV4RepoTestPool(t, ctx, 0x2d)
+	poolB := seedUniswapV4RepoTestPool(t, ctx, 0x2e)
+
+	key := defaultUniswapV4PositionKey()
+	repo := newUniswapV4Repo(t)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{Positions: []*entity.UniswapV4Position{
+			newUniswapV4TestPosition(poolB, key, 6100, 0, defaultUniswapV4PositionValues()),
+			newUniswapV4TestPosition(poolA, key, 6100, 0, defaultUniswapV4PositionValues()),
+		}}); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		poolID int64
+	}{
+		{"pool_a", poolA},
+		{"pool_b", poolB},
+	} {
+		var rows int
+		if err := uniswapV4TestPool.QueryRow(ctx,
+			`SELECT count(*) FROM uniswap_v4_position
+			 WHERE pool_id=$1 AND owner=$2 AND tick_lower=$3 AND tick_upper=$4 AND salt=$5`,
+			tc.poolID, key.Owner.Bytes(), key.TickLower, key.TickUpper, key.Salt.Bytes(),
+		).Scan(&rows); err != nil {
+			t.Fatalf("counting %s positions: %v", tc.name, err)
+		}
+		if rows != 1 {
+			t.Errorf("%s position row count = %d, want 1", tc.name, rows)
+		}
+	}
+}
+
+func TestUniswapV4Repository_PositionsForPoolAtBlock_ReturnsDistinctKeysInOrder(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4PositionFixture(t, ctx, 0x2f)
+
+	const targetBlock = int64(6200)
+	lowOwner := defaultUniswapV4PositionKey()
+	lowOwner.Owner = common.HexToAddress("0x000000000022D473030F116dDEE9F6B43aC78BA3")
+	lowTicks := defaultUniswapV4PositionKey()
+	lowTicks.TickLower = -120
+	lowSalt := defaultUniswapV4PositionKey()
+	highSalt := defaultUniswapV4PositionKey()
+	highSalt.Salt = common.HexToHash("0x00000000000000000000000000000000000000000000000000000000000000ff")
+	otherBlock := defaultUniswapV4PositionKey()
+	otherBlock.TickLower = -180
+
+	f.save(
+		f.position(highSalt, targetBlock, 0, defaultUniswapV4PositionValues()),
+		f.position(lowSalt, targetBlock, 0, defaultUniswapV4PositionValues()),
+		f.position(lowTicks, targetBlock, 0, defaultUniswapV4PositionValues()),
+		f.position(lowOwner, targetBlock, 0, defaultUniswapV4PositionValues()),
+	)
+	f.save(f.position(lowSalt, targetBlock, 1, defaultUniswapV4PositionValues()))
+	f.save(f.position(otherBlock, targetBlock+1, 0, defaultUniswapV4PositionValues()))
+
+	got, err := f.repo.PositionsForPoolAtBlock(ctx, uniswapV4RepoSaveChainID, f.poolID, targetBlock)
+	if err != nil {
+		t.Fatalf("PositionsForPoolAtBlock: %v", err)
+	}
+	if want := []entity.UniswapV4PositionKey{lowOwner, lowTicks, lowSalt, highSalt}; !slices.Equal(got, want) {
+		t.Errorf("positions = %+v, want %+v", got, want)
+	}
+	// The port promises Compare order; SQL ORDER BY is what has to deliver it.
+	if !slices.IsSortedFunc(got, entity.UniswapV4PositionKey.Compare) {
+		t.Errorf("positions = %+v, want them sorted by UniswapV4PositionKey.Compare", got)
+	}
+}
+
+func TestUniswapV4Repository_PositionsForPoolAtBlock_UnknownBlockIsEmpty(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4PositionFixture(t, ctx, 0x30)
+
+	got, err := f.repo.PositionsForPoolAtBlock(ctx, uniswapV4RepoSaveChainID, f.poolID, 6300)
+	if err != nil {
+		t.Fatalf("PositionsForPoolAtBlock: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("positions = %+v, want none", got)
+	}
+}
+
+func TestUniswapV4Repository_PositionsForPoolAtBlock_ResolvesSupersededPoolForward(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(uniswapV4RepoSupersededChainID))
+
+	fixture := newUniswapV4RepoPoolFixture(t, ctx, uniswapV4RepoSupersededChainID, 0x3b)
+	supersededID := seedUniswapV4RepoPool(t, ctx, fixture)
+
+	const targetBlock = int64(7150000)
+	key := defaultUniswapV4PositionKey()
+	repo := newUniswapV4Repo(t)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{Positions: []*entity.UniswapV4Position{
+			newUniswapV4TestPosition(supersededID, key, targetBlock, 0, defaultUniswapV4PositionValues()),
+		}}); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+
+	fixture.buildID = 1
+	fixture.deployBlock = 2
+	currentID := seedUniswapV4RepoPool(t, ctx, fixture)
+	if currentID == supersededID {
+		t.Fatalf("the corrected pool reused id %d; the fixture did not append a new version", currentID)
+	}
+
+	got, err := repo.PositionsForPoolAtBlock(ctx, uniswapV4RepoSupersededChainID, currentID, targetBlock)
+	if err != nil {
+		t.Fatalf("PositionsForPoolAtBlock: %v", err)
+	}
+	if want := []entity.UniswapV4PositionKey{key}; !slices.Equal(got, want) {
+		t.Errorf("positions = %+v, want %+v (the superseded %d must resolve forward, or the reorg re-read never names this position)", got, want, supersededID)
+	}
+}
+
+// The trigger's rebuild branch: a newer build reading different values at the
+// same (block, version) appends at processing_version 1 rather than tripping the
+// same-build disagreement assert.
+func TestUniswapV4Repository_WritePositions_NewBuildRewritesChangedValuesAtProcessingVersionOne(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4PositionFixture(t, ctx, 0x3c)
+	key := defaultUniswapV4PositionKey()
+
+	const blockNumber = int64(6900)
+	f.save(f.position(key, blockNumber, 0, defaultUniswapV4PositionValues()))
+
+	rewritten := defaultUniswapV4PositionValues()
+	rewritten.liquidity = big.NewInt(2000)
+	rebuild := NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4RebuildID)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := rebuild.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{Positions: []*entity.UniswapV4Position{
+			f.position(key, blockNumber, 0, rewritten),
+		}}); err != nil {
+			t.Fatalf("SaveBlock under the rebuild: %v", err)
+		}
+	})
+
+	got := uniswapV4RowBuilds(t, ctx, "uniswap_v4_position", f.poolID, blockNumber)
+	want := [][2]int{{0, int(testUniswapV4BuildID)}, {1, int(testUniswapV4RebuildID)}}
+	if !slices.Equal(got, want) {
+		t.Errorf("(processing_version, build_id) = %v, want %v", got, want)
+	}
+}
+
+// A deploy rolled back to build A replays a block that build B had rewritten in
+// between: the PK drops A's re-insert against A's own (N, v0) row, no error.
+func TestUniswapV4Repository_WritePositions_RolledBackBuildReplayingItsOwnRowIsANoOp(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4PositionFixture(t, ctx, 0x3d)
+	key := defaultUniswapV4PositionKey()
+
+	const blockNumber = int64(6950)
+	original := defaultUniswapV4PositionValues()
+	f.save(f.position(key, blockNumber, 0, original))
+
+	rewritten := defaultUniswapV4PositionValues()
+	rewritten.liquidity = big.NewInt(2000)
+	rebuild := NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4RebuildID)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := rebuild.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{Positions: []*entity.UniswapV4Position{
+			f.position(key, blockNumber, 0, rewritten),
+		}}); err != nil {
+			t.Fatalf("SaveBlock under the rebuild: %v", err)
+		}
+	})
+
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := f.repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{Positions: []*entity.UniswapV4Position{
+			f.position(key, blockNumber, 0, original),
+		}}); err != nil {
+			t.Fatalf("build %d replaying its own row after a rollback: %v", testUniswapV4BuildID, err)
+		}
+	})
+	got := uniswapV4RowBuilds(t, ctx, "uniswap_v4_position", f.poolID, blockNumber)
+	want := [][2]int{{0, int(testUniswapV4BuildID)}, {1, int(testUniswapV4RebuildID)}}
+	if !slices.Equal(got, want) {
+		t.Errorf("(processing_version, build_id) = %v, want %v (the replay must neither append nor error)", got, want)
+	}
+
+}
+
+// A re-read of a (block, version) this build already stored is dropped by the
+// PK, first write wins: no dead-lettered block, the same silence the tick writer keeps.
+func TestUniswapV4Repository_WritePositions_ValueDriftAtOneBlockVersionKeepsTheFirstWrite(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4PositionFixture(t, ctx, 0x37)
+	key := defaultUniswapV4PositionKey()
+
+	const blockNumber = int64(6800)
+	f.save(f.position(key, blockNumber, 0, defaultUniswapV4PositionValues()))
+
+	drifted := defaultUniswapV4PositionValues()
+	drifted.liquidity = big.NewInt(999_999)
+	f.save(f.position(key, blockNumber, 0, drifted))
+
+	if got := f.rowCount(key); got != 1 {
+		t.Errorf("row count = %d, want 1 (the drifted re-read must not append)", got)
+	}
+	if got := f.latestValue(key, "liquidity"); got != "1000" {
+		t.Errorf("liquidity = %s, want 1000 (the first write wins)", got)
+	}
+}
+
+func TestUniswapV4Repository_WritePositions_MixedBlockNumbersError(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4PositionFixture(t, ctx, 0x31)
+	key := defaultUniswapV4PositionKey()
+
+	withUniswapV4RollbackTx(t, ctx, func(tx pgx.Tx) {
+		_, err := f.repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{Positions: []*entity.UniswapV4Position{
+			f.position(key, 6400, 0, defaultUniswapV4PositionValues()),
+			f.position(key, 6401, 0, defaultUniswapV4PositionValues()),
+		}})
+		if err == nil {
+			t.Fatal("SaveBlock with positions from two blocks: want error, got nil")
+		}
+		if !strings.Contains(err.Error(), "one SaveBlock is one block") {
+			t.Errorf("error %q does not name the one-block-per-SaveBlock rule", err)
+		}
+	})
+}
+
+func TestUniswapV4Repository_WritePositions_NilNumericWritesNothing(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		column        string
+		discriminator byte
+		nilOut        func(*entity.UniswapV4Position)
+	}{
+		{"liquidity", 0x32, func(p *entity.UniswapV4Position) { p.Liquidity = nil }},
+		{"fee_growth_inside0_last_x128", 0x34, func(p *entity.UniswapV4Position) { p.FeeGrowthInside0LastX128 = nil }},
+		{"fee_growth_inside1_last_x128", 0x35, func(p *entity.UniswapV4Position) { p.FeeGrowthInside1LastX128 = nil }},
+	} {
+		t.Run(tc.column, func(t *testing.T) {
+			f := newUniswapV4PositionFixture(t, ctx, tc.discriminator)
+
+			const blockNumber = int64(6500)
+			broken := f.position(defaultUniswapV4PositionKey(), blockNumber, 0, defaultUniswapV4PositionValues())
+			tc.nilOut(broken)
+
+			withUniswapV4RollbackTx(t, ctx, func(tx pgx.Tx) {
+				if _, err := f.repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
+					Positions: []*entity.UniswapV4Position{broken},
+				}); err == nil {
+					t.Fatalf("SaveBlock with a nil %s: want error, got nil", tc.column)
+				}
+				if got := f.rowCountIn(tx, defaultUniswapV4PositionKey()); got != 0 {
+					t.Errorf("uniswap_v4_position has %d rows after a failed SaveBlock, want 0 (the batch must not run past the conversion error)", got)
+				}
+			})
+		})
 	}
 }
 
@@ -1833,7 +2449,9 @@ func newUniswapV4TestState(poolID int64, blockNumber int64, blockVersion int, ti
 	}
 }
 
-// Two calls differ only in blockVersion, exactly as a reorg re-observation does.
+// newUniswapV4TestBlockWrites builds one validated row per pool-keyed fact table
+// (four batched hypertables, the plain uniswap_v4_position), sharing every key but
+// blockVersion so two calls differ as an original and its reorg re-observation do; NFT transfers are added per case.
 func newUniswapV4TestBlockWrites(t *testing.T, poolID int64, blockNumber int64, blockVersion int) outbound.UniswapV4BlockWrites {
 	t.Helper()
 
@@ -1842,7 +2460,9 @@ func newUniswapV4TestBlockWrites(t *testing.T, poolID int64, blockNumber int64, 
 	liquidityEvent := newUniswapV4TestLiquidityEvent(poolID, blockNumber, blockVersion, 2)
 	poolEvent := newUniswapV4TestPoolEvent(poolID, blockNumber, blockVersion, 3)
 
-	for _, v := range []interface{ Validate() error }{state, swap, liquidityEvent, poolEvent} {
+	position := newUniswapV4TestPosition(poolID, defaultUniswapV4PositionKey(), blockNumber, blockVersion, defaultUniswapV4PositionValues())
+
+	for _, v := range []interface{ Validate() error }{state, swap, liquidityEvent, poolEvent, position} {
 		if err := v.Validate(); err != nil {
 			t.Fatalf("Validate: %v", err)
 		}
@@ -1853,6 +2473,48 @@ func newUniswapV4TestBlockWrites(t *testing.T, poolID int64, blockNumber int64, 
 		Swaps:           []*entity.UniswapV4Swap{swap},
 		LiquidityEvents: []*entity.UniswapV4LiquidityEvent{liquidityEvent},
 		PoolEvents:      []*entity.UniswapV4PoolEvent{poolEvent},
+		Positions:       []*entity.UniswapV4Position{position},
+	}
+}
+
+type uniswapV4PositionValues struct {
+	liquidity                *big.Int
+	feeGrowthInside0LastX128 *big.Int
+	feeGrowthInside1LastX128 *big.Int
+}
+
+// defaultUniswapV4PositionValues are three distinct values, so a case mutating
+// one column cannot pass on another column's value.
+func defaultUniswapV4PositionValues() uniswapV4PositionValues {
+	return uniswapV4PositionValues{
+		liquidity:                big.NewInt(1000),
+		feeGrowthInside0LastX128: big.NewInt(2),
+		feeGrowthInside1LastX128: big.NewInt(3),
+	}
+}
+
+func defaultUniswapV4PositionKey() entity.UniswapV4PositionKey {
+	return entity.UniswapV4PositionKey{
+		Owner:     common.HexToAddress("0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e"),
+		TickLower: -60,
+		TickUpper: 60,
+		Salt:      common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001"),
+	}
+}
+
+func newUniswapV4TestPosition(poolID int64, key entity.UniswapV4PositionKey, blockNumber int64, blockVersion int, values uniswapV4PositionValues) *entity.UniswapV4Position {
+	return &entity.UniswapV4Position{
+		PoolID:                   poolID,
+		Owner:                    key.Owner,
+		TickLower:                key.TickLower,
+		TickUpper:                key.TickUpper,
+		Salt:                     key.Salt,
+		BlockNumber:              blockNumber,
+		BlockVersion:             blockVersion,
+		BlockTimestamp:           time.Unix(1740000000+blockNumber, 0).UTC(),
+		Liquidity:                values.liquidity,
+		FeeGrowthInside0LastX128: values.feeGrowthInside0LastX128,
+		FeeGrowthInside1LastX128: values.feeGrowthInside1LastX128,
 	}
 }
 
@@ -2025,5 +2687,525 @@ func TestUniswapV4Repository_PoolIDsEverSnapshotted_ExcludesOtherChains(t *testi
 	}
 	if len(got) != 0 {
 		t.Errorf("pool ids = %v, want none: pool %d has no rows and %d belongs to another chain", got, homePool, neighbourPool)
+	}
+}
+
+func TestUniswapV4Repository_LoadPools_ReturnsThePositionManager(t *testing.T) {
+	ctx := context.Background()
+	poolID := seedUniswapV4RepoTestPool(t, ctx, 0x51)
+	manager := newUniswapV4RepoManagerFixture(uniswapV4RepoSaveChainID)
+	wantID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	repo := newUniswapV4Repo(t)
+	pools, err := repo.LoadPools(ctx, uniswapV4RepoSaveChainID)
+	if err != nil {
+		t.Fatalf("LoadPools: %v", err)
+	}
+	idx := slices.IndexFunc(pools, func(p outbound.UniswapV4PoolRow) bool { return p.ID == poolID })
+	if idx < 0 {
+		t.Fatalf("pool %d missing from LoadPools result", poolID)
+	}
+	if got := pools[idx].PositionManager; got != manager.positionManager {
+		t.Errorf("PositionManager = %s, want %s", got, manager.positionManager)
+	}
+	if got := pools[idx].PositionManagerID; got != wantID {
+		t.Errorf("PositionManagerID = %d, want %d", got, wantID)
+	}
+}
+
+// A zero PositionManager address would make the decoder match address(0)'s logs,
+// so an absent registry row has to be a named error, not a zero value.
+func TestUniswapV4Repository_LoadPools_RejectsChainWithPoolsButNoPositionManager(t *testing.T) {
+	ctx := context.Background()
+
+	manager := newUniswapV4RepoManagerFixture(uniswapV4RepoNoPosmChainID)
+	manager.positionManager = common.Address{}
+	seedUniswapV4RepoPoolManager(t, ctx, manager)
+	poolID := seedUniswapV4RepoPool(t, ctx,
+		newUniswapV4RepoPoolFixture(t, ctx, uniswapV4RepoNoPosmChainID, 0x52))
+
+	repo := newUniswapV4Repo(t)
+	pools, err := repo.LoadPools(ctx, uniswapV4RepoNoPosmChainID)
+	if err == nil {
+		t.Fatalf("LoadPools on a chain with pool id=%d but no position manager: want error, got %d pools", poolID, len(pools))
+	}
+	if !strings.Contains(err.Error(), "uniswap_v4_position_manager") {
+		t.Errorf("error %q does not name the missing uniswap_v4_position_manager row", err)
+	}
+}
+
+// The posm registry is versioned, so a correction re-points the whole chain.
+func TestUniswapV4Repository_LoadPools_UsesLatestPositionManagerVersion(t *testing.T) {
+	ctx := context.Background()
+
+	manager := newUniswapV4RepoManagerFixture(uniswapV4RepoPosmVerChainID)
+	supersededPosm := manager.positionManager
+	seedUniswapV4RepoPoolManager(t, ctx, manager)
+
+	correctedPosm := common.HexToAddress("0x00000000000000000000000000000000000c0de1")
+	manager.positionManager = correctedPosm
+	manager.buildID = 1
+	seedUniswapV4RepoPoolManager(t, ctx, manager)
+	seedUniswapV4RepoPool(t, ctx, newUniswapV4RepoPoolFixture(t, ctx, uniswapV4RepoPosmVerChainID, 0x53))
+
+	wantID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoPosmVerChainID)
+
+	repo := newUniswapV4Repo(t)
+	pools, err := repo.LoadPools(ctx, uniswapV4RepoPosmVerChainID)
+	if err != nil {
+		t.Fatalf("LoadPools: %v", err)
+	}
+	if len(pools) == 0 {
+		t.Fatal("LoadPools returned no pools")
+	}
+	for _, p := range pools {
+		if p.PositionManager != correctedPosm {
+			t.Errorf("pool %d PositionManager = %s, want %s (the superseded %s must not win)",
+				p.ID, p.PositionManager, correctedPosm, supersededPosm)
+		}
+		if p.PositionManagerID != wantID {
+			t.Errorf("pool %d PositionManagerID = %d, want %d", p.ID, p.PositionManagerID, wantID)
+		}
+	}
+}
+
+// An inner join would skip the newest posm version whose protocol row is on
+// another chain and hand back the previous version's address.
+func TestUniswapV4Repository_LoadPools_RejectsCrossChainPositionManagerProtocol(t *testing.T) {
+	ctx := context.Background()
+
+	manager := newUniswapV4RepoManagerFixture(uniswapV4RepoXChainPosmChainID)
+	manager.posmProtocolChainID = uniswapV4RepoXChainMgrDonorChID
+	seedUniswapV4RepoPoolManager(t, ctx, manager)
+	poolID := seedUniswapV4RepoPool(t, ctx,
+		newUniswapV4RepoPoolFixture(t, ctx, uniswapV4RepoXChainPosmChainID, 0x54))
+
+	repo := newUniswapV4Repo(t)
+	pools, err := repo.LoadPools(ctx, uniswapV4RepoXChainPosmChainID)
+	if err == nil {
+		t.Fatalf("LoadPools with pool id=%d whose position manager protocol row lives on another chain: want error, got %d pools", poolID, len(pools))
+	}
+	if !strings.Contains(err.Error(), "uniswap_v4_position_manager") {
+		t.Errorf("error %q does not name the offending uniswap_v4_position_manager row", err)
+	}
+}
+
+// The two fixtures are verbatim mainnet posm Transfer logs: token 1's mint at
+// block 21695956 (from = address(0)) and token 388720 changing hands at block
+// 25873334.
+var (
+	uniswapV4MintFixtureTx   = common.HexToHash("0x4e63fcc0dd42a2b317e77d17e236cadf77464a08ccece33a354bd8648b5f7419")
+	uniswapV4MintFixtureTo   = common.HexToAddress("0x4423B0D6955aF39B48cf215577a79Ce574299D3f")
+	uniswapV4MoveFixtureTx   = common.HexToHash("0x41904e8dc4f2218019baaf8a7195e264ccd1530f5f56ae0db0027c1f0772c6e4")
+	uniswapV4MoveFixtureFrom = common.HexToAddress("0x3b0a17a75A14EAaEF42002a4891AcF8F9fD8A72E")
+	uniswapV4MoveFixtureTo   = common.HexToAddress("0xe588dDd13a8bDBee578eAa7c4Fd9780180b2f10C")
+)
+
+func newUniswapV4RepoNFTTransfer(managerID, blockNumber int64, blockVersion, logIndex int, tokenID int64, from, to common.Address) *entity.UniswapV4PositionNFTTransfer {
+	return &entity.UniswapV4PositionNFTTransfer{
+		PositionManagerID: managerID,
+		TokenID:           big.NewInt(tokenID),
+		BlockNumber:       blockNumber,
+		BlockVersion:      blockVersion,
+		BlockTimestamp:    time.Unix(1740000000, 0).UTC(),
+		TxHash:            uniswapV4MoveFixtureTx,
+		LogIndex:          logIndex,
+		From:              from,
+		To:                to,
+	}
+}
+
+// uniswapV4HolderAtBlockSQL is the holder-at-block query the table's COMMENT and
+// the runbook publish. One copy, so the answer tests read and the plan the index
+// test pins cannot drift from each other or from the documented ordering.
+//
+// It keys on the chain and joins every uniswap_v4_position_manager version, not
+// one surrogate id: a registry correction starts a new id and the transfers
+// written before it keep the old one.
+const uniswapV4HolderAtBlockSQL = `
+	SELECT t.to_address
+	FROM uniswap_v4_position_nft_transfer t
+	JOIN uniswap_v4_position_manager m
+	  ON m.id = t.position_manager_id AND m.chain_id = $1
+	WHERE t.token_id = $2 AND t.block_number <= $3
+	  AND NOT EXISTS (
+	      SELECT 1 FROM block_states b
+	      WHERE b.chain_id = $1 AND b.number = t.block_number
+	        AND b.version = t.block_version AND b.is_orphaned)
+	ORDER BY t.block_number DESC, t.block_version DESC, t.log_index DESC, t.processing_version DESC
+	LIMIT 1`
+
+func holderOfUniswapV4Token(t *testing.T, ctx context.Context, chainID int, tokenID int64, atBlock int64) common.Address {
+	t.Helper()
+	var to []byte
+	if err := uniswapV4TestPool.QueryRow(ctx, uniswapV4HolderAtBlockSQL,
+		chainID, tokenID, atBlock).Scan(&to); err != nil {
+		t.Fatalf("reading holder of token %d at block %d: %v", tokenID, atBlock, err)
+	}
+	return common.BytesToAddress(to)
+}
+
+func TestUniswapV4Repository_SaveBlock_RoundTripsNFTTransfers(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x55)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	mint := &entity.UniswapV4PositionNFTTransfer{
+		PositionManagerID: managerID,
+		TokenID:           big.NewInt(1),
+		BlockNumber:       21695956,
+		BlockTimestamp:    time.Unix(1737790055, 0).UTC(),
+		TxHash:            uniswapV4MintFixtureTx,
+		LogIndex:          67,
+		From:              common.Address{},
+		To:                uniswapV4MintFixtureTo,
+	}
+	move := &entity.UniswapV4PositionNFTTransfer{
+		PositionManagerID: managerID,
+		TokenID:           big.NewInt(388720),
+		BlockNumber:       25873334,
+		BlockTimestamp:    time.Unix(1787000000, 0).UTC(),
+		TxHash:            uniswapV4MoveFixtureTx,
+		LogIndex:          1219,
+		From:              uniswapV4MoveFixtureFrom,
+		To:                uniswapV4MoveFixtureTo,
+	}
+	for _, v := range []*entity.UniswapV4PositionNFTTransfer{mint, move} {
+		if err := v.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+	}
+
+	repo := newUniswapV4Repo(t)
+	writes := outbound.UniswapV4BlockWrites{NFTTransfers: []*entity.UniswapV4PositionNFTTransfer{mint, move}}
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		counts, err := repo.SaveBlock(ctx, tx, writes)
+		if err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+		if counts.NFTTransfersPersisted != 2 {
+			t.Errorf("NFTTransfersPersisted = %d, want 2", counts.NFTTransfersPersisted)
+		}
+	})
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		counts, err := repo.SaveBlock(ctx, tx, writes)
+		if err != nil {
+			t.Fatalf("SaveBlock replay: %v", err)
+		}
+		if counts.NFTTransfersPersisted != 0 {
+			t.Errorf("NFTTransfersPersisted on an identical replay = %d, want 0: the metric must count rows that landed", counts.NFTTransfersPersisted)
+		}
+	})
+
+	for _, want := range []*entity.UniswapV4PositionNFTTransfer{mint, move} {
+		t.Run(want.TokenID.String(), func(t *testing.T) {
+			var (
+				tokenID              string
+				txHash, from, to     []byte
+				gotLogIndex, buildID int
+				gotTimestamp         time.Time
+			)
+			if err := uniswapV4TestPool.QueryRow(ctx, `
+				SELECT token_id::text, tx_hash, log_index, from_address, to_address,
+				       block_timestamp, build_id
+				FROM uniswap_v4_position_nft_transfer
+				WHERE position_manager_id = $1 AND block_number = $2`,
+				managerID, want.BlockNumber,
+			).Scan(&tokenID, &txHash, &gotLogIndex, &from, &to, &gotTimestamp, &buildID); err != nil {
+				t.Fatalf("read back transfer: %v", err)
+			}
+			if tokenID != want.TokenID.String() {
+				t.Errorf("token_id = %q, want %q", tokenID, want.TokenID)
+			}
+			if got := common.BytesToHash(txHash); got != want.TxHash {
+				t.Errorf("tx_hash = %s, want %s", got, want.TxHash)
+			}
+			if gotLogIndex != want.LogIndex {
+				t.Errorf("log_index = %d, want %d", gotLogIndex, want.LogIndex)
+			}
+			if got := common.BytesToAddress(from); got != want.From {
+				t.Errorf("from_address = %s, want %s", got, want.From)
+			}
+			if got := common.BytesToAddress(to); got != want.To {
+				t.Errorf("to_address = %s, want %s", got, want.To)
+			}
+			if !gotTimestamp.UTC().Equal(want.BlockTimestamp) {
+				t.Errorf("block_timestamp = %s, want %s", gotTimestamp.UTC(), want.BlockTimestamp)
+			}
+			if buildID != int(testUniswapV4BuildID) {
+				t.Errorf("build_id = %d, want %d", buildID, testUniswapV4BuildID)
+			}
+		})
+	}
+}
+
+// The table has no state to re-read, so the whole correction is the appended
+// (N, v1) row set.
+func TestUniswapV4Repository_SaveBlock_NewBuildAppendsANFTTransferCorrection(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x57)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	const blockNumber = int64(25001000)
+	transfer := &entity.UniswapV4PositionNFTTransfer{
+		PositionManagerID: managerID,
+		TokenID:           big.NewInt(4242),
+		BlockNumber:       blockNumber,
+		BlockTimestamp:    uniswapV4TestBlockTime(blockNumber),
+		TxHash:            uniswapV4MintFixtureTx,
+		LogIndex:          9,
+		From:              common.Address{},
+		To:                uniswapV4MintFixtureTo,
+	}
+	if err := transfer.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	writes := outbound.UniswapV4BlockWrites{NFTTransfers: []*entity.UniswapV4PositionNFTTransfer{transfer}}
+
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4BuildID).SaveBlock(ctx, tx, writes); err != nil {
+			t.Fatalf("SaveBlock at build %d: %v", testUniswapV4BuildID, err)
+		}
+	})
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4RebuildID).SaveBlock(ctx, tx, writes); err != nil {
+			t.Fatalf("SaveBlock at build %d: %v", testUniswapV4RebuildID, err)
+		}
+	})
+
+	rows, err := uniswapV4TestPool.Query(ctx, `
+		SELECT processing_version, build_id FROM uniswap_v4_position_nft_transfer
+		WHERE position_manager_id = $1 AND block_number = $2 ORDER BY processing_version`, managerID, blockNumber)
+	if err != nil {
+		t.Fatalf("read back versions: %v", err)
+	}
+	defer rows.Close()
+	var got [][2]int
+	for rows.Next() {
+		var pv, build int
+		if err := rows.Scan(&pv, &build); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got = append(got, [2]int{pv, build})
+	}
+	want := [][2]int{{0, int(testUniswapV4BuildID)}, {1, int(testUniswapV4RebuildID)}}
+	if !slices.Equal(got, want) {
+		t.Errorf("(processing_version, build_id) = %v, want %v (the rebuild's correction row was not appended)", got, want)
+	}
+}
+
+func TestUniswapV4Repository_SaveBlock_ReorgAppendsASecondNFTTransferRowSet(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x56)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	const blockNumber = int64(21800100)
+	orphaned := newUniswapV4RepoNFTTransfer(managerID, blockNumber, 0, 7, 4242,
+		uniswapV4MoveFixtureFrom, uniswapV4MintFixtureTo)
+	canonical := newUniswapV4RepoNFTTransfer(managerID, blockNumber, 1, 7, 4242,
+		uniswapV4MoveFixtureFrom, uniswapV4MoveFixtureTo)
+
+	repo := newUniswapV4Repo(t)
+	for _, transfer := range []*entity.UniswapV4PositionNFTTransfer{orphaned, canonical} {
+		withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+			if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
+				NFTTransfers: []*entity.UniswapV4PositionNFTTransfer{transfer},
+			}); err != nil {
+				t.Fatalf("SaveBlock at block_version %d: %v", transfer.BlockVersion, err)
+			}
+		})
+	}
+
+	var rows int
+	if err := uniswapV4TestPool.QueryRow(ctx,
+		`SELECT count(*) FROM uniswap_v4_position_nft_transfer
+		 WHERE position_manager_id = $1 AND block_number = $2`,
+		managerID, blockNumber).Scan(&rows); err != nil {
+		t.Fatalf("counting transfer versions: %v", err)
+	}
+	if rows != 2 {
+		t.Errorf("rows at block %d = %d, want 2 (the orphaned fork's row is superseded, never replaced)", blockNumber, rows)
+	}
+	if got := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, 4242, blockNumber); got != canonical.To {
+		t.Errorf("holder at block %d = %s, want %s (block_version DESC must pick the reorg re-observation)", blockNumber, got, canonical.To)
+	}
+}
+
+// A token can change hands twice in one block, so log_index is part of both the
+// key and the holder ordering: without it the earlier log wins.
+func TestUniswapV4Repository_NFTTransferHolderAtBlockPicksTheLastLogInTheBlock(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x57)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	// The real mainnet pair on token 113383 at block 25873296: log 4325 moves it
+	// out, log 4363 moves it straight back.
+	const (
+		blockNumber = int64(25873296)
+		tokenID     = int64(113383)
+	)
+	owner := common.HexToAddress("0x66BF88E42A01EFF49A9f22Cae6E46bb2412916cD")
+	custodian := common.HexToAddress("0x542298e710b32b49883577883B75B39eF18883ce")
+
+	repo := newUniswapV4Repo(t)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
+			NFTTransfers: []*entity.UniswapV4PositionNFTTransfer{
+				newUniswapV4RepoNFTTransfer(managerID, blockNumber, 0, 4325, tokenID, owner, custodian),
+				newUniswapV4RepoNFTTransfer(managerID, blockNumber, 0, 4363, tokenID, custodian, owner),
+			},
+		}); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+
+	if got := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, tokenID, blockNumber); got != owner {
+		t.Errorf("holder at block %d = %s, want %s (log_index DESC must pick log 4363, not 4325)", blockNumber, got, owner)
+	}
+}
+
+// The re-observed fork carries a different transfer set, so the log index moves
+// too: block_version has to outrank log_index or the orphaned log answers.
+func TestUniswapV4Repository_NFTTransferHolderAtBlockPrefersTheNewerBlockVersion(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x58)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	const (
+		blockNumber = int64(21800120)
+		tokenID     = int64(4243)
+	)
+	orphaned := newUniswapV4RepoNFTTransfer(managerID, blockNumber, 0, 900, tokenID,
+		uniswapV4MoveFixtureFrom, uniswapV4MintFixtureTo)
+	canonical := newUniswapV4RepoNFTTransfer(managerID, blockNumber, 1, 12, tokenID,
+		uniswapV4MoveFixtureFrom, uniswapV4MoveFixtureTo)
+
+	repo := newUniswapV4Repo(t)
+	for _, transfer := range []*entity.UniswapV4PositionNFTTransfer{orphaned, canonical} {
+		withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+			if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
+				NFTTransfers: []*entity.UniswapV4PositionNFTTransfer{transfer},
+			}); err != nil {
+				t.Fatalf("SaveBlock at block_version %d: %v", transfer.BlockVersion, err)
+			}
+		})
+	}
+
+	if got := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, tokenID, blockNumber); got != canonical.To {
+		t.Errorf("holder at block %d = %s, want %s (block_version %d at log %d must beat the orphaned fork's log %d)",
+			blockNumber, got, canonical.To, canonical.BlockVersion, canonical.LogIndex, orphaned.LogIndex)
+	}
+}
+
+// Nothing re-reads chain state, so a transfer decoded on a fork the watcher
+// later orphaned is superseded only if the canonical block re-emits one for
+// that token; when it does not, only the block_states exclusion keeps the
+// orphaned row from answering.
+func TestUniswapV4Repository_NFTTransferHolderAtBlockSkipsAnOrphanedVersion(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x5a)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	const (
+		blockNumber = int64(21800140)
+		tokenID     = int64(4244)
+	)
+	earlier := newUniswapV4RepoNFTTransfer(managerID, blockNumber-10, 0, 3, tokenID,
+		uniswapV4MoveFixtureFrom, uniswapV4MoveFixtureTo)
+	orphaned := newUniswapV4RepoNFTTransfer(managerID, blockNumber, 0, 9, tokenID,
+		uniswapV4MoveFixtureTo, uniswapV4MintFixtureTo)
+
+	repo := newUniswapV4Repo(t)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
+			NFTTransfers: []*entity.UniswapV4PositionNFTTransfer{earlier, orphaned},
+		}); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+	// The watcher's record of the reorg: version 0 orphaned, the canonical
+	// version 1 carrying no transfer of this token. assign_block_version numbers
+	// them in insertion order.
+	for _, b := range []struct {
+		hash     string
+		orphaned bool
+	}{{"0xorphan-21800140", true}, {"0xcanon-21800140", false}} {
+		if _, err := uniswapV4TestPool.Exec(ctx, `
+			INSERT INTO block_states (chain_id, number, hash, parent_hash, received_at, is_orphaned, created_at)
+			VALUES ($1, $2, $3, '0xparent', 0, $4, now())`,
+			uniswapV4RepoSaveChainID, blockNumber, b.hash, b.orphaned); err != nil {
+			t.Fatalf("seeding block_states %s: %v", b.hash, err)
+		}
+	}
+
+	if got := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, tokenID, blockNumber); got != earlier.To {
+		t.Errorf("holder at block %d = %s, want %s: the transfer at the orphaned version 0 must not answer", blockNumber, got, earlier.To)
+	}
+}
+
+// SaveBlock never calls Validate, so a nil token id reaches the NUMERIC
+// conversion and has to name the column, not surface as a bare NOT NULL error.
+func TestUniswapV4Repository_SaveBlock_RejectsANilNFTTransferTokenID(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x59)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	transfer := newUniswapV4RepoNFTTransfer(managerID, 21800130, 0, 3, 1,
+		uniswapV4MoveFixtureFrom, uniswapV4MoveFixtureTo)
+	transfer.TokenID = nil
+
+	repo := newUniswapV4Repo(t)
+	withUniswapV4RollbackTx(t, ctx, func(tx pgx.Tx) {
+		_, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
+			NFTTransfers: []*entity.UniswapV4PositionNFTTransfer{transfer},
+		})
+		if err == nil {
+			t.Fatal("SaveBlock with a nil token id: want error, got nil")
+		}
+		if !strings.Contains(err.Error(), "token_id") {
+			t.Errorf("error %q does not name token_id", err)
+		}
+	})
+}
+
+// A posm registry correction appends a version with a new surrogate id, and the
+// transfers written before it keep pointing at the old one. Keying the holder
+// read on the current id alone would answer "no holder" for every token whose
+// last move predates the correction, which is what the id column's COMMENT
+// warns against.
+func TestUniswapV4Repository_NFTTransferHolderSurvivesAPositionManagerCorrection(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x58)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	const blockNumber = int64(25002000)
+	const tokenID = int64(4343)
+	transfer := newUniswapV4RepoNFTTransfer(managerID, blockNumber, 0, 11, tokenID,
+		common.Address{}, uniswapV4MintFixtureTo)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4BuildID).SaveBlock(ctx, tx,
+			outbound.UniswapV4BlockWrites{NFTTransfers: []*entity.UniswapV4PositionNFTTransfer{transfer}}); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+
+	var correctedID int64
+	if err := uniswapV4TestPool.QueryRow(ctx, `
+		INSERT INTO uniswap_v4_position_manager (chain_id, protocol_id, deploy_block, build_id)
+		SELECT chain_id, protocol_id, deploy_block, build_id + 1
+		FROM uniswap_v4_position_manager
+		WHERE chain_id = $1
+		ORDER BY processing_version DESC
+		LIMIT 1
+		RETURNING id`, uniswapV4RepoSaveChainID).Scan(&correctedID); err != nil {
+		t.Fatalf("appending a corrected position manager version: %v", err)
+	}
+	if correctedID == managerID {
+		t.Fatalf("the correction reused surrogate id %d, so this test proves nothing", correctedID)
+	}
+
+	if got := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, tokenID, blockNumber); got != uniswapV4MintFixtureTo {
+		t.Errorf("holder after a registry correction = %s, want %s: the read is keyed on one surrogate id instead of the chain",
+			got, uniswapV4MintFixtureTo)
 	}
 }

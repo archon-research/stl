@@ -1,6 +1,8 @@
 package entity
 
 import (
+	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -29,6 +31,10 @@ func validatePoolBlockKey(poolID, blockNumber int64, blockVersion int, blockTime
 	if poolID <= 0 {
 		return fmt.Errorf("poolID must be positive, got %d", poolID)
 	}
+	return validateV4BlockKey(blockNumber, blockVersion, blockTimestamp)
+}
+
+func validateV4BlockKey(blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
 	if blockNumber <= 0 {
 		return fmt.Errorf("blockNumber must be positive, got %d", blockNumber)
 	}
@@ -284,6 +290,82 @@ func (t *UniswapV4Tick) Validate() error {
 	return requireBigInt("feeGrowthOutside1X128", t.FeeGrowthOutside1X128)
 }
 
+// UniswapV4PositionKey is the tuple StateView.getPositionInfo takes. Owner is
+// the caller of PoolManager.modifyLiquidity — for a PositionManager-managed NFT
+// that is the PositionManager, with Salt = bytes32(tokenId), not the NFT holder.
+type UniswapV4PositionKey struct {
+	Owner     common.Address
+	TickLower int
+	TickUpper int
+	Salt      common.Hash
+}
+
+// Validate also guards keys read back from the database: the ticks are packed
+// into int24 ABI arguments, which the encoder does not range-check.
+func (k UniswapV4PositionKey) Validate() error {
+	if k.Owner == (common.Address{}) {
+		return fmt.Errorf("owner is required")
+	}
+	return validateV4Ticks(k.TickLower, k.TickUpper)
+}
+
+// Compare is the canonical order the repository's advisory locks are taken in.
+func (k UniswapV4PositionKey) Compare(other UniswapV4PositionKey) int {
+	return cmp.Or(
+		bytes.Compare(k.Owner.Bytes(), other.Owner.Bytes()),
+		cmp.Compare(k.TickLower, other.TickLower),
+		cmp.Compare(k.TickUpper, other.TickUpper),
+		bytes.Compare(k.Salt.Bytes(), other.Salt.Bytes()),
+	)
+}
+
+// UniswapV4Position is the append-on-change state read from
+// StateView.getPositionInfo. V4 stores no token amounts; they are a downstream
+// derivation from Liquidity, the pool's sqrtPrice and the tick bounds.
+type UniswapV4Position struct {
+	PoolID    int64 // uniswap_v4_pool surrogate id
+	Owner     common.Address
+	TickLower int
+	TickUpper int
+	Salt      common.Hash
+
+	BlockNumber    int64
+	BlockVersion   int
+	BlockTimestamp time.Time
+	Liquidity      *big.Int
+	// Q128.128 checkpoints from the position's last touch, not fees owed: fees
+	// accrued since are (feeGrowthInside now - this) * Liquidity / 2^128.
+	FeeGrowthInside0LastX128 *big.Int
+	FeeGrowthInside1LastX128 *big.Int
+}
+
+func (p *UniswapV4Position) Key() UniswapV4PositionKey {
+	return UniswapV4PositionKey{
+		Owner:     p.Owner,
+		TickLower: p.TickLower,
+		TickUpper: p.TickUpper,
+		Salt:      p.Salt,
+	}
+}
+
+// Validate accepts an all-zero position: getPositionInfo answers a burned or
+// never-opened key with zeros rather than reverting, and the row records that.
+func (p *UniswapV4Position) Validate() error {
+	if err := validatePoolBlockKey(p.PoolID, p.BlockNumber, p.BlockVersion, p.BlockTimestamp); err != nil {
+		return err
+	}
+	if err := p.Key().Validate(); err != nil {
+		return err
+	}
+	if err := requireNonNegativeBigInt("liquidity", p.Liquidity); err != nil {
+		return err
+	}
+	if err := requireNonNegativeBigInt("feeGrowthInside0LastX128", p.FeeGrowthInside0LastX128); err != nil {
+		return err
+	}
+	return requireNonNegativeBigInt("feeGrowthInside1LastX128", p.FeeGrowthInside1LastX128)
+}
+
 // Deliberately a separate set from V3's PoolEventName: V4 has no per-pool Flash,
 // no observation cardinality, and sets protocol fees through a controller.
 type UniswapV4PoolEventName string
@@ -328,4 +410,32 @@ func (e *UniswapV4PoolEvent) Validate() error {
 		return fmt.Errorf("params must be valid JSON")
 	}
 	return nil
+}
+
+// UniswapV4PositionNFTTransfer is one ERC-721 Transfer log from the V4
+// PositionManager. From is address(0) on a mint and To on a burn, so neither is
+// required to be set.
+type UniswapV4PositionNFTTransfer struct {
+	PositionManagerID int64
+	TokenID           *big.Int
+	BlockNumber       int64
+	BlockVersion      int
+	BlockTimestamp    time.Time
+	TxHash            common.Hash
+	LogIndex          int
+	From              common.Address
+	To                common.Address
+}
+
+func (t *UniswapV4PositionNFTTransfer) Validate() error {
+	if t.PositionManagerID <= 0 {
+		return fmt.Errorf("positionManagerID must be positive, got %d", t.PositionManagerID)
+	}
+	if err := validateV4BlockKey(t.BlockNumber, t.BlockVersion, t.BlockTimestamp); err != nil {
+		return err
+	}
+	if err := validatePoolLogKey(t.TxHash, t.LogIndex); err != nil {
+		return err
+	}
+	return requireNonNegativeBigInt("tokenID", t.TokenID)
 }

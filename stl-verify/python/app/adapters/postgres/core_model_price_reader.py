@@ -67,7 +67,10 @@ _AMBIGUOUS_SYMBOLS = text("""
     SELECT upper(t.symbol) AS symbol, count(*) AS token_count
     FROM token t
     WHERE t.chain_id = :chain_id AND upper(t.symbol) = ANY(:symbols)
-      AND EXISTS (SELECT 1 FROM onchain_token_price p WHERE p.token_id = t.id AND p.oracle_id = :oracle_id)
+      -- "has this oracle ever priced the token" — token_price_current holds exactly
+      -- one row per (oracle, token) that has, so it answers without walking the
+      -- onchain_token_price history (VEC-672).
+      AND EXISTS (SELECT 1 FROM token_price_current p WHERE p.token_id = t.id AND p.oracle_id = :oracle_id)
     GROUP BY upper(t.symbol)
     HAVING count(*) > 1
 """)

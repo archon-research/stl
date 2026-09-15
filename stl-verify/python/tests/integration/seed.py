@@ -1479,6 +1479,23 @@ RUV_LOCF_STALE_VALUE = Decimal("100")  # bucket 0, backdated 10 min in
 RUV_LOCF_NEWER_VALUE = Decimal("140")  # bucket 0, 20 min in; must win within the bucket
 RUV_LOCF_LATER_VALUE = Decimal("180")  # bucket 2; ends the carried value
 
+RUV_CONTEST_PROXY_HEX = "aa" * 20
+_RUV_CONTEST_PROTOCOL_HEX = "d2" * 20
+_RUV_CONTEST_LOW_ORACLE_HEX = "d3" * 20
+_RUV_CONTEST_HIGH_ORACLE_HEX = "d4" * 20
+_RUV_CONTEST_UNDERLYING_HEX = "ba" * 20
+_RUV_CONTEST_RECEIPT_HEX = "c8" * 20
+
+# One (underlying, protocol) priced by two enabled oracles, the low-id one
+# revised twice. Blocks are ordered low@2000 < high@2050 < low@2100 so the
+# winner is decided by block_number, and picking it wrong is observable:
+# keeping the low oracle's superseded row hands the win to the high oracle,
+# and ranking oracle_id above recency does the same.
+RUV_CONTEST_BALANCE = Decimal("60")
+RUV_CONTEST_LOW_ORACLE_STALE_PRICE = Decimal("2.00")
+RUV_CONTEST_HIGH_ORACLE_PRICE = Decimal("3.00")
+RUV_CONTEST_WINNING_PRICE = Decimal("4.00")
+
 RUV_MORPHO_SHARE_BALANCE = Decimal("1000")
 RUV_MORPHO_UNDERLYING_VALUE = Decimal("1023.917201")
 # Distinct from RUV_UNDERLYING_PRICE so a cross-binding price mixup is visible.
@@ -1553,6 +1570,7 @@ async def seed_receipt_underlying_value_positions(db_url: str) -> None:
 
             await _ruv_seed_locf_series(conn, prime_id=prime_id, protocol_id=protocol_id, underlying_id=underlying_id)
             await _ruv_seed_morpho_like_position(conn, prime_id=prime_id)
+            await _ruv_seed_price_contest_position(conn, prime_id=prime_id)
     finally:
         await conn.close()
 
@@ -1595,6 +1613,78 @@ async def _ruv_seed_locf_series(
             underlying_token_id=underlying_id,
             created_at=RUV_LOCF_BASE_TS + offset,
         )
+
+
+async def _ruv_seed_price_contest_position(conn: asyncpg.Connection, *, prime_id: int) -> None:
+    """Seed a receipt position whose underlying has a contested latest price.
+
+    Two enabled oracles price it and the low-id one is revised, so resolving
+    "latest" wrongly is observable rather than masked by a single candidate:
+    the low oracle's superseded row and the high oracle's row both lose to the
+    low oracle's revision, on ``block_number`` before ``oracle_id``. Everything
+    the read touches is seeded here, so the scenario does not lean on
+    migration-seeded registry rows.
+    """
+    protocol_id = await conn.fetchval(
+        "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+        "VALUES (1, $1, 'ruvContest', 'lending') RETURNING id",
+        bytes.fromhex(_RUV_CONTEST_PROTOCOL_HEX),
+    )
+    low_oracle_id = await conn.fetchval(
+        "INSERT INTO oracle (name, display_name, chain_id, address) "
+        "VALUES ('ruv_contest_low', 'RUV contest low-id oracle', 1, $1) RETURNING id",
+        bytes.fromhex(_RUV_CONTEST_LOW_ORACLE_HEX),
+    )
+    high_oracle_id = await conn.fetchval(
+        "INSERT INTO oracle (name, display_name, chain_id, address) "
+        "VALUES ('ruv_contest_high', 'RUV contest high-id oracle', 1, $1) RETURNING id",
+        bytes.fromhex(_RUV_CONTEST_HIGH_ORACLE_HEX),
+    )
+    # The winner must be the LOW-id oracle, so that ranking oracle_id above
+    # recency would flip the result instead of coinciding with it.
+    if not low_oracle_id < high_oracle_id:
+        raise RuntimeError("seed premise broken: the revised oracle must have the lower id")
+    for oracle_id in (low_oracle_id, high_oracle_id):
+        await conn.execute(
+            "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+            protocol_id,
+            oracle_id,
+        )
+
+    underlying_id = await insert_token(conn, "contestUSD", 6, bytes.fromhex(_RUV_CONTEST_UNDERLYING_HEX))
+    receipt_token_id = await insert_token(conn, "contestReceipt", 6, bytes.fromhex(_RUV_CONTEST_RECEIPT_HEX))
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=protocol_id,
+        underlying_token_id=underlying_id,
+        address=bytes.fromhex(_RUV_CONTEST_RECEIPT_HEX),
+        symbol="contestReceipt",
+    )
+
+    prices = [
+        (low_oracle_id, 2000, RUV_CONTEST_LOW_ORACLE_STALE_PRICE),
+        (high_oracle_id, 2050, RUV_CONTEST_HIGH_ORACLE_PRICE),
+        (low_oracle_id, 2100, RUV_CONTEST_WINNING_PRICE),
+    ]
+    for oracle_id, block, price in prices:
+        await insert_onchain_price(conn, token_id=underlying_id, oracle_id=oracle_id, price=price, block=block)
+    for oracle_id in (low_oracle_id, high_oracle_id):
+        await insert_oracle_asset(conn, oracle_id, underlying_id)
+
+    await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=RUV_CONTEST_PROXY_HEX)
+    await insert_allocation_position(
+        conn,
+        token_id=receipt_token_id,
+        prime_id=prime_id,
+        proxy_hex=RUV_CONTEST_PROXY_HEX,
+        balance=RUV_CONTEST_BALANCE,
+        block=2100,
+        tx="2a" * 32,
+        direction="in",
+        underlying_value=RUV_CONTEST_BALANCE,
+        underlying_token_id=underlying_id,
+        created_at=RUV_LOCF_BASE_TS + dt.timedelta(minutes=10),
+    )
 
 
 async def _ruv_seed_morpho_like_position(conn: asyncpg.Connection, *, prime_id: int) -> None:
@@ -3172,5 +3262,122 @@ async def seed_receipt_position_latest_rows(db_url: str) -> None:
             await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=RTL_PROXY_HEX)
             tokens = await _rtl_seed_registry(conn)
             await _rtl_seed_positions(conn, prime_id=prime_id, tokens=tokens)
+    finally:
+        await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# processing_version dedup regression (VEC-758)
+#
+# One identity, reprocessed once (build_id 0 then 1, same created_at), feeds
+# the four allocation_position reads VEC-758 collapsed to newest-version-only:
+# the activity feed, the activity buckets, the exposure buckets, and the
+# total-capital buckets. The corrected amount differs enough from the
+# original that a missing dedup, or one sorted the wrong way, surfaces as a
+# wrong number rather than an accidental pass.
+# ---------------------------------------------------------------------------
+
+PVD_VAULT_HEX = "70" * 20
+PVD_ALM_PROXY_HEX = "71" * 20
+PVD_PROTOCOL_HEX = "72" * 20
+PVD_ORACLE_HEX = "73" * 20
+PVD_UNDERLYING_HEX = "74" * 20
+PVD_RECEIPT_HEX = "75" * 20
+
+PVD_TX = "76" * 32
+PVD_BLOCK = 900_000
+PVD_CREATED_AT = dt.datetime(2026, 3, 1, 12, 0, tzinfo=dt.UTC)
+
+PVD_ORIGINAL_AMOUNT = Decimal("1000")
+PVD_CORRECTED_AMOUNT = Decimal("1234")
+PVD_UNDERLYING_PRICE = Decimal("2")
+
+# Real mainnet USDS address (matches the repository's hardcoded _USDS_ADDRESS_HEX;
+# the total-capital read filters on it directly, so a fixture value would never match).
+PVD_USDS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
+PVD_TOTAL_CAPITAL_TX = "77" * 32
+PVD_TOTAL_CAPITAL_BLOCK = 900_100
+PVD_TOTAL_CAPITAL_CREATED_AT = dt.datetime(2026, 3, 1, 12, 0, tzinfo=dt.UTC)
+PVD_TOTAL_CAPITAL_ORIGINAL = Decimal("500000")
+PVD_TOTAL_CAPITAL_CORRECTED = Decimal("777777")
+
+
+async def seed_processing_version_dedup_scenarios(db_url: str) -> None:
+    """Seed the reprocessing scenarios for the four VEC-758 dedup reads."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('pv_dedup', $1) RETURNING id",
+                bytes.fromhex(PVD_VAULT_HEX),
+            )
+            await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=PVD_ALM_PROXY_HEX)
+
+            protocol_id = await conn.fetchval(
+                "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+                "VALUES (1, $1, 'pvDedupLike', 'lending') RETURNING id",
+                bytes.fromhex(PVD_PROTOCOL_HEX),
+            )
+            oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('pv_dedup', 'PV dedup test oracle', 1, $1) RETURNING id",
+                bytes.fromhex(PVD_ORACLE_HEX),
+            )
+            await conn.execute(
+                "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+                protocol_id,
+                oracle_id,
+            )
+
+            underlying_id = await insert_token(conn, "pvdUnderlying", 18, bytes.fromhex(PVD_UNDERLYING_HEX))
+            await _insert_price(conn, underlying_id, oracle_id, PVD_UNDERLYING_PRICE)
+            receipt_token_id = await insert_token(conn, "pvdReceipt", 18, bytes.fromhex(PVD_RECEIPT_HEX))
+            await insert_receipt_token_row(
+                conn,
+                protocol_id=protocol_id,
+                underlying_token_id=underlying_id,
+                address=bytes.fromhex(PVD_RECEIPT_HEX),
+                symbol="pvdReceipt",
+            )
+
+            # Feeds the activity feed, the activity buckets, and the exposure
+            # buckets: one identity, reprocessed once. underlying_value travels
+            # with balance/tx_amount so exposure_buckets' LOCF sees the same
+            # correction the other two see.
+            for build_id, amount in ((0, PVD_ORIGINAL_AMOUNT), (1, PVD_CORRECTED_AMOUNT)):
+                await insert_allocation_position(
+                    conn,
+                    token_id=receipt_token_id,
+                    prime_id=prime_id,
+                    proxy_hex=PVD_ALM_PROXY_HEX,
+                    balance=amount,
+                    tx_amount=amount,
+                    underlying_value=amount,
+                    underlying_token_id=underlying_id,
+                    block=PVD_BLOCK,
+                    tx=PVD_TX,
+                    direction="in",
+                    created_at=PVD_CREATED_AT,
+                    build_id=build_id,
+                )
+
+            # Feeds list_total_capital_buckets: a real SubProxy holding USDS,
+            # sharing prime_id with the ALM proxy above (any SubProxy address
+            # serves -- the read filters on the whole registry set).
+            subproxy_hex = sorted(subproxy_addresses())[0][2:]
+            usds_id = await insert_token(conn, "pvdUSDS", 18, bytes.fromhex(PVD_USDS_HEX))
+            for build_id, amount in ((0, PVD_TOTAL_CAPITAL_ORIGINAL), (1, PVD_TOTAL_CAPITAL_CORRECTED)):
+                await insert_allocation_position(
+                    conn,
+                    token_id=usds_id,
+                    prime_id=prime_id,
+                    proxy_hex=subproxy_hex,
+                    balance=amount,
+                    block=PVD_TOTAL_CAPITAL_BLOCK,
+                    tx=PVD_TOTAL_CAPITAL_TX,
+                    direction="in",
+                    created_at=PVD_TOTAL_CAPITAL_CREATED_AT,
+                    build_id=build_id,
+                )
     finally:
         await conn.close()

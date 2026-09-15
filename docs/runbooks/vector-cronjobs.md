@@ -18,6 +18,7 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
 | `morpho-vault-backfill` | `morpho-vault-backfill` | **on demand** | Discovers Morpho vaults from the archived S3 receipts and replays their VaultV2 structured events, for a block range supplied at start time (VEC-218) |
 | `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **on demand** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
+| `uniswap-v4-position-bootstrap` | `uniswap-v4-position-bootstrap` | **on demand** | Snapshots every historical Uniswap V4 LP position of the registered pools at one finality-safe block, closing the gap event-driven indexing cannot (VEC-639); operated from [vector-indexers.md](vector-indexers.md#uniswap-v4-indexer-vec-475) |
 | `block-republisher`, `<chain>-block-republisher` | `block-republisher`, `<chain>-block-republisher` | **on demand** | Re-publishes named block heights under the next `block_version` their raw archive leaves free, so every indexer appends the canonical block for a height whose only published version is a losing fork (ARCT-383). One deployment per chain — see the table under its section below |
 | `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (Python harness; staging + prod; N_MC=10000, pod sized from a live-data pass in #891) |
 
@@ -449,7 +450,8 @@ stale. The only impact is that a new run cannot be started until the pod is back
 Warning severity for that reason.
 
 Currently matches: `offchain-price-backfill`, `reference-capital-backfill`,
-`morpho-vault-backfill`, `morpho-v2-bootstrap`, and every chain's republisher —
+`morpho-vault-backfill`, `morpho-v2-bootstrap`, `uniswap-v4-position-bootstrap`, and
+every chain's republisher —
 `block-republisher` and `<chain>-block-republisher`, which the rule matches with
 one prefix-agnostic regex rather than a list of chains.
 
@@ -913,6 +915,23 @@ hole but an archive that has not caught up, and republishing that height makes
 things worse; see "morpho-v2-bootstrap run outcomes" below. Either way, do not
 work around it by stamping a version — the whole point is that no row is written
 under a version no canonical block was archived under.
+
+---
+
+### Special case: `uniswap-v4-position-bootstrap` (on-demand, no schedule)
+
+Another **on-demand** Temporal worker (`temporal.RunWorker`, parameterless via
+`RegisterRunner` like `morpho-v2-bootstrap`). Everything said about
+`offchain-price-backfill` above applies — nothing is missed while it is down, and
+it is excluded from `VectorCronjobAllRunsFailing` for the same reason. It writes
+only `uniswap_v4_position`, through the live indexer's own append-on-change
+writer, so a run shows up on the
+[`VectorUniswapV4AppendOnChangeGrowthHigh`](vector-indexers.md#vectoruniswapv4appendonchangegrowthhigh)
+rate once, by design.
+
+When to run it, how to start a run, what it does and how a killed attempt resumes
+are in the indexer runbook:
+[Uniswap V4 indexer — position coverage and the bootstrap](vector-indexers.md#uniswap-v4-indexer-vec-475).
 
 ---
 
