@@ -37,8 +37,8 @@ observation with timestamp. Evidence over assertion. -->
 before/after query timing. Bug fixes: state the test was observed red first.
 No code change: say so. Describe and tick off the bullets below; add more as needed. -->
 
-- [ ] `Local e2e run`
-- [ ] `Performance testing on new queries`
+- [ ] `End-to-end`
+- [ ] `Performance testing on new queries or endpoint`
   - [ ] `Local backend`
   - [ ] `Staging backend`
 
