@@ -38,10 +38,9 @@ func NewBalanceOfSource(multicaller outbound.Multicaller, erc20ABI *abi.ABI, ato
 			"securitize": true,
 			"superstate": true,
 			"proxy":      true,
-			// centrifuge is intentionally absent: as of axis-synome 0.2.0 those
-			// entries point at ERC-7540 vault addresses, which are not tokens and
-			// revert on balanceOf/decimals. ERC7540Source owns them (VEC-337 part 2).
-			// (centrifuge_feeder is a different mechanism and stays on the stub source.)
+			// A centrifuge_feeder entry is the Centrifuge share token itself, so
+			// balanceOf(wallet) is the whole position.
+			"centrifuge_feeder": true,
 		},
 	}
 }
