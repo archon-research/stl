@@ -390,13 +390,24 @@ func (s *Service) snapshotPool(
 }
 
 func (s *Service) persist(ctx context.Context, rows []*entity.UniswapV4Position) (int64, error) {
+	return persistInOneTransaction(ctx, s.txMgr, rows, s.repo.SavePositions)
+}
+
+// persistInOneTransaction writes one batch in its own transaction and reports the
+// rows that landed, which is fewer than it queued whenever a row conflicts away.
+func persistInOneTransaction[T any](
+	ctx context.Context,
+	txMgr outbound.TxManager,
+	rows []T,
+	save func(ctx context.Context, tx pgx.Tx, rows []T) (int64, error),
+) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
 	var written int64
-	err := s.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
+	err := txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
 		var saveErr error
-		written, saveErr = s.repo.SavePositions(ctx, tx, rows)
+		written, saveErr = save(ctx, tx, rows)
 		return saveErr
 	})
 	if err != nil {

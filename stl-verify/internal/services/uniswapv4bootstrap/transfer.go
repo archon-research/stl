@@ -7,10 +7,10 @@ import (
 	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockversion"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4indexer"
 )
@@ -26,19 +26,28 @@ type NFTTransferRecorder interface {
 	RecordNFTTransferRows(ctx context.Context, attempted, written int)
 }
 
+// TransferVersions answers a scanned height's block_version from the raw archive —
+// block_states is the watchers' operational table, off limits here, and retains far
+// less than this range anyway — and reports what the run it served asked for.
+type TransferVersions interface {
+	uniswapv4indexer.BlockVersionResolver
+	Summary() blockversion.RunSummary
+}
+
 type TransferDeps struct {
 	PositionManager uniswapv4indexer.RegisteredPositionManager
 	LogScan         outbound.LogScanClient
-	// Versions answers each scanned height's block_version from the raw archive;
-	// block_states is the watchers' operational table, off limits here, and retains
-	// far less than this range anyway.
-	Versions  uniswapv4indexer.BlockVersionResolver
-	Repo      outbound.UniswapV4NFTTransferWriter
-	TxManager outbound.TxManager
-	Progress  TransferProgressStore
-	Telemetry NFTTransferRecorder
-	Logger    *slog.Logger
-	Config    Config
+	// NewVersions is called once per run, because a Resolver memoises the heights it
+	// proved against the archive: one shared between runs would hand a later run a
+	// version it never proved, and its map is written without a mutex, which two
+	// concurrent runs turn into a fatal `concurrent map writes`.
+	NewVersions func() TransferVersions
+	Repo        outbound.UniswapV4NFTTransferWriter
+	TxManager   outbound.TxManager
+	Progress    TransferProgressStore
+	Telemetry   NFTTransferRecorder
+	Logger      *slog.Logger
+	Config      Config
 }
 
 // TransferService backfills the posm ERC-721 Transfer log from the
@@ -49,7 +58,7 @@ type TransferDeps struct {
 type TransferService struct {
 	positionManager uniswapv4indexer.RegisteredPositionManager
 	logScan         outbound.LogScanClient
-	versions        uniswapv4indexer.BlockVersionResolver
+	newVersions     func() TransferVersions
 	repo            outbound.UniswapV4NFTTransferWriter
 	txMgr           outbound.TxManager
 	progress        TransferProgressStore
@@ -59,8 +68,10 @@ type TransferService struct {
 }
 
 type TransferSummary struct {
-	PinnedBlock      int64
-	PinnedHash       common.Hash
+	PinnedBlock int64
+	PinnedHash  common.Hash
+	// FromBlock is where THIS attempt started scanning, so it is zero on an attempt
+	// that found the scan already finished and scanned nothing.
 	FromBlock        int64
 	ResumedFromBlock int64
 	ScanWindows      int
@@ -85,7 +96,7 @@ func NewTransferService(deps TransferDeps) (*TransferService, error) {
 	return &TransferService{
 		positionManager: deps.PositionManager,
 		logScan:         deps.LogScan,
-		versions:        deps.Versions,
+		newVersions:     deps.NewVersions,
 		repo:            deps.Repo,
 		txMgr:           deps.TxManager,
 		progress:        deps.Progress,
@@ -108,8 +119,8 @@ func (d TransferDeps) validate() error {
 		return fmt.Errorf("uniswap_v4_position_manager.deploy_block for chain %d is %d: the scan would start at genesis, so the registry row needs a correcting version appended", d.Config.ChainID, d.PositionManager.DeployBlock)
 	case d.LogScan == nil:
 		return fmt.Errorf("log scan client is required")
-	case d.Versions == nil:
-		return fmt.Errorf("block version resolver is required: a scanned log carries no version of its own")
+	case d.NewVersions == nil:
+		return fmt.Errorf("a block version resolver factory is required: a scanned log carries no version of its own")
 	case d.Repo == nil:
 		return fmt.Errorf("repo is required")
 	case d.TxManager == nil:
@@ -125,21 +136,25 @@ func (d TransferDeps) validate() error {
 }
 
 // Run replays the PositionManager's whole Transfer history up to one pinned
-// finality-safe height and appends every log site that holds no row yet.
+// finality-safe height, appending through the live indexer's insert.
 //
-// Nothing is read from chain state: a log carries its own block height,
-// timestamp, token id and both parties, which is what makes this cheaper than
-// the position bootstrap and why it needs no pinned multicall. The pin is still
-// derived and held, for two reasons: it stops the scan below the reorg window,
-// so every row can carry block_version 0 and the live indexer owns everything
-// above; and a pin that moves under the run means a reorg deeper than the
-// finality depth, which the operator has to hear about.
+// No chain STATE is read: a log carries its own block height, timestamp, token id
+// and both parties, which is what makes this cheaper than the position bootstrap
+// and why it needs no pinned multicall. Each row's block_version comes from the
+// raw archive instead, since a log carries none. The pin is derived and held for
+// two reasons: it keeps the scan below the reorg window, so the live indexer owns
+// everything above it; and a pin that moves under the run means a reorg deeper
+// than the finality depth, which the operator has to hear about.
 //
 // A run that dies part-way resumes on a later attempt through the
 // TransferProgressStore, continuing from the first window it had not finished. No
 // correctness depends on the record: a run that resumes from nothing simply
 // rescans, and the write is the live path's, so a same-build rescan conflicts away.
-func (s *TransferService) Run(ctx context.Context) (TransferSummary, error) {
+func (s *TransferService) Run(ctx context.Context) (_ TransferSummary, runErr error) {
+	// One Resolver per run, never per process: see TransferDeps.NewVersions.
+	versions := s.newVersions()
+	defer func() { s.logResolvedBlockVersions(ctx, versions.Summary(), runErr) }()
+
 	pin, resumeFrom, err := s.resumePoint(ctx)
 	if err != nil {
 		return TransferSummary{}, err
@@ -149,7 +164,6 @@ func (s *TransferService) Run(ctx context.Context) (TransferSummary, error) {
 	// A cursor past the pin means an earlier attempt finished the scan; resumePoint
 	// has just re-read that pin, which is all the closing check would verify.
 	if resumeFrom == pin.number+1 {
-		summary.FromBlock = resumeFrom
 		s.logger.Info("uniswap-v4 posm transfer backfill already scanned to its pin on an earlier attempt",
 			"chainId", s.cfg.ChainID, "pinnedBlock", pin.number, "nextBlock", resumeFrom)
 		return summary, nil
@@ -162,7 +176,7 @@ func (s *TransferService) Run(ctx context.Context) (TransferSummary, error) {
 	summary.FromBlock = from
 	s.logStart(pin, from)
 
-	if err := s.scanAndPersist(ctx, from, pin, &summary); err != nil {
+	if err := s.scanAndPersist(ctx, versions, from, pin, &summary); err != nil {
 		return summary, err
 	}
 	// Every row is already committed, so this cannot prevent a bad write; it is
@@ -175,6 +189,31 @@ func (s *TransferService) Run(ctx context.Context) (TransferSummary, error) {
 }
 
 // resumePoint is the pin this run scans up to and the height it resumes from.
+// logResolvedBlockVersions reports what the run asked the archive for, the way
+// morpho-v2-bootstrap does. A version above 0 across deep history is the archive's
+// convention, not evidence of a reorg (see internal/pkg/blockversion).
+func (s *TransferService) logResolvedBlockVersions(ctx context.Context, summary blockversion.RunSummary, runErr error) {
+	if summary.HeightsResolved == 0 {
+		return
+	}
+	outcome, level := "completed", slog.LevelInfo
+	if runErr != nil {
+		outcome, level = "aborted", slog.LevelError
+	}
+	attrs := []slog.Attr{
+		slog.String("outcome", outcome),
+		slog.Int64("chainId", s.cfg.ChainID),
+		slog.Int("heights", summary.HeightsResolved),
+	}
+	for _, extent := range summary.Versions {
+		attrs = append(attrs, slog.Group(fmt.Sprintf("version_%d", extent.Version),
+			slog.Int("heights", extent.Heights),
+			slog.Int64("from", extent.From),
+			slog.Int64("to", extent.To)))
+	}
+	s.logger.LogAttrs(ctx, level, "uniswap-v4 posm transfer block versions resolved from the raw archive", attrs...)
+}
+
 func (s *TransferService) resumePoint(ctx context.Context) (pinnedBlock, int64, error) {
 	recorded, found, err := s.progress.LoadProgress(ctx)
 	if err != nil {
@@ -227,7 +266,7 @@ func (s *TransferService) logStart(pin pinnedBlock, from int64) {
 // scanAndPersist walks the range one adaptive window at a time, committing each
 // window's rows before recording it as done. A window is the resume unit, so a
 // kill mid-window costs one rescan and no rows.
-func (s *TransferService) scanAndPersist(ctx context.Context, from int64, pin pinnedBlock, summary *TransferSummary) error {
+func (s *TransferService) scanAndPersist(ctx context.Context, versions TransferVersions, from int64, pin pinnedBlock, summary *TransferSummary) error {
 	scanner := &logWindowScanner{
 		client:  s.logScan,
 		filter:  s.baseFilter(),
@@ -237,7 +276,7 @@ func (s *TransferService) scanAndPersist(ctx context.Context, from int64, pin pi
 	}
 
 	stats, err := scanner.scan(ctx, from, pin.number, func(w logWindow) error {
-		return s.persistWindow(ctx, w, summary)
+		return s.persistWindow(ctx, versions, w, summary)
 	})
 	summary.ScanWindows, summary.ScanNarrowings, summary.ScanLogs = stats.windows, stats.narrowings, stats.logs
 	if err != nil {
@@ -250,8 +289,8 @@ func (s *TransferService) scanAndPersist(ctx context.Context, from int64, pin pi
 	return nil
 }
 
-func (s *TransferService) persistWindow(ctx context.Context, w logWindow, summary *TransferSummary) error {
-	transfers, err := uniswapv4indexer.NFTTransfersFromLogs(ctx, toSharedLogs(w.logs), s.positionManager, s.versions)
+func (s *TransferService) persistWindow(ctx context.Context, versions TransferVersions, w logWindow, summary *TransferSummary) error {
+	transfers, err := uniswapv4indexer.NFTTransfersFromLogs(ctx, toSharedLogs(w.logs), s.positionManager, versions)
 	if err != nil {
 		return err
 	}
@@ -291,19 +330,7 @@ func (s *TransferService) recordWindowDone(ctx context.Context, w logWindow, sum
 }
 
 func (s *TransferService) persist(ctx context.Context, transfers []*entity.UniswapV4PositionNFTTransfer) (int64, error) {
-	if len(transfers) == 0 {
-		return 0, nil
-	}
-	var written int64
-	err := s.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
-		var saveErr error
-		written, saveErr = s.repo.SaveNFTTransfers(ctx, tx, transfers)
-		return saveErr
-	})
-	if err != nil {
-		return 0, err
-	}
-	return written, nil
+	return persistInOneTransaction(ctx, s.txMgr, transfers, s.repo.SaveNFTTransfers)
 }
 
 // The emitting ADDRESS is what makes the result the posm's: this topic0 is shared

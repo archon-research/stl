@@ -15,6 +15,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockversion"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4indexer"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -56,8 +57,9 @@ func transferFilteredLog(tokenID, blockNumber int64, logIndex int, from, to stri
 // fakeBlockVersions answers a version per height; a height it was not given
 // resolves to 0.
 type fakeBlockVersions struct {
-	byBlock map[int64]int
-	err     error
+	byBlock  map[int64]int
+	err      error
+	resolved []int64
 }
 
 func versionsAt(byBlock map[int64]int) *fakeBlockVersions {
@@ -72,7 +74,12 @@ func (f *fakeBlockVersions) ResolveBlockVersion(_ context.Context, blockNumber i
 	if f.err != nil {
 		return 0, f.err
 	}
+	f.resolved = append(f.resolved, blockNumber)
 	return f.byBlock[blockNumber], nil
+}
+
+func (f *fakeBlockVersions) Summary() blockversion.RunSummary {
+	return blockversion.RunSummary{HeightsResolved: len(f.resolved)}
 }
 
 type fakeNFTTransferRepo struct {
@@ -160,7 +167,7 @@ func newTransferFixture(t *testing.T, mutate func(*TransferDeps)) *transferFixtu
 	deps := TransferDeps{
 		PositionManager: testPositionManager(),
 		LogScan:         client,
-		Versions:        versionsAt(nil),
+		NewVersions:     func() TransferVersions { return versionsAt(nil) },
 		Repo:            repo,
 		TxManager:       &testutil.MockTxManager{},
 		Progress:        progress,
@@ -251,7 +258,7 @@ func TestTransferRun_FiltersOnTheAddressAndTopic0Only(t *testing.T) {
 
 func TestTransferRun_PersistsEveryDecodedTransfer(t *testing.T) {
 	wantVersions := map[int64]int{posmDeployBlock + 10: 2, posmDeployBlock + 11: 5}
-	f := newTransferFixture(t, func(d *TransferDeps) { d.Versions = versionsAt(wantVersions) })
+	f := newTransferFixture(t, func(d *TransferDeps) { d.NewVersions = func() TransferVersions { return versionsAt(wantVersions) } })
 	f.client.GetLogsFn = logsAt(
 		transferFilteredLog(388720, posmDeployBlock+10, 2, zeroAddress, transferHolderAddr),
 		transferFilteredLog(388721, posmDeployBlock+11, 5, transferHolderAddr, ownerA),
@@ -461,7 +468,9 @@ func TestTransferRun_StopsOnAWriteFailureRatherThanLeavingAHole(t *testing.T) {
 // the watcher indexed first at that height.
 func TestTransferRun_StopsWhenAWindowCannotBeVersioned(t *testing.T) {
 	f := newTransferFixture(t, func(d *TransferDeps) {
-		d.Versions = versionsFailing(errors.New("the raw archive holds nothing at that height"))
+		d.NewVersions = func() TransferVersions {
+			return versionsFailing(errors.New("the raw archive holds nothing at that height"))
+		}
 	})
 	f.client.GetLogsFn = logsAt(transferFilteredLog(388720, posmDeployBlock+10, 2, zeroAddress, transferHolderAddr))
 
@@ -503,7 +512,7 @@ func TestNewTransferService_RefusesIncompleteDeps(t *testing.T) {
 		{"a negative position manager row id", func(d *TransferDeps) { d.PositionManager.ID = -1 }, "positive row id"},
 		{"a negative transfer batch", func(d *TransferDeps) { d.Config.TransferBatch = -1 }, "transferBatch must be positive"},
 		{"no log scan client", func(d *TransferDeps) { d.LogScan = nil }, "log scan client"},
-		{"no block version resolver", func(d *TransferDeps) { d.Versions = nil }, "block version resolver"},
+		{"no block version resolver factory", func(d *TransferDeps) { d.NewVersions = nil }, "block version resolver factory"},
 		{"no repo", func(d *TransferDeps) { d.Repo = nil }, "repo"},
 		{"no tx manager", func(d *TransferDeps) { d.TxManager = nil }, "txManager"},
 		{"no progress store", func(d *TransferDeps) { d.Progress = nil }, "progress store"},
@@ -515,7 +524,7 @@ func TestNewTransferService_RefusesIncompleteDeps(t *testing.T) {
 			deps := TransferDeps{
 				PositionManager: testPositionManager(),
 				LogScan:         newFakeLogScanClient(testHead, nil),
-				Versions:        versionsAt(nil),
+				NewVersions:     func() TransferVersions { return versionsAt(nil) },
 				Repo:            &fakeNFTTransferRepo{},
 				TxManager:       &testutil.MockTxManager{},
 				Progress:        &fakeTransferProgressStore{},
@@ -571,8 +580,13 @@ func TestTransferRun_TreatsACursorPastThePinAsAFinishedScan(t *testing.T) {
 	if len(f.client.Filters) != 0 {
 		t.Errorf("scanned %d windows, want none: the scan was already complete", len(f.client.Filters))
 	}
-	if summary.FromBlock != testPinned+1 {
-		t.Errorf("FromBlock = %d, want %d", summary.FromBlock, testPinned+1)
+	// Zero, not pin+1: this attempt scanned nothing, and a FromBlock above
+	// PinnedBlock reads as a contradiction in the run's closing log line.
+	if summary.FromBlock != 0 {
+		t.Errorf("FromBlock = %d, want 0 for an attempt that scanned nothing", summary.FromBlock)
+	}
+	if summary.ResumedFromBlock != testPinned+1 {
+		t.Errorf("ResumedFromBlock = %d, want %d", summary.ResumedFromBlock, testPinned+1)
 	}
 }
 
@@ -642,5 +656,28 @@ func TestTransferRun_DoesNotWarnWhenAResumedAttemptScansAQuietTail(t *testing.T)
 	}
 	if logs.warned(emptyHistoryWarning) {
 		t.Error("a resumed attempt over a quiet tail blamed the PositionManager address")
+	}
+}
+
+// A Resolver memoises the heights it proved against the archive, and its map is
+// written without a mutex, so two runs sharing one would stamp versions neither
+// proved and can crash the process outright on concurrent writes.
+func TestTransferRun_BuildsOneResolverPerRun(t *testing.T) {
+	built := 0
+	f := newTransferFixture(t, func(d *TransferDeps) {
+		d.NewVersions = func() TransferVersions {
+			built++
+			return versionsAt(nil)
+		}
+	})
+
+	for run := 1; run <= 2; run++ {
+		if _, err := f.svc.Run(context.Background()); err != nil {
+			t.Fatalf("run %d: %v", run, err)
+		}
+	}
+
+	if built != 2 {
+		t.Errorf("resolvers built = %d over two runs, want 2", built)
 	}
 }

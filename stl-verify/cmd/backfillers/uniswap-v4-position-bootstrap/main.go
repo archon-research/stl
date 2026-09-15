@@ -91,6 +91,8 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	temporalsdk "go.temporal.io/sdk/temporal"
+
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
@@ -361,7 +363,11 @@ func buildRunnerJobs(ctx context.Context, deps temporal.Dependencies, w runnerWi
 			ActivityName: temporal.RunnerActivityName(transferWorkflowTypeName),
 			Runner: temporal.RunnerFunc(func(ctx context.Context) error {
 				if transferErr != nil {
-					return fmt.Errorf("the posm transfer backfill was refused at worker startup on chain %d: %w", chainID, transferErr)
+					// Non-retryable: the refusal is decided at startup and cannot change
+					// until a rollout, so the ten attempts would be ten identical failures.
+					return temporalsdk.NewNonRetryableApplicationError(
+						fmt.Sprintf("the posm transfer backfill was refused at worker startup on chain %d", chainID),
+						"TransferBackfillNotRunnable", transferErr)
 				}
 				return runTransferBackfill(ctx, deps.Logger, transfers, chainID)
 			}),
@@ -433,9 +439,9 @@ func newMulticaller(
 // the archive reads that stamp each block's version.
 //
 // Measured 2026-09-14/15 against mainnet: 487,908 Transfer logs over 4.29M blocks
-// in 68 eth_getLogs windows, ~2 minutes of RPC; ~4,300 partition listings; and a
-// hash read for each height carrying more than one archived version, which is the
-// ~100k in the band two archive writers overlapped. StartToClose therefore has to
+// in 68 eth_getLogs windows, ~2 minutes of RPC. The archive reads dominate the
+// rest: one ListObjectsV2 per distinct height, then a ranged GET for that height's
+// block hash, ~250k of each and issued serially. StartToClose therefore has to
 // clear a run of several hours end to end — 12h leaves room for provider slowness
 // and for a chain with an order of magnitude more tokens.
 //
@@ -470,11 +476,10 @@ func newTransferService(ctx context.Context, logger *slog.Logger, w runnerWiring
 	}
 	// Opened here rather than in setupRunners so a missing bucket or credential
 	// refuses this workflow type alone.
-	archive, err := openArchive(ctx, w.cfg.bootstrap.ChainID, logger)
+	archive, bucket, err := openArchive(ctx, w.cfg.bootstrap.ChainID, logger)
 	if err != nil {
 		return nil, err
 	}
-	versions := blockversion.NewResolver(archive, "uniswap-v4 posm transfer backfill", logger)
 	// The prefix is the live indexer's, so both writers move one counter. Narrow,
 	// because the full set's seeded zeros would permanently sit on this worker.
 	telemetry, err := dextelemetry.NewNFTTransferRecorder(metricPrefix, w.cfg.bootstrap.ChainID)
@@ -485,13 +490,17 @@ func newTransferService(ctx context.Context, logger *slog.Logger, w runnerWiring
 	return uniswapv4bootstrap.NewTransferService(uniswapv4bootstrap.TransferDeps{
 		PositionManager: positionManager,
 		LogScan:         w.logScan,
-		Versions:        versions,
-		Repo:            w.repo,
-		TxManager:       w.txMgr,
-		Progress:        w.transferProgress,
-		Telemetry:       telemetry,
-		Logger:          logger,
-		Config:          w.cfg.bootstrap,
+		// A Resolver memoises what it proved against the archive, so each run gets
+		// its own; the archive client itself is safe to share.
+		NewVersions: func() uniswapv4bootstrap.TransferVersions {
+			return blockversion.NewResolver(archive, "s3://"+bucket, logger)
+		},
+		Repo:      w.repo,
+		TxManager: w.txMgr,
+		Progress:  w.transferProgress,
+		Telemetry: telemetry,
+		Logger:    logger,
+		Config:    w.cfg.bootstrap,
 	})
 }
 
@@ -525,24 +534,30 @@ func runTransferBackfill(ctx context.Context, logger *slog.Logger, svc *uniswapv
 // against the chain: they arrive as independent variables, and another chain's
 // archive answers for heights this chain never published. S3 access is the pod's
 // own identity; the startup probe fails here rather than mid-run.
-func openArchive(ctx context.Context, chainID int64, logger *slog.Logger) (*s3adapter.ArchiveReader, error) {
+// openArchive returns the reader and the bucket it reads, which names the archive
+// in the resolver's errors so an operator is told what to repair.
+func openArchive(ctx context.Context, chainID int64, logger *slog.Logger) (*s3adapter.ArchiveReader, string, error) {
 	bucket, err := env.Require("S3_BUCKET")
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	deployEnv, err := env.Require("DEPLOY_ENV")
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if err := chainutil.ValidateS3BucketForChain(chainID, bucket, deployEnv); err != nil {
-		return nil, fmt.Errorf("S3_BUCKET / CHAIN_ID mismatch: %w", err)
+		return nil, "", fmt.Errorf("S3_BUCKET / CHAIN_ID mismatch: %w", err)
 	}
 
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{StaticCredentialsFromEnv: true})
 	if err != nil {
-		return nil, fmt.Errorf("loading AWS config: %w", err)
+		return nil, "", fmt.Errorf("loading AWS config: %w", err)
 	}
-	return s3adapter.OpenArchiveReader(ctx, awsCfg, bucket, logger)
+	reader, err := s3adapter.OpenArchiveReader(ctx, awsCfg, bucket, logger)
+	if err != nil {
+		return nil, "", err
+	}
+	return reader, bucket, nil
 }
 
 func loadRegisteredPools(ctx context.Context, repo *postgres.UniswapV4Repository, chainID int64) ([]uniswapv4indexer.RegisteredPool, error) {

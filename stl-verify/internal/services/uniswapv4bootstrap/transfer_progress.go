@@ -19,8 +19,8 @@ type TransferProgress struct {
 	PinnedHash        string `json:"pinned_hash"`
 	// NextBlock is the lowest height not yet persisted: one past the last scan
 	// window whose rows all committed. Whole windows only, so a resumed attempt
-	// redoes at most one window, and redoing one writes nothing because every
-	// site it revisits already holds a row.
+	// redoes at most one window — and on the same build that redo conflicts away,
+	// since the insert's conflict target includes processing_version.
 	NextBlock int64 `json:"next_block"`
 }
 
