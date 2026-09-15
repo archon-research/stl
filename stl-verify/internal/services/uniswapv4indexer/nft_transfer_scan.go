@@ -1,6 +1,7 @@
 package uniswapv4indexer
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -11,9 +12,12 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// Past finality a height has one canonical block, so a scanned row's version can
-// only be 0; the live indexer's reorg versioning has nothing to disagree with.
-const scannedBlockVersion = 0
+// BlockVersionResolver answers which block_version a scanned height was indexed
+// under. The hash comes from the log itself, so the answer can be proved to speak
+// for the block being decoded rather than for a fork kept past its reorg.
+type BlockVersionResolver interface {
+	ResolveBlockVersion(ctx context.Context, blockNumber int64, blockHash common.Hash) (int, error)
+}
 
 // NFTTransfersFromLogs decodes a window of scanned posm logs into transfer rows.
 //
@@ -26,8 +30,10 @@ const scannedBlockVersion = 0
 // one, so a foreign log means the filter or the registry is wrong, and skipping
 // it would leave a hole no rerun would look for again.
 func NFTTransfersFromLogs(
+	ctx context.Context,
 	logs []shared.Log,
 	positionManager RegisteredPositionManager,
+	versions BlockVersionResolver,
 ) ([]*entity.UniswapV4PositionNFTTransfer, error) {
 	ev, err := PositionManagerTransferEvent()
 	if err != nil {
@@ -36,7 +42,7 @@ func NFTTransfersFromLogs(
 
 	transfers := make([]*entity.UniswapV4PositionNFTTransfer, 0, len(logs))
 	for _, log := range logs {
-		transfer, err := decodeScannedNFTTransfer(*ev, log, positionManager)
+		transfer, err := decodeScannedNFTTransfer(ctx, *ev, log, positionManager, versions)
 		if err != nil {
 			return nil, err
 		}
@@ -46,9 +52,11 @@ func NFTTransfersFromLogs(
 }
 
 func decodeScannedNFTTransfer(
+	ctx context.Context,
 	ev abi.Event,
 	log shared.Log,
 	positionManager RegisteredPositionManager,
+	versions BlockVersionResolver,
 ) (*entity.UniswapV4PositionNFTTransfer, error) {
 	if err := assertScannedTransferSite(ev, log, positionManager.Address); err != nil {
 		return nil, err
@@ -67,8 +75,16 @@ func decodeScannedNFTTransfer(
 		return nil, fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
 	}
 
+	if !shared.IsHexWord(log.BlockHash) {
+		return nil, fmt.Errorf("PositionManager Transfer (tx %s, index %s) has block hash %q, which is not a 32-byte hex word", log.TransactionHash, log.LogIndex, log.BlockHash)
+	}
+	blockVersion, err := versions.ResolveBlockVersion(ctx, int64(blockNumber), common.HexToHash(log.BlockHash))
+	if err != nil {
+		return nil, fmt.Errorf("resolving the block version of PositionManager Transfer (tx %s, index %s) at block %d: %w", log.TransactionHash, log.LogIndex, blockNumber, err)
+	}
+
 	transfer, err := newNFTTransferRow(ev, log, positionManager.ID, blockCoords{
-		number: int64(blockNumber), version: scannedBlockVersion, ts: blockTimestamp,
+		number: int64(blockNumber), version: blockVersion, ts: blockTimestamp,
 	}, int(logIndex))
 	if err != nil {
 		return nil, fmt.Errorf("PositionManager Transfer (tx %s, index %s): %w", log.TransactionHash, log.LogIndex, err)

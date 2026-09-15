@@ -1985,20 +1985,33 @@ or non-existent token.
   whole history (2026-09-14).
 - **Pin semantics.** The scan stops at `head - FINALITY_DEPTH` and the live
   indexer owns everything above, so no row is written for a block that can still
-  reorg and every row carries `block_version = 0`. The pin is re-read at the end
-  of the scan; because rows commit as the scan goes, that check cannot prevent a
-  bad write — it is how you learn the range was reorged under the run, which
-  past the finality depth means the rows below it want re-checking.
-- **Rerun behaviour is fully idempotent**, including over the stretch the live
-  indexer already covers and across a registry correction. The writer appends only
-  log sites that hold NO row (`SaveNFTTransfersIfAbsent`), rather than the
-  correction version a second build's plain insert would append at every site it
-  revisits, and it asks that of every `uniswap_v4_position_manager` version the
-  chain has had — a fact row keeps the retired surrogate, so a check keyed on the
-  current one alone would find a whole history absent. So a rerun
-  reports `transfersWritten=0` — that, not the row count, is how you tell a
-  no-op rerun from one that closed a real gap. Run it again whenever you suspect
-  a gap; it costs RPC time and no rows.
+  reorg. The pin is re-read at the end of the scan; because rows commit as the scan
+  goes, that check cannot prevent a bad write — it is how you learn the range was
+  reorged under the run, which past the finality depth means the rows below it want
+  re-checking.
+- **Where `block_version` comes from.** A scanned log carries none, so each row's
+  version is read from the chain's raw S3 archive through
+  `internal/pkg/blockversion` — never from `block_states`, which is the watchers'
+  operational table and retains only 30 days, less than this scan's range. The rule
+  is the maintainer-set highest-version-wins one every replay in this repo uses,
+  and `cmd/backfillers/morpho-vault-backfill/discovery.go` states it in full
+  including its two surprises: deep history is `_1_`-only and one transition window
+  holds identical `_0_`/`_1_` twins, so **a replayed row carrying
+  `block_version = 1` implies no reorg**. Never read a reorg out of `block_version`
+  on a replayed row. A height the archive cannot answer for, or answers for with a
+  different block, stops the run — the archive is what gets repaired, by the
+  republisher or the bulk downloader, before the range is replayed again.
+- **Rerun behaviour is the live path's**, the same terms `morpho-v2-bootstrap`
+  states for its replay. `SaveNFTTransfers` queues the statement the live
+  indexer's transfer phase queues, so a rerun **on the same build** conflicts away
+  and reports `transfersWritten=0`. A rerun **from a different build** re-records
+  the range as parallel provenance rows, because `processing_version` keys on
+  `build_id`: the row count moves by up to one whole posm history while the holder
+  answer does not, since the newest `processing_version` wins the ordering and
+  carries identical content. The backfill is itself a different build from the
+  live indexer, so its first run over a stretch the indexer already covered writes
+  parallel rows there by construction. Run it again whenever you suspect a gap;
+  read `transfersWritten` together with the build, not on its own.
 - **Row volume and runtime.** Mainnet, measured 2026-09-14: **487,908 Transfer
   logs over 4,286,968 blocks in 68 `eth_getLogs` windows with 25 narrowings**,
   about two minutes of RPC; the writes dominate the rest. The default
@@ -3371,10 +3384,11 @@ Why the threshold is so much higher than the live rule's 2.9 rows/s: the two
 measure different things. A live indexer's rate is a *regime* that continues; the
 backfill's is a **bounded burst that ends**. One chain's whole posm history is
 ~490k rows (487,908 on mainnet, 2026-09) and lands in minutes, which is 5.7
-rows/s averaged over the 24h window. A rerun adds close to nothing, because
-`SaveNFTTransfersIfAbsent` appends only log sites that hold no row and the counter
-counts rows *persisted* — so **a backfill stuck in a loop cannot fire this**, and
-neither can an ordinary run.
+rows/s averaged over the 24h window. A rerun on the same build adds close to
+nothing, because the insert conflicts away and this counter counts rows
+*persisted* — so **a backfill looping on one build cannot fire this**. A rerun from
+a new build re-records the range, which is one history's worth per run and still
+well inside the budget; several of those in a day is what the threshold is set for.
 
 | | |
 |---|---|

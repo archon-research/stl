@@ -55,21 +55,18 @@ type UniswapV4PositionWriter interface {
 	SavePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) (insertedRows int64, err error)
 }
 
-// UniswapV4NFTTransferWriter is the posm transfer backfill's one write.
+// UniswapV4NFTTransferWriter is the posm transfer backfill's one write: transfer
+// rows alone, through the same insert SaveBlock's transfer phase takes.
 //
-// Separate from SaveBlock's transfer phase because the two want different
-// answers to "this log site already has a row". SaveBlock corrects: a later
-// build re-deciding a site appends a new processing_version, which is the
-// ADR-0002 channel every fact table has. A backfill must not — it replays the
-// same immutable logs the live indexer already decoded, so on the stretch where
-// their coverage overlaps every site it revisits would gain a correction version
-// that corrects nothing.
+// Idempotency is the live path's, which is the repo's convention for a replay
+// (morpho-v2-bootstrap states it in full): a re-run on the same build conflicts
+// away and writes nothing, while one from a different build re-records the range
+// as parallel provenance rows, since processing_version keys on build_id. Row
+// counts move, the holder answer does not — the newest processing_version wins the
+// ordering and carries identical content.
 type UniswapV4NFTTransferWriter interface {
-	// Returns how many rows it inserted; a site that already holds a row under any
-	// build, and under any of the chain's PositionManager versions, is left alone —
-	// so a rerun over covered history returns 0 even after a registry correction
-	// has given the chain a new surrogate and left the stored rows on the old one.
-	SaveNFTTransfersIfAbsent(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) (insertedRows int64, err error)
+	// Returns how many rows it inserted.
+	SaveNFTTransfers(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) (insertedRows int64, err error)
 }
 
 type UniswapV4Repository interface {

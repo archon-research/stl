@@ -162,15 +162,20 @@ const (
 	posmDeployBlockNum = int64(21689089)
 )
 
+// liveVersions resolves every height to 0: this gate asks whether the provider's
+// logs still decode, not what the raw archive holds at a height.
+func liveVersions() *fakeBlockVersions {
+	return versionsAt(nil)
+}
+
 func livePosm() uniswapv4indexer.RegisteredPositionManager {
 	return uniswapv4indexer.RegisteredPositionManager{
 		ID: 1, Address: common.HexToAddress(livePosmAddr), DeployBlock: posmDeployBlockNum,
 	}
 }
 
-// Every field of a transfer row comes from the log, so this is the one gate that
-// can catch the provider dropping a field the decoder needs — blockTimestamp
-// above all, which is Alchemy's extension rather than a spec field.
+// The only gate that can catch the provider dropping a field the decoder needs —
+// blockTimestamp above all, which is Alchemy's extension rather than a spec field.
 func TestLiveValidation_PosmTransferLogsDecodeWithNoChainRead(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -187,7 +192,7 @@ func TestLiveValidation_PosmTransferLogsDecodeWithNoChainRead(t *testing.T) {
 		t.Fatal("no posm Transfer logs in the PositionManager's first 200k blocks; the address or topic0 is wrong")
 	}
 
-	transfers, err := uniswapv4indexer.NFTTransfersFromLogs(toSharedLogs(logs), livePosm())
+	transfers, err := uniswapv4indexer.NFTTransfersFromLogs(ctx, toSharedLogs(logs), livePosm(), liveVersions())
 	if err != nil {
 		t.Fatalf("decoding %d live posm logs: %v", len(logs), err)
 	}
@@ -233,7 +238,7 @@ func TestLiveValidation_PosmLogTimestampMatchesItsBlockHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetLogs: %v", err)
 	}
-	transfers, err := uniswapv4indexer.NFTTransfersFromLogs(toSharedLogs(logs), livePosm())
+	transfers, err := uniswapv4indexer.NFTTransfersFromLogs(ctx, toSharedLogs(logs), livePosm(), liveVersions())
 	if err != nil {
 		t.Fatalf("decoding %d live posm logs: %v", len(logs), err)
 	}

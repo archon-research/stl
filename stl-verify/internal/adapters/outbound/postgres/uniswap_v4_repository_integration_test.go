@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -3190,18 +3189,7 @@ func TestUniswapV4Repository_NFTTransferHolderSurvivesAPositionManagerCorrection
 		}
 	})
 
-	var correctedID int64
-	if err := uniswapV4TestPool.QueryRow(ctx, `
-		INSERT INTO uniswap_v4_position_manager (chain_id, protocol_id, deploy_block, build_id)
-		SELECT chain_id, protocol_id, deploy_block, build_id + 1
-		FROM uniswap_v4_position_manager
-		WHERE chain_id = $1
-		ORDER BY processing_version DESC
-		LIMIT 1
-		RETURNING id`, uniswapV4RepoSaveChainID).Scan(&correctedID); err != nil {
-		t.Fatalf("appending a corrected position manager version: %v", err)
-	}
-	if correctedID == managerID {
+	if correctedID := appendUniswapV4PositionManagerVersion(t, ctx); correctedID == managerID {
 		t.Fatalf("the correction reused surrogate id %d, so this test proves nothing", correctedID)
 	}
 
@@ -3211,177 +3199,83 @@ func TestUniswapV4Repository_NFTTransferHolderSurvivesAPositionManagerCorrection
 	}
 }
 
-// SaveNFTTransfersIfAbsent is the transfer backfill's writer. Its contract is the
-// mirror image of SaveBlock's above: where a new build's SaveBlock APPENDS a
-// correction version for a log site, this one leaves the site alone, because the
-// backfill replays the same immutable logs the live indexer already decoded. The
-// returned count is what the run reports as transfersWritten, and an operator
-// reads "0" as a no-op rerun rather than a closed gap.
-func TestUniswapV4Repository_SaveNFTTransfersIfAbsent_SkipsASiteAnotherBuildWrote(t *testing.T) {
-	ctx := context.Background()
-	seedUniswapV4RepoTestPool(t, ctx, 0x59)
-	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
-
-	const blockNumber = int64(25002000)
-	transfer := &entity.UniswapV4PositionNFTTransfer{
-		PositionManagerID: managerID,
-		TokenID:           big.NewInt(8888),
-		BlockNumber:       blockNumber,
-		BlockTimestamp:    uniswapV4TestBlockTime(blockNumber),
-		TxHash:            uniswapV4MintFixtureTx,
-		LogIndex:          3,
-		From:              common.Address{},
-		To:                uniswapV4MintFixtureTo,
-	}
-	if err := transfer.Validate(); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	transfers := []*entity.UniswapV4PositionNFTTransfer{transfer}
-
-	// The live indexer's build records the site first.
-	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
-		writes := outbound.UniswapV4BlockWrites{NFTTransfers: transfers}
-		if _, err := NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4BuildID).SaveBlock(ctx, tx, writes); err != nil {
-			t.Fatalf("SaveBlock: %v", err)
-		}
-	})
-
-	// A backfill on a different build then replays it.
-	var written int64
-	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
-		var err error
-		written, err = NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4RebuildID).
-			SaveNFTTransfersIfAbsent(ctx, tx, transfers)
-		if err != nil {
-			t.Fatalf("SaveNFTTransfersIfAbsent: %v", err)
-		}
-	})
-	if written != 0 {
-		t.Errorf("reported %d rows written, want 0: a rerun over covered history must report a no-op", written)
-	}
-
-	var rowCount, version, buildID int
-	err := uniswapV4TestPool.QueryRow(ctx, `
-		SELECT count(*), max(processing_version), max(build_id)
-		FROM uniswap_v4_position_nft_transfer
-		WHERE position_manager_id = $1 AND block_number = $2`, managerID, blockNumber).
-		Scan(&rowCount, &version, &buildID)
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	if rowCount != 1 || version != 0 || buildID != int(testUniswapV4BuildID) {
-		t.Errorf("site holds %d row(s) at processing_version %d / build %d, want the live indexer's single version-0 row",
-			rowCount, version, buildID)
-	}
-}
-
-func TestUniswapV4Repository_SaveNFTTransfersIfAbsent_WritesEverySiteOfAnUncoveredBlock(t *testing.T) {
+func TestUniswapV4Repository_SaveNFTTransfers_ARerunOnTheSameBuildWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	const blockNumber = int64(25003000)
 	managerID, transfers := newUniswapV4NFTTransferBlock(t, ctx, 0x5a, blockNumber, 3)
-
-	written, err := writeNFTTransfersInTx(ctx, t, testUniswapV4BuildID, transfers)
+	first, err := writeNFTTransfersInTx(ctx, t, testUniswapV4BuildID, transfers)
 	if err != nil {
-		t.Fatalf("SaveNFTTransfersIfAbsent: %v", err)
+		t.Fatalf("seeding the covered block: %v", err)
+	}
+	if first != 3 {
+		t.Fatalf("the first write landed %d rows, want 3: the rerun would prove nothing", first)
 	}
 
-	if written != 3 {
-		t.Errorf("reported %d rows written, want 3", written)
+	rerun, err := writeNFTTransfersInTx(ctx, t, testUniswapV4BuildID, transfers)
+
+	if err != nil {
+		t.Fatalf("SaveNFTTransfers: %v", err)
+	}
+	if rerun != 0 {
+		t.Errorf("the rerun reported %d rows written, want 0", rerun)
 	}
 	if rowCount := countUniswapV4NFTTransferRows(t, ctx, managerID, blockNumber); rowCount != 3 {
-		t.Errorf("site holds %d rows, want 3: one per log index", rowCount)
+		t.Errorf("the block holds %d rows, want 3: the rerun duplicated a log site", rowCount)
 	}
 }
 
-func TestUniswapV4Repository_SaveNFTTransfersIfAbsent_ReportsARerunOfItsOwnWriteAsANoOp(t *testing.T) {
+// processing_version keys on build_id, so a rerun from another build is a second
+// provenance record of the same logs rather than a correction of them.
+func TestUniswapV4Repository_SaveNFTTransfers_ARerunFromAnotherBuildRecordsTheRangeAgain(t *testing.T) {
 	ctx := context.Background()
-	const blockNumber = int64(25005000)
-	managerID, transfers := newUniswapV4NFTTransferBlock(t, ctx, 0x5c, blockNumber, 3)
+	const blockNumber = int64(25004000)
+	managerID, transfers := newUniswapV4NFTTransferBlock(t, ctx, 0x5b, blockNumber, 3)
 	if _, err := writeNFTTransfersInTx(ctx, t, testUniswapV4BuildID, transfers); err != nil {
 		t.Fatalf("seeding the covered block: %v", err)
 	}
 
-	written, err := writeNFTTransfersInTx(ctx, t, testUniswapV4BuildID, transfers)
-	if err != nil {
-		t.Fatalf("SaveNFTTransfersIfAbsent: %v", err)
-	}
+	rerun, err := writeNFTTransfersInTx(ctx, t, testUniswapV4RebuildID, transfers)
 
-	if written != 0 {
-		t.Errorf("the rerun reported %d rows written, want 0", written)
+	if err != nil {
+		t.Fatalf("SaveNFTTransfers: %v", err)
 	}
-	if rowCount := countUniswapV4NFTTransferRows(t, ctx, managerID, blockNumber); rowCount != 3 {
-		t.Errorf("site holds %d rows, want 3: the rerun duplicated a log index", rowCount)
+	if rerun != 3 {
+		t.Errorf("the rerun reported %d rows written, want 3", rerun)
+	}
+	if rowCount := countUniswapV4NFTTransferRows(t, ctx, managerID, blockNumber); rowCount != 6 {
+		t.Errorf("the block holds %d rows, want 6: one set per build", rowCount)
+	}
+	got := uniswapV4NFTTransferRowsAt(t, ctx, managerID, blockNumber, 0)
+	want := []uniswapV4NFTTransferProvenance{
+		{processingVersion: 0, buildID: int(testUniswapV4BuildID), to: uniswapV4MintFixtureTo},
+		{processingVersion: 1, buildID: int(testUniswapV4RebuildID), to: uniswapV4MintFixtureTo},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("the log site holds %+v, want %+v", got, want)
 	}
 }
 
-// With the existence check and the lock in ONE statement, both parameters are
-// constants, so the check compiles to an InitPlan gating a Result node ABOVE the
-// lock: two cross-build writers both decide "absent", and the loser's trigger
-// then assigns processing_version 1 — a correction version for a log fact nothing
-// corrected.
-//
-// Deterministic rather than timing-dependent: the first writer holds its
-// transaction open until it can SEE the second blocked on the site lock in
-// pg_locks, which is the exact moment the second has made its decision.
-func TestUniswapV4Repository_SaveNFTTransfersIfAbsent_HoldsTheSiteAgainstAConcurrentWriter(t *testing.T) {
+// The two rows carry identical content, so the newest processing_version winning
+// the holder ordering cannot change the answer it wins with.
+func TestUniswapV4Repository_SaveNFTTransfers_ARerunFromAnotherBuildLeavesTheHolderUnchanged(t *testing.T) {
 	ctx := context.Background()
+	const blockNumber = int64(25005000)
+	managerID, transfers := newUniswapV4NFTTransferBlock(t, ctx, 0x5c, blockNumber, 1)
+	if _, err := writeNFTTransfersInTx(ctx, t, testUniswapV4BuildID, transfers); err != nil {
+		t.Fatalf("seeding the covered block: %v", err)
+	}
+	tokenID := transfers[0].TokenID.Int64()
+	before := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, tokenID, blockNumber)
 
-	const blockNumber = int64(25004000)
-	// One slice for both writers: contending over the SAME log site is the point,
-	// and neither writer mutates the transfers it is handed.
-	managerID, site := newUniswapV4NFTTransferBlock(t, ctx, 0x5b, blockNumber, 1)
-
-	firstWrote := make(chan struct{})
-	secondDone := make(chan struct{})
-	var firstCount, secondCount int64
-	var firstErr, secondErr error
-
-	go func() {
-		defer close(secondDone)
-		<-firstWrote
-		secondCount, secondErr = writeNFTTransfersInTx(ctx, t, testUniswapV4RebuildID, site)
-	}()
-
-	firstErr = func() error {
-		// Opening the gate on every path, failures included, so a first-writer
-		// error cannot strand the waiting goroutine and hang the whole package.
-		var release sync.Once
-		defer func() { release.Do(func() { close(firstWrote) }) }()
-
-		tx, err := uniswapV4TestPool.Begin(ctx)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = tx.Rollback(ctx) }()
-
-		firstCount, err = NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4BuildID).
-			SaveNFTTransfersIfAbsent(ctx, tx, site)
-		if err != nil {
-			return err
-		}
-		release.Do(func() { close(firstWrote) })
-		waitForBlockedAdvisoryLock(ctx, t)
-		return tx.Commit(ctx)
-	}()
-
-	select {
-	case <-secondDone:
-	case <-time.After(uniswapV4ConcurrentWriterWait):
-		t.Fatal("the concurrent writer never returned after the first writer's transaction ended")
+	if _, err := writeNFTTransfersInTx(ctx, t, testUniswapV4RebuildID, transfers); err != nil {
+		t.Fatalf("the rerun from another build: %v", err)
 	}
 
-	if firstErr != nil {
-		t.Fatalf("first writer: %v", firstErr)
+	if rowCount := countUniswapV4NFTTransferRows(t, ctx, managerID, blockNumber); rowCount != 2 {
+		t.Fatalf("the block holds %d rows, want 2: no parallel row landed to answer alongside", rowCount)
 	}
-	if secondErr != nil {
-		t.Fatalf("second writer: %v", secondErr)
-	}
-	if total := firstCount + secondCount; total != 1 {
-		t.Errorf("the two writers reported %d rows written between them, want exactly 1", total)
-	}
-
-	if rowCount := countUniswapV4NFTTransferRows(t, ctx, managerID, blockNumber); rowCount != 1 {
-		t.Errorf("site holds %d rows, want 1: the second writer appended a correction version that corrects nothing", rowCount)
+	if after := holderOfUniswapV4Token(t, ctx, uniswapV4RepoSaveChainID, tokenID, blockNumber); after != before {
+		t.Errorf("holder of token %d went %s -> %s across a rerun from another build", tokenID, before, after)
 	}
 }
 
@@ -3400,7 +3294,7 @@ func newUniswapV4NFTTransferBlock(
 	for i := range logs {
 		transfer := &entity.UniswapV4PositionNFTTransfer{
 			PositionManagerID: managerID,
-			TokenID:           big.NewInt(int64(7000 + i)),
+			TokenID:           big.NewInt(int64(discriminator)*1000 + int64(i)),
 			BlockNumber:       blockNumber,
 			BlockTimestamp:    uniswapV4TestBlockTime(blockNumber),
 			TxHash:            uniswapV4MintFixtureTx,
@@ -3427,6 +3321,41 @@ func countUniswapV4NFTTransferRows(t *testing.T, ctx context.Context, managerID,
 	return rowCount
 }
 
+// uniswapV4NFTTransferProvenance is what separates two rows of one log site.
+type uniswapV4NFTTransferProvenance struct {
+	processingVersion int
+	buildID           int
+	to                common.Address
+}
+
+func uniswapV4NFTTransferRowsAt(t *testing.T, ctx context.Context, managerID, blockNumber int64, logIndex int) []uniswapV4NFTTransferProvenance {
+	t.Helper()
+	rows, err := uniswapV4TestPool.Query(ctx, `
+		SELECT processing_version, build_id, to_address
+		FROM uniswap_v4_position_nft_transfer
+		WHERE position_manager_id = $1 AND block_number = $2 AND log_index = $3
+		ORDER BY processing_version`, managerID, blockNumber, logIndex)
+	if err != nil {
+		t.Fatalf("reading the log site's rows: %v", err)
+	}
+	defer rows.Close()
+
+	var got []uniswapV4NFTTransferProvenance
+	for rows.Next() {
+		var row uniswapV4NFTTransferProvenance
+		var to []byte
+		if err := rows.Scan(&row.processingVersion, &row.buildID, &to); err != nil {
+			t.Fatalf("scanning the log site's rows: %v", err)
+		}
+		row.to = common.BytesToAddress(to)
+		got = append(got, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading the log site's rows: %v", err)
+	}
+	return got
+}
+
 func writeNFTTransfersInTx(
 	ctx context.Context,
 	t *testing.T,
@@ -3440,94 +3369,11 @@ func writeNFTTransfersInTx(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	written, err := NewUniswapV4Repository(uniswapV4TestPool, buildID).SaveNFTTransfersIfAbsent(ctx, tx, transfers)
+	written, err := NewUniswapV4Repository(uniswapV4TestPool, buildID).SaveNFTTransfers(ctx, tx, transfers)
 	if err != nil {
 		return 0, err
 	}
 	return written, tx.Commit(ctx)
-}
-
-// waitForBlockedAdvisoryLock blocks until another backend in THIS database is
-// waiting on an advisory lock, which is what proves the concurrent writer has
-// reached the site lock — and, under the defect this guards, has already decided
-// the row is absent.
-//
-// Scoped to the current database and to other backends: pg_locks is cluster-wide,
-// and one Postgres container is shared by every package in a CI shard (VEC-565),
-// so an unscoped count is satisfied by any other suite's advisory wait. That
-// would let the first writer commit before the second had contended at all — a
-// pass in the silent direction, on the one test that must not give one.
-// One budget for both halves of the handoff, so a writer that never contends and
-// a writer that never returns both fail with a message instead of a shard timeout.
-const uniswapV4ConcurrentWriterWait = 30 * time.Second
-
-func waitForBlockedAdvisoryLock(ctx context.Context, t *testing.T) {
-	t.Helper()
-	const blockedInThisDatabase = `
-		SELECT count(*) FROM pg_locks
-		WHERE locktype = 'advisory'
-		  AND NOT granted
-		  AND pid <> pg_backend_pid()
-		  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`
-
-	deadline := time.Now().Add(uniswapV4ConcurrentWriterWait)
-	for time.Now().Before(deadline) {
-		var waiting int
-		if err := uniswapV4TestPool.QueryRow(ctx, blockedInThisDatabase).Scan(&waiting); err != nil {
-			t.Fatalf("polling pg_locks: %v", err)
-		}
-		if waiting > 0 {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatal("no backend ever blocked on the site advisory lock: the concurrent writer never contended, so this test proves nothing")
-}
-
-// The existence check asks every PositionManager surrogate of the chain, not the
-// one this build resolved. A correcting registry version gives the chain a new
-// surrogate while every stored row keeps the retired one, so a check keyed on the
-// new id alone would find a whole posm history absent and append it again — on
-// mainnet ~488k rows no read benefits from, against a writer whose contract is
-// that a rerun writes nothing.
-func TestUniswapV4Repository_SaveNFTTransfersIfAbsent_IsANoOpAfterAPositionManagerCorrection(t *testing.T) {
-	ctx := context.Background()
-	managerID, transfers := newUniswapV4NFTTransferBlock(t, ctx, 0x5d, 25006000, 3)
-
-	written, err := writeNFTTransfersInTx(ctx, t, testUniswapV4BuildID, transfers)
-	if err != nil {
-		t.Fatalf("first write: %v", err)
-	}
-	if written != 3 {
-		t.Fatalf("first write reported %d rows, want 3", written)
-	}
-
-	correctedID := appendUniswapV4PositionManagerVersion(t, ctx)
-	if correctedID == managerID {
-		t.Fatalf("the correction reused surrogate id %d, so this test proves nothing", correctedID)
-	}
-
-	// The rerun a rebooted worker performs: same log sites, the new surrogate.
-	reresolved := make([]*entity.UniswapV4PositionNFTTransfer, len(transfers))
-	for i, t0 := range transfers {
-		corrected := *t0
-		corrected.PositionManagerID = correctedID
-		reresolved[i] = &corrected
-	}
-
-	rerun, err := writeNFTTransfersInTx(ctx, t, testUniswapV4RebuildID, reresolved)
-	if err != nil {
-		t.Fatalf("rerun under the corrected surrogate: %v", err)
-	}
-	if rerun != 0 {
-		t.Errorf("rerun reported %d rows written, want 0: the check is keyed on one surrogate id instead of the chain", rerun)
-	}
-	if got := countUniswapV4NFTTransferRows(t, ctx, managerID, 25006000); got != 3 {
-		t.Errorf("the block holds %d rows under the retired surrogate, want 3", got)
-	}
-	if got := countUniswapV4NFTTransferRows(t, ctx, correctedID, 25006000); got != 0 {
-		t.Errorf("the corrected surrogate holds %d rows, want 0: a correction re-wrote the history", got)
-	}
 }
 
 // appendUniswapV4PositionManagerVersion supersedes the chain's current posm row,

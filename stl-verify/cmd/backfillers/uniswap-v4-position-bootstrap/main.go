@@ -31,11 +31,17 @@
 // ERC-721 Transfer history from uniswap_v4_position_manager.deploy_block up to a
 // pinned finality-safe height, above which the live indexer owns the stream.
 //
-// Nothing is read from chain state: a log carries its own height, timestamp,
-// token id and both parties. Idempotent for a different reason than the position
-// run — the writer appends only log sites that hold no row, so replaying history
-// the live indexer already covered adds nothing rather than a correction version
-// per site.
+// Nothing is read from chain state: a log carries its own height, timestamp, token
+// id and both parties. Its block_version comes from the raw S3 archive, the
+// maintainer-set highest-version-wins read every replay in this repo uses, so a
+// row is versioned as the archived copy it was decoded against rather than by an
+// assumption about reorgs.
+//
+// Re-running is safe on the live path's terms, which are morpho-v2-bootstrap's: a
+// re-run on the same build conflicts away and writes nothing, one from a different
+// build re-records the range as parallel provenance rows, and the holder answer is
+// the same either way because the newest processing_version wins and carries
+// identical content.
 //
 // # How to start a run
 //
@@ -81,12 +87,16 @@ import (
 	"go.temporal.io/sdk/worker"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
+
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockversion"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/dextelemetry"
@@ -288,7 +298,7 @@ func loadAndBuildJobs(ctx context.Context, deps temporal.Dependencies, in jobInp
 		return nil, fmt.Errorf("creating the tx manager: %w", err)
 	}
 
-	return buildRunnerJobs(deps, runnerWiring{
+	return buildRunnerJobs(ctx, deps, runnerWiring{
 		cfg: in.cfg, pools: pools, repo: repo, txMgr: txMgr,
 		logScan: in.logScan, multicaller: in.multicaller,
 		positionProgress: in.positionProgress, transferProgress: in.transferProgress,
@@ -308,7 +318,7 @@ type runnerWiring struct {
 	transferProgress *temporal.ActivityProgress[uniswapv4bootstrap.TransferProgress]
 }
 
-func buildRunnerJobs(deps temporal.Dependencies, w runnerWiring) ([]temporal.RunnerJob, error) {
+func buildRunnerJobs(ctx context.Context, deps temporal.Dependencies, w runnerWiring) ([]temporal.RunnerJob, error) {
 	chainID := w.cfg.bootstrap.ChainID
 
 	positions, err := uniswapv4bootstrap.New(uniswapv4bootstrap.Deps{
@@ -329,7 +339,7 @@ func buildRunnerJobs(deps temporal.Dependencies, w runnerWiring) ([]temporal.Run
 	// whole worker's registration and CrashLoop the Deployment, taking the
 	// unrelated position bootstrap with it. Its workflow type carries the refusal
 	// instead, so only a run of it fails.
-	transfers, transferErr := newTransferService(deps.Logger, w)
+	transfers, transferErr := newTransferService(ctx, deps.Logger, w)
 	if transferErr != nil {
 		deps.Logger.Error("the uniswap-v4 posm transfer backfill is not runnable; its workflow type is registered but will refuse every run",
 			"chainId", chainID, "error", transferErr)
@@ -437,11 +447,20 @@ var transferActivityTimeouts = temporal.ActivityTimeouts{
 	Heartbeat:       time.Minute,
 }
 
-func newTransferService(logger *slog.Logger, w runnerWiring) (*uniswapv4bootstrap.TransferService, error) {
+func newTransferService(ctx context.Context, logger *slog.Logger, w runnerWiring) (*uniswapv4bootstrap.TransferService, error) {
 	positionManager, err := uniswapv4indexer.PositionManagerFor(w.pools)
 	if err != nil {
 		return nil, err
 	}
+	// A scanned log carries no block_version, so the archive supplies it. Opened
+	// here rather than in setupRunners because its failure must reach only this
+	// workflow type: the probe needs S3 credentials and a bucket the position
+	// bootstrap has no use for.
+	archive, err := openArchive(ctx, w.cfg.bootstrap.ChainID, logger)
+	if err != nil {
+		return nil, err
+	}
+	versions := blockversion.NewResolver(archive, "uniswap-v4 posm transfer backfill", logger)
 	// The prefix is the live indexer's, so both writers move one counter; the
 	// chain name comes from the chain id, as it does for every dex worker.
 	telemetry, err := dextelemetry.NewTelemetry(metricPrefix, w.cfg.bootstrap.ChainID)
@@ -452,6 +471,7 @@ func newTransferService(logger *slog.Logger, w runnerWiring) (*uniswapv4bootstra
 	return uniswapv4bootstrap.NewTransferService(uniswapv4bootstrap.TransferDeps{
 		PositionManager: positionManager,
 		LogScan:         w.logScan,
+		Versions:        versions,
 		Repo:            w.repo,
 		TxManager:       w.txMgr,
 		Progress:        w.transferProgress,
@@ -485,6 +505,30 @@ func runTransferBackfill(ctx context.Context, logger *slog.Logger, svc *uniswapv
 		"transfersWritten", summary.TransfersWritten, "batches", summary.Batches,
 		"lowestBlockSeen", summary.LowestBlockSeen, "highestBlockSeen", summary.HighestBlockSeen)
 	return nil
+}
+
+// openArchive opens the chain's raw archive read-only, cross-checking the bucket
+// against the chain: they arrive as independent variables, and another chain's
+// archive answers for heights this chain never published. S3 access is the pod's
+// own identity; the startup probe fails here rather than mid-run.
+func openArchive(ctx context.Context, chainID int64, logger *slog.Logger) (*s3adapter.ArchiveReader, error) {
+	bucket, err := env.Require("S3_BUCKET")
+	if err != nil {
+		return nil, err
+	}
+	deployEnv, err := env.Require("DEPLOY_ENV")
+	if err != nil {
+		return nil, err
+	}
+	if err := chainutil.ValidateS3BucketForChain(chainID, bucket, deployEnv); err != nil {
+		return nil, fmt.Errorf("S3_BUCKET / CHAIN_ID mismatch: %w", err)
+	}
+
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{StaticCredentialsFromEnv: true})
+	if err != nil {
+		return nil, fmt.Errorf("loading AWS config: %w", err)
+	}
+	return s3adapter.OpenArchiveReader(ctx, awsCfg, bucket, logger)
 }
 
 func loadRegisteredPools(ctx context.Context, repo *postgres.UniswapV4Repository, chainID int64) ([]uniswapv4indexer.RegisteredPool, error) {

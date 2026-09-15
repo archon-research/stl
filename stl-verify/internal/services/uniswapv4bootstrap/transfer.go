@@ -29,12 +29,16 @@ type NFTTransferRecorder interface {
 type TransferDeps struct {
 	PositionManager uniswapv4indexer.RegisteredPositionManager
 	LogScan         outbound.LogScanClient
-	Repo            outbound.UniswapV4NFTTransferWriter
-	TxManager       outbound.TxManager
-	Progress        TransferProgressStore
-	Telemetry       NFTTransferRecorder
-	Logger          *slog.Logger
-	Config          Config
+	// Versions answers which block_version each scanned height was indexed under,
+	// from the raw archive — block_states is the watchers' and cannot answer for a
+	// range older than its retention.
+	Versions  uniswapv4indexer.BlockVersionResolver
+	Repo      outbound.UniswapV4NFTTransferWriter
+	TxManager outbound.TxManager
+	Progress  TransferProgressStore
+	Telemetry NFTTransferRecorder
+	Logger    *slog.Logger
+	Config    Config
 }
 
 // TransferService backfills the posm ERC-721 Transfer log from the
@@ -45,6 +49,7 @@ type TransferDeps struct {
 type TransferService struct {
 	positionManager uniswapv4indexer.RegisteredPositionManager
 	logScan         outbound.LogScanClient
+	versions        uniswapv4indexer.BlockVersionResolver
 	repo            outbound.UniswapV4NFTTransferWriter
 	txMgr           outbound.TxManager
 	progress        TransferProgressStore
@@ -80,6 +85,7 @@ func NewTransferService(deps TransferDeps) (*TransferService, error) {
 	return &TransferService{
 		positionManager: deps.PositionManager,
 		logScan:         deps.LogScan,
+		versions:        deps.Versions,
 		repo:            deps.Repo,
 		txMgr:           deps.TxManager,
 		progress:        deps.Progress,
@@ -102,6 +108,8 @@ func (d TransferDeps) validate() error {
 		return fmt.Errorf("uniswap_v4_position_manager.deploy_block for chain %d is %d: the scan would start at genesis, so the registry row needs a correcting version appended", d.Config.ChainID, d.PositionManager.DeployBlock)
 	case d.LogScan == nil:
 		return fmt.Errorf("log scan client is required")
+	case d.Versions == nil:
+		return fmt.Errorf("block version resolver is required: a scanned log carries no version of its own")
 	case d.Repo == nil:
 		return fmt.Errorf("repo is required")
 	case d.TxManager == nil:
@@ -128,9 +136,9 @@ func (d TransferDeps) validate() error {
 // finality depth, which the operator has to hear about.
 //
 // A run that dies part-way resumes on a later attempt through the
-// TransferProgressStore, continuing from the first window it had not finished.
-// No correctness depends on the record: a run that resumes from nothing simply
-// rescans, and the writer appends nothing for a site already stored.
+// TransferProgressStore, continuing from the first window it had not finished. No
+// correctness depends on the record: a run that resumes from nothing simply
+// rescans, and the write is the live path's, so a same-build rescan conflicts away.
 func (s *TransferService) Run(ctx context.Context) (TransferSummary, error) {
 	pin, resumeFrom, err := s.resumePoint(ctx)
 	if err != nil {
@@ -244,7 +252,7 @@ func (s *TransferService) scanAndPersist(ctx context.Context, from int64, pin pi
 }
 
 func (s *TransferService) persistWindow(ctx context.Context, w logWindow, summary *TransferSummary) error {
-	transfers, err := uniswapv4indexer.NFTTransfersFromLogs(toSharedLogs(w.logs), s.positionManager)
+	transfers, err := uniswapv4indexer.NFTTransfersFromLogs(ctx, toSharedLogs(w.logs), s.positionManager, s.versions)
 	if err != nil {
 		return err
 	}
@@ -290,7 +298,7 @@ func (s *TransferService) persist(ctx context.Context, transfers []*entity.Unisw
 	var written int64
 	err := s.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
 		var saveErr error
-		written, saveErr = s.repo.SaveNFTTransfersIfAbsent(ctx, tx, transfers)
+		written, saveErr = s.repo.SaveNFTTransfers(ctx, tx, transfers)
 		return saveErr
 	})
 	if err != nil {

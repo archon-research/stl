@@ -1,7 +1,11 @@
 package uniswapv4indexer
 
 import (
+	"context"
+	"errors"
 	"math/big"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,10 +21,36 @@ const (
 	scanHolderTopic = "0x000000000000000000000000e588dDd10E5Ca07c0Cf6a1F0e0e6b0e1d1b2C3d4"
 	scanZeroTopic   = "0x0000000000000000000000000000000000000000000000000000000000000000"
 	scanTxHash      = "0x1111111111111111111111111111111111111111111111111111111111111111"
+	scanBlockHash   = "0x3333333333333333333333333333333333333333333333333333333333333333"
+	scanBlockNumber = int64(0x18a1d36)
 )
 
 func scanPosm() RegisteredPositionManager {
 	return RegisteredPositionManager{ID: 7, Address: common.HexToAddress(scanPosmAddress)}
+}
+
+// fakeBlockVersions answers a version per height; a height it was not given
+// resolves to 0.
+type fakeBlockVersions struct {
+	byBlock     map[int64]int
+	err         error
+	askedHashes []common.Hash
+}
+
+func versionsAt(byBlock map[int64]int) *fakeBlockVersions {
+	return &fakeBlockVersions{byBlock: byBlock}
+}
+
+func versionsFailing(err error) *fakeBlockVersions {
+	return &fakeBlockVersions{err: err}
+}
+
+func (f *fakeBlockVersions) ResolveBlockVersion(_ context.Context, blockNumber int64, blockHash common.Hash) (int, error) {
+	f.askedHashes = append(f.askedHashes, blockHash)
+	if f.err != nil {
+		return 0, f.err
+	}
+	return f.byBlock[blockNumber], nil
 }
 
 // tokenIDTopic renders a token id as the 32-byte hex word topics[3] carries.
@@ -33,8 +63,8 @@ func scannedTransferLog(mut ...func(*shared.Log)) shared.Log {
 		Address:          scanPosmAddress,
 		Topics:           []string{abis.TransferTopic0().Hex(), scanZeroTopic, scanHolderTopic, tokenIDTopic(388720)},
 		Data:             "0x",
-		BlockHash:        scanTxHash,
-		BlockNumber:      "0x18a1d36",
+		BlockHash:        scanBlockHash,
+		BlockNumber:      "0x" + strconv.FormatInt(scanBlockNumber, 16),
 		BlockTimestamp:   "0x6793d267",
 		TransactionHash:  scanTxHash,
 		TransactionIndex: "0x1",
@@ -47,7 +77,7 @@ func scannedTransferLog(mut ...func(*shared.Log)) shared.Log {
 }
 
 func TestNFTTransfersFromLogs_TakesEveryFieldFromTheLog(t *testing.T) {
-	got, err := NFTTransfersFromLogs([]shared.Log{scannedTransferLog()}, scanPosm())
+	got, err := NFTTransfersFromLogs(context.Background(), []shared.Log{scannedTransferLog()}, scanPosm(), versionsAt(nil))
 	if err != nil {
 		t.Fatalf("NFTTransfersFromLogs: %v", err)
 	}
@@ -61,14 +91,11 @@ func TestNFTTransfersFromLogs_TakesEveryFieldFromTheLog(t *testing.T) {
 	if transfer.TokenID.Cmp(big.NewInt(388720)) != 0 {
 		t.Errorf("TokenID = %s, want 388720", transfer.TokenID)
 	}
-	if transfer.BlockNumber != 0x18a1d36 {
-		t.Errorf("BlockNumber = %d, want %d", transfer.BlockNumber, 0x18a1d36)
+	if transfer.BlockNumber != scanBlockNumber {
+		t.Errorf("BlockNumber = %d, want %d", transfer.BlockNumber, scanBlockNumber)
 	}
 	if want := time.Unix(0x6793d267, 0).UTC(); !transfer.BlockTimestamp.Equal(want) {
 		t.Errorf("BlockTimestamp = %s, want %s", transfer.BlockTimestamp, want)
-	}
-	if transfer.BlockVersion != 0 {
-		t.Errorf("BlockVersion = %d, want 0: every scanned row is past finality", transfer.BlockVersion)
 	}
 	if transfer.LogIndex != 42 {
 		t.Errorf("LogIndex = %d, want 42", transfer.LogIndex)
@@ -78,6 +105,44 @@ func TestNFTTransfersFromLogs_TakesEveryFieldFromTheLog(t *testing.T) {
 	}
 	if want := common.HexToAddress("0xe588dDd10E5Ca07c0Cf6a1F0e0e6b0e1d1b2C3d4"); transfer.To != want {
 		t.Errorf("To = %s, want %s", transfer.To, want)
+	}
+}
+
+func TestNFTTransfersFromLogs_StampsTheVersionTheResolverAnswers(t *testing.T) {
+	got, err := NFTTransfersFromLogs(context.Background(), []shared.Log{scannedTransferLog()}, scanPosm(),
+		versionsAt(map[int64]int{scanBlockNumber: 3}))
+	if err != nil {
+		t.Fatalf("NFTTransfersFromLogs: %v", err)
+	}
+	if got[0].BlockVersion != 3 {
+		t.Errorf("BlockVersion = %d, want the resolved 3", got[0].BlockVersion)
+	}
+}
+
+// The transaction hash sits beside the block hash in the log and would have the
+// resolver answer for another block.
+func TestNFTTransfersFromLogs_AsksTheResolverForTheLogsOwnBlockHash(t *testing.T) {
+	versions := versionsAt(nil)
+
+	if _, err := NFTTransfersFromLogs(context.Background(), []shared.Log{scannedTransferLog()}, scanPosm(), versions); err != nil {
+		t.Fatalf("NFTTransfersFromLogs: %v", err)
+	}
+	if want := []common.Hash{common.HexToHash(scanBlockHash)}; !slices.Equal(versions.askedHashes, want) {
+		t.Errorf("resolver was asked about %v, want %v", versions.askedHashes, want)
+	}
+}
+
+// An unversioned row would default to 0 and answer for whichever block the
+// watcher indexed first at that height.
+func TestNFTTransfersFromLogs_FailsTheWindowWhenTheVersionCannotBeResolved(t *testing.T) {
+	got, err := NFTTransfersFromLogs(context.Background(), []shared.Log{scannedTransferLog()}, scanPosm(),
+		versionsFailing(errors.New("the raw archive holds nothing at that height")))
+
+	if err == nil || !strings.Contains(err.Error(), "the raw archive holds nothing at that height") {
+		t.Fatalf("error = %v, want the resolver failure to fail the window", err)
+	}
+	if got != nil {
+		t.Errorf("returned %d rows alongside the error", len(got))
 	}
 }
 
@@ -115,10 +180,13 @@ func TestNFTTransfersFromLogs_RefusesALogTheFilterShouldNotHaveReturned(t *testi
 		{"a truncated topic", func(l *shared.Log) {
 			l.Topics[3] = "0xdeadbeef"
 		}, "is not a 32-byte hex word"},
+		{"a truncated block hash", func(l *shared.Log) {
+			l.BlockHash = "0xdeadbeef"
+		}, "has block hash"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NFTTransfersFromLogs([]shared.Log{scannedTransferLog(tc.mut)}, scanPosm())
+			_, err := NFTTransfersFromLogs(context.Background(), []shared.Log{scannedTransferLog(tc.mut)}, scanPosm(), versionsAt(nil))
 			if err == nil {
 				t.Fatalf("NFTTransfersFromLogs succeeded, want an error containing %q", tc.wantErr)
 			}
@@ -134,7 +202,7 @@ func TestNFTTransfersFromLogs_DecodesABurnToTheZeroAddress(t *testing.T) {
 		l.Topics[1] = scanHolderTopic
 		l.Topics[2] = scanZeroTopic
 	})
-	got, err := NFTTransfersFromLogs([]shared.Log{burn}, scanPosm())
+	got, err := NFTTransfersFromLogs(context.Background(), []shared.Log{burn}, scanPosm(), versionsAt(nil))
 	if err != nil {
 		t.Fatalf("NFTTransfersFromLogs: %v", err)
 	}
@@ -143,13 +211,10 @@ func TestNFTTransfersFromLogs_DecodesABurnToTheZeroAddress(t *testing.T) {
 	}
 }
 
-// A scan bounded below the reorg window is answered from the canonical chain, so a
-// removed log means the provider served a fork. It must fail the window: as a
-// version-0 row it would then satisfy the existence check guarding the real one.
 func TestNFTTransfersFromLogs_RefusesARemovedLog(t *testing.T) {
 	removed := scannedTransferLog(func(l *shared.Log) { l.Removed = true })
 
-	_, err := NFTTransfersFromLogs([]shared.Log{removed}, scanPosm())
+	_, err := NFTTransfersFromLogs(context.Background(), []shared.Log{removed}, scanPosm(), versionsAt(nil))
 	if err == nil || !strings.Contains(err.Error(), "flagged removed") {
 		t.Fatalf("NFTTransfersFromLogs error = %v, want it to refuse a removed log", err)
 	}

@@ -53,13 +53,35 @@ func transferFilteredLog(tokenID, blockNumber int64, logIndex int, from, to stri
 	}
 }
 
+// fakeBlockVersions answers a version per height; a height it was not given
+// resolves to 0.
+type fakeBlockVersions struct {
+	byBlock map[int64]int
+	err     error
+}
+
+func versionsAt(byBlock map[int64]int) *fakeBlockVersions {
+	return &fakeBlockVersions{byBlock: byBlock}
+}
+
+func versionsFailing(err error) *fakeBlockVersions {
+	return &fakeBlockVersions{err: err}
+}
+
+func (f *fakeBlockVersions) ResolveBlockVersion(_ context.Context, blockNumber int64, _ common.Hash) (int, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	return f.byBlock[blockNumber], nil
+}
+
 type fakeNFTTransferRepo struct {
 	mu           sync.Mutex
 	SaveFn       func([]*entity.UniswapV4PositionNFTTransfer) (int64, error)
 	SavedBatches [][]*entity.UniswapV4PositionNFTTransfer
 }
 
-func (f *fakeNFTTransferRepo) SaveNFTTransfersIfAbsent(_ context.Context, _ pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) (int64, error) {
+func (f *fakeNFTTransferRepo) SaveNFTTransfers(_ context.Context, _ pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) (int64, error) {
 	f.mu.Lock()
 	f.SavedBatches = append(f.SavedBatches, transfers)
 	f.mu.Unlock()
@@ -138,6 +160,7 @@ func newTransferFixture(t *testing.T, mutate func(*TransferDeps)) *transferFixtu
 	deps := TransferDeps{
 		PositionManager: testPositionManager(),
 		LogScan:         client,
+		Versions:        versionsAt(nil),
 		Repo:            repo,
 		TxManager:       &testutil.MockTxManager{},
 		Progress:        progress,
@@ -227,7 +250,8 @@ func TestTransferRun_FiltersOnTheAddressAndTopic0Only(t *testing.T) {
 }
 
 func TestTransferRun_PersistsEveryDecodedTransfer(t *testing.T) {
-	f := newTransferFixture(t, nil)
+	wantVersions := map[int64]int{posmDeployBlock + 10: 2, posmDeployBlock + 11: 5}
+	f := newTransferFixture(t, func(d *TransferDeps) { d.Versions = versionsAt(wantVersions) })
 	f.client.GetLogsFn = logsAt(
 		transferFilteredLog(388720, posmDeployBlock+10, 2, zeroAddress, transferHolderAddr),
 		transferFilteredLog(388721, posmDeployBlock+11, 5, transferHolderAddr, ownerA),
@@ -251,15 +275,19 @@ func TestTransferRun_PersistsEveryDecodedTransfer(t *testing.T) {
 		if row.PositionManagerID != posmRowID {
 			t.Errorf("row token %s has PositionManagerID %d, want %d", row.TokenID, row.PositionManagerID, posmRowID)
 		}
-		if row.BlockVersion != 0 {
-			t.Errorf("row token %s has BlockVersion %d, want 0", row.TokenID, row.BlockVersion)
+		want, scanned := wantVersions[row.BlockNumber]
+		if !scanned {
+			t.Errorf("row token %s is at block %d, which the run was served no log for", row.TokenID, row.BlockNumber)
+			continue
+		}
+		if row.BlockVersion != want {
+			t.Errorf("row token %s has BlockVersion %d, want the resolved %d", row.TokenID, row.BlockVersion, want)
 		}
 	}
 }
 
-// newPartiallyCoveredTransferRun serves two transfers to a writer that reports
-// one of the two sites as already holding a row, which is what separates the
-// queued count from the landed one.
+// newPartiallyCoveredTransferRun serves two transfers to a writer that lands one
+// of them, which is what separates the queued count from the landed one.
 func newPartiallyCoveredTransferRun(t *testing.T) *transferFixture {
 	t.Helper()
 	f := newTransferFixture(t, nil)
@@ -429,6 +457,24 @@ func TestTransferRun_StopsOnAWriteFailureRatherThanLeavingAHole(t *testing.T) {
 	}
 }
 
+// A row the archive cannot version would land at 0 and answer for whichever block
+// the watcher indexed first at that height.
+func TestTransferRun_StopsWhenAWindowCannotBeVersioned(t *testing.T) {
+	f := newTransferFixture(t, func(d *TransferDeps) {
+		d.Versions = versionsFailing(errors.New("the raw archive holds nothing at that height"))
+	})
+	f.client.GetLogsFn = logsAt(transferFilteredLog(388720, posmDeployBlock+10, 2, zeroAddress, transferHolderAddr))
+
+	_, err := f.svc.Run(context.Background())
+
+	if err == nil || !strings.Contains(err.Error(), "the raw archive holds nothing at that height") {
+		t.Fatalf("Run error = %v, want the resolver failure to stop the run", err)
+	}
+	if len(f.repo.SavedBatches) != 0 {
+		t.Errorf("persisted %d batches, want none", len(f.repo.SavedBatches))
+	}
+}
+
 func TestTransferRun_ReportsAPinThatMovedUnderTheScan(t *testing.T) {
 	f := newTransferFixture(t, nil)
 	f.client.GetLogsFn = func(filter outbound.LogFilter) ([]outbound.FilteredLog, error) {
@@ -457,6 +503,7 @@ func TestNewTransferService_RefusesIncompleteDeps(t *testing.T) {
 		{"a negative position manager row id", func(d *TransferDeps) { d.PositionManager.ID = -1 }, "positive row id"},
 		{"a negative transfer batch", func(d *TransferDeps) { d.Config.TransferBatch = -1 }, "transferBatch must be positive"},
 		{"no log scan client", func(d *TransferDeps) { d.LogScan = nil }, "log scan client"},
+		{"no block version resolver", func(d *TransferDeps) { d.Versions = nil }, "block version resolver"},
 		{"no repo", func(d *TransferDeps) { d.Repo = nil }, "repo"},
 		{"no tx manager", func(d *TransferDeps) { d.TxManager = nil }, "txManager"},
 		{"no progress store", func(d *TransferDeps) { d.Progress = nil }, "progress store"},
@@ -468,6 +515,7 @@ func TestNewTransferService_RefusesIncompleteDeps(t *testing.T) {
 			deps := TransferDeps{
 				PositionManager: testPositionManager(),
 				LogScan:         newFakeLogScanClient(testHead, nil),
+				Versions:        versionsAt(nil),
 				Repo:            &fakeNFTTransferRepo{},
 				TxManager:       &testutil.MockTxManager{},
 				Progress:        &fakeTransferProgressStore{},
@@ -484,10 +532,8 @@ func TestNewTransferService_RefusesIncompleteDeps(t *testing.T) {
 	}
 }
 
-// A correcting uniswap_v4_position_manager version gives the chain a new surrogate
-// id. Honouring a cursor written under the old one would leave every transfer
-// below it unwritten under the new id, and SaveNFTTransfersIfAbsent keys on that
-// id, so no rerun of this execution would look there again.
+// Transfer rows are keyed on the PositionManager surrogate, so a cursor written
+// under a superseded one would leave every transfer below it unwritten.
 func TestTransferRun_IgnoresACursorWrittenUnderAnotherPositionManager(t *testing.T) {
 	f := newTransferFixture(t, nil)
 	f.progress.Recorded = TransferProgress{

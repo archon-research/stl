@@ -243,39 +243,10 @@ func (r *UniswapV4Repository) SavePositions(ctx context.Context, tx pgx.Tx, posi
 	return r.writePositions(ctx, tx, positions)
 }
 
-// This NOT EXISTS decides whether a row lands, so lockNFTTransferSitesV4 must
-// already hold the site's lock when the statement runs (ADR-0002 §3).
-//
-// $11 is every uniswap_v4_position_manager surrogate of the chain, not just the
-// one this build resolved: a fact row keeps the retired id after a registry
-// correction and reads reach it through chain_id, so asking about one id would
-// find a whole history absent and append it again.
-const insertUniswapV4NFTTransferIfAbsentSQL = `
-	INSERT INTO uniswap_v4_position_nft_transfer
-	   (position_manager_id, token_id, block_number, block_version, block_timestamp,
-	    tx_hash, log_index, from_address, to_address, build_id)
-	SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
-	WHERE NOT EXISTS (
-	    SELECT 1 FROM uniswap_v4_position_nft_transfer
-	    WHERE position_manager_id = ANY($11::bigint[])
-	      AND block_number        = $3
-	      AND block_version       = $4
-	      AND log_index           = $7
-	)`
-
-// posmChainScopeSQL resolves the chain a PositionManager surrogate belongs to and
-// every surrogate the chain has had, the natural-key resolution
-// currentUniswapV4PoolCTE does for pools.
-const posmChainScopeSQL = `
-	SELECT sib.chain_id, array_agg(sib.id ORDER BY sib.id)
-	FROM uniswap_v4_position_manager sib
-	WHERE sib.chain_id = (SELECT chain_id FROM uniswap_v4_position_manager WHERE id = $1)
-	GROUP BY sib.chain_id`
-
-// SaveNFTTransfersIfAbsent appends only the log sites that hold no row yet, so
-// the transfer backfill can replay history the live indexer already covered
-// without appending a correction version to every site it revisits.
-func (r *UniswapV4Repository) SaveNFTTransfersIfAbsent(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) (int64, error) {
+// SaveNFTTransfers appends transfer rows through the same statement SaveBlock's
+// transfer phase queues, so a replay and live indexing share one write path and one
+// idempotency story (see outbound.UniswapV4NFTTransferWriter).
+func (r *UniswapV4Repository) SaveNFTTransfers(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) (int64, error) {
 	if len(transfers) == 0 {
 		return 0, nil
 	}
@@ -283,109 +254,10 @@ func (r *UniswapV4Repository) SaveNFTTransfersIfAbsent(ctx context.Context, tx p
 	if err != nil {
 		return 0, err
 	}
-	scope, err := r.posmChainScope(ctx, tx, transfers)
-	if err != nil {
-		return 0, err
-	}
-	if err := lockNFTTransferSitesV4(ctx, tx, transfers, scope.chainID); err != nil {
-		return 0, err
-	}
 
 	batch := &pgx.Batch{}
-	for _, c := range rows {
-		t := c.t
-		batch.Queue(insertUniswapV4NFTTransferIfAbsentSQL,
-			t.PositionManagerID, c.tokenID, t.BlockNumber, t.BlockVersion, t.BlockTimestamp,
-			t.TxHash.Bytes(), t.LogIndex, t.From.Bytes(), t.To.Bytes(), int(r.buildID),
-			scope.positionManagerIDs,
-		)
-	}
+	queueV4NFTTransfers(batch, rows, r.buildID)
 	return sendInsertBatch(ctx, tx, batch, len(rows), "uniswap_v4 nft transfer")
-}
-
-// posmChainScope is the chain a batch belongs to and every PositionManager
-// surrogate that chain has had.
-type posmChainScope struct {
-	chainID            int64
-	positionManagerIDs []int64
-}
-
-// One batch is one run's decode, so it carries one PositionManager; a mixed batch
-// would silently scope half of it to the wrong chain.
-func (r *UniswapV4Repository) posmChainScope(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) (posmChainScope, error) {
-	posmID := transfers[0].PositionManagerID
-	for _, t := range transfers[1:] {
-		if t.PositionManagerID != posmID {
-			return posmChainScope{}, fmt.Errorf("nft transfer batch mixes uniswap_v4_position_manager ids %d and %d", posmID, t.PositionManagerID)
-		}
-	}
-
-	var scope posmChainScope
-	if err := tx.QueryRow(ctx, posmChainScopeSQL, posmID).Scan(&scope.chainID, &scope.positionManagerIDs); err != nil {
-		return posmChainScope{}, fmt.Errorf("resolving the chain of uniswap_v4_position_manager %d: %w", posmID, err)
-	}
-	return scope, nil
-}
-
-// lockNFTTransferSitesV4 takes every log site's advisory lock in one round-trip,
-// ahead of the existence check that decides the insert, so a concurrent writer
-// cannot pass the same check and land a second row at processing_version 1.
-//
-// Keyed by CHAIN and log site, as wide as that check: two builds holding different
-// PositionManager surrogates for one chain — a worker booted either side of a
-// registry correction — would otherwise take different locks for one logical site
-// and both decide it absent. Wider than the table's assign_processing_version
-// trigger, so the trigger's per-row acquisition is its own lock rather than a
-// re-entrant no-op; measured at 1,000 sites that is 2,000 of the ~12,800 shared
-// slots a stock instance sizes for, and staging sizes for 76,800.
-func lockNFTTransferSitesV4(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer, chainID int64) error {
-	return lockAdvisoryKeys(ctx, tx, distinctSortedNFTTransferSiteKeys(transfers, chainID), "uniswap_v4 nft transfer sites")
-}
-
-type v4NFTTransferSite struct {
-	positionManagerID int64
-	blockNumber       int64
-	blockVersion      int
-	logIndex          int
-}
-
-// The 'u4pnt|…' spelling is the trigger's, so both acquisitions name one lock.
-func (s v4NFTTransferSite) lockKey(chainID int64) string {
-	return fmt.Sprintf("u4pnt-chain|%d|%d|%d|%d", chainID, s.blockNumber, s.blockVersion, s.logIndex)
-}
-
-// Ordered by the key's COMPONENTS numerically, which is ascending log order
-// within a block — the order the live path's per-row trigger acquisitions already
-// arrive in, so two overlapping writers agree and cannot deadlock. Sorting the
-// formatted strings instead would put "…|10" below "…|7".
-func distinctSortedNFTTransferSiteKeys(transfers []*entity.UniswapV4PositionNFTTransfer, chainID int64) []string {
-	seen := make(map[v4NFTTransferSite]struct{}, len(transfers))
-	for _, t := range transfers {
-		seen[v4NFTTransferSite{
-			positionManagerID: t.PositionManagerID,
-			blockNumber:       t.BlockNumber,
-			blockVersion:      t.BlockVersion,
-			logIndex:          t.LogIndex,
-		}] = struct{}{}
-	}
-	sites := make([]v4NFTTransferSite, 0, len(seen))
-	for site := range seen {
-		sites = append(sites, site)
-	}
-	slices.SortFunc(sites, func(a, b v4NFTTransferSite) int {
-		return cmp.Or(
-			cmp.Compare(a.positionManagerID, b.positionManagerID),
-			cmp.Compare(a.blockNumber, b.blockNumber),
-			cmp.Compare(a.blockVersion, b.blockVersion),
-			cmp.Compare(a.logIndex, b.logIndex),
-		)
-	})
-
-	keys := make([]string, len(sites))
-	for i, site := range sites {
-		keys[i] = site.lockKey(chainID)
-	}
-	return keys
 }
 
 // sendInsertBatch reads every queued statement's result and sums the rows they
