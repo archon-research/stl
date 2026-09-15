@@ -1,6 +1,6 @@
--- position_daily (VEC-636): one row per (position, UTC date), the winning observation for that position
--- on that day. Only OBSERVED dates get a row -- there is no carry-forward, so a query for a specific
--- date may correctly return nothing.
+-- position_daily (VEC-636): append-only, one row per (position, UTC date) per batch that observed it --
+-- that batch's newest observation for the day. "What did it hold on D" is the newest row per (position,
+-- date), position_daily_latest; "what did we say it held on D at time T" is position_daily_as_of(T).
 
 -- Bounds the wait for CREATE TRIGGER's SHARE ROW EXCLUSIVE on position_state, which every ingest
 -- INSERT conflicts with. Never mark this file `migrate: no-transaction`: SET LOCAL would be inert.
@@ -23,64 +23,66 @@ CREATE TABLE IF NOT EXISTS position_daily (
     run_id             bigint,
     deal_type          text,
     created_at         timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT position_daily_pkey PRIMARY KEY (position_id, as_of_date),
-    -- The one constraint that is not a copy of a position_state guard: it pins both writers' date
-    -- derivation to one expression, so they cannot disagree about which day an observation belongs to.
+    -- The spine's coordinate with as_of_date ahead of it, so a (position, date) read is a prefix scan.
+    CONSTRAINT position_daily_pkey PRIMARY KEY
+        (position_id, as_of_date, block_number, block_version, processing_version, block_timestamp),
+    -- Pins both writers' date derivation to one expression, so they cannot disagree about the day.
     CONSTRAINT position_daily_as_of_date_chk CHECK (as_of_date = (block_timestamp AT TIME ZONE 'utc')::date)
 );
 
--- CREATE TABLE IF NOT EXISTS adds no column to a table an earlier revision of this file created, so both
--- columns the writers below name get an idempotent ALTER: the LANGUAGE sql procedure reads run_id and
--- created_at, and must parse. Reached by a hand re-apply only; the migrator refuses an applied file.
-ALTER TABLE position_daily ADD COLUMN IF NOT EXISTS run_id bigint;
--- A row written before the column existed has no known write time. -infinity records that; now() would
--- invent one and advance max(created_at), the staleness reading, past what was actually written.
-ALTER TABLE position_daily ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT '-infinity';
-ALTER TABLE position_daily ALTER COLUMN created_at SET DEFAULT now();
-
--- Created plain, per AGENTS.md: converted later if measurement says to. Both writers upsert in place, so
--- there is no append-only tail for compression or tiering to close behind, and the reads are PK point
--- lookups and holder series. Indexes are built after the backfill, at the foot of this file.
-
-COMMENT ON TABLE position_daily IS '[Operational] One row per (position, UTC date): the winning observation for that position on that day (VEC-636). Only OBSERVED dates get a row -- no carry-forward, so a query for one date may correctly return nothing. Rebuildable with CALL rebuild_position_daily(), a FORWARD-ONLY merge: it raises a row and never lowers or removes one. Plain, not a hypertable, and carrying no compression or tiering policy: both writers upsert in place, so there is no append-only tail for either to close behind. What would change that is measurement -- a date-range scan across positions becoming a hot read, or a row count outgrowing a plain table, though it holds at most one row per position per OBSERVED date, so it can never exceed position_state -- a ratio, not a ceiling, since the spine grows with blocks. Point-in-time questions are answered from position_state.';
+COMMENT ON TABLE position_daily IS '[Operational] Append-only. One row per (position, UTC date) per ingest batch that observed the position that day: the batch''s newest observation (VEC-636). The day''s answer is the newest row per (position, date) by (block_number, block_version, processing_version, block_timestamp); read it through position_daily_latest, or position_daily_as_of(T) for the answer as it stood at time T. Only OBSERVED dates get rows -- no carry-forward. Nothing updates or deletes here: a correction is a new row, and CALL rebuild_position_daily() only adds rows the trigger missed. Plain, not a hypertable: rows per (position, date) are bounded by the batches that touched it, never exceeding position_state. Point-in-time questions at block grain are answered from position_state.';
 COMMENT ON COLUMN position_daily.position_id IS 'Roles: PK. The bytea(32) native position identity from position_id() (VEC-400).';
-COMMENT ON COLUMN position_daily.as_of_date IS 'Roles: PK. UTC date of the winning observation''s block_timestamp, pinned to it by a CHECK.';
+COMMENT ON COLUMN position_daily.as_of_date IS 'Roles: PK. UTC date of block_timestamp, pinned to it by a CHECK.';
 COMMENT ON COLUMN position_daily.chain_id IS 'Roles: Derived (copy of position_state.chain_id). NULL is a materializer convention for an off-chain source, not missing data.';
 COMMENT ON COLUMN position_daily.protocol_id IS 'Roles: Derived (copy of position_state.protocol_id). NULL only for an off-chain source, which has no protocol row.';
 COMMENT ON COLUMN position_daily.instrument_key IS 'Roles: Derived (copy of position_state.instrument_key). The instrument''s native, globally-unique id.';
 COMMENT ON COLUMN position_daily.holder_id IS 'Roles: Derived (copy of position_state.holder_id). Native on-chain holder, lowercase hex, no 0x.';
-COMMENT ON COLUMN position_daily.quantity IS 'Roles: Derived (copy of position_state.quantity). Native units on that date; a zero is a real closing observation, not an absence.';
-COMMENT ON COLUMN position_daily.block_number IS 'Roles: Derived. Block of the winning observation; the leading leg of the newer-wins comparison.';
-COMMENT ON COLUMN position_daily.block_version IS 'Roles: Derived. Reorg version of that block (0 = original); part of the newer-wins comparison.';
-COMMENT ON COLUMN position_daily.processing_version IS 'Roles: Derived. Correction version of that row (0 = original, N = Nth reprocess); part of the newer-wins comparison.';
-COMMENT ON COLUMN position_daily.block_timestamp IS 'Roles: Derived. On-chain time of the winning observation; the last leg of the newer-wins comparison, so the pick is total.';
-COMMENT ON COLUMN position_daily.projection IS 'Roles: Audit. Which projection view wrote the winning observation.';
-COMMENT ON COLUMN position_daily.deal_type IS 'Roles: Derived (copy of position_state.deal_type). The deal type of that day''s winning observation.';
-COMMENT ON COLUMN position_daily.build_id IS 'Roles: Audit. Which build wrote the winning observation (build_registry.id; 0 = pre-tracking).';
-COMMENT ON COLUMN position_daily.run_id IS 'Roles: Audit (copy of position_state.run_id). Which writer run appended the winning observation (writer_run.id; NULL means it predates run tracking).';
-COMMENT ON COLUMN position_daily.created_at IS 'Roles: Audit. When this day''s row was last written - its first insert or the latest overwrite by a newer observation for the same date; one the guard rejects leaves it alone. Not block time (see block_timestamp). max(created_at) behind max(position_state.created_at), both processing time, is the staleness signal, weaker at this grain than at position_current''s: a late observation for a date with no row yet is an INSERT, so it advances the reading rather than lagging it. A row written before this column existed carries -infinity, not a fabricated write time.';
+COMMENT ON COLUMN position_daily.quantity IS 'Roles: Derived (copy of position_state.quantity). Native units at this observation; a zero is a real closing observation, not an absence.';
+COMMENT ON COLUMN position_daily.block_number IS 'Roles: PK, Derived. Block of the observation; the leading leg of the newest-per-day ordering.';
+COMMENT ON COLUMN position_daily.block_version IS 'Roles: PK, Derived. Reorg version of that block (0 = original); second leg of the ordering.';
+COMMENT ON COLUMN position_daily.processing_version IS 'Roles: PK, Derived. Correction version of that row (0 = original, N = Nth reprocess); third leg of the ordering.';
+COMMENT ON COLUMN position_daily.block_timestamp IS 'Roles: PK, Derived. On-chain time of the observation; the last leg of the ordering, so the pick is total.';
+COMMENT ON COLUMN position_daily.projection IS 'Roles: Audit. Which projection view wrote the observation.';
+COMMENT ON COLUMN position_daily.deal_type IS 'Roles: Derived (copy of position_state.deal_type). The deal type of this observation.';
+COMMENT ON COLUMN position_daily.build_id IS 'Roles: Audit. Which build wrote the observation (build_registry.id; 0 = pre-tracking).';
+COMMENT ON COLUMN position_daily.run_id IS 'Roles: Audit (copy of position_state.run_id). Which writer run appended the observation (writer_run.id; NULL means it predates run tracking).';
+COMMENT ON COLUMN position_daily.created_at IS 'Roles: Audit. When this row was appended; never rewritten. The reproducibility axis: position_daily_as_of(T) answers from rows with created_at <= T. Processing time, not block time (see block_timestamp).';
 
--- Trigger-only cache, like position_current and allocation_position_current: the app role reads and the
--- SECURITY DEFINER maintainer writes, so no caller needs a write grant and the cache cannot fork from
--- history. ALTER DEFAULT PRIVILEGES (20260122_140100) grants full DML, so the REVOKE is what closes it.
+-- Trigger-only, like position_current: the SECURITY DEFINER maintainer inserts, the app role reads.
+-- ALTER DEFAULT PRIVILEGES (20260122_140100) hands every migrator-owned table full DML, so the REVOKE closes it.
 GRANT SELECT ON position_daily TO stl_readonly;
 GRANT SELECT ON position_daily TO stl_readwrite;
-REVOKE INSERT, UPDATE, DELETE ON position_daily FROM stl_readwrite;
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON position_daily FROM stl_readwrite;
 
--- SECURITY DEFINER so the upsert runs as the owner: the role appending to position_state holds no write
--- grant here. search_path is then mandatory, so a caller's path cannot bind these names to its own objects.
-CREATE OR REPLACE FUNCTION upsert_position_daily() RETURNS trigger
+-- Append-only at the owner too, as position_state and sec_node are: the writers below only INSERT, and
+-- nothing FKs this table, so no integrity probe needs the owner's UPDATE. Derived from relowner so it
+-- lands whatever the role is called; recorded but not enforced where the owner is a superuser.
+DO $$
+DECLARE
+    owner_role text;
+    owner_is_super boolean;
+BEGIN
+    SELECT pg_get_userbyid(c.relowner) INTO owner_role FROM pg_class c WHERE c.oid = 'position_daily'::regclass;
+    SELECT rolsuper INTO owner_is_super FROM pg_roles WHERE rolname = owner_role;
+    EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON position_daily FROM %I', owner_role);
+    IF NOT owner_is_super AND has_table_privilege(owner_role, 'position_daily', 'UPDATE') THEN
+        RAISE EXCEPTION 'append-only not enforced: owner % still holds UPDATE on position_daily after the revoke', owner_role;
+    END IF;
+END $$;
+
+-- SECURITY DEFINER so the append runs as the owner: the role appending to position_state holds no
+-- write grant here. search_path is then mandatory, so a caller's path cannot bind these names.
+CREATE OR REPLACE FUNCTION append_position_daily() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, public
 AS $fn$
 BEGIN
-    INSERT INTO public.position_daily AS cur
+    -- One row per (position, date) per STATEMENT: the batch's newest observation for that day. The
+    -- day's overall newest is the newest of some batch, so it is always among the appended rows.
+    INSERT INTO public.position_daily
         (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
          block_number, block_version, processing_version, block_timestamp, projection, build_id,
-         run_id,
-         deal_type)
-    -- One upsert per STATEMENT over the transition table, ordered by this table's PK: a total order the
-    -- rebuild cannot cross, where a row trigger would fire in the writer's own insertion order.
+         run_id, deal_type)
     SELECT DISTINCT ON (n.position_id, (n.block_timestamp AT TIME ZONE 'utc')::date)
            n.position_id, (n.block_timestamp AT TIME ZONE 'utc')::date, n.chain_id, n.protocol_id,
            n.instrument_key, n.holder_id, n.quantity, n.block_number, n.block_version,
@@ -88,32 +90,39 @@ BEGIN
     FROM newrows n
     ORDER BY n.position_id, (n.block_timestamp AT TIME ZONE 'utc')::date,
              n.block_number DESC, n.block_version DESC, n.processing_version DESC, n.block_timestamp DESC
-    ON CONFLICT (position_id, as_of_date) DO UPDATE SET
-        chain_id           = EXCLUDED.chain_id,
-        protocol_id        = EXCLUDED.protocol_id,
-        instrument_key     = EXCLUDED.instrument_key,
-        holder_id          = EXCLUDED.holder_id,
-        quantity           = EXCLUDED.quantity,
-        block_number       = EXCLUDED.block_number,
-        block_version      = EXCLUDED.block_version,
-        processing_version = EXCLUDED.processing_version,
-        block_timestamp    = EXCLUDED.block_timestamp,
-        projection         = EXCLUDED.projection,
-        build_id           = EXCLUDED.build_id,
-        run_id             = EXCLUDED.run_id,
-        deal_type          = EXCLUDED.deal_type,
-        created_at         = now()
-    WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)
-        > (cur.block_number, cur.block_version, cur.processing_version, cur.block_timestamp);
+    ON CONFLICT DO NOTHING;
     RETURN NULL;
 END;
 $fn$;
 
-COMMENT ON FUNCTION upsert_position_daily() IS '[Operational] Keeps position_daily at the winning observation per (position, UTC date) (VEC-636). AFTER INSERT FOR EACH STATEMENT on position_state, one upsert over the transition table ordered by this table''s PK, guarded by (block_number, block_version, processing_version, block_timestamp). SECURITY DEFINER: the appending role holds no write grant on the cache.';
+COMMENT ON FUNCTION append_position_daily() IS '[Operational] Appends each batch''s newest observation per (position, UTC date) to position_daily (VEC-636). AFTER INSERT FOR EACH STATEMENT on position_state over the transition table; ON CONFLICT DO NOTHING, never UPDATE. SECURITY DEFINER: the appending role holds no write grant on the table.';
 
--- The rebuild an operator re-runs, as a procedure so its settings cannot be forgotten or stepped over and
--- there is no second call site to keep in step: enable_tiered_reads because newest-per-key over position_state's
--- local chunks alone reads a PARTIAL spine, work_mem because the DISTINCT ON sorts the whole of it.
+-- The read: newest row per (position, date) among those appended by time T. STABLE, invoker rights and
+-- no SET clause, so the planner inlines it into the caller's query instead of running it as a scan.
+CREATE OR REPLACE FUNCTION position_daily_as_of(seen_before timestamptz)
+    RETURNS SETOF position_daily
+    LANGUAGE sql STABLE
+AS $fn$
+    SELECT DISTINCT ON (d.position_id, d.as_of_date) d.*
+      FROM public.position_daily d
+     WHERE d.created_at <= seen_before
+     ORDER BY d.position_id, d.as_of_date,
+              d.block_number DESC, d.block_version DESC, d.processing_version DESC, d.block_timestamp DESC;
+$fn$;
+
+COMMENT ON FUNCTION position_daily_as_of(timestamptz) IS '[Operational] position_daily as it read at time T: the newest row per (position, UTC date) among rows with created_at <= T (VEC-636). A query pinned to a T it records is reproducible: later appends are invisible to it. position_daily_as_of(''infinity'') is the current answer, which position_daily_latest wraps.';
+
+CREATE OR REPLACE VIEW position_daily_latest AS
+    SELECT * FROM public.position_daily_as_of('infinity'::timestamptz);
+
+COMMENT ON VIEW position_daily_latest IS '[Operational] What each position held on each observed UTC date: the newest position_daily row per (position, date) (VEC-636). Equal to the newest position_state observation per (position, UTC date). Not reproducible across appends; pin a time with position_daily_as_of(T) for that.';
+
+GRANT SELECT ON position_daily_latest TO stl_readonly;
+GRANT SELECT ON position_daily_latest TO stl_readwrite;
+
+-- The repair an operator re-runs, as a procedure so its settings cannot be forgotten or stepped over:
+-- enable_tiered_reads because newest-per-day over position_state's local chunks alone reads a PARTIAL
+-- spine, work_mem because the DISTINCT ON sorts the whole of it. Adds rows only; never rewrites one.
 CREATE OR REPLACE PROCEDURE rebuild_position_daily()
     LANGUAGE sql
     SET search_path = pg_catalog, public
@@ -124,8 +133,7 @@ AS $proc$
     INSERT INTO public.position_daily
         (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
          block_number, block_version, processing_version, block_timestamp, projection, build_id,
-         run_id,
-         deal_type)
+         run_id, deal_type)
     SELECT DISTINCT ON (p.position_id, (p.block_timestamp AT TIME ZONE 'utc')::date)
            p.position_id, (p.block_timestamp AT TIME ZONE 'utc')::date, p.chain_id, p.protocol_id,
            p.instrument_key, p.holder_id, p.quantity, p.block_number, p.block_version,
@@ -133,40 +141,22 @@ AS $proc$
     FROM public.position_state p
     ORDER BY p.position_id, (p.block_timestamp AT TIME ZONE 'utc')::date,
              p.block_number DESC, p.block_version DESC, p.processing_version DESC, p.block_timestamp DESC
-    ON CONFLICT (position_id, as_of_date) DO UPDATE SET
-        chain_id           = EXCLUDED.chain_id,
-        protocol_id        = EXCLUDED.protocol_id,
-        instrument_key     = EXCLUDED.instrument_key,
-        holder_id          = EXCLUDED.holder_id,
-        quantity           = EXCLUDED.quantity,
-        block_number       = EXCLUDED.block_number,
-        block_version      = EXCLUDED.block_version,
-        processing_version = EXCLUDED.processing_version,
-        block_timestamp    = EXCLUDED.block_timestamp,
-        projection         = EXCLUDED.projection,
-        build_id           = EXCLUDED.build_id,
-        run_id             = EXCLUDED.run_id,
-        deal_type          = EXCLUDED.deal_type,
-        created_at         = now()
-    -- Forward-only: raise a stale row, never lower one. No equal-coordinate arm is needed now that the
-    -- cache has no write channel outside these two writers, which cannot disagree on one coordinate.
-    WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)
-        > (position_daily.block_number, position_daily.block_version, position_daily.processing_version, position_daily.block_timestamp);
+    ON CONFLICT DO NOTHING;
 $proc$;
 
-COMMENT ON PROCEDURE rebuild_position_daily() IS '[Operational] Rebuilds position_daily from position_state (VEC-636): CALL rebuild_position_daily(). Forward-only, so it raises a stale row and never lowers or removes one; it cannot repair a row ahead of history, a row whose position has no history left, or a DATE whose observations a correction moved to another date (the position keeps its other days). Pins enable_tiered_reads so newest-per-key is computed over the whole spine, its tiered chunks included. Requires a quiet window on position_state.';
+COMMENT ON PROCEDURE rebuild_position_daily() IS '[Operational] Appends to position_daily every (position, UTC date) winner in position_state that it lacks (VEC-636): CALL rebuild_position_daily(). Insert-only and idempotent; it never rewrites or removes a row, so rows already present keep their created_at and the as-of reading stays honest. Pins enable_tiered_reads so the winner is computed over the whole spine, tiered chunks included. Requires a quiet window on position_state.';
 
 -- Guarded like every other DDL statement here, so a re-run does not fail with "trigger already exists".
-DROP TRIGGER IF EXISTS trigger_upsert_position_daily ON position_state;
-CREATE TRIGGER trigger_upsert_position_daily
+DROP TRIGGER IF EXISTS trigger_append_position_daily ON position_state;
+CREATE TRIGGER trigger_append_position_daily
     AFTER INSERT ON position_state
     REFERENCING NEW TABLE AS newrows
     FOR EACH STATEMENT
-EXECUTE FUNCTION upsert_position_daily();
+EXECUTE FUNCTION append_position_daily();
 
 -- KNOWN GAP, as on position_current (20260819_150000): TimescaleDB refuses ENABLE ALWAYS on a hypertable
 -- trigger, so this stays at ORIGIN and does not fire under session_replication_role = 'replica'
--- (pg_restore --disable-triggers). CALL rebuild_position_daily() repairs what the bypass skipped.
+-- (pg_restore --disable-triggers). CALL rebuild_position_daily() appends what the bypass skipped.
 
 -- The backfill, both indexes and the ANALYZE are in 20260824_120100, as 20260819_150100 established:
 -- the migrator runs a file in one transaction, so here they would run under the lock CREATE TRIGGER

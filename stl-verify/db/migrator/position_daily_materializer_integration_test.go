@@ -9,9 +9,10 @@ import (
 )
 
 // The rest of the position_daily suite writes to the spine directly, which exercises the trigger but
-// not the write path production actually uses. These drive the cache through
+// not the write path production actually uses. These drive the table through
 // materialize_position_projection, where the batch is an INSERT ... WHERE NOT EXISTS ... ON CONFLICT
-// DO NOTHING whose transition table is what the cache's statement trigger reads.
+// DO NOTHING whose transition table is what the statement trigger reads. Reads go through
+// position_daily_latest, the newest appended row per (position, date).
 
 // mppRow is one contract-shaped projection row with its own block_timestamp, which the package's
 // shared row() helper pins to a single date.
@@ -21,9 +22,9 @@ func mppRow(ik string, qty, bn, bv, pv int, ts, dealType string) string {
 		strconv.Itoa(bn) + "::bigint," + strconv.Itoa(bv) + "::int," + strconv.Itoa(pv) + "::int,'" + ts + "'::timestamptz)"
 }
 
-// cacheDivergence reports every (position, date) where position_daily is not the spine's winning
+// cacheDivergence reports every (position, date) where position_daily_latest is not the spine's winning
 // observation -- missing, extra, or holding a losing row -- as one description per divergence. The
-// whole-row comparison is what a writer that forgets a SET column fails.
+// whole-row comparison is what a writer that forgets a column fails.
 func cacheDivergence(t *testing.T, f *psFixture) []string {
 	t.Helper()
 	rows, err := f.pool.Query(f.ctx, `
@@ -42,7 +43,7 @@ func cacheDivergence(t *testing.T, f *psFixture) []string {
 		              coalesce(to_jsonb(d) - 'position_id' - 'created_at', 'null'::jsonb)::text,
 		              coalesce(to_jsonb(w) - 'position_id', 'null'::jsonb)::text)
 		  FROM winner w
-		  FULL OUTER JOIN position_daily d ON d.position_id = w.position_id AND d.as_of_date = w.as_of_date
+		  FULL OUTER JOIN position_daily_latest d ON d.position_id = w.position_id AND d.as_of_date = w.as_of_date
 		 WHERE w.position_id IS NULL OR d.position_id IS NULL
 		    OR (d.instrument_key, d.quantity, d.block_number, d.block_version, d.processing_version,
 		        d.block_timestamp, d.projection, d.build_id)
@@ -70,12 +71,12 @@ func cacheDivergence(t *testing.T, f *psFixture) []string {
 	return out
 }
 
-// cachedDays returns one position's cached series as (date, quantity) pairs, keyed by instrument_key
-// because the materializer derives position_id itself.
+// cachedDays returns one position's series through the latest view as (date, quantity) pairs, keyed by
+// instrument_key because the materializer derives position_id itself.
 func cachedDays(t *testing.T, f *psFixture, ik string) []string {
 	t.Helper()
 	rows, err := f.pool.Query(f.ctx, `
-		SELECT as_of_date::text || '=' || quantity::text FROM position_daily
+		SELECT as_of_date::text || '=' || quantity::text FROM position_daily_latest
 		 WHERE instrument_key = $1 ORDER BY as_of_date`, ik)
 	if err != nil {
 		t.Fatalf("cachedDays(%s): %v", ik, err)
@@ -95,8 +96,8 @@ func cachedDays(t *testing.T, f *psFixture, ik string) []string {
 	return out
 }
 
-// cacheDisagreement reports every position where position_current is not the position_daily row on that
-// position's latest observed date. The two caches read the same spine through two triggers on the same
+// cacheDisagreement reports every position where position_current is not the position_daily_latest row on
+// that position's latest observed date. The two caches read the same spine through two triggers on the same
 // statement, and their agreement is what the block_time_inverts_height refusal exists to protect: they
 // order by block and date by timestamp, so an inverted pair makes them name different winners.
 func cacheDisagreement(t *testing.T, f *psFixture) []string {
@@ -105,7 +106,7 @@ func cacheDisagreement(t *testing.T, f *psFixture) []string {
 		WITH latest_day AS (
 		    SELECT DISTINCT ON (position_id) position_id, as_of_date, instrument_key, quantity, deal_type,
 		           block_number, block_version, processing_version, block_timestamp, projection, build_id, run_id
-		      FROM position_daily ORDER BY position_id, as_of_date DESC
+		      FROM position_daily_latest ORDER BY position_id, as_of_date DESC
 		)
 		SELECT format('ik=%s daily(%s)=%s current=%s',
 		              coalesce(d.instrument_key, c.instrument_key), d.as_of_date::text,
@@ -146,8 +147,8 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 	f, cleanup := newPositionStateFixture(t)
 	defer cleanup()
 
-	// One batch, several positions and dates, corrections and a reorg version: the cache must equal the
-	// spine's argmax per (position, UTC date) on every column, not merely hold a row.
+	// One batch, several positions and dates, corrections and a reorg version: the reading must equal
+	// the spine's argmax per (position, UTC date) on every column, not merely hold a row.
 	t.Run("a materialized batch lands at the spine argmax per date", func(t *testing.T) {
 		body := valuesOf(
 			mppRow("mpp-a", 100, 500, 0, 0, "2026-04-01T01:00:00Z", "LOAN"),
@@ -239,23 +240,26 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 		}
 	})
 
-	// A re-run over unchanged history appends nothing, so the statement trigger fires on an empty
-	// transition table and must leave the cache's rows physically alone.
-	t.Run("a re-run appends nothing and does not rewrite the cached row", func(t *testing.T) {
+	// A re-run over unchanged history appends nothing to the spine, so the statement trigger fires on an
+	// empty transition table and must append nothing here either.
+	t.Run("a re-run appends nothing to the table", func(t *testing.T) {
 		const ik = "mpp-rerun"
 		body := valuesOf(mppRow(ik, 60, 1100, 0, 0, "2026-04-25T00:00:00Z", "LOAN"))
 		if n := f.mppN(t, "pv_daily_rerun", body, "the first run"); n != 1 {
 			t.Fatalf("the first run appended %d, want 1", n)
 		}
-		before := f.cacheCtid(t, ik, "2026-04-25")
+		before := f.dailyRowsFor(t, ik)
+		if before != 1 {
+			t.Fatalf("the first run left %d row(s) for %s, want 1", before, ik)
+		}
 		if n := f.mppN(t, "pv_daily_rerun", body, "the re-run"); n != 0 {
 			t.Errorf("the re-run appended %d observations, want 0", n)
 		}
-		if after := f.cacheCtid(t, ik, "2026-04-25"); after != before {
-			t.Errorf("the cached row moved %s -> %s on a re-run that appended nothing; every scheduled pass would cost a heap write and WAL", before, after)
+		if after := f.dailyRowsFor(t, ik); after != before {
+			t.Errorf("the re-run grew position_daily from %d to %d row(s) for %s while appending nothing to the spine", before, after, ik)
 		}
 		if d := cacheDivergence(t, f); len(d) != 0 {
-			t.Errorf("the cache diverges from the spine argmax: %s", strings.Join(d, " | "))
+			t.Errorf("the reading diverges from the spine argmax: %s", strings.Join(d, " | "))
 		}
 	})
 
@@ -289,7 +293,7 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 		var gotBuild int
 		var gotRun int64
 		if err := f.pool.QueryRow(f.ctx, `
-			SELECT build_id, run_id FROM position_daily WHERE instrument_key = $1`, ik).Scan(&gotBuild, &gotRun); err != nil {
+			SELECT build_id, run_id FROM position_daily_latest WHERE instrument_key = $1`, ik).Scan(&gotBuild, &gotRun); err != nil {
 			t.Fatalf("read the cached audit columns: %v", err)
 		}
 		if gotBuild != buildID || gotRun != runID {
@@ -363,7 +367,7 @@ func (f *psFixture) dealTypeOf(t *testing.T, ik, date string) string {
 	t.Helper()
 	var dt *string
 	if err := f.pool.QueryRow(f.ctx,
-		`SELECT deal_type FROM position_daily WHERE instrument_key = $1 AND as_of_date = $2::date`, ik, date).Scan(&dt); err != nil {
+		`SELECT deal_type FROM position_daily_latest WHERE instrument_key = $1 AND as_of_date = $2::date`, ik, date).Scan(&dt); err != nil {
 		t.Fatalf("dealTypeOf(%s, %s): %v", ik, date, err)
 	}
 	if dt == nil {
@@ -372,27 +376,25 @@ func (f *psFixture) dealTypeOf(t *testing.T, ik, date string) string {
 	return *dt
 }
 
-// cacheCtid is the physical location of one cached row, so a rewrite is visible even when the row's
-// values are unchanged.
-func (f *psFixture) cacheCtid(t *testing.T, ik, date string) string {
+// dailyRowsFor counts the TABLE rows one instrument has, across all dates.
+func (f *psFixture) dailyRowsFor(t *testing.T, ik string) int {
 	t.Helper()
-	var v string
-	if err := f.pool.QueryRow(f.ctx,
-		`SELECT ctid::text FROM position_daily WHERE instrument_key = $1 AND as_of_date = $2::date`, ik, date).Scan(&v); err != nil {
-		t.Fatalf("cacheCtid(%s, %s): %v", ik, date, err)
+	var n int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM position_daily WHERE instrument_key = $1`, ik).Scan(&n); err != nil {
+		t.Fatalf("dailyRowsFor(%s): %v", ik, err)
 	}
-	return v
+	return n
 }
 
 // A correction at the SAME block_number carrying an earlier instant, crossing UTC midnight. Nothing
 // refuses it: block_time_inverts_height compares a higher block against an earlier instant, and this
-// pair shares a block. The correction lands on the EARLIER date, and position_daily -- forward-only,
-// so it can raise a row but never remove one -- keeps the superseded observation standing on the later
-// date forever. That later date is then its newest, so the two caches name different winners.
+// pair shares a block. The correction lands on the EARLIER date, and position_daily -- append-only, so
+// nothing removes a row -- keeps the superseded observation standing on the later date. That later
+// date is then its newest, so the two caches name different winners.
 //
-// Pinned rather than fixed: removing the stale day means giving the rebuild a delete, which is a
-// deliberate change to the forward-only contract in the table's COMMENT (VEC-636), not a patch. This
-// test fails the day that changes, which is when the COMMENT and this comment must change too.
+// Pinned rather than fixed: removing the stale day means a DELETE, which the append-only contract in
+// the table's COMMENT (VEC-636) rules out. This test fails the day that changes, which is when the
+// COMMENT and this comment must change too.
 func TestPositionDailyKeepsADayACorrectionMovedAway(t *testing.T) {
 	f, cleanup := newPositionStateFixture(t)
 	defer cleanup()
