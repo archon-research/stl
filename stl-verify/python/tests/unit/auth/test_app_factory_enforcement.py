@@ -297,7 +297,9 @@ def _unclassifiable_routes(app: FastAPI) -> list[str]:
     Deny by default: a Mount serves a sub-app that inherits none of the
     including router's gates, and a plain Route or websocket reaches the
     contexts with an empty path, so a /v1 filter would let them through. Any
-    new route type therefore fails here until someone teaches the walk about it.
+    route type the contexts DO enumerate therefore fails here until someone
+    teaches the walk about it; what they never enumerate is guarded by
+    test_no_low_priority_routes.
     """
     found = []
     for rc in iter_route_contexts(app.routes):
@@ -320,6 +322,13 @@ def test_no_route_type_the_walk_cannot_classify(enforced_app: FastAPI) -> None:
     unclassifiable = _unclassifiable_routes(enforced_app)
 
     assert not unclassifiable, f"route types the /v1 gate walk cannot classify: {unclassifiable}"
+
+
+def test_no_low_priority_routes(enforced_app: FastAPI) -> None:
+    """app.frontend() lands in _low_priority_routes, which iter_route_contexts
+    never enumerates, so neither walk above can see it. Private attribute, and
+    the only handle there is."""
+    assert enforced_app.router._low_priority_routes == []  # noqa: SLF001
 
 
 def test_an_unknown_v1_path_is_not_served_by_the_spa(enforced_app: FastAPI) -> None:
