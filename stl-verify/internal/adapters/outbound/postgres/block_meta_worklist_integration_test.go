@@ -31,7 +31,7 @@ func seedWorkListSources(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 		INSERT INTO chain (chain_id, name) VALUES (1, 'ethereum'), (8453, 'base') ON CONFLICT DO NOTHING;
 		INSERT INTO protocol (chain_id, address, name) VALUES (1, '\x9001', 'wl-eth') ON CONFLICT DO NOTHING;
 		INSERT INTO token (chain_id, address) VALUES (1, '\x9002') ON CONFLICT DO NOTHING;
-		INSERT INTO prime (name, vault_address) VALUES ('wl-prime', '\x9003') ON CONFLICT DO NOTHING;
+		INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'wl-prime', '\x9003') ON CONFLICT DO NOTHING;
 		-- 9 blocks spanning 900,000 to 1,100,000: eight chunks at interval 100000.
 		INSERT INTO sparklend_reserve_data (protocol_id, token_id, block_number, block_version)
 		SELECT (SELECT id FROM protocol WHERE address='\x9001'),
