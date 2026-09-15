@@ -264,6 +264,11 @@
       "type": "int4",
       "class": "R"
     },
+    "chain_scope": {
+      "type": "int4",
+      "class": "D",
+      "not_null": true
+    },
     "change": {
       "type": "numeric",
       "class": "S"
@@ -2643,10 +2648,6 @@
     {
       "table": "sparklend_reserve_data",
       "column": "processing_version"
-    },
-    {
-      "table": "alias_register",
-      "column": "valid_to"
     }
   ],
   "transform_config": {
