@@ -5,16 +5,28 @@
 
 -- COINGECKO and MAPLE_SYMBOL are the asset-identity model's Decision 7 schemes.
 --
--- CEX_SYMBOL is ONE scheme carrying the venue inside the value, not one scheme per exchange:
--- a scheme per venue grows a governed reference table by a row for every exchange we ever
--- touch, and the bounded form is what TICKER already does for the same many-to-many-over-time
--- shape (unique_current = false). alias_register has no payload column, so the venue lives in
--- id_value or nowhere. OPEN: the model's own Decision 8 asks for venue-scoped scheme names;
--- this ships the bounded form and the choice wants confirming before the CEX load lands.
+-- CEX symbols are VENUE-SCOPED, one scheme per exchange (the model's Decision 8), because a
+-- venue's pair string is meaningless outside that venue. cex_orderbook_snapshots.symbol already
+-- records why and says to join on (exchange, symbol) and never on symbol alone; the fleet's own
+-- config is the evidence — the same six markets are BTC-USD / BTC-USDT / XBT-USD-shaped across
+-- coinbase, okx and kraken, differing in separator, asset spelling (XBT, not BTC) and even quote
+-- asset. Nothing external fixes this: CCXT's unified BASE/QUOTE is a client-side convention over
+-- per-exchange market ids, and ISO 24165 standardises the TOKEN, not the venue's pair.
+--
+-- Scoping buys two things one shared scheme cannot. value_form states each venue's ACTUAL form
+-- instead of "varies by venue", which is the column admitting it cannot do its job. And each
+-- scheme is unique_current: within one venue a symbol names one market, so the duplicate-target
+-- DQ rule applies to CEX symbols — TICKER is false precisely BECAUSE it is not venue-scoped,
+-- where the same string means different securities on different venues at the same instant.
+--
+-- Only the venues we index are seeded; inventing rows for venues we do not read would be
+-- inventing data. A new venue is one row here alongside its deployment and configmap.
 INSERT INTO id_scheme_vocabulary (id_scheme, applies_to, value_form, unique_current, description) VALUES
  ('COINGECKO','{SECURITY}','CoinGecko asset id, lowercase slug', true,'CoinGecko asset id, assigned by CoinGecko'),
  ('MAPLE_SYMBOL','{SECURITY}','Maple pool symbol', true,'Maple pool symbol, assigned by Maple'),
- ('CEX_SYMBOL','{SECURITY}','venue '':'' symbol, e.g. coinbase:BTC-USD; the venue is IN the value because the scheme is not venue-scoped', false,'Exchange-listed symbol at a named venue. Not unique_current: one security is listed at many venues, and a venue reassigns a symbol')
+ ('CEX_SYMBOL_COINBASE','{SECURITY}','Coinbase product id: BASE-QUOTE, uppercase, hyphen — e.g. BTC-USD', true,'Symbol as listed on Coinbase (cex_orderbook_snapshots.exchange = ''coinbase'')'),
+ ('CEX_SYMBOL_OKX','{SECURITY}','OKX SPOT instrument id: BASE-QUOTE, uppercase, hyphen, USDT-quoted across the indexed set — e.g. BTC-USDT', true,'Symbol as listed on OKX (exchange = ''okx''). A USDT quote is not a USD quote; the basis is VEC-458''s'),
+ ('CEX_SYMBOL_KRAKEN','{SECURITY}','Kraken AssetPairs wsname verbatim: slash-separated, venue asset names — e.g. XBT/USD, not BTC/USD', true,'Symbol as listed on Kraken (exchange = ''kraken''). Taken from the venue API rather than built by convention, because Kraken''s asset names are its own')
 ON CONFLICT (id_scheme) DO NOTHING;
 
 -- The two namespaces the position projections already emit keys for and the ratified four do
