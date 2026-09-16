@@ -1,7 +1,8 @@
-import { SyncedChartGroup } from '@archon-research/charting';
+import { SyncedChartGroup } from '@archon-research/charting/xychart';
 import {
   Badge,
   type BadgeColorPalette,
+  SkeletonStack,
   SurfaceMessageBody,
   SurfaceMessageRoot,
 } from '@archon-research/design-system';
@@ -17,7 +18,6 @@ import {
   formatWadValue,
 } from '../../shared/lib/dashboard';
 import type { PrimeRiskCapital } from '../../shared/types/allocation';
-import { Placeholder } from '../../shared/ui/Placeholder';
 import { ExposureCard, PrimeCollateralCard } from './HiddenMetricCards';
 import { MetricCardLegend, MetricCardTrend } from './metricCardChart';
 import {
@@ -102,6 +102,10 @@ const staleNoteClassName = css({
   py: '2',
   px: '2.5',
 });
+
+// Flags a partial total the same way a stale figure is flagged elsewhere in
+// the band, appended inline rather than replacing the caption it follows.
+const coverageNoteClassName = css({ color: 'text.warning' });
 
 /**
  * A card still holding the figure from before its read failed.
@@ -192,6 +196,7 @@ function TotalAllocationCard({
 }) {
   const isFiltered = hasSearchQuery && overallSummary !== null;
   const chartErrorMessage = chart?.errorMessage ?? null;
+  const coverage = chart?.coverage ?? null;
 
   return (
     <MetricCard
@@ -216,6 +221,11 @@ function TotalAllocationCard({
             {isFiltered
               ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
               : `${summary.allocationCount} allocations`}
+            {coverage === null ? null : (
+              <span className={coverageNoteClassName}>
+                {` · ${coverage.pricedEntityCount} of ${coverage.entityCount} positions priced`}
+              </span>
+            )}
           </div>
           <MetricCardTrend
             chart={chart}
@@ -401,7 +411,7 @@ function PrimeDebtCard({
       // only card in the row with no chart box reserved.
       value={
         isLoading ? (
-          <Placeholder width="8rem" height={28} />
+          <SkeletonStack count={1} itemHeight={28} style={{ width: '8rem' }} />
         ) : (
           formatWadValue(wad)
         )
@@ -413,7 +423,11 @@ function PrimeDebtCard({
               when it is the unrounded debt the headline already states. */}
           <div className={metricCaptionClassName}>
             {isLoading ? (
-              <Placeholder width="12rem" height={16} />
+              <SkeletonStack
+                count={1}
+                itemHeight={16}
+                style={{ width: '12rem' }}
+              />
             ) : (
               (ilkLabel ?? '\u00A0')
             )}

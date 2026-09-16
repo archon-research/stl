@@ -6,12 +6,12 @@ import { AllocationDrawer } from '../features/allocations/AllocationDrawer';
 import { AllocationGrid } from '../features/allocations/AllocationGrid';
 import { buildMetricCharts } from '../features/allocations/metric-charts';
 import { preloadAllocationDetail } from '../features/allocations/preload';
-import { useAllocationRows } from '../features/allocations/useAllocationRows';
 import { useAllocationSelection } from '../features/allocations/useAllocationSelection';
 import { useFilteredAllocations } from '../features/allocations/useFilteredAllocations';
 import { usePrimeChartSeries } from '../features/allocations/usePrimeChartSeries';
 import { usePrimeMetrics } from '../features/allocations/usePrimeMetrics';
 import { usePrimeTotalAllocationUsd } from '../features/allocations/usePrimeTotalAllocationUsd';
+import { useAllocationRows } from '../shared/hooks/useAllocationRows';
 import {
   useChainLabels,
   useLocalProtocols,

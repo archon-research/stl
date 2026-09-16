@@ -150,7 +150,7 @@ func TestGetProtocolConfig(t *testing.T) {
 			chainID:      43114,
 			address:      "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
 			expectExists: true,
-			expectName:   "Aave V3 Avalanche",
+			expectName:   "Aave V3",
 			expectType:   "lending",
 		},
 		{
@@ -158,7 +158,7 @@ func TestGetProtocolConfig(t *testing.T) {
 			chainID:      42161,
 			address:      "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
 			expectExists: true,
-			expectName:   "Aave V3 Arbitrum",
+			expectName:   "Aave V3",
 			expectType:   "lending",
 		},
 		{
@@ -166,7 +166,7 @@ func TestGetProtocolConfig(t *testing.T) {
 			chainID:      10,
 			address:      "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
 			expectExists: true,
-			expectName:   "Aave V3 Optimism",
+			expectName:   "Aave V3",
 			expectType:   "lending",
 		},
 		{
@@ -174,7 +174,7 @@ func TestGetProtocolConfig(t *testing.T) {
 			chainID:      8453,
 			address:      "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
 			expectExists: true,
-			expectName:   "Aave V3 Base",
+			expectName:   "Aave V3",
 			expectType:   "lending",
 		},
 		{

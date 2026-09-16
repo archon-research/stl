@@ -153,10 +153,26 @@ func TestCountingMorphoRepository_InterceptsEveryAppendingWrite(t *testing.T) {
 }
 
 // reportsAnAppend recognises the port's write shape: a bool among the results, which is
-// how every one of them says whether a row was appended.
+// how every one of them says whether a row was appended, AND a pointer to the entity
+// being written among the arguments. The bool alone is not enough — a position-scoped
+// READ answers bool too (AdapterSetEnumeratedAt), and counting it as a write would
+// demand the counter intercept a method that appends nothing.
 func reportsAnAppend(signature reflect.Type) bool {
+	return resultsCarryABool(signature) && argsCarryAnEntityPointer(signature)
+}
+
+func resultsCarryABool(signature reflect.Type) bool {
 	for out := range signature.Outs() {
 		if out.Kind() == reflect.Bool {
+			return true
+		}
+	}
+	return false
+}
+
+func argsCarryAnEntityPointer(signature reflect.Type) bool {
+	for in := range signature.Ins() {
+		if in.Kind() == reflect.Pointer && in.Elem().Kind() == reflect.Struct {
 			return true
 		}
 	}

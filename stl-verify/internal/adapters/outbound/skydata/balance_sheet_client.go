@@ -43,6 +43,7 @@ var networkToChainID = map[string]int64{
 	"base":      8453,
 	"arbitrum":  42161,
 	"avalanche": 43114,
+	"robinhood": 4663,
 }
 
 // Compile-time checks that Client implements both feed ports.

@@ -1,15 +1,18 @@
-# On-demand Uniswap V4 position bootstrap (VEC-639).
+# On-demand Uniswap V4 backfill worker (VEC-639, VEC-790).
 #
 # A long-running Deployment, not a k8s Job or CronJob: it polls the Temporal task
 # queue "uniswap-v4-position-bootstrap" and stays idle until someone starts a run
 # from the Temporal UI. It registers NO schedule, so an always-on pod costs
-# nothing but a poller. A run snapshots every historical position key of the
-# registered snapshot-supported pools at one finality-safe block; see
-# docs/runbooks/vector-indexers.md, section "Uniswap V4 indexer".
+# nothing but a poller. It hosts two workflow types, both hand-started:
+# UniswapV4PositionBootstrap snapshots every historical position key at one
+# finality-safe block, and UniswapV4PosmTransferBackfill replays the
+# PositionManager's whole ERC-721 Transfer history. The queue keeps the older
+# name; see docs/runbooks/vector-indexers.md, section "Uniswap V4 indexer".
 #
 # replicas: 1 — one pod on one task queue. A run is one activity, so a second
 # replica would buy nothing and double the request rate against the same
-# Alchemy key.
+# Alchemy key. Both workflow types can run at once on the one pod: they write
+# different tables, and each is one activity.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -44,8 +47,12 @@ spec:
               cpu: "100m"
               memory: "128Mi"
             limits:
-              # Peak memory is the distinct position keys plus one window's logs
-              # plus one multicall batch: ~70 B per key, so ~10^6 keys fit.
+              # Sized for BOTH runs at once, since nothing stops that: the
+              # position run's distinct keys plus one window's logs plus one
+              # multicall batch (~70 B per key, so ~10^6 keys fit), and the
+              # transfer run's one window of logs plus their decoded rows,
+              # nothing accumulated across windows and capped near 10^4 logs by
+              # the provider's response limit (~20 MB at mainnet's density).
               cpu: "1000m"
               memory: "512Mi"
       # An in-flight run is cancelled on shutdown and Temporal retries it on the

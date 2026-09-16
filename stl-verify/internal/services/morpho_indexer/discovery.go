@@ -305,7 +305,7 @@ func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *
 	for _, a := range adapters {
 		s.warnIfUnknownAdapterType(vaultAddress, a.address, a.adapterType, blockNumber)
 		adapterType := a.adapterType
-		adapterID, appended, err := s.observeAdapterMembership(ctx, tx, vault, a.address, entity.MorphoAdapterMembership{
+		adapterID, observation, err := s.observeAdapterMembership(ctx, tx, vault, a.address, entity.MorphoAdapterMembership{
 			BlockNumber:  blockNumber,
 			BlockVersion: blockVersion,
 			LogIndex:     entity.EndOfBlockLogIndex,
@@ -317,7 +317,7 @@ func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *
 		if err != nil {
 			return err
 		}
-		if appended {
+		if observation != nil {
 			s.logger.Warn("adapter membership recorded by the set enumeration; the log did not already give this answer",
 				"vault", vaultAddress.Hex(), "adapter", a.address.Hex(), "block", blockNumber,
 				"adapter_type", adapterTypeLabel(&adapterType), "observed_via", string(observedVia))

@@ -56,7 +56,7 @@ const topBarClassName = css({
   px: '4',
   py: '3',
   minHeight: '16',
-  borderBottomWidth: '1px',
+  borderBottomWidth: 'hairline',
   borderBottomStyle: 'solid',
   borderColor: 'border.subtle',
   bg: 'surface.default',

@@ -1,0 +1,329 @@
+# Unit tests for the uniswap_v4_position_nft_transfer rules: the live indexers'
+# row-growth tripwire, the silent-empty decode guard, and the backfill worker's
+# own growth tripwire.
+#
+# The table is created plain, so it owes a tripwire on the same 2.9 rows/s
+# budget as the append-on-change tables: sustained rates over 12h of samples,
+# 180 rows/min breaching and 168 not. The backfill rule reads a 24h window and
+# holds for 2h, so its cases run 26h.
+rule_files:
+  - ../alerts/vector-indexers.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: "growth: a sustained rate over the table's budget fires"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-indexer"}'
+        values: '0+180x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV4NFTTransferGrowthHigh
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: &nft_growth
+              description: |
+                Rows written into `uniswap_v4_position_nft_transfer` have exceeded
+                250k/day (2.9 rows/s) sustained for 6h — about 90M rows/year against
+                the ~100M-row budget an un-partitioned table is comfortable with.
+                Nothing is broken: the table was created plain and this is the
+                measurement the hypertable decision was deferred to. This counts the
+                live indexers only — the posm transfer backfill is excluded, so its
+                bulk load cannot be the cause. Check the real row count, then decide
+                whether the rate is the new normal; if it is, plan the conversion
+                described in the runbook.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4nfttransfergrowthhigh"
+              summary: "Vector uniswap_v4_position_nft_transfer outgrowing its plain-table budget"
+
+  - name: "growth: a sustained rate under the table's budget stays quiet"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-indexer"}'
+        values: '0+168x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV4NFTTransferGrowthHigh
+        exp_alerts: []
+
+  - name: "growth: two chains writing into the one table are summed"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-indexer"}'
+        values: '0+90x720'
+      - series: 'uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="base", service_name="uniswap-v4-indexer"}'
+        values: '0+90x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV4NFTTransferGrowthHigh
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: *nft_growth
+
+  # Rows attempted include conflicts, which do not grow the table.
+  - name: "growth: rows attempted but never persisted do not count"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_nft_transfer_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-indexer"}'
+        values: '0+180x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV4NFTTransferGrowthHigh
+        exp_alerts: []
+
+  # A real mainnet run lands ~488k rows over ~7.5h: ~18 rows/s, six times the
+  # live indexer's budget, and not a growth regime.
+  - name: "growth: the backfill's bulk load is outside this rule"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-position-bootstrap"}'
+        values: '0+16000x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV4NFTTransferGrowthHigh
+        exp_alerts: []
+
+  # The live indexer stays under budget on its own, so this case fires only if
+  # the excluded backfill's rows reach the sum.
+  - name: "growth: a running backfill cannot push the live indexers over budget"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-indexer"}'
+        values: '0+168x720'
+      - series: 'uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-position-bootstrap"}'
+        values: '0+16000x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV4NFTTransferGrowthHigh
+        exp_alerts: []
+
+  # The exclusion matches through the `(^|.*-)` prefix every chain deployment
+  # carries, so a second chain's backfill worker needs no edit to either rule.
+  - name: "growth: a chain-prefixed backfill worker is excluded too"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="base", service_name="base-uniswap-v4-position-bootstrap"}'
+        values: '0+16000x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV4NFTTransferGrowthHigh
+        exp_alerts: []
+
+  # An absent counter means the running build predates the posm decoder, which
+  # is every rollout: the rules sync to Mimir on merge, the image lands minutes
+  # later.
+  - name: "no-transfers: an absent attempted counter is a rollout, not a fault"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
+        values: '0+5x730'
+    alert_rule_test:
+      - eval_time: 730m
+        alertname: VectorUniswapV4IndexerNoNFTTransfers
+        exp_alerts: []
+
+  - name: "no-transfers: a seeded zero with blocks flowing for 6h fires"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
+        values: '0+5x730'
+      - series: 'uniswap_v4_nft_transfer_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-indexer"}'
+        values: '0x730'
+    alert_rule_test:
+      - eval_time: 730m
+        alertname: VectorUniswapV4IndexerNoNFTTransfers
+        exp_alerts:
+          - exp_labels:
+              chain: "mainnet"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: &no_transfers
+              description: |
+                `uniswap-v4-indexer` on chain `mainnet` has processed
+                blocks successfully for 6h without decoding a single Uniswap V4
+                PositionManager ERC-721 `Transfer`. Mainnet moves posm position NFTs
+                continuously, so six hours of silence is a matching failure rather
+                than a lull: suspect a wrong PositionManager address in
+                `uniswap_v4_position_manager` (the address is the FK'd `protocol`
+                row's), or a regression in the topic0 / 4-topic guard in
+                `decodePositionManagerLog`. `uniswap_v4_position_nft_transfer` is
+                the only source of posm token holders, so it is going stale.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexernonfttransfers"
+              summary: "Vector uniswap-v4-indexer decoding no posm NFT transfers on mainnet"
+
+  - name: "no-transfers: an indexer decoding transfers is silent"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
+        values: '0+5x730'
+      - series: 'uniswap_v4_nft_transfer_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-indexer"}'
+        values: '0+2x730'
+    alert_rule_test:
+      - eval_time: 730m
+        alertname: VectorUniswapV4IndexerNoNFTTransfers
+        exp_alerts: []
+
+  # Without the exclusion a backfill's rate lifts the sum off zero and the
+  # guard goes quiet for the run plus its window, masking a wrong
+  # PositionManager.
+  - name: "no-transfers: a running backfill does not silence the guard"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
+        values: '0+5x730'
+      - series: 'uniswap_v4_nft_transfer_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-indexer"}'
+        values: '0x730'
+      - series: 'uniswap_v4_nft_transfer_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-position-bootstrap"}'
+        values: '0+16000x730'
+    alert_rule_test:
+      - eval_time: 730m
+        alertname: VectorUniswapV4IndexerNoNFTTransfers
+        exp_alerts:
+          - exp_labels:
+              chain: "mainnet"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: *no_transfers
+
+  - name: "no-transfers: a live indexer decoding normally alongside a backfill is silent"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
+        values: '0+5x730'
+      - series: 'uniswap_v4_nft_transfer_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-indexer"}'
+        values: '0+2x730'
+      - series: 'uniswap_v4_nft_transfer_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-position-bootstrap"}'
+        values: '0+16000x730'
+    alert_rule_test:
+      - eval_time: 730m
+        alertname: VectorUniswapV4IndexerNoNFTTransfers
+        exp_alerts: []
+
+  # The exclusion covers the existence side too: only the live indexer's series
+  # can satisfy the `== 0` term, so a backfill series on a chain whose indexer
+  # has no decoder at all cannot revive the rollout false positive.
+  - name: "no-transfers: a backfill-only counter series does not fire the guard"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
+        values: '0+5x730'
+      - series: 'uniswap_v4_nft_transfer_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-position-bootstrap"}'
+        values: '0x730'
+    alert_rule_test:
+      - eval_time: 730m
+        alertname: VectorUniswapV4IndexerNoNFTTransfers
+        exp_alerts: []
+
+  - name: "no-transfers: the indexer's own seeded zero beside a backfill series fires"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
+        values: '0+5x730'
+      - series: 'uniswap_v4_nft_transfer_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-position-bootstrap"}'
+        values: '0x730'
+      - series: 'uniswap_v4_nft_transfer_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-indexer"}'
+        values: '0x730'
+    alert_rule_test:
+      - eval_time: 730m
+        alertname: VectorUniswapV4IndexerNoNFTTransfers
+        exp_alerts:
+          - exp_labels:
+              chain: "mainnet"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: *no_transfers
+
+  # The companion rule covering the writer the growth tripwire excludes. One
+  # legitimate ~488k-row history is 5.6 rows/s over 24h and must stay quiet.
+  - name: "backfill-growth: one mainnet history in a day"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-position-bootstrap"}'
+        values: '0+339x1560'
+    alert_rule_test:
+      - eval_time: 26h
+        alertname: VectorUniswapV4NFTTransferBackfillGrowthHigh
+        exp_alerts: []
+
+  - name: "backfill-growth: six histories in a day"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-position-bootstrap"}'
+        values: '0+2035x1560'
+    alert_rule_test:
+      - eval_time: 26h
+        alertname: VectorUniswapV4NFTTransferBackfillGrowthHigh
+        exp_alerts: []
+
+  - name: "backfill-growth: eight histories in a day"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-position-bootstrap"}'
+        values: '0+2713x1560'
+    alert_rule_test:
+      - eval_time: 26h
+        alertname: VectorUniswapV4NFTTransferBackfillGrowthHigh
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: &backfill_growth
+              description: |
+                The `UniswapV4PosmTransferBackfill` runs on
+                `uniswap-v4-position-bootstrap` have written above 3M rows/day into
+                `uniswap_v4_position_nft_transfer` for 2h — several times a whole
+                mainnet posm history (~490k rows), which is the most one run has cause
+                to write. Nothing is broken, but this is a plain table: check which
+                chains are being backfilled and the real row count, then decide whether
+                the total now argues for the hypertable conversion the runbook carries.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4nfttransferbackfillgrowthhigh"
+              summary: "Vector posm transfer backfill writing more than 3M rows/day into uniswap_v4_position_nft_transfer"
+
+  - name: "backfill-growth: the live indexer writing at that rate is another rule's business"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet", service_name="uniswap-v4-indexer"}'
+        values: '0+2713x1560'
+    alert_rule_test:
+      - eval_time: 26h
+        alertname: VectorUniswapV4NFTTransferBackfillGrowthHigh
+        exp_alerts: []
+
+  - name: "backfill-growth: a chain-prefixed backfill worker is inside this rule"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="base", service_name="base-uniswap-v4-position-bootstrap"}'
+        values: '0+2713x1560'
+    alert_rule_test:
+      - eval_time: 26h
+        alertname: VectorUniswapV4NFTTransferBackfillGrowthHigh
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: *backfill_growth

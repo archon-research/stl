@@ -1,4 +1,8 @@
-import { AsyncStateRenderer, EmptyState } from '@archon-research/design-system';
+import {
+  AsyncStateRenderer,
+  EmptyState,
+  SkeletonStack,
+} from '@archon-research/design-system';
 import { isHttpRequestError } from '@archon-research/http-client-react';
 import { useQuery } from '@tanstack/react-query';
 
@@ -14,7 +18,6 @@ import {
 } from '../../shared/lib/queries';
 import type { ProtocolEvent } from '../../shared/types/allocation';
 import { TokenAddress } from '../../shared/ui';
-import { Placeholder } from '../../shared/ui/Placeholder';
 
 function formatEventData(eventData: ProtocolEvent['event_data']): string {
   if (eventData === null) {
@@ -32,7 +35,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
   return (
     <div
       className={css({
-        borderWidth: '1px',
+        borderWidth: 'hairline',
         borderStyle: 'solid',
         borderColor: 'border.subtle',
         borderRadius: 'sm',
@@ -188,12 +191,7 @@ export function TxProtocolEventsPanel({ txHash }: { txHash: string }) {
         isLoading={events === null && error === null}
         error={error}
         isEmpty={events !== null && events.length === 0}
-        loadingView={
-          <div className={css({ display: 'grid', gap: '2' })}>
-            <Placeholder width="100%" height={40} />
-            <Placeholder width="100%" height={40} />
-          </div>
-        }
+        loadingView={<SkeletonStack count={2} itemHeight={40} />}
         errorView={
           <span className={css({ fontSize: 'xs', color: 'text.warning' })}>
             Failed to load protocol events: {error}
