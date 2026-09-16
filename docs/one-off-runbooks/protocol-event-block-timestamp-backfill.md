@@ -25,6 +25,12 @@ reason VEC-491 kept `block_meta` DDL-only.
   2-minute statement timeout).
 - **`SET timescaledb.enable_tiered_reads = 'on'` in every session.** It defaults off, so a plain
   session cannot see — or count — a tiered chunk, and Step 3 would report a false zero.
+- **`SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0` in every session that runs
+  an `UPDATE`.** TimescaleDB caps one DML statement at 100,000 decompressed tuples by default and
+  aborts past it with `tuple decompression limit exceeded by operation` (SQLSTATE 53400); every
+  month window below is far past that. `0` lifts the cap, and the one-month window is what bounds
+  the decompressed volume instead. `20260911_120000_rekey_grove_centrifuge_vault_positions.sql`
+  raises the same cap for its smaller `UPDATE`s.
 - ADR-0005's reader switch and the catalogue axis flip to `event` are VEC-735's. They must not run
   until Step 3 reports zero.
 
