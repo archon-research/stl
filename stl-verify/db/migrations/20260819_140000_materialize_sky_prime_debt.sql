@@ -71,7 +71,7 @@ BEGIN
         JOIN public.prime pr ON pr.id = pd.prime_id
         LEFT JOIN public.protocol p ON p.id = pd.protocol_id
         WHERE p.id IS NULL
-           OR btrim(pd.ilk_name) = ''
+           OR pd.ilk_name ~ '^\s*$'
            OR strpos(pd.ilk_name, ';') > 0
            OR pd.ilk_name ~ '(^\s|\s$)'
            OR octet_length(pr.vault_address) <> 20

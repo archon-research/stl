@@ -208,6 +208,7 @@ func TestSkyPrimeDebtRefusesASnapshotItCannotKey(t *testing.T) {
 		{"leading space in ilk_name", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", " ILK-X", goodVault, "ilk ' ILK-X'"},
 		{"trailing space in ilk_name", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "ILK-X ", goodVault, "ilk 'ILK-X '"},
 		{"blank ilk_name", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "", goodVault, "ilk ''"},
+		{"tab-only ilk_name", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "\t", goodVault, "ilk '"},
 		{"ilk_name carrying the key delimiter", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "ILK;X", goodVault, "ilk 'ILK;X'"},
 		{"empty vault_address", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "ILK-X", "", "vault_address ''"},
 		{"19-byte vault_address", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "ILK-X", goodVault[:38], "vault_address '" + goodVault[:38] + "'"},
