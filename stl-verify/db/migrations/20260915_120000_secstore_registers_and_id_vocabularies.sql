@@ -81,15 +81,15 @@ CREATE TABLE instrument_register (
     CONSTRAINT instrument_register_chain_pos_chk CHECK (chain_id IS NULL OR chain_id > 0),
     CONSTRAINT instrument_register_valid_from_finite_chk CHECK (valid_from <> 'infinity' AND valid_from <> '-infinity')
 );
-COMMENT ON TABLE instrument_register IS '[Dimension] Native instrument key -> SECURITY node (ADR-0007 §2): the instrument is a KEY, not a node, so resolution is a lookup and no RESOLVES_TO edge type exists. Many keys resolve to one security — six USDC deployments are six rows pointing at one sec-usdc — which is why this is a register rather than a node kind. Append-only (full ACL revoke incl. owner; nothing FKs it), bitemporal. Successor of the frozen security_instrument_bridge. The hottest join in the metric path: position_state.instrument_key resolves here (seam 1, ADR-0007 §9.1) and nothing is stamped back onto the position. Plain table: governance-rate writes.';
-COMMENT ON COLUMN instrument_register.instrument_key IS 'Roles: PK (with chain_scope, valid_from, valid_to, processing_version). The instrument''s NATIVE, globally-unique id, assigned by the chain or the source and never by us: contract address (lowercase hex, no 0x), protocol-emitted market id, the Sky ilk, provider:package. position_id hashes this value (VEC-400), so no house classifier may appear in it and its text form is frozen once positions exist. key_namespace is deliberately NOT part of the key: a position row carries no namespace, so if one key could sit under two namespaces the read could not choose between them — leaving it out turns that collision into a PK violation at write instead.';
+COMMENT ON TABLE instrument_register IS '[Dimension] Native instrument key -> SECURITY node (ADR-0007 §2): the instrument is a KEY, not a node, so resolution is a lookup and no RESOLVES_TO edge type exists. Many keys resolve to one security — six USDC deployments are six rows pointing at one sec-usdc — which is why this is a register rather than a node kind. Append-only (full ACL revoke incl. owner; nothing FKs it), bitemporal. Successor of the frozen security_instrument_bridge. The hottest join in the metric path: position_state.instrument_key resolves here (seam 1, ADR-0007 §9.1) and nothing is stamped back onto the position. Identity is (instrument_key, chain_scope), NOT instrument_key alone as ADR-0007 §10''s dim_instrument contract still says — that correction is VEC-616''s to record. Plain table: governance-rate writes.';
+COMMENT ON COLUMN instrument_register.instrument_key IS 'Roles: PK (with chain_scope, valid_from, valid_to, processing_version). The instrument''s NATIVE, globally-unique id, assigned by the chain or the source and never by us: contract address (lowercase hex, no 0x), protocol-emitted market id, the Sky ilk, provider:package. position_id hashes this value (VEC-400), so no house classifier may appear in it and its text form is frozen once positions exist. key_namespace is deliberately NOT part of the key: a position row carries no namespace, so if one key could sit under two namespaces the read could not choose between them. The key alone cannot enforce that — two rows differing in valid_from do not collide — so instrument_register_namespace_guard refuses the second namespace.';
 COMMENT ON COLUMN instrument_register.key_namespace IS 'Roles: FK→key_namespace_vocabulary.key_namespace. Which form the key takes. Descriptive, not part of identity (see instrument_key).';
 COMMENT ON COLUMN instrument_register.security_id IS 'Roles: FK→sec_node.id (soft; SCD2 ids are non-unique, so resolve through sec_node_current). The SECURITY node this key means. NO foreign key BY DESIGN, and not merely because the target is non-unique: a register row must be writable before its security node exists, which is what lets the register load ahead of the security load (VEC-625/627). An unresolvable security_id is a DQ finding, not a write error.';
 COMMENT ON COLUMN instrument_register.chain_id IS 'Roles: FK→chain.chain_id (soft). Native chain id, raw integer — READ THIS COLUMN FOR THE CHAIN, never chain_scope. NULL where the namespace has no chain BY CONSTRUCTION, not where one was missed: Anchorage packages are off-chain custody and Sky ilks come from a source that carries no chain column. Hardcoding 1 for those is the remembered-constant antipattern VEC-400''s helper warns against.';
 COMMENT ON COLUMN instrument_register.chain_scope IS 'Roles: PK component, Derived. EXISTS FOR THE KEY AND IS NOT THE CHAIN — read chain_id for that. coalesce(chain_id, 0), because the same contract address is deployed on several chains (13 addresses today, 3 of them held) and a key without chain rejects the second one; chain_id itself cannot go in the key because a PRIMARY KEY forces NOT NULL, which would make the two chainless namespaces unregisterable unless they carried a sentinel in real data. 0 is safe: EVM chain ids start at 1 and the chain_id CHECK refuses anything lower. Reads join on instrument_key = $1 AND chain_scope = coalesce($2, 0), on columns the position stream already carries. Excluded from content_hash, which covers chain_id instead — a STORED generated column is computed AFTER the BEFORE INSERT guard, so hashing it would hash a NULL and never reproduce from the stored row.';
 COMMENT ON COLUMN instrument_register.attrs IS 'Instrument-level attributes that are not identity: symbol, decimals, venue, first-seen block. Decimals here are the token''s own scale, never applied to a quantity by this table.';
 COMMENT ON COLUMN instrument_register.valid_from IS 'Roles: PK component. Valid-time window start, UTC date, half-open [valid_from, valid_to). A re-point is a new row with a later valid_from, never an UPDATE: MKR -> SKY leaves the MKR row in place and the SKY row becomes current. Grain is a day, as sec_node.valid_from.';
-COMMENT ON COLUMN instrument_register.valid_to IS 'Roles: PK component. Valid-time window end, exclusive; ''infinity'' = open, never NULL. In the key so ending a mapping is an ordinary append at processing_version 0 rather than an UPDATE the append-only grants refuse — a key whose instrument is retired with no successor security has to stop resolving somehow. A zero-length window is a retraction tombstone, as sec_node.valid_to.';
+COMMENT ON COLUMN instrument_register.valid_to IS 'Roles: PK component. Valid-time window end, exclusive; ''infinity'' = open, never NULL. In the key so ending a mapping is an ordinary append at processing_version 0 rather than an UPDATE the append-only grants refuse — a key whose instrument is retired with no successor security has to stop resolving somehow. A zero-length window is a retraction tombstone, as sec_node.valid_to — and it withdraws ONE WINDOW, so retiring an open mapping means tombstoning the window it opened, not appending a later one. Note the converse too: giving a re-point a finite valid_to does not end the key, it resurrects whatever the re-point superseded.';
 COMMENT ON COLUMN instrument_register.record_id IS 'Roles: Audit, UNIQUE. Per-append surrogate; what supersedes_record_id and a reproduction manifest point at (PR-2.1).';
 COMMENT ON COLUMN instrument_register.processing_version IS 'Roles: Audit, PK component. Correction version, caller-assigned per ADR-0006 §3: 0 live, N per correction run. A re-point is a VALID-TIME change and stays at 0 — which is exactly what the drafted key (instrument_key, processing_version) could not hold, since the second row collided. See sec_node.processing_version for what a correction at N then does to later loads.';
 COMMENT ON COLUMN instrument_register.ingest_xid IS 'Roles: Audit. Knowledge-time visibility key (ADR-0006 §5) and the supersession tiebreak inside a valid window. Never writer-supplied; enforced by the append guard.';
@@ -107,6 +107,8 @@ COMMENT ON COLUMN instrument_register.content_hash IS 'Roles: Audit, Derived. sh
 -- whole key or the DISTINCT ON degrades to a full scan plus sort on every resolution (as
 -- sec_node_resolve_idx).
 CREATE INDEX instrument_register_resolve_idx ON instrument_register (instrument_key, chain_scope, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC);
+-- Reverse lookup (which keys mean this security) and the DQ sweeps, both of which read the base
+-- table; the resolved views scan and filter, so this index does not serve them.
 CREATE INDEX instrument_register_security_idx ON instrument_register (security_id);
 
 -- ---------------------------------------------------------------------------
@@ -176,28 +178,27 @@ CREATE INDEX alias_register_node_idx ON alias_register (node_id);
 -- The other order resurrects a superseded row (ADR-0006 §5; the wave-1 rule).
 -- ---------------------------------------------------------------------------
 
+-- Step one of the two-step read, shared by the reads that can take it. The knowledge-time
+-- overload CANNOT: its snapshot filter has to run BEFORE this resolution, or a correction
+-- invisible in the snapshot wins its group and then vanishes, so it inlines the CTE instead.
+CREATE VIEW instrument_register_latest AS
+SELECT DISTINCT ON (instrument_key, chain_scope, valid_from) *
+FROM instrument_register
+ORDER BY instrument_key, chain_scope, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC;
+COMMENT ON VIEW instrument_register_latest IS 'Latest append per (instrument_key, chain_scope, valid_from) — step one of the two-step read (ADR-0006 §5), with no valid-time filter applied. Not a consumer surface: reading it alone returns closed and tombstoned windows. instrument_register_current and instrument_register_as_of(date) apply the window to it; instrument_register_as_of(date, pg_snapshot) must not use it, because the snapshot filter has to precede this resolution.';
+
 CREATE VIEW instrument_register_current AS
-WITH latest AS (
-    SELECT DISTINCT ON (instrument_key, chain_scope, valid_from) *
-    FROM instrument_register
-    ORDER BY instrument_key, chain_scope, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
-)
 SELECT DISTINCT ON (instrument_key, chain_scope) *
-FROM latest
+FROM instrument_register_latest
 WHERE valid_from <= (now() AT TIME ZONE 'utc')::date
   AND (now() AT TIME ZONE 'utc')::date < valid_to
 ORDER BY instrument_key, chain_scope, valid_from DESC;
-COMMENT ON VIEW instrument_register_current IS 'One current mapping per (key, chain_scope) — the unique-current guarantee dim_instrument carries and the metric path''s hottest join needs. A closed or tombstoned window is absent here. Operational reads only: a calculation uses instrument_register_as_of(effective_at), and a replay instrument_register_as_of(effective_at, known_at), because resolving the register at now() while scanning last quarter''s positions applies today''s mapping to yesterday''s holding, silently (ADR-0007 §9.3). Two OVERLAPPING windows for one key are not rejected here or by the PK — an open mapping always time-overlaps its own re-point, so that stays a DQ check over current state, the same position wave 1 took for single-valued edge cardinality.';
+COMMENT ON VIEW instrument_register_current IS 'One current mapping per (key, chain_scope) — the unique-current guarantee dim_instrument carries and the metric path''s hottest join needs. A closed or tombstoned window is absent here. Operational reads only: a calculation uses instrument_register_as_of(effective_at), and a replay instrument_register_as_of(effective_at, known_at), because resolving the register at now() while scanning last quarter''s positions applies today''s mapping to yesterday''s holding, silently (ADR-0007 §9.3). Two OVERLAPPING windows for one key are not rejected here or by the PK — an open mapping always time-overlaps its own re-point, so that stays a DQ check over current state, the same position wave 1 took for single-valued edge cardinality. What IS refused at write is a second key_namespace for one key, which no key shape could catch (instrument_register_namespace_guard).';
 
 CREATE FUNCTION instrument_register_as_of(effective_at date)
 RETURNS SETOF instrument_register LANGUAGE sql STABLE AS $$
-    WITH latest AS (
-        SELECT DISTINCT ON (instrument_key, chain_scope, valid_from) *
-        FROM instrument_register
-        ORDER BY instrument_key, chain_scope, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
-    )
     SELECT DISTINCT ON (instrument_key, chain_scope) *
-    FROM latest
+    FROM instrument_register_latest
     WHERE valid_from <= effective_at
       AND effective_at < valid_to
     ORDER BY instrument_key, chain_scope, valid_from DESC
@@ -224,14 +225,15 @@ RETURNS SETOF instrument_register LANGUAGE sql STABLE AS $$
 $$;
 COMMENT ON FUNCTION instrument_register_as_of(date, pg_snapshot) IS 'Bitemporal instrument resolution: latest append visible in known_at per (key, valid_from), then the valid window over effective_at (RP-4.1, CR-3.6). Serves the exact replay a recorded snapshot pins.';
 
+CREATE VIEW alias_register_latest AS
+SELECT DISTINCT ON (id_scheme, id_value, valid_from) *
+FROM alias_register
+ORDER BY id_scheme, id_value, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC;
+COMMENT ON VIEW alias_register_latest IS 'Latest append per (id_scheme, id_value, valid_from) — step one of the two-step read; see instrument_register_latest for why the knowledge-time overload does not use it.';
+
 CREATE VIEW alias_register_current AS
-WITH latest AS (
-    SELECT DISTINCT ON (id_scheme, id_value, valid_from) *
-    FROM alias_register
-    ORDER BY id_scheme, id_value, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
-)
 SELECT DISTINCT ON (id_scheme, id_value) *
-FROM latest
+FROM alias_register_latest
 WHERE valid_from <= (now() AT TIME ZONE 'utc')::date
   AND (now() AT TIME ZONE 'utc')::date < valid_to
 ORDER BY id_scheme, id_value, valid_from DESC;
@@ -239,13 +241,8 @@ COMMENT ON VIEW alias_register_current IS 'Current alias -> node resolution, two
 
 CREATE FUNCTION alias_register_as_of(effective_at date)
 RETURNS SETOF alias_register LANGUAGE sql STABLE AS $$
-    WITH latest AS (
-        SELECT DISTINCT ON (id_scheme, id_value, valid_from) *
-        FROM alias_register
-        ORDER BY id_scheme, id_value, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
-    )
     SELECT DISTINCT ON (id_scheme, id_value) *
-    FROM latest
+    FROM alias_register_latest
     WHERE valid_from <= effective_at
       AND effective_at < valid_to
     ORDER BY id_scheme, id_value, valid_from DESC
@@ -299,18 +296,8 @@ ON CONFLICT (id_scheme) DO NOTHING;
 -- Write boundary and append-only, on the wave-1 terms (VEC-617).
 -- ---------------------------------------------------------------------------
 
--- sec_store_append_guard is reused rather than reimplemented: its edge_disc branch is keyed on
--- the column, which the registers do not carry, so what runs here is exactly the part that
--- applies — reject a writer-supplied ingest_xid, chain content_hash through supersedes_record_id,
--- verify a supplied hash rather than trust it.
--- sec_store_append_guard is reused rather than reimplemented, and is replaced here for one
--- reason: a STORED generated column is computed AFTER a BEFORE INSERT trigger, so the guard saw
--- NULL for instrument_register.chain_scope and hashed that, which no later verification from the
--- stored row could reproduce. The fixed '- edge_id' subtraction becomes a catalogue lookup over
--- every generated column on the table being written. Behaviour on sec_node and sec_edge is
--- unchanged (edge_id is the only generated column between them, and record_id is an IDENTITY
--- column, which attgenerated does not mark), so the 501 rows wave 1 seeded keep their hashes and
--- its acceptance tests keep passing against this definition.
+-- Replaced for one reason: a STORED generated column is computed AFTER a BEFORE INSERT trigger,
+-- so the guard hashed a NULL chain_scope, which no verification from the stored row reproduces.
 CREATE OR REPLACE FUNCTION sec_store_append_guard() RETURNS trigger
   LANGUAGE plpgsql AS $$
 DECLARE
@@ -324,6 +311,7 @@ DECLARE
     parent_disc  text;
     vocab_found  boolean;
     generated_col text;
+    needs_approval boolean;
 BEGIN
     IF NEW.ingest_xid IS DISTINCT FROM pg_current_xact_id() THEN
         RAISE EXCEPTION 'ingest_xid is platform-assigned on %.% and must never be writer-supplied (ADR-0007 §4, ADR-0006 §5); omit the column and let the default stand',
@@ -401,6 +389,22 @@ BEGIN
         pre_image := pre_image || jsonb_build_object('supersedes_content_hash', encode(parent_hash, 'hex'));
     END IF;
 
+    -- Four-eyes (NFR-2), after the supersedes resolution so an unresolvable pointer still reports
+    -- itself rather than being pre-empted by a missing approver. change_reason_vocabulary said
+    -- which codes require one from the day it was seeded; nothing read it until now.
+    SELECT v.requires_approval INTO needs_approval
+      FROM change_reason_vocabulary v WHERE v.code = NEW.change_reason_code;
+    IF coalesce(needs_approval, false) THEN
+        IF NEW.approved_by IS NULL THEN
+            RAISE EXCEPTION 'change_reason_code % requires an approver on %.%, and approved_by is null (ADR-0007 §4, CR-3.3)',
+                NEW.change_reason_code, TG_TABLE_SCHEMA, TG_TABLE_NAME;
+        END IF;
+        IF NEW.approved_by = NEW.actor THEN
+            RAISE EXCEPTION 'approved_by must differ from actor on %.%: % approved their own append, which is not four-eyes (NFR-2)',
+                TG_TABLE_SCHEMA, TG_TABLE_NAME, NEW.actor;
+        END IF;
+    END IF;
+
     computed := sha256(convert_to(pre_image::text, 'UTF8'));
 
     IF NEW.content_hash IS NOT NULL AND NEW.content_hash <> computed THEN
@@ -411,12 +415,73 @@ BEGIN
     NEW.content_hash := computed;
     RETURN NEW;
 END $$;
-COMMENT ON FUNCTION sec_store_append_guard() IS 'BEFORE INSERT guard for sec_node / sec_edge and the VEC-616 registers: rejects a writer-supplied ingest_xid; on a table carrying edge_disc, derives it from the type''s declared cluster key before the pre-image is taken so the hash covers it, refuses a payload carrying none of the declared keys, and refuses an append whose supersedes_record_id names a row of a different identity; computes content_hash over to_jsonb(row) minus the platform-assigned fields, minus every STORED generated column (computed after this trigger, so NEW holds NULL for them — their inputs are hashed instead), with supersedes_record_id replaced by the predecessor''s content_hash so the digest chains and survives a re-import that reassigns record_ids; rejects a supersedes_record_id naming no stored row; verifies rather than trusts a supplied hash or discriminator (AR-1.2, NFR-5). Reads the store it guards by record_id, rel_type_vocabulary by rel_type, and pg_attribute by relation — all equality lookups on unique indexes of plain tables, which is not the per-row hypertable shape AGENTS.md''s plan_cache_mode rule is scoped to.';
+COMMENT ON FUNCTION sec_store_append_guard() IS 'BEFORE INSERT guard for sec_node / sec_edge and the VEC-616 registers: rejects a writer-supplied ingest_xid; on a table carrying edge_disc, derives it from the type''s declared cluster key before the pre-image is taken so the hash covers it, refuses a payload carrying none of the declared keys, and refuses an append whose supersedes_record_id names a row of a different identity; computes content_hash over to_jsonb(row) minus the platform-assigned fields, minus every STORED generated column (computed after this trigger, so NEW holds NULL for them — their inputs are hashed instead), with supersedes_record_id replaced by the predecessor''s content_hash so the digest chains and survives a re-import that reassigns record_ids; rejects a supersedes_record_id naming no stored row; verifies rather than trusts a supplied hash or discriminator (AR-1.2, NFR-5). Reads the store it guards by record_id and rel_type_vocabulary by rel_type (equality on unique indexes), plus change_reason_vocabulary by code and a range scan of pg_attribute for the relation''s generated columns. None is the per-row hypertable lookup AGENTS.md''s plan_cache_mode rule is scoped to — these are plain tables at governance write rates.';
+
+-- One key belongs to one namespace, enforced here because the primary key cannot: two rows
+-- differing in valid_from do not collide, so a token address and a Maple loan address that happen
+-- to share a string would both land and the later one would silently shadow the earlier in every
+-- resolved read. The read side cannot arbitrate — a position row carries no namespace — so the
+-- collision has to be refused at write. The advisory lock is the AGENTS.md read-then-write rule:
+-- the decision is made from a SELECT, which ON CONFLICT cannot guard (ADR-0002 §3).
+CREATE FUNCTION instrument_register_namespace_guard() RETURNS trigger
+  LANGUAGE plpgsql AS $$
+DECLARE
+    other_namespace text;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtext('instrument_register:' || NEW.instrument_key || ':' || coalesce(NEW.chain_id, 0)::text));
+
+    SELECT r.key_namespace INTO other_namespace
+      FROM instrument_register r
+     WHERE r.instrument_key = NEW.instrument_key
+       AND r.chain_scope = coalesce(NEW.chain_id, 0)
+       AND r.key_namespace <> NEW.key_namespace
+     LIMIT 1;
+
+    IF other_namespace IS NOT NULL THEN
+        RAISE EXCEPTION 'instrument_key % (chain_scope %) is already registered under namespace %, and this append claims %; one key means one instrument, and a position row carries no namespace to tell them apart',
+            NEW.instrument_key, coalesce(NEW.chain_id, 0), other_namespace, NEW.key_namespace;
+    END IF;
+    RETURN NEW;
+END $$;
+COMMENT ON FUNCTION instrument_register_namespace_guard() IS 'BEFORE INSERT on instrument_register: refuses a key already registered under a different key_namespace. Reads chain_id rather than chain_scope because a STORED generated column is computed after this trigger. Serialised per natural key with pg_advisory_xact_lock, since two concurrent appends would otherwise both see no conflicting row and both land.';
+
+-- The scheme vocabulary declares which node kinds it may alias; until now nothing read it, so an
+-- LEI could point at a security. The kind comes from the id prefix, which sec_node_id_prefix_chk
+-- makes a deterministic function of the id — the same trick sec_edge's endpoint CHECKs use.
+CREATE FUNCTION alias_register_scheme_guard() RETURNS trigger
+  LANGUAGE plpgsql AS $$
+DECLARE
+    node_kind text;
+    legal     text[];
+BEGIN
+    node_kind := CASE
+        WHEN NEW.node_id LIKE 'em-%'      THEN 'ENTITY'
+        WHEN NEW.node_id LIKE 'sec-%'     THEN 'SECURITY'
+        WHEN NEW.node_id LIKE 'concept-%' THEN 'CONCEPT'
+        WHEN NEW.node_id LIKE 'src-%'     THEN 'SOURCE'
+        WHEN NEW.node_id LIKE 'acct-%'    THEN 'ACCOUNT'
+    END;
+
+    SELECT v.applies_to INTO legal FROM id_scheme_vocabulary v WHERE v.id_scheme = NEW.id_scheme;
+
+    -- node_kind NULL: an unknown prefix, which alias_register_node_prefix_chk owns.
+    -- legal NULL: an unknown scheme, which the id_scheme foreign key owns (23503).
+    IF node_kind IS NOT NULL AND legal IS NOT NULL AND NOT (node_kind = ANY (legal)) THEN
+        RAISE EXCEPTION 'scheme % applies to %, so it cannot alias % (a % node) (ADR-0007 §1.3)',
+            NEW.id_scheme, legal, NEW.node_id, node_kind;
+    END IF;
+    RETURN NEW;
+END $$;
+COMMENT ON FUNCTION alias_register_scheme_guard() IS 'BEFORE INSERT on alias_register: enforces id_scheme_vocabulary.applies_to against the node kind implied by node_id''s prefix. value_form stays prose and validator-owned — one value column serves every scheme, so its form is not a column CHECK.';
 
 CREATE TRIGGER instrument_register_append_guard BEFORE INSERT ON instrument_register
     FOR EACH ROW EXECUTE FUNCTION sec_store_append_guard();
+CREATE TRIGGER instrument_register_namespace_guard BEFORE INSERT ON instrument_register
+    FOR EACH ROW EXECUTE FUNCTION instrument_register_namespace_guard();
 CREATE TRIGGER alias_register_append_guard BEFORE INSERT ON alias_register
     FOR EACH ROW EXECUTE FUNCTION sec_store_append_guard();
+CREATE TRIGGER alias_register_scheme_guard BEFORE INSERT ON alias_register
+    FOR EACH ROW EXECUTE FUNCTION alias_register_scheme_guard();
 
 DO $$
 DECLARE
