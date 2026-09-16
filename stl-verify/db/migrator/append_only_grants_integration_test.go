@@ -49,10 +49,7 @@ var convertedAppendOnlyTables = []string{
 	// parents and enforce append-only through reference_table_immutable() (20260714_160000, #574).
 	"sec_node",
 	"sec_edge",
-	// VEC-616: the combined master's two identifier registers, on the same terms as the stores
-	// above — nothing FKs them either, so the owner-side revoke is safe. Their two vocabularies
-	// are FK parents and keep the owner's UPDATE for the integrity probe, so they enforce
-	// append-only through reference_table_immutable() and are asserted with the wave-1 set.
+	// VEC-616: same terms as the stores above — nothing FKs the registers either.
 	"instrument_register",
 	"alias_register",
 	// VEC-475 (#711): append-only from birth; the creating migration REVOKEs all seven.

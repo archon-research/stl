@@ -6,12 +6,8 @@
 -- ilks, Anchorage packages, holder addresses — is one slice per namespace and hands out
 -- separately; each slice needs its namespace's security ids, which is what it waits on.
 --
--- A plain INSERT, not ON CONFLICT DO NOTHING: the migration self-registers, so it runs once,
--- and DO NOTHING here would swallow exactly the collisions the key exists to catch — a key
--- already registered under another namespace, or a second row for one key and chain.
---
--- content_hash is left to sec_store_append_guard, which computes it on every insert so the
--- chain runs from the first append; supplying one would only be verified against the same value.
+-- A plain INSERT, not ON CONFLICT DO NOTHING: the migration self-registers, so it runs once, and
+-- DO NOTHING would swallow a collision the guards raise on.
 
 INSERT INTO instrument_register (instrument_key, key_namespace, security_id, chain_id, attrs, valid_from, actor, change_reason_code, change_reason, source_system) VALUES
  ('00000000efe302beaa2b3e6e1b18d08d69a9012a','token_address','sec-ausd',1,'{"symbol":"AUSD","address":"00000000efe302beaa2b3e6e1b18d08d69a9012a","decimals":6}'::jsonb,'2026-08-26','seed','SEED_LOAD','Seed: held book from token table','token'),
