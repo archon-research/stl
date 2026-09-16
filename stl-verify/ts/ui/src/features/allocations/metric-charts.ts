@@ -1,4 +1,4 @@
-import type { ChartColorToken } from '@archon-research/charting';
+import type { ChartColorToken } from '@archon-research/charting/core';
 import type { TimeRange } from '@archon-research/design-system';
 
 import {

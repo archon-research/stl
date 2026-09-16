@@ -928,8 +928,9 @@ metadata:
 data:
   EXCHANGE: "coinbase"
   SYMBOLS: "BTC-USD,ETH-USD,XRP-USD,SOL-USD,HYPE-USD,JITOSOL-USD"
-  ORDERBOOK_DEPTH: "100"
-  ORDERBOOK_INTERVAL: "5s"
+  # level2 delivers the full ladder (~21k levels on BTC); this value means "no trim".
+  ORDERBOOK_DEPTH: "1000000"
+  ORDERBOOK_INTERVAL: "60s"
   ENVIRONMENT: "sentinelprod"
 ---
 # OKX uses dash-separated instrument ids. All six are quoted in USDT: JITOSOL has
@@ -944,8 +945,9 @@ metadata:
 data:
   EXCHANGE: "okx"
   SYMBOLS: "BTC-USDT,ETH-USDT,XRP-USDT,SOL-USDT,HYPE-USDT,JITOSOL-USDT"
-  ORDERBOOK_DEPTH: "100"
-  ORDERBOOK_INTERVAL: "5s"
+  # The books channel's ceiling: OKX serves at most 400 levels per side.
+  ORDERBOOK_DEPTH: "400"
+  ORDERBOOK_INTERVAL: "60s"
   ENVIRONMENT: "sentinelprod"
 ---
 # Kraken uses slash-separated pairs with its own asset names (XBT, not BTC), so
@@ -961,8 +963,9 @@ metadata:
 data:
   EXCHANGE: "kraken"
   SYMBOLS: "XBT/USD,ETH/USD,XRP/USD,SOL/USD,HYPE/USD,JITOSOL/USD,WBTC/USD"
-  ORDERBOOK_DEPTH: "100"
-  ORDERBOOK_INTERVAL: "5s"
+  # The book channel's ceiling: depth 500 is Kraken's largest subscription.
+  ORDERBOOK_DEPTH: "500"
+  ORDERBOOK_INTERVAL: "60s"
   ENVIRONMENT: "sentinelprod"
 ---
 apiVersion: v1

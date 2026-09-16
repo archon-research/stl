@@ -161,7 +161,7 @@ export function TokenAddress({
               bg: 'surface.default',
               borderRadius: 'md',
               borderStyle: 'solid',
-              borderWidth: '1px',
+              borderWidth: 'hairline',
               borderColor: 'border.subtle',
               boxShadow: 'overlay',
               // Below the smallest size step (`xs`, 20rem), and a menu is sized

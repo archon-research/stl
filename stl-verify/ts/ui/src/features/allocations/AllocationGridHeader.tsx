@@ -1,3 +1,5 @@
+import { SkeletonStack } from '@archon-research/design-system';
+
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
@@ -7,7 +9,6 @@ import {
 } from '../../shared/lib/dashboard';
 import type { Prime } from '../../shared/types/allocation';
 import { ProtocolLogo, TokenAddress } from '../../shared/ui';
-import { Placeholder } from '../../shared/ui/Placeholder';
 
 type AllocationGridHeaderProps = {
   selectedPrime: Prime | null;
@@ -67,7 +68,11 @@ export function AllocationGridHeader({
             // only time this is empty is before that has happened, and
             // naming an action the reader does not have to take reads as a
             // page that has given up.
-            <Placeholder width="12rem" height={40} />
+            <SkeletonStack
+              count={1}
+              itemHeight={40}
+              style={{ width: '12rem' }}
+            />
           )}
         </div>
         {/* The label ships with the address, never on its own: this is the
@@ -156,7 +161,9 @@ export function AllocationGridHeader({
                 justifyContent: 'flex-end',
               })}
             >
-              <span
+              {/* `<div>`, not `<span>`: SkeletonStack renders a block element,
+                  which a flex item already blockifies, so nothing visually changes. */}
+              <div
                 className={css({
                   fontSize: 'sm',
                   fontWeight: 'semibold',
@@ -169,7 +176,11 @@ export function AllocationGridHeader({
                     "Debt as of Loading..." — a sentence claiming that is the
                     timestamp. */}
                 {isPrimeDebtLoading ? (
-                  <Placeholder width="5rem" height={14} />
+                  <SkeletonStack
+                    count={1}
+                    itemHeight={14}
+                    style={{ width: '5rem' }}
+                  />
                 ) : primeDebtErrorMessage ? (
                   'Error'
                 ) : debtObservedAt ? (
@@ -177,7 +188,7 @@ export function AllocationGridHeader({
                 ) : (
                   '—'
                 )}
-              </span>
+              </div>
               <span
                 className={css({
                   fontSize: 'xs',
