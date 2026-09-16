@@ -273,6 +273,7 @@ func TestMaterializeMorphoMarketNegativeSourceAmountAborts(t *testing.T) {
 		supply, borrow, collateral, mkt string
 	}{
 		{"negative collateral in a same-token market, where it nets into the loan leg", "0", "0", "-50", `\x5678`},
+		{"negative collateral in a different-token market, which reaches the collateral leg raw", "0", "0", "-50", `\x1234`},
 		{"negative supply", "-70", "0", "0", `\x1234`},
 		{"negative borrow", "0", "-70", "0", `\x1234`},
 	} {
@@ -344,5 +345,32 @@ func TestMaterializeMorphoMarketForwardsTheWriterRun(t *testing.T) {
 		if !found {
 			t.Errorf("materialize_morpho_market declares %v, missing %s -- the runner calls it by name", args, want)
 		}
+	}
+}
+
+// chain_id and protocol_id come from the MARKET. Both feed the position_id hash, so a wrong constant
+// forks every identity in a table that grants no UPDATE, and no count-based assertion would notice.
+func TestMaterializeMorphoMarketTakesChainAndProtocolFromTheMarket(t *testing.T) {
+	ctx, pool, _ := materializeMorphoMarketFixture(t)
+	var mismatched int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM position_state s
+		WHERE s.projection = 'public.position_morpho_market'
+		  AND NOT EXISTS (
+		      SELECT 1 FROM morpho_market m
+		       WHERE m.chain_id = s.chain_id AND m.protocol_id = s.protocol_id
+		         AND s.instrument_key LIKE encode(m.market_id, 'hex') || ':%')`).Scan(&mismatched); err != nil {
+		t.Fatal(err)
+	}
+	var total int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM position_state WHERE projection = 'public.position_morpho_market'`).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if total == 0 {
+		t.Fatal("the projection stored nothing, so the assertion below would pass vacuously")
+	}
+	if mismatched != 0 {
+		t.Errorf("%d of %d rows carry a chain_id/protocol_id pair that is not their own market's", mismatched, total)
 	}
 }
