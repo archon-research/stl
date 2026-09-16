@@ -32,7 +32,8 @@ NODE_VERSION="$(cat .node-version)"
 
 # The Go images share a base; they are listed once here so the checks below and
 # the agreement check cannot fall out of step with each other.
-GO_DOCKERFILES="stl-verify/Dockerfile.common stl-verify/Dockerfile.migrate"
+GO_DOCKERFILES=(stl-verify/Dockerfile.common stl-verify/Dockerfile.migrate)
+PYTHON_DOCKERFILE=stl-verify/python/Dockerfile
 
 FAILED=0
 
@@ -109,22 +110,50 @@ check_pins_agree() {
   fi
 }
 
-for f in $GO_DOCKERFILES; do
+# check_go_directive <file> <expected>: go.mod states the toolchain version a
+# fourth time, and neither bot manages it -- the Renovate group covers
+# .go-version and the two Dockerfiles only.
+check_go_directive() {
+  local file="$1" expected="$2" found status=0
+  if [ ! -f "$file" ]; then
+    echo "  BAD  ${file}: not a readable file"
+    FAILED=1
+    return
+  fi
+  found="$(grep -oE "^go[[:space:]]+[0-9]+\.[0-9]+(\.[0-9]+)?" "$file")" || status=$?
+  if [ "$status" -ne 0 ] || [ -z "$found" ]; then
+    echo "  BAD  ${file}: no 'go' directive found"
+    FAILED=1
+    return
+  fi
+  found="${found#go}"
+  found="${found# }"
+  found="$(printf '%s' "$found" | tr -d '[:space:]')"
+  if [ "$found" = "$expected" ]; then
+    echo "  ok   ${file}: go ${found}"
+  else
+    echo "  BAD  ${file}: 'go ${found}' does not match .go-version (${expected})"
+    FAILED=1
+  fi
+}
+
+for f in "${GO_DOCKERFILES[@]}"; do
   check_tag "$f" golang "${GO_VERSION}-alpine"
 done
-check_tag stl-verify/python/Dockerfile python "${PYTHON_VERSION}-slim"
-check_tag stl-verify/python/Dockerfile node "${NODE_VERSION}-alpine"
+check_tag "$PYTHON_DOCKERFILE" python "${PYTHON_VERSION}-slim"
+check_tag "$PYTHON_DOCKERFILE" node "${NODE_VERSION}-alpine"
+check_go_directive stl-verify/go.mod "$GO_VERSION"
 
-# shellcheck disable=SC2086 # deliberate word-splitting: the list is a filename list
-check_pins_agree golang $GO_DOCKERFILES
-# shellcheck disable=SC2086 # deliberate word-splitting: the list is a filename list
-check_pins_agree alpine $GO_DOCKERFILES
+check_pins_agree golang "${GO_DOCKERFILES[@]}"
+check_pins_agree alpine "${GO_DOCKERFILES[@]}"
+check_pins_agree python "$PYTHON_DOCKERFILE"
+check_pins_agree node "$PYTHON_DOCKERFILE"
 
 if [ "$FAILED" -ne 0 ]; then
   cat >&2 <<MSG
 ::error::A Dockerfile's pinned base-image tag does not match .go-version
 ::error::(${GO_VERSION}), .python-version (${PYTHON_VERSION}) or .node-version
-::error::(${NODE_VERSION}), or two Dockerfiles pin the same base image differently.
+::error::(${NODE_VERSION}), or a base image is pinned more than one way.
 ::error::VEC-783 hardcoded the tag next to its digest deliberately, so bumping the
 ::error::version file does not by itself change what gets built -- update the FROM
 ::error::line's tag and digest together with the version file, in the same PR, and

@@ -39,6 +39,7 @@ tree() {
     > "$d/stl-verify/Dockerfile.migrate"
   printf 'FROM --platform=$BUILDPLATFORM %s AS ui-builder\nFROM %s AS py-base\n' "$NODE_PIN" "$PY_PIN" \
     > "$d/stl-verify/python/Dockerfile"
+  printf 'module github.com/archon-research/stl/stl-verify\n\ngo 1.26.6\n' > "$d/stl-verify/go.mod"
 }
 
 # check <name> <expected-exit> <expected-substring> <dir>
@@ -112,6 +113,23 @@ check "go disagreeing with .go-version is caught" 1 "does not match expected" "$
 D="${WORK}/missing"; tree "$D"
 rm "$D/stl-verify/Dockerfile.migrate"
 check "a guarded Dockerfile that is gone is caught" 1 "Dockerfile.migrate" "$D"
+
+# python/Dockerfile carries one pin because the py-base stage collapsed two.
+# Re-inlining a second FROM is the way that property gets lost, so it is the
+# arm that has to bite -- check_tag cannot see it, both tags being equal.
+D="${WORK}/py-second-pin"; tree "$D"
+printf 'FROM --platform=$BUILDPLATFORM %s AS ui-builder\nFROM %s AS py-base\nFROM python:3.12.14-slim@sha256:%s AS builder\n' \
+  "$NODE_PIN" "$PY_PIN" "1111111111111111111111111111111111111111111111111111111111111111" \
+  > "$D/stl-verify/python/Dockerfile"
+check "a reintroduced second python pin is caught" 1 "python is pinned 2 different ways" "$D"
+
+D="${WORK}/gomod-drift"; tree "$D"
+printf 'module github.com/archon-research/stl/stl-verify\n\ngo 1.27.1\n' > "$D/stl-verify/go.mod"
+check "go.mod disagreeing with .go-version is caught" 1 "does not match .go-version" "$D"
+
+D="${WORK}/gomod-missing"; tree "$D"
+rm "$D/stl-verify/go.mod"
+check "a missing go.mod is caught" 1 "go.mod" "$D"
 
 echo "${PASSED} passed, ${FAILED} failed"
 [ "$FAILED" -eq 0 ] || exit 1
