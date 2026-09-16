@@ -15,8 +15,16 @@ type UniswapV4PoolRow struct {
 	ProtocolID  int64
 	PoolManager common.Address
 	StateView   common.Address
-	// Raw on-chain PoolId — keccak256 of the abi-encoded PoolKey — that every
-	// PoolManager log is indexed by; ID is the surrogate key.
+	// Chain-level, not pool-level: carried per row because one read loads the
+	// whole registry.
+	PositionManagerID int64
+	PositionManager   common.Address
+	// PositionManagerDeployBlock is where the posm transfer backfill starts its
+	// scan: no posm token exists below it.
+	PositionManagerDeployBlock int64
+	// PoolIDHash is the raw on-chain PoolId — keccak256 of the abi-encoded
+	// PoolKey — which every PoolManager log is indexed by, not the surrogate key
+	// in ID.
 	PoolIDHash        common.Hash
 	Currency0         common.Address // address(0) is native ETH
 	Currency1         common.Address
@@ -37,6 +45,7 @@ type UniswapV4BlockWrites struct {
 	Ticks           []*entity.UniswapV4Tick
 	PoolEvents      []*entity.UniswapV4PoolEvent
 	Positions       []*entity.UniswapV4Position
+	NFTTransfers    []*entity.UniswapV4PositionNFTTransfer
 }
 
 // UniswapV4PositionWriter is the position bootstrap's one write: position rows
@@ -46,9 +55,34 @@ type UniswapV4PositionWriter interface {
 	SavePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) (insertedRows int64, err error)
 }
 
+// UniswapV4NFTTransferWriter is the posm transfer backfill's one write: transfer
+// rows alone, through the same insert SaveBlock's transfer phase takes.
+//
+// Idempotency is the live path's, which is the repo's convention for a replay
+// (morpho-v2-bootstrap states it in full): a re-run on the same build conflicts
+// away and writes nothing, while one from a different build re-records the range
+// as parallel provenance rows, since processing_version keys on build_id. Row
+// counts move, the holder answer does not — the newest processing_version wins the
+// ordering and carries identical content.
+type UniswapV4NFTTransferWriter interface {
+	// Returns how many rows it inserted.
+	SaveNFTTransfers(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) (insertedRows int64, err error)
+}
+
 type UniswapV4Repository interface {
-	// Current version of every registered pool on chainID, with the chain's
-	// PoolManager/StateView and token decimals; an unresolvable pool is an error.
+	// LoadPools returns the current version of every registered pool on chainID,
+	// with the chain's current PoolManager/StateView addresses and the currency
+	// decimals from token. Both registry tables are append-only version
+	// histories, so "current" means the highest processing_version per natural
+	// key — per (chain_id, pool_id) for pools, per chain_id for the PoolManager.
+	// A missing PoolManager, a missing PositionManager, a NULL decimals, or a
+	// currency that disagrees with its token row is an error rather than a skipped
+	// pool: without the chain's StateView there is nothing to snapshot, a zero
+	// PositionManager address would make the decoder claim address(0)'s logs, and
+	// the decimals are carried so downstream consumers can scale and sanity-check
+	// the raw amounts this indexer stores. A currency matches when token.address
+	// equals it, or when it is address(0) and the token row is the
+	// 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE native-ETH placeholder.
 	LoadPools(ctx context.Context, chainID int64) ([]UniswapV4PoolRow, error)
 	SaveBlock(ctx context.Context, tx pgx.Tx, w UniswapV4BlockWrites) (stateRows StateRowCounts, err error)
 	// On-chain PoolIds of the pools on chainID with a state row at blockNumber,

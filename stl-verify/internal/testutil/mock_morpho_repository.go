@@ -22,6 +22,7 @@ type MockMorphoRepository struct {
 	SaveVaultPositionFn   func(ctx context.Context, tx pgx.Tx, position *entity.MorphoVaultPosition) error
 
 	ObserveAdapterMembershipFn   func(ctx context.Context, tx pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error)
+	AdapterSetEnumeratedAtFn     func(ctx context.Context, tx pgx.Tx, morphoAdapterID int64, at entity.BlockPosition) (bool, error)
 	GetActiveAdapterAtFn         func(ctx context.Context, morphoVaultID int64, address []byte, at entity.BlockPosition) (*entity.MorphoAdapterMember, error)
 	GetActiveAdaptersByVaultAtFn func(ctx context.Context, morphoVaultID int64, at entity.BlockPosition) ([]*entity.MorphoAdapterMember, error)
 	SaveAdapterStateFn           func(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) (bool, error)
@@ -97,6 +98,13 @@ func (m *MockMorphoRepository) ObserveAdapterMembership(ctx context.Context, tx 
 		return m.ObserveAdapterMembershipFn(ctx, tx, obs)
 	}
 	return 1, true, nil
+}
+
+func (m *MockMorphoRepository) AdapterSetEnumeratedAt(ctx context.Context, tx pgx.Tx, morphoAdapterID int64, at entity.BlockPosition) (bool, error) {
+	if m.AdapterSetEnumeratedAtFn != nil {
+		return m.AdapterSetEnumeratedAtFn(ctx, tx, morphoAdapterID, at)
+	}
+	return false, nil
 }
 
 func (m *MockMorphoRepository) GetActiveAdapterAt(ctx context.Context, morphoVaultID int64, address []byte, at entity.BlockPosition) (*entity.MorphoAdapterMember, error) {

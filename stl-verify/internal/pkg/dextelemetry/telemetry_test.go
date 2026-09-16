@@ -295,6 +295,50 @@ func TestTelemetry_NilSafe(t *testing.T) {
 	tel.RecordTickRows(ctx, 0)
 	tel.RecordPositionRows(ctx, 5)
 	tel.RecordPositionRows(ctx, 0)
+	tel.RecordNFTTransferRows(ctx, 5, 5)
+	tel.RecordNFTTransferRows(ctx, 0, 0)
+}
+
+// VectorUniswapV4IndexerNoNFTTransfers keys on the attempted series alone: a
+// wrong posm address or a topic regression empties it and raises no error, while
+// a same-build replay empties only written.
+func TestRecordNFTTransferRows_IncrementsBothCounters(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := NewTelemetry("uniswap_v4", 1)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	ctx := context.Background()
+	tel.RecordNFTTransferRows(ctx, 3, 3)
+	tel.RecordNFTTransferRows(ctx, 5, 0) // a replay: queued, all conflicted away
+	tel.RecordNFTTransferRows(ctx, 0, 0) // no-op
+	tel.RecordNFTTransferRows(ctx, -1, -1)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	const attempted = "uniswap_v4.nft.transfer.rows.attempted"
+	if got := readSingleSumCount(t, &rm, attempted); got != 8 {
+		t.Errorf("%s = %d, want 8 (3+5; 0 and -1 are no-ops)", attempted, got)
+	}
+	const written = "uniswap_v4.nft.transfer.rows.written"
+	if got := readSingleSumCount(t, &rm, written); got != 3 {
+		t.Errorf("%s = %d, want 3 (the replay landed nothing)", written, got)
+	}
+	if want := "mainnet"; readChainAttr(t, &rm, attempted) != want {
+		t.Errorf("%s chain attr = %q, want %q", attempted, readChainAttr(t, &rm, attempted), want)
+	}
 }
 
 func TestRecordAppendOnChangeRows_IncrementsItsOwnCounter(t *testing.T) {
@@ -583,7 +627,9 @@ func readSingleSumCount(t *testing.T, rm *metricdata.ResourceMetrics, name strin
 	return 0
 }
 
-func newTestTelemetry(t *testing.T, prefix string, chainID int64) (*Telemetry, *metricsdk.ManualReader) {
+// installTestMeterProvider makes the global provider one this test can read, for
+// the constructors that bind their instruments to it as they are built.
+func installTestMeterProvider(t *testing.T) *metricsdk.ManualReader {
 	t.Helper()
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
@@ -593,6 +639,12 @@ func newTestTelemetry(t *testing.T, prefix string, chainID int64) (*Telemetry, *
 		otel.SetMeterProvider(prev)
 		_ = mp.Shutdown(context.Background())
 	})
+	return reader
+}
+
+func newTestTelemetry(t *testing.T, prefix string, chainID int64) (*Telemetry, *metricsdk.ManualReader) {
+	t.Helper()
+	reader := installTestMeterProvider(t)
 
 	tel, err := NewTelemetry(prefix, chainID)
 	if err != nil {
@@ -625,6 +677,26 @@ func TestNewTelemetry_SeedsAlertedSeriesAtZero(t *testing.T) {
 			t.Errorf("curve.blocks.processed{status=%q} = %d, want 0", status, v)
 		}
 	}
+}
+
+// NoNFTTransfers reads nft.transfer.rows.attempted as ==0, which an absent
+// series cannot match. The seed is what makes absence mean "this build predates
+// the posm decoder" — the window between the rules syncing on merge and the
+// image reaching the cluster — rather than "decoding is broken".
+func TestNewTelemetry_SeedsTheNFTTransferAttemptedSeries(t *testing.T) {
+	_, reader := newTestTelemetry(t, "uniswap_v4", 1)
+
+	dps := testutil.CollectSumDataPoints(t, reader, "uniswap_v4.nft.transfer.rows.attempted")
+	if len(dps) != 1 {
+		t.Fatalf("uniswap_v4.nft.transfer.rows.attempted has %d series before any block, want 1 (the seed)", len(dps))
+	}
+	if dps[0].Value != 0 {
+		t.Errorf("seeded value = %d, want 0", dps[0].Value)
+	}
+	if chain := testutil.AttrValue(dps[0], "chain"); chain != "mainnet" {
+		t.Errorf("seeded chain attr = %q, want %q", chain, "mainnet")
+	}
+
 }
 
 func TestRecordPoolsNeverIndexed_RecordsZeroAsAValue(t *testing.T) {

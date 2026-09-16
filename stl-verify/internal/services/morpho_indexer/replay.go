@@ -159,7 +159,7 @@ func (s *Service) deregisterAdaptersAbsentOnChain(ctx context.Context, tx pgx.Tx
 		if _, stillThere := enumerated[address]; stillThere {
 			continue
 		}
-		_, appended, err := s.observeAdapterMembership(ctx, tx, vault, address, entity.MorphoAdapterMembership{
+		_, observation, err := s.observeAdapterMembership(ctx, tx, vault, address, entity.MorphoAdapterMembership{
 			BlockNumber:  blockNumber,
 			BlockVersion: blockVersion,
 			LogIndex:     entity.EndOfBlockLogIndex,
@@ -171,7 +171,7 @@ func (s *Service) deregisterAdaptersAbsentOnChain(ctx context.Context, tx pgx.Tx
 		if err != nil {
 			return err
 		}
-		if appended {
+		if observation != nil {
 			s.logger.Warn("adapter de-registered by the head enumeration; its RemoveAdapter was never observed",
 				"vault", vaultAddress.Hex(), "adapter", address.Hex(), "block", blockNumber)
 		}

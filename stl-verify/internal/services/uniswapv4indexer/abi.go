@@ -136,3 +136,11 @@ const poolManagerEventsJSON = `[
 		"type": "event"
 	}
 ]`
+
+// PositionManagerTransferEvent is the posm's ERC-721 Transfer fragment. Kept
+// apart from PoolManagerABI: the PoolManager's inherited ERC-6909 Transfer is a
+// different event, and one shared topic0 map would decode either against the
+// other.
+func PositionManagerTransferEvent() (*abi.Event, error) {
+	return abis.ERC721TransferEvent()
+}

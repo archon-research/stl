@@ -66,7 +66,7 @@ Daily closes per modeled collateral, 180+ contiguous days (validated up front). 
 
 ### 3 — Order book / liquidity data
 
-Sell-side depth per book. Live: `core_model_orderbook_reader.py` merges the freshest snapshot per venue from `cex_orderbook_snapshots` (Coinbase, OKX, Kraken; books: BTC, ETH, XRP, HYPE — ETH LSTs proxy the ETH book, BTC wrappers the BTC book). Note the live books hold the top 100 levels per venue side — Known Issue #12. The parquet books are BA's originals, aggregated across 11 venues (Binance, Bybit, OKX, Kraken, Coinbase, Gate.io, KuCoin, Huobi, Bitget, Bitfinex, Crypto.com) with DEX routing for some tokens (cbBTC via a Uniswap V3 pool, HYPE via HyperLiquid) — deeper than the live books, which is why live and parquet CRRs are not directly comparable.
+Sell-side depth per book. Live: `core_model_orderbook_reader.py` merges the freshest snapshot per venue from `cex_orderbook_snapshots` (Coinbase, OKX, Kraken; books: BTC, ETH, XRP, HYPE, SOL, JITOSOL — ETH LSTs proxy the ETH book, BTC wrappers the BTC book). Note the live books hold the top 100 levels per venue side — Known Issue #12. The parquet books are BA's originals, aggregated across 11 venues (Binance, Bybit, OKX, Kraken, Coinbase, Gate.io, KuCoin, Huobi, Bitget, Bitfinex, Crypto.com) with DEX routing for some tokens (cbBTC via a Uniswap V3 pool, HYPE via HyperLiquid) — deeper than the live books, which is why live and parquet CRRs are not directly comparable.
 
 Liquidity is consumed **cumulatively** across liquidation events within a scenario: each successive liquidation starts from the point in the book where the previous one left off, rather than assuming a fully replenished book.
 

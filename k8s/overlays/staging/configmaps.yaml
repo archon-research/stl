@@ -439,7 +439,8 @@ data:
   AWS_REGION: "eu-west-1"
   DEPLOY_ENV: "staging"
 ---
-# On-demand Uniswap V4 position bootstrap worker (VEC-639). No schedule: it
+# On-demand Uniswap V4 backfill worker (VEC-639, VEC-790): hosts both
+# UniswapV4PositionBootstrap and UniswapV4PosmTransferBackfill. No schedule: it
 # idles on its task queue until a run is started by hand. ALCHEMY_HTTP_URL is
 # the uniswap-v4-indexer's own; a run reads the same chain the indexer does.
 apiVersion: v1
@@ -582,8 +583,9 @@ metadata:
 data:
   EXCHANGE: "coinbase"
   SYMBOLS: "BTC-USD,ETH-USD,XRP-USD,SOL-USD,HYPE-USD,JITOSOL-USD"
-  ORDERBOOK_DEPTH: "100"
-  ORDERBOOK_INTERVAL: "5s"
+  # level2 delivers the full ladder (~21k levels on BTC); this value means "no trim".
+  ORDERBOOK_DEPTH: "1000000"
+  ORDERBOOK_INTERVAL: "60s"
   ENVIRONMENT: "sentinelstaging"
 ---
 # OKX uses dash-separated instrument ids. All six are quoted in USDT: JITOSOL has
@@ -598,8 +600,9 @@ metadata:
 data:
   EXCHANGE: "okx"
   SYMBOLS: "BTC-USDT,ETH-USDT,XRP-USDT,SOL-USDT,HYPE-USDT,JITOSOL-USDT"
-  ORDERBOOK_DEPTH: "100"
-  ORDERBOOK_INTERVAL: "5s"
+  # The books channel's ceiling: OKX serves at most 400 levels per side.
+  ORDERBOOK_DEPTH: "400"
+  ORDERBOOK_INTERVAL: "60s"
   ENVIRONMENT: "sentinelstaging"
 ---
 # Kraken uses slash-separated pairs with its own asset names (XBT, not BTC), so
@@ -615,8 +618,9 @@ metadata:
 data:
   EXCHANGE: "kraken"
   SYMBOLS: "XBT/USD,ETH/USD,XRP/USD,SOL/USD,HYPE/USD,JITOSOL/USD,WBTC/USD"
-  ORDERBOOK_DEPTH: "100"
-  ORDERBOOK_INTERVAL: "5s"
+  # The book channel's ceiling: depth 500 is Kraken's largest subscription.
+  ORDERBOOK_DEPTH: "500"
+  ORDERBOOK_INTERVAL: "60s"
   ENVIRONMENT: "sentinelstaging"
 ---
 apiVersion: v1
@@ -794,9 +798,15 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelstaging"
   ENABLE_BACKFILL: "true"
+  # Robinhood produces ~10 blocks/s, the fastest chain we watch. On the 10/30s
+  # defaults a pass drained ~7 blk/s measured on staging — under live, so the
+  # gap grew and one gap-fill pass ran for the whole pod lifetime. 100 blocks
+  # every 5s = ~20 blk/s, matching the avalanche and arbitrum tuning above.
+  BACKFILL_BATCH_SIZE: "100"
+  BACKFILL_POLL_INTERVAL: "5s"
   # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
   # 2500 newHeads slots hold ~4 min at ~10 blocks/s, so a hung request drops
-  # nothing. Backfill keeps the client default (30s) for its batches.
+  # nothing. Backfill keeps the client default (30s) for its 100-block batches.
   LIVE_RPC_TIMEOUT: "10s"
   SUBSCRIBER_BUFFER_SIZE: "2500"
 ---
@@ -916,17 +926,18 @@ data:
   # verification, the per-router role gates and the OpenFGA checks together.
   AUTH_ENABLED: "false"
   # Two names for one Keycloak. OIDC_ISSUER must equal the `iss` CLAIM
-  # (KC_HOSTNAME), which jwt.py compares exactly and Swagger sends a BROWSER to;
-  # OIDC_JWKS_URL is where this POD fetches keys, and MagicDNS does not resolve
-  # `keycloak-staging` inside a pod.
-  OIDC_ISSUER: "http://keycloak-staging/realms/archon"
+  # (KC_HOSTNAME, https and the full tailnet name since ORB-440), which jwt.py
+  # compares exactly and Swagger sends a BROWSER to; OIDC_JWKS_URL is where this
+  # POD fetches keys, and MagicDNS does not resolve tailnet names inside a pod.
+  OIDC_ISSUER: "https://keycloak-staging.tail25f1d9.ts.net/realms/archon"
   OIDC_JWKS_URL: "http://keycloak.auth.svc/realms/archon/protocol/openid-connect/certs"
   OIDC_AUDIENCE: "python-api"
   OPENFGA_URL: "http://openfga.auth.svc:8080"
   OPENFGA_STORE_NAME: "auth"
-  # Must track OpenFGA's own OPENFGA_LIST_OBJECTS_MAX_RESULTS (server default
-  # 1000, set in the infrastructure repo). A ceiling ABOVE the server's max
-  # makes a truncated allow-list read as complete and silently under-return.
+  # Must track OpenFGA's own OPENFGA_LIST_OBJECTS_MAX_RESULTS, pinned to 1000
+  # in the infrastructure repo's OpenFGA deployment (ORB-400). A ceiling ABOVE
+  # the server's max makes a truncated allow-list read as complete and
+  # silently under-return.
   OPENFGA_LIST_CEILING: "1000"
   # DB pool for the API, declared here rather than left baked into the image so it
   # can be tuned by editing config and restarting — this ConfigMap is consumed via
@@ -948,6 +959,12 @@ data:
   # cache must stay 0 behind a transaction-mode pooler (see app/config.py).
   DB_POOL_RECYCLE_SECONDS: "300"
   DB_STATEMENT_CACHE_SIZE: "0"
+  # Startup retries an unreachable database for this long before the pod fails.
+  # Declared here so it sits beside the startupProbe budget it is bound by:
+  # k8s/base/python-api/deployment.yaml allows 150s, and the worst case here is
+  # this value plus one 10s connect timeout. Raising it past 140 needs the probe
+  # raised first, or the kubelet kills the container before it logs why.
+  DB_CONNECT_RETRY_DEADLINE_SECONDS: "120"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -1018,3 +1035,18 @@ data:
   # full-pass measurement at this value (1.6 GiB peak on live staging data,
   # k8s/base/core-model-runner/deployment.yaml); raise both together.
   CORE_MODEL_N_MC: "10000"
+---
+# block-meta-loader (VEC-491): on-demand Temporal worker filling block_meta for
+# Ethereum from that chain's raw-block archive. Started by hand from the Temporal
+# UI; no schedule. S3_BUCKET and DATABASE_URL come from the ExternalSecret, since
+# both are per-environment infra config.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: block-meta-loader
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  DEPLOY_ENV: "staging"

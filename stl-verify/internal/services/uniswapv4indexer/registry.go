@@ -16,19 +16,22 @@ func RegisteredPoolsFromRows(rows []outbound.UniswapV4PoolRow) []RegisteredPool 
 	pools := make([]RegisteredPool, 0, len(rows))
 	for _, row := range rows {
 		pools = append(pools, RegisteredPool{
-			ID:                row.ID,
-			PoolManager:       row.PoolManager,
-			StateView:         row.StateView,
-			PoolIDHash:        row.PoolIDHash,
-			Currency0:         row.Currency0,
-			Currency1:         row.Currency1,
-			Currency0Decimals: row.Currency0Decimals,
-			Currency1Decimals: row.Currency1Decimals,
-			Fee:               row.Fee,
-			TickSpacing:       row.TickSpacing,
-			Hooks:             row.Hooks,
-			DeployBlock:       row.DeployBlock,
-			SnapshotSupported: row.SnapshotSupported,
+			ID:                         row.ID,
+			PoolManager:                row.PoolManager,
+			StateView:                  row.StateView,
+			PositionManagerID:          row.PositionManagerID,
+			PositionManager:            row.PositionManager,
+			PositionManagerDeployBlock: row.PositionManagerDeployBlock,
+			PoolIDHash:                 row.PoolIDHash,
+			Currency0:                  row.Currency0,
+			Currency1:                  row.Currency1,
+			Currency0Decimals:          row.Currency0Decimals,
+			Currency1Decimals:          row.Currency1Decimals,
+			Fee:                        row.Fee,
+			TickSpacing:                row.TickSpacing,
+			Hooks:                      row.Hooks,
+			DeployBlock:                row.DeployBlock,
+			SnapshotSupported:          row.SnapshotSupported,
 		})
 	}
 	return pools

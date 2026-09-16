@@ -144,10 +144,10 @@ async def test_list_supported_asset_ids_filters_supported_protocols(
             ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Aave V3", chain_id=1),
             ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="morpho-blue", chain_id=1),
             ReceiptTokenProtocolPair(receipt_token_id=3, protocol_name="Unsupported", chain_id=1),
-            ReceiptTokenProtocolPair(receipt_token_id=4, protocol_name="Aave V3 Avalanche", chain_id=43114),
-            ReceiptTokenProtocolPair(receipt_token_id=5, protocol_name="Aave V3 Arbitrum", chain_id=42161),
-            ReceiptTokenProtocolPair(receipt_token_id=6, protocol_name="Aave V3 Optimism", chain_id=10),
-            ReceiptTokenProtocolPair(receipt_token_id=7, protocol_name="Aave V3 Base", chain_id=8453),
+            ReceiptTokenProtocolPair(receipt_token_id=4, protocol_name="Aave V3", chain_id=43114),
+            ReceiptTokenProtocolPair(receipt_token_id=5, protocol_name="Aave V3", chain_id=42161),
+            ReceiptTokenProtocolPair(receipt_token_id=6, protocol_name="Aave V3", chain_id=10),
+            ReceiptTokenProtocolPair(receipt_token_id=7, protocol_name="Aave V3", chain_id=8453),
         ]
     )
 
@@ -202,13 +202,11 @@ async def test_get_receipt_token_delegates_to_repo(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("protocol_name", ["Aave V3", "Aave V3 Avalanche"])
 async def test_get_breakdown_uses_aave_like_repository(
     reader: PostgresCryptoLendingReader,
     aave_breakdown_repo: MagicMock,
-    protocol_name: str,
 ) -> None:
-    info = _aave_like_info(protocol_name)
+    info = _aave_like_info()
 
     result = await reader.get_breakdown(info)
 
@@ -249,13 +247,11 @@ async def test_get_breakdown_raises_on_unknown_protocol(reader: PostgresCryptoLe
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("protocol_name", ["Aave V3", "Aave V3 Avalanche"])
 async def test_get_liquidation_params_uses_aave_like_repository(
     reader: PostgresCryptoLendingReader,
     aave_liq_repo: MagicMock,
-    protocol_name: str,
 ) -> None:
-    info = _aave_like_info(protocol_name)
+    info = _aave_like_info()
 
     result = await reader.get_liquidation_params(info, backed_asset_id=42, token_ids=[1, 2])
 
@@ -590,9 +586,8 @@ def test_requires_liquidation_enrichment_false_for_maple(reader: PostgresCryptoL
     assert reader.requires_liquidation_enrichment(_maple_info()) is False
 
 
-@pytest.mark.parametrize("protocol_name", ["Aave V3", "Aave V3 Avalanche"])
-def test_requires_liquidation_enrichment_true_for_aave(reader: PostgresCryptoLendingReader, protocol_name: str) -> None:
-    assert reader.requires_liquidation_enrichment(_aave_like_info(protocol_name)) is True
+def test_requires_liquidation_enrichment_true_for_aave(reader: PostgresCryptoLendingReader) -> None:
+    assert reader.requires_liquidation_enrichment(_aave_like_info()) is True
 
 
 @pytest.mark.asyncio

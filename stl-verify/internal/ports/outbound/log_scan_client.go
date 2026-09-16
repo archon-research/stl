@@ -24,15 +24,18 @@ type LogFilter struct {
 
 // FilteredLog reaches a consumer unvalidated, exactly as the wire had it.
 type FilteredLog struct {
-	Address          string   `json:"address"`
-	Topics           []string `json:"topics"`
-	Data             string   `json:"data"`
-	BlockHash        string   `json:"blockHash"`
-	BlockNumber      string   `json:"blockNumber"`
-	TransactionHash  string   `json:"transactionHash"`
-	TransactionIndex string   `json:"transactionIndex"`
-	LogIndex         string   `json:"logIndex"`
-	Removed          bool     `json:"removed"`
+	Address     string   `json:"address"`
+	Topics      []string `json:"topics"`
+	Data        string   `json:"data"`
+	BlockHash   string   `json:"blockHash"`
+	BlockNumber string   `json:"blockNumber"`
+	// Outside the JSON-RPC spec: Alchemy returns it per log, which lets a log
+	// scan stamp a row's block_timestamp without a header read per block.
+	BlockTimestamp   string `json:"blockTimestamp"`
+	TransactionHash  string `json:"transactionHash"`
+	TransactionIndex string `json:"transactionIndex"`
+	LogIndex         string `json:"logIndex"`
+	Removed          bool   `json:"removed"`
 }
 
 type LogScanClient interface {

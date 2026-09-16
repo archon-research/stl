@@ -13,6 +13,7 @@ include lint.mk
 		docker-build-reference-capital-backfill docker-release-reference-capital-backfill _docker-release-reference-capital-backfill-internal \
 		docker-build-morpho-vault-backfill docker-release-morpho-vault-backfill _docker-release-morpho-vault-backfill-internal \
 		docker-build-block-republisher docker-release-block-republisher _docker-release-block-republisher-internal \
+		docker-build-block-meta-loader docker-release-block-meta-loader _docker-release-block-meta-loader-internal \
 		docker-build-uniswap-v4-position-bootstrap docker-release-uniswap-v4-position-bootstrap _docker-release-uniswap-v4-position-bootstrap-internal \
 		build-backfiller-% run-backfiller-% \
         docker-build-watcher docker-push-watcher docker-release-watcher \
@@ -392,6 +393,19 @@ e2e-real-blocks:
 	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
 	[ -n "$$ALCHEMY_API_KEY" ] || { echo "ERROR: ALCHEMY_API_KEY is empty; put it in ../.env.secrets"; exit 1; }; \
 	E2E_BLOCKS="$(BLOCKS)" go test -tags=integration,e2e -run TestE2E_RealBlocks -v -timeout=25m ./cmd/workers/morpho-indexer/
+
+# Drive the uniswap-v4 posm transfer backfill over a real mainnet slice, stamping
+# each row's block_version from a real raw archive. Needs ALCHEMY_API_KEY in
+# ../.env.secrets, plus AWS_PROFILE, E2E_DEPLOY_ENV and E2E_S3_BUCKET naming an
+# archive that profile may read. SCAN_BLOCKS=n widens the slice from the default
+# 30k blocks above the PositionManager deploy block.
+e2e-v4-posm-transfer:
+	@set -a; if [ -f ../.env.secrets ]; then . ../.env.secrets; fi; set +a; \
+	[ -n "$$ALCHEMY_API_KEY" ] || { echo "ERROR: ALCHEMY_API_KEY is empty; put it in ../.env.secrets"; exit 1; }; \
+	[ -n "$$AWS_PROFILE" ] || { echo "ERROR: AWS_PROFILE is empty; it must name a profile that can read E2E_S3_BUCKET"; exit 1; }; \
+	[ -n "$$E2E_DEPLOY_ENV" ] || { echo "ERROR: E2E_DEPLOY_ENV is empty; it must name the deploy env whose raw archive is read"; exit 1; }; \
+	[ -n "$$E2E_S3_BUCKET" ] || { echo "ERROR: E2E_S3_BUCKET is empty; it must name a raw archive bucket AWS_PROFILE may read"; exit 1; }; \
+	E2E_SCAN_BLOCKS="$(SCAN_BLOCKS)" go test -tags=integration,e2e -run TestE2E_PosmTransferBackfillOverRealBlocks -v -timeout=15m ./cmd/backfillers/uniswap-v4-position-bootstrap/
 
 # Spot-check the registered L2 Aave V3 reserve facts against the real per-chain RPC.
 # Needs ALCHEMY_API_KEY in ../.env.secrets.
@@ -1442,6 +1456,7 @@ docker-release-all:
 	@$(MAKE) _docker-release-reference-capital-backfill-internal ENV=$(ENV)
 	@$(MAKE) _docker-release-morpho-vault-backfill-internal ENV=$(ENV)
 	@$(MAKE) _docker-release-block-republisher-internal ENV=$(ENV)
+	@$(MAKE) _docker-release-block-meta-loader-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-uniswap-v4-position-bootstrap-internal ENV=$(ENV)
 	@echo ""
@@ -2450,6 +2465,15 @@ docker-release-morpho-vault-backfill: ecr-login _docker-release-morpho-vault-bac
 
 _docker-release-morpho-vault-backfill-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Morpho Vault Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/morpho-vault-backfill GO_BIN=morpho-vault-backfill GO_CACHE_KEY="cronjob-morpho-vault-backfill" GO_TAG="morpho-vault-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="morpho-vault-backfill-latest"
+# block-meta-loader: a per-chain on-demand Temporal worker that fills the block_meta dimension from a
+# chain's S3 raw-block archive. Ships in the shared cronjob ECR repo with a name-prefixed tag.
+docker-build-block-meta-loader:
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/cronjobs/block-meta-loader --build-arg BIN=block-meta-loader -t stl-block-meta-loader:$(LOCAL_TAG) -f Dockerfile.common .
+
+docker-release-block-meta-loader: ecr-login _docker-release-block-meta-loader-internal
+
+_docker-release-block-meta-loader-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Block Meta Loader" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/cronjobs/block-meta-loader GO_BIN=block-meta-loader GO_CACHE_KEY="cronjob-block-meta-loader" GO_TAG="block-meta-loader-$(IMAGE_TAG)" GO_LATEST_TAG="block-meta-loader-latest"
 
 # block-republisher (ARCT-383): the on-demand repair that re-publishes a block
 # under a new version. Same lifecycle as the two backfillers above — a
