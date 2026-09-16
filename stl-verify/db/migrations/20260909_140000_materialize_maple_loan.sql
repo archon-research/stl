@@ -111,9 +111,8 @@ COMMENT ON VIEW position_maple_loan IS '[Operational] VEC-405 projection: Maple 
 -- omits a trailing argument ambiguous, as it did for the spine.
 DROP FUNCTION IF EXISTS materialize_maple_loan(integer, interval);
 DROP FUNCTION IF EXISTS materialize_maple_loan(integer, interval, bigint);
+DROP FUNCTION IF EXISTS materialize_maple_loan(integer, interval, bigint, interval);
 
--- The three the spine shares come first, in the order its six siblings declare them; p_max_skew is
--- this projection's own and sits last, so the two intervals cannot be confused positionally.
 CREATE OR REPLACE FUNCTION materialize_maple_loan(p_build_id integer DEFAULT 0,
                                                   p_run_id bigint DEFAULT NULL,
                                                   p_window interval DEFAULT NULL,
@@ -131,9 +130,8 @@ BEGIN
      WHERE c.oid = 'public.position_maple_loan'::regclass;
 
     -- Block header times rise with height by consensus, so a pair that inverts is a mis-parsed
-    -- block_meta row. Unrefused it silently wins the placement, or wedges the spine's gate later.
-    -- Adjacent pairs only: an out-of-order sequence always inverts somewhere adjacent, so this finds
-    -- the same rows as every-pair in one ordered pass instead of one per pair.
+    -- block_meta row that would silently win the placement. Adjacent pairs find the same rows as
+    -- every-pair, because an out-of-order sequence always inverts somewhere adjacent.
     SELECT string_agg(msg, '; ' ORDER BY msg) INTO v_bad FROM (
         SELECT format('chain %s: block %s at %s precedes block %s at %s', p.chain_id,
                       p.block_number, p.block_timestamp, p.prev_number, p.prev_timestamp) AS msg
@@ -221,7 +219,7 @@ BEGIN
 END
 $fn$;
 
-COMMENT ON FUNCTION materialize_maple_loan(integer, bigint, interval, interval) IS '[Operational] VEC-405: materialize Maple loan state into position_state via materialize_position_projection(position_maple_loan). Takes that function''s own advisory lock first, derived from the view''s canonical name rather than transcribed, then refuses on either of two block_meta conditions, naming every offending chain: header times that invert against height, which are mis-parsed rows that would place a cycle at the wrong block; cycles that no block precedes, whose history would start late; cycles further than p_max_skew from the block they resolve to, which would be back-dated by the whole gap; source states other than Active, which the projection would otherwise carry through as open borrowings; and a borrower address that is not 20 bytes, which would otherwise surface only as a chunk CHECK violation. Widen p_max_skew only deliberately -- it is the only bound on placement error. Idempotent for a FIXED block_meta: a later-arriving block closer to a cycle re-places it and appends a second observation for that cycle, so block_meta must be complete for a chain''s range before this is run over it. Returns rows appended. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2); p_max_skew is declared last, after the three the spine shares, so the two intervals cannot be swapped positionally. p_window is forwarded to the materializer, which bounds the batch it reads; against this view it filters rows without pruning chunks, and it is distinct from p_max_skew, which bounds how far a cycle may sit from the block it is placed at.';
+COMMENT ON FUNCTION materialize_maple_loan(integer, bigint, interval, interval) IS '[Operational] VEC-405: materialize Maple loan state into position_state via materialize_position_projection(position_maple_loan). Takes that function''s own advisory lock first, derived from the view''s canonical name rather than transcribed, then refuses on six conditions, the first three naming every offending chain: header times that invert against height, which are mis-parsed rows that would place a cycle at the wrong block; cycles that no block precedes, whose history would start late; cycles further than p_max_skew from the block they resolve to, which would be back-dated by the whole gap; source states other than Active, which the projection would otherwise carry through as open borrowings; and a borrower or loan address that is not 20 bytes, which would otherwise surface only as a chunk CHECK violation. Widen p_max_skew only deliberately -- it is the only bound on placement error. Idempotent for a FIXED block_meta: a later-arriving block closer to a cycle re-places it and appends a second observation for that cycle, so block_meta must be complete for a chain''s range before this is run over it. Returns rows appended. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2); p_max_skew is declared last, after the three the spine shares, so the two intervals cannot be swapped positionally. p_window is forwarded to the materializer, which bounds the batch it reads; against this view it filters rows without pruning chunks, and it is distinct from p_max_skew, which bounds how far a cycle may sit from the block it is placed at.';
 
 -- No GRANT: ALTER DEFAULT PRIVILEGES (20260122_140100) already grants SELECT on new public views to
 -- both app roles, so an explicit one would be a no-op that reads as the enforcement. The view is not
