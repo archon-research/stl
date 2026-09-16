@@ -547,10 +547,11 @@ func TestWorkListReEnumeratesAfterAnInterruptedEnumeration(t *testing.T) {
 		t.Fatalf("build the repository: %v", err)
 	}
 
-	// The state a killed enumeration leaves: some rows, no marker.
+	// The state a killed enumeration leaves: some rows, no marker, owned by the run that died.
+	killed := backdatedRun(t, ctx, pool, buildID, "1 hour")
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO block_meta_worklist (chain_id, run_id, block_number, block_version)
-		VALUES (1, $1, 7000001, 0) ON CONFLICT DO NOTHING`, int64(runID)); err != nil {
+		VALUES (1, $1, 7000001, 0) ON CONFLICT DO NOTHING`, killed); err != nil {
 		t.Fatalf("leave a partial work list: %v", err)
 	}
 	var partial int
@@ -657,44 +658,63 @@ func TestWindowPredicatesCoverTieredChunkRanges(t *testing.T) {
 }
 
 // Two runs may cover one chain at once: an operator's on-demand pass and the scheduled top-up. Each
-// enumerates its own slice and deletes only that, so an overlap costs duplicated archive reads. Before
-// the slices were keyed by run, the second open cleared the chain outright -- the first run's cursor
-// then read an empty list, stopped early, and reported success having loaded a fraction of the chain.
+// enumerates its own slice and deletes only that, so an overlap costs duplicated archive reads.
+//
+// The second run's pending set is deliberately made SMALLER than the first's: the blocks the first has
+// not reached are loaded before the second opens, so the second legitimately enumerates none of them.
+// Sharing one slice, the second run's open would take those blocks off the first run's list -- and the
+// first run's cursor would read the end of the list and report success having skipped them.
 func TestAnOverlappingRunDoesNotTruncateTheOtherRunsWorkList(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	seedWorkListSources(t, ctx, pool)
 
-	first, err := openRunList(t, ctx, pool, 1)
-	if err != nil {
-		t.Fatalf("open the first run's list: %v", err)
-	}
+	first, firstRun := openRunList(t, ctx, pool, 1)
 	defer first.Close(ctx)
-	head, err := first.Next(ctx, 2)
+	want := sliceBlocks(t, ctx, pool, 1, firstRun)
+	const page = 2
+	if len(want) <= page {
+		t.Fatalf("the first run enumerated %d blocks, too few to page and still have a tail", len(want))
+	}
+	head, err := first.Next(ctx, page)
 	if err != nil {
 		t.Fatalf("page the first run: %v", err)
 	}
-	if len(head) != 2 {
-		t.Fatalf("the first run read %d blocks, want 2; the seed is not exercising this", len(head))
+	if len(head) != page {
+		t.Fatalf("the first run read %d blocks, want %d", len(head), page)
 	}
 
-	// The second run, mid-flight of the first.
-	second, err := openRunList(t, ctx, pool, 1)
-	if err != nil {
-		t.Fatalf("open the second run's list: %v", err)
+	// Everything the first run has not reached is loaded by the time the second run enumerates, so the
+	// second legitimately enumerates none of it.
+	for _, b := range want[page:] {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
+			VALUES (1, $1, 0, TIMESTAMPTZ '2026-01-01') ON CONFLICT DO NOTHING`, b); err != nil {
+			t.Fatalf("load block %d: %v", b, err)
+		}
 	}
+	second, _ := openRunList(t, ctx, pool, 1)
 	defer second.Close(ctx)
+	// Only the blocks the first run already read are still pending, so that is the second run's whole
+	// slice: it is strictly smaller than the first's, which is what makes a shared list visible.
+	if left := blockNumbers(drain(t, ctx, second)); !slices.Equal(left, want[:page]) {
+		t.Fatalf("the second run enumerated %v, want %v", left, want[:page])
+	}
 
-	rest := drain(t, ctx, first)
-	if len(rest) == 0 {
-		t.Fatal("the first run's list is empty after the second run opened: the second run cleared the " +
-			"blocks the first had not reached, and that run reports success having skipped them")
+	got := append(blockNumbers(head), blockNumbers(drain(t, ctx, first))...)
+	if !slices.Equal(got, want) {
+		t.Errorf("the first run read %v, want %v: the second run's open took blocks off a list it does not own",
+			got, want)
 	}
-	// Both runs see the same pending set over the same sources; the first must not lose its tail.
-	if got, want := len(head)+len(rest), len(drain(t, ctx, second)); got != want {
-		t.Errorf("the first run enumerated %d blocks and the second %d over identical sources", got, want)
+}
+
+func blockNumbers(refs []outbound.BlockRef) []int64 {
+	out := make([]int64, 0, len(refs))
+	for _, r := range refs {
+		out = append(out, r.Number)
 	}
+	return out
 }
 
 // A run killed before it closes leaves its slice behind; nothing else may delete another run's rows,
@@ -707,8 +727,8 @@ func TestAbandonedSlicesAreSweptOnceTheirRunIsOldEnough(t *testing.T) {
 	seedWorkListSources(t, ctx, pool)
 
 	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
-	stale := backdatedRun(t, ctx, pool, buildID, "2 days")
-	fresh := backdatedRun(t, ctx, pool, buildID, "1 hour")
+	stale := backdatedRun(t, ctx, pool, buildID, "49 hours")
+	fresh := backdatedRun(t, ctx, pool, buildID, "47 hours")
 	for _, owner := range []int64{stale, fresh} {
 		if _, err := pool.Exec(ctx, `
 			INSERT INTO block_meta_worklist (chain_id, run_id, block_number, block_version)
@@ -734,22 +754,52 @@ func TestAbandonedSlicesAreSweptOnceTheirRunIsOldEnough(t *testing.T) {
 		t.Fatal(err)
 	}
 	if staleRows != 0 {
-		t.Errorf("%d row(s) of a two-day-old run survive; abandoned slices accumulate forever", staleRows)
+		t.Errorf("%d row(s) of a run past the sweep age survive; abandoned slices accumulate forever", staleRows)
 	}
 	if freshRows != 1 {
-		t.Errorf("the hour-old run's row count is %d, want 1; a run still in flight had its list deleted", freshRows)
+		t.Errorf("the row count of a run inside the sweep age is %d, want 1; a run still in flight had its list deleted", freshRows)
 	}
 }
 
-// openRunList opens a work list under its own writer run, the way a separate process would.
-func openRunList(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64) (outbound.BlockWorkList, error) {
+// openRunList opens a work list under its own writer run, the way a separate process would, and
+// returns that run's id so a test can read the slice it owns.
+func openRunList(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64) (outbound.BlockWorkList, buildregistry.RunID) {
 	t.Helper()
 	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
 	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
 	if err != nil {
 		t.Fatalf("build the repository: %v", err)
 	}
-	return repo.OpenWorkList(ctx, chainID, 0)
+	list, err := repo.OpenWorkList(ctx, chainID, 0)
+	if err != nil {
+		t.Fatalf("open the work list for chain %d: %v", chainID, err)
+	}
+	return list, runID
+}
+
+// sliceBlocks reads the rows a run owns straight from the table, so a test's expectation comes from
+// the enumeration rather than from the cursor it is checking.
+func sliceBlocks(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64, runID buildregistry.RunID) []int64 {
+	t.Helper()
+	rows, err := pool.Query(ctx, `
+		SELECT block_number FROM block_meta_worklist
+		 WHERE chain_id = $1 AND run_id = $2 ORDER BY block_number, block_version`, chainID, int64(runID))
+	if err != nil {
+		t.Fatalf("read the run's slice: %v", err)
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var b int64
+		if err := rows.Scan(&b); err != nil {
+			t.Fatalf("scan a slice row: %v", err)
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate the run's slice: %v", err)
+	}
+	return out
 }
 
 // drain reads a list to its end.
@@ -780,4 +830,199 @@ func backdatedRun(t *testing.T, ctx context.Context, pool *pgxpool.Pool, buildID
 		t.Fatalf("insert a %s-old writer run: %v", age, err)
 	}
 	return id
+}
+
+// A slice deleted under a live run must stop that run, not end it. Every cause is the same shape --
+// the sweep reaching a run that outlived its margin, a migration clearing the table, an operator's
+// DELETE -- and all of them leave a cursor reading an empty page it cannot distinguish from the end of
+// its list. Before the cursor checked, that page was the run's success: it reported the blocks it
+// never reached as nothing left to do.
+func TestACursorRefusesToEndOnASliceDeletedUnderIt(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+	list, err := repo.OpenWorkList(ctx, 1, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer list.Close(ctx)
+
+	page, err := list.Next(ctx, 2)
+	if err != nil {
+		t.Fatalf("page: %v", err)
+	}
+	if len(page) != 2 {
+		t.Fatalf("read %d blocks, want 2; the seed is not exercising this", len(page))
+	}
+
+	tag, err := pool.Exec(ctx, `DELETE FROM block_meta_worklist WHERE chain_id = 1 AND run_id = $1`, int64(runID))
+	if err != nil {
+		t.Fatalf("delete the slice under the run: %v", err)
+	}
+	if tag.RowsAffected() == 0 {
+		t.Fatal("nothing was deleted; the run held no slice and this case is not being exercised")
+	}
+
+	rest, err := list.Next(ctx, 2)
+	if err == nil {
+		t.Errorf("the cursor returned %d blocks and no error after its slice was deleted; the run treats a "+
+			"list that vanished as a list it finished", len(rest))
+	}
+}
+
+// The counterpart: a run that pages to the end of an intact slice ends cleanly. Without this the check
+// above is satisfied by a cursor that simply always fails.
+func TestACursorEndsCleanlyOnAnIntactSlice(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	list, _ := openRunList(t, ctx, pool, 1)
+	defer list.Close(ctx)
+	if blocks := drain(t, ctx, list); len(blocks) == 0 {
+		t.Fatal("the seed produced no pending blocks; this case is not being exercised")
+	}
+}
+
+// Close is the ordinary release, and SIGTERM is the ordinary stop: it arrives with the run's context
+// already cancelled, so a Close that ran on it would always fail and leave the slice for the sweep.
+func TestCloseReleasesTheSliceOnACancelledContext(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	list, err := repo.OpenWorkList(runCtx, 1, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	var held int64
+	if err := pool.QueryRow(ctx, sliceSizeSQL, int64(1), int64(runID)).Scan(&held); err != nil {
+		t.Fatal(err)
+	}
+	if held == 0 {
+		t.Fatal("the run holds no rows; this case is not being exercised")
+	}
+
+	cancel() // SIGTERM
+	list.Close(runCtx)
+
+	var left int64
+	if err := pool.QueryRow(ctx, sliceSizeSQL, int64(1), int64(runID)).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Errorf("%d of %d rows survive a Close on a cancelled context; every ordinary shutdown orphans "+
+			"its slice until the sweep reclaims it", left, held)
+	}
+}
+
+// The sweep covers every chain, not the one being opened: a chain whose deployment is retired opens no
+// further lists, so a slice abandoned there would have no other sweeper.
+func TestTheSweepReclaimsSlicesOnChainsOtherThanTheOneOpened(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	retired := backdatedRun(t, ctx, pool, buildID, "4 days")
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO block_meta_worklist (chain_id, run_id, block_number, block_version)
+		VALUES (8453, $1, 9000000, 0)`, retired); err != nil {
+		t.Fatalf("seed the retired chain's slice: %v", err)
+	}
+
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+	list, err := repo.OpenWorkList(ctx, 1, 0)
+	if err != nil {
+		t.Fatalf("open on chain 1: %v", err)
+	}
+	defer list.Close(ctx)
+
+	var left int64
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM block_meta_worklist WHERE chain_id = 8453`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Errorf("%d row(s) abandoned on a chain nobody opens survive; nothing else will ever reclaim them", left)
+	}
+}
+
+// Closing one run releases that run's rows and no others, and the other run's cursor carries on from
+// where it stopped.
+func TestClosingOneRunLeavesTheOtherRunsListIntact(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	first, firstRun := openRunList(t, ctx, pool, 1)
+	defer first.Close(ctx)
+	want := sliceBlocks(t, ctx, pool, 1, firstRun)
+	head, err := first.Next(ctx, 2)
+	if err != nil {
+		t.Fatalf("page the first run: %v", err)
+	}
+
+	second, _ := openRunList(t, ctx, pool, 1)
+	second.Close(ctx)
+
+	got := append(blockNumbers(head), blockNumbers(drain(t, ctx, first))...)
+	if !slices.Equal(got, want) {
+		t.Errorf("the first run read %v after the second closed, want %v: Close released rows it does not own",
+			got, want)
+	}
+}
+
+// The head margin trims the run applying it. A second run opening with a margin must not trim the
+// first run's list, which was opened without one.
+func TestTheHeadMarginTrimsOnlyTheRunApplyingIt(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	first, firstRun := openRunList(t, ctx, pool, 1) // no margin: holds the chain head
+	defer first.Close(ctx)
+	want := sliceBlocks(t, ctx, pool, 1, firstRun)
+
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+	// A margin wide enough to take everything above the lowest block.
+	second, err := repo.OpenWorkList(ctx, 1, 100000)
+	if err != nil {
+		t.Fatalf("open the second run's list: %v", err)
+	}
+	defer second.Close(ctx)
+	if trimmed := drain(t, ctx, second); len(trimmed) >= len(want) {
+		t.Fatalf("the margin trimmed the second run to %d of %d blocks; it is not wide enough to exercise this",
+			len(trimmed), len(want))
+	}
+
+	if got := blockNumbers(drain(t, ctx, first)); !slices.Equal(got, want) {
+		t.Errorf("the first run read %v, want %v: the second run's head margin trimmed a list it does not own",
+			got, want)
+	}
 }
