@@ -709,6 +709,10 @@
       "type": "bool",
       "class": "R"
     },
+    "is_retracted": {
+      "type": "bool",
+      "class": "A"
+    },
     "is_syrup": {
       "type": "bool",
       "class": "S"

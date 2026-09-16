@@ -20,6 +20,10 @@ CREATE TABLE IF NOT EXISTS position_daily_observation (
     run_id             bigint,
     deal_type          text,
     created_at         timestamptz NOT NULL DEFAULT now(),
+    -- A retraction marker (ADR-0006 §3, ARCT-470): TRUE means this key should never have
+    -- existed. Nullable with no default, so the add stays metadata-only and no live writer
+    -- names it. NULL and FALSE are live.
+    is_retracted       boolean,
     -- A day's version is the coordinate of the observation that won it, copied from the spine. The
     -- winner is the maximum of a set that only grows, so it can only move forward.
     CONSTRAINT position_daily_observation_pkey PRIMARY KEY
@@ -33,7 +37,7 @@ CREATE TABLE IF NOT EXISTS position_daily_observation (
 -- one row per (position, date) rather than one per observation -- and a correction to a settled day
 -- is the exception, so there is no append-only tail for compression or tiering to close behind.
 
-COMMENT ON TABLE position_daily_observation IS '[Operational] Append-only log behind the position_daily view (VEC-636). Written by CALL crystallize_position_daily(): once a UTC day has closed, that day''s winning position_state observation is written here, so the normal shape is ONE row per (position, date). A correction or late observation that changes a settled day appends one more row carrying its own spine coordinate; nothing is ever updated or deleted, so every answer the table has given stays readable through position_daily_as_of(T). as_of_date is therefore not unique per position here -- read position_daily instead. The current UTC day is not crystallized; position_current answers "now". Point-in-time questions at block grain are answered from position_state.';
+COMMENT ON TABLE position_daily_observation IS '[Operational] Append-only log behind the position_daily view (VEC-636). Written by CALL crystallize_position_daily(): once a UTC day has closed, that day''s winning position_state observation is written here, so the normal shape is ONE row per (position, date). A correction or late observation that changes a settled day appends one more row carrying its own spine coordinate; nothing is ever updated or deleted, so every answer the table has given stays readable through position_daily_as_of(T). as_of_date is therefore not unique per position here -- read position_daily instead. A key that should never have existed is withdrawn the same way, by appending a row with is_retracted = TRUE, which the reads treat as absent (ADR-0006 §3, ARCT-470). The current UTC day is not crystallized; position_current answers "now". Point-in-time questions at block grain are answered from position_state.';
 COMMENT ON COLUMN position_daily_observation.position_id IS 'Roles: PK. The bytea(32) native position identity from position_id() (VEC-400).';
 COMMENT ON COLUMN position_daily_observation.as_of_date IS 'Roles: PK, Derived. UTC date of block_timestamp, pinned to it by a CHECK. NOT unique per position on this table: a day that has been corrected carries one row per answer it has had. Filter it on the position_daily view instead.';
 COMMENT ON COLUMN position_daily_observation.chain_id IS 'Roles: Derived (copy of position_state.chain_id). NULL is a materializer convention for an off-chain source, not missing data.';
@@ -50,6 +54,7 @@ COMMENT ON COLUMN position_daily_observation.deal_type IS 'Roles: Derived (copy 
 COMMENT ON COLUMN position_daily_observation.build_id IS 'Roles: Audit. Which build wrote the observation (build_registry.id; 0 = pre-tracking).';
 COMMENT ON COLUMN position_daily_observation.run_id IS 'Roles: Audit (copy of position_state.run_id). Which writer run appended the observation (writer_run.id; NULL means it predates run tracking).';
 COMMENT ON COLUMN position_daily_observation.created_at IS 'Roles: Audit. When this row was crystallized; never rewritten. The as-of axis position_daily_as_of(T) filters on. It is TRANSACTION START time (now()) and a row becomes visible at COMMIT, so a T newer than the start of a still-running crystallization gains rows afterwards: a pinned T is stable once older than every run open at T. Processing time, not block time (see block_timestamp).';
+COMMENT ON COLUMN position_daily_observation.is_retracted IS 'Roles: Audit. Retraction marker (ADR-0006 §3, ARCT-470): TRUE means this (position, date) key should never have existed, so position_daily and position_daily_as_of(T) treat the day as ABSENT rather than falling back to an older row. NULL and FALSE are live. Written only by a correction run, as a new row at the retracted row''s own coordinate and a higher processing_version; the crystallizer never sets it. A later row at a higher version with it unset revives the key. Raw reads of this table still return retracted rows, which is what keeps an earlier position_daily_as_of(T) reproducible.';
 
 -- The app role reads; only the owner writes, which is the crystallizer's caller. ALTER DEFAULT
 -- PRIVILEGES (20260122_140100) hands every migrator-owned table full DML, so the REVOKE closes it.
@@ -115,7 +120,7 @@ BEGIN
 END;
 $proc$;
 
-COMMENT ON PROCEDURE crystallize_position_daily(interval, bigint) IS '[Operational] Writes each settled UTC day''s winning position_state observation into position_daily_observation (VEC-636): CALL crystallize_position_daily(). Returns the number of rows it wrote, normally zero. Insert-only and idempotent -- it offers the recomputed winner per (position, date), and conflicts do nothing, so a re-run and a late observation that loses both write nothing while a genuine change appends exactly one row. settle_after (default 1 hour) holds back days that have just closed; it reduces churn rather than buying correctness, since a later correction is picked up by the next run. What it cannot repair: a row whose spine source was re-stamped in place, and the as-of history of a window it never saw. Pins enable_tiered_reads so the winner is computed over the whole spine, tiered chunks included.';
+COMMENT ON PROCEDURE crystallize_position_daily(interval, bigint) IS '[Operational] Writes each settled UTC day''s winning position_state observation into position_daily_observation (VEC-636): CALL crystallize_position_daily(). Returns the number of rows it wrote, normally zero. Insert-only and idempotent -- it offers the recomputed winner per (position, date), and conflicts do nothing, so a re-run and a late observation that loses both write nothing while a genuine change appends exactly one row. settle_after (default 1 hour) holds back days that have just closed; it reduces churn rather than buying correctness, since a later correction is picked up by the next run. What it cannot repair: a row whose spine source was re-stamped in place, and the as-of history of a window it never saw. Never writes is_retracted: retracting a key is a correction run''s job, and reaches this table by copy once the spine carries the column. Pins enable_tiered_reads so the winner is computed over the whole spine, tiered chunks included.';
 
 -- A NULL bound would make every created_at <= NULL comparison NULL, so the read would return an empty
 -- set and a caller with an unset timestamp would read "held nothing" as an answer. Raise instead.
@@ -140,23 +145,30 @@ COMMENT ON FUNCTION position_daily_as_of_bound(timestamptz) IS '[Operational] Re
 -- because position_id is sha256(chain;protocol;instrument;holder) and so determines it. It is there
 -- because a qual on a non-key column cannot be pushed below a DISTINCT ON: without it a holder filter
 -- became a post-filter over the whole table, measured at 1.9s against 34ms (VEC-636).
+--
+-- The retraction filter sits OUTSIDE the DISTINCT ON, so a retracted key is absent rather than
+-- falling back to the older row it retracts. Inside, it would pick the newest LIVE row and answer
+-- with a reading the correction withdrew.
 CREATE OR REPLACE FUNCTION position_daily_as_of(seen_before timestamptz)
     RETURNS SETOF position_daily_observation
     LANGUAGE sql STABLE
 AS $fn$
-    SELECT DISTINCT ON (d.position_id, d.as_of_date, d.holder_id) d.*
-      FROM public.position_daily_observation d
-     WHERE d.created_at <= public.position_daily_as_of_bound(seen_before)
-     ORDER BY d.position_id, d.as_of_date, d.holder_id,
-              d.block_number DESC, d.block_version DESC, d.processing_version DESC, d.block_timestamp DESC;
+    SELECT w.* FROM (
+        SELECT DISTINCT ON (d.position_id, d.as_of_date, d.holder_id) d.*
+          FROM public.position_daily_observation d
+         WHERE d.created_at <= public.position_daily_as_of_bound(seen_before)
+         ORDER BY d.position_id, d.as_of_date, d.holder_id,
+                  d.block_number DESC, d.block_version DESC, d.processing_version DESC, d.block_timestamp DESC
+    ) w
+    WHERE w.is_retracted IS NOT TRUE;
 $fn$;
 
-COMMENT ON FUNCTION position_daily_as_of(timestamptz) IS '[Operational] position_daily as it read at time T: the winning row per (position, UTC date) among those crystallized by T (VEC-636). Raises on a NULL T. A report that records its own run time can reconstruct what it saw, subject to the window created_at''s COMMENT records: T is stable once older than every crystallization open at T. position_daily_as_of(''infinity'') is the current answer, which the position_daily view wraps.';
+COMMENT ON FUNCTION position_daily_as_of(timestamptz) IS '[Operational] position_daily as it read at time T: the winning row per (position, UTC date) among those crystallized by T (VEC-636). Raises on a NULL T. A report that records its own run time can reconstruct what it saw, subject to the window created_at''s COMMENT records: T is stable once older than every crystallization open at T. A key whose winning row is retracted is absent, not replaced by the row it retracted. position_daily_as_of(''infinity'') is the current answer, which the position_daily view wraps.';
 
 CREATE OR REPLACE VIEW position_daily AS
     SELECT * FROM public.position_daily_as_of('infinity'::timestamptz);
 
-COMMENT ON VIEW position_daily IS '[Operational] What each position held on each observed UTC date: one row per (position, UTC date), that day''s winning observation (VEC-636). Equal to the newest position_state observation per (position, UTC date) across settled days. Only OBSERVED dates get a row -- no carry-forward, so a query for one date may correctly return nothing, and the current UTC day is absent until it is crystallized. Not reproducible across corrections; pin a time with position_daily_as_of(T) for that.';
+COMMENT ON VIEW position_daily IS '[Operational] What each position held on each observed UTC date: one row per (position, UTC date), that day''s winning observation (VEC-636). Equal to the newest position_state observation per (position, UTC date) across settled days, except where a retraction withdraws the key. Only OBSERVED dates get a row -- no carry-forward, so a query for one date may correctly return nothing, and the current UTC day is absent until it is crystallized. A retracted key is absent entirely. Not reproducible across corrections; pin a time with position_daily_as_of(T) for that.';
 
 GRANT SELECT ON position_daily TO stl_readonly;
 GRANT SELECT ON position_daily TO stl_readwrite;
