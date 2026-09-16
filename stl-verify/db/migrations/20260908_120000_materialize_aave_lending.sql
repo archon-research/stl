@@ -1,10 +1,7 @@
--- VEC-404: project the Aave-family lending ledgers (borrower, borrower_collateral) onto the position
--- spine. Debt rows become BORROW observations keyed on the reserve's variable-debt token; supply rows
--- become COLLATERAL (collateral_enabled) or LOAN observations keyed on the reserve's receipt (aToken).
+-- VEC-404: project the Aave-family lending ledgers onto the position spine.
 
--- Reserves the projection cannot key, recorded per run instead of failing it: a reserve with no token
--- mapping has no native instrument, and minting a surrogate would change its position_id the day the
--- real mapping arrives, orphaning rows the spine cannot delete. Append-only, so the gap has a history.
+-- Reserves the projection cannot key, recorded per run instead of failing it. Append-only, so the gap
+-- has a history.
 CREATE TABLE IF NOT EXISTS aave_unmapped_reserve (
     protocol_id  bigint      NOT NULL REFERENCES protocol (id),
     token_id     bigint      NOT NULL REFERENCES token (id),
@@ -19,8 +16,8 @@ CREATE TABLE IF NOT EXISTS aave_unmapped_reserve (
     CONSTRAINT aave_unmapped_reserve_observations_chk CHECK (observations > 0)
 );
 
--- CREATE TABLE IF NOT EXISTS adds no column to a table that already exists, so run_id needs its
--- own idempotent ALTER: the writers below read it and are parsed when they are created.
+-- CREATE TABLE IF NOT EXISTS adds no column to a table that already exists, so run_id needs its own
+-- idempotent ALTER.
 ALTER TABLE aave_unmapped_reserve ADD COLUMN IF NOT EXISTS run_id bigint;
 
 COMMENT ON TABLE aave_unmapped_reserve IS '[Operational] VEC-404: one row per materialize_aave_lending() run per reserve the projection skipped because no token mapping resolves it. The tag is reason, which also names the ledger: no_variable_debt_token for a debt reserve (borrower) absent from debt_token or carrying a NULL variable_debt_address, no_receipt_token for a supply reserve (borrower_collateral) absent from receipt_token. observations counts the ledger rows skipped. Append-only: each run appends its own view of the gap, so closing one is visible as its disappearance from later runs rather than as a mutation. A reserve here holds real exposure that position_state does not carry.';
@@ -39,7 +36,7 @@ REVOKE UPDATE, DELETE ON aave_unmapped_reserve FROM stl_readwrite;
 CREATE OR REPLACE VIEW position_aave_lending AS
 WITH debt AS (
     -- created_at is the block header time the tracker stamps. Two builds can resolve two times for one
-    -- block, both at processing_version 0; the earliest is the stable pick, as in position_morpho_market.
+    -- block, both at processing_version 0, so the earliest is the stable pick.
     SELECT DISTINCT ON (b.user_id, b.protocol_id, b.token_id, b.block_number, b.block_version, b.processing_version)
            'debt'::text AS leg,
            b.user_id, b.protocol_id, b.token_id,
@@ -88,15 +85,14 @@ SELECT p.chain_id,
 FROM (SELECT * FROM debt UNION ALL SELECT * FROM supply) s
 JOIN protocol p ON p.id = s.protocol_id
 JOIN "user"   u ON u.id = s.user_id
--- A reserve with no token mapping has no native instrument; materialize_aave_lending() records it in
--- aave_unmapped_reserve so the exposure is visible, and the run continues without it.
+-- materialize_aave_lending() records an unkeyable reserve in aave_unmapped_reserve, and the run
+-- continues without it.
 WHERE s.instrument_key IS NOT NULL;
 
 COMMENT ON VIEW position_aave_lending IS '[Operational] VEC-404 projection: Aave-family lending positions (SparkLend, Aave V2/V3 and forks sharing the borrower ledgers) as native per-instrument position rows. Debt leg: borrower rows -> BORROW, instrument_key = the reserve''s variable-debt token address (debt_token). Supply leg: borrower_collateral rows -> COLLATERAL when collateral_enabled else LOAN, instrument_key = the reserve''s receipt token address (receipt_token). Quantities are the ledger''s point-in-time balances in native decimals; block_timestamp is the ledger''s created_at, which the tracker sets to the block header time. Emits the shared position_state column contract consumed by materialize_position_projection(); one row per observation; closure is applied by the materializer. A reserve with no token mapping is skipped and recorded in aave_unmapped_reserve, so the exposure it holds is visible; a reserve mapped ambiguously would key wrongly and refuses the run instead.';
 
--- Records the reserves it cannot key, then refuses only what would key WRONGLY: an ambiguous mapping
--- or a cross-chain ledger row would mint a colliding or wrong position_id, which the spine cannot undo.
--- Dropped, not replaced: a surviving old signature makes a run-less call ambiguous.
+-- Records the reserves it cannot key, then refuses what would key wrongly: an ambiguous mapping or a
+-- cross-chain ledger row mints a colliding or wrong position_id, which the spine cannot undo.
 DROP FUNCTION IF EXISTS materialize_aave_lending(integer);
 
 CREATE OR REPLACE FUNCTION materialize_aave_lending(p_build_id integer DEFAULT 0,
@@ -105,14 +101,16 @@ CREATE OR REPLACE FUNCTION materialize_aave_lending(p_build_id integer DEFAULT 0
     SET search_path FROM CURRENT
     -- Superuser-context GUC: creating and calling this needs SET ON PARAMETER temp_file_limit, which
     -- Timescale Cloud grants to PUBLIC and k8s/dev-infra/jobs/bootstrap-db.yaml grants for kind.
-    SET temp_file_limit = '4GB' AS $fn$
+    SET temp_file_limit = '4GB'
+    -- Pinned to the materializer's own setting, so the branches below cannot read fewer chunks than the
+    -- run does on an instance where the default is off; both ledgers tier at one year.
+    SET timescaledb.enable_tiered_reads = 'on' AS $fn$
 DECLARE
     v_bad  text;
     v_msgs text[];
 BEGIN
     v_msgs := ARRAY[]::text[];
 
-    -- Refusal branch 1 of 5, planned on its own.
     v_msgs := v_msgs || ARRAY(
         SELECT * FROM (
             SELECT format('variable-debt token %s is mapped to %s reserves of protocol_id %s', encode(dt.variable_debt_address, 'hex'), count(*), dt.protocol_id) AS msg
@@ -123,7 +121,6 @@ BEGIN
             HAVING count(*) > 1
         ) b1 ORDER BY 1 LIMIT 10);
 
-    -- Refusal branch 2 of 5, planned on its own.
     v_msgs := v_msgs || ARRAY(
         SELECT * FROM (
             SELECT format('supply reserve (protocol_id %s, token_id %s) maps to %s receipt tokens', r.protocol_id, r.token_id, count(rt.receipt_token_address))
@@ -133,7 +130,18 @@ BEGIN
             HAVING count(*) > 1
         ) b2 ORDER BY 1 LIMIT 10);
 
-    -- Refusal branch 3 of 5, planned on its own.
+    -- receipt_token is unique on (chain_id, receipt_token_address), its OWN chain_id, which nothing
+    -- ties to the protocol's; two reserves can share one address and merge into one position.
+    v_msgs := v_msgs || ARRAY(
+        SELECT * FROM (
+            SELECT format('receipt token %s is mapped to %s reserves of protocol_id %s', encode(rt.receipt_token_address, 'hex'), count(DISTINCT rt.underlying_token_id), rt.protocol_id)
+            FROM public.receipt_token rt
+            WHERE EXISTS (SELECT 1 FROM public.borrower_collateral c
+                           WHERE c.protocol_id = rt.protocol_id AND c.token_id = rt.underlying_token_id)
+            GROUP BY rt.protocol_id, rt.receipt_token_address
+            HAVING count(DISTINCT rt.underlying_token_id) > 1
+        ) b6 ORDER BY 1 LIMIT 10);
+
     v_msgs := v_msgs || ARRAY(
         SELECT * FROM (
             SELECT format('address %s is registered as both a variable-debt and a receipt token of protocol_id %s', encode(dt.variable_debt_address, 'hex'), dt.protocol_id)
@@ -149,7 +157,6 @@ BEGIN
                             WHERE c.protocol_id = rt.protocol_id AND c.token_id = rt.underlying_token_id))
         ) b3 ORDER BY 1 LIMIT 10);
 
-    -- Refusal branch 4 of 5, planned on its own.
     v_msgs := v_msgs || ARRAY(
         SELECT * FROM (
             SELECT format('holder %s is a %s-byte address, so holder_id would fail position_state''s 40-hex check', encode(u.address, 'hex'), length(u.address))
@@ -159,7 +166,6 @@ BEGIN
             WHERE length(u.address) <> 20
         ) b4 ORDER BY 1 LIMIT 10);
 
-    -- Refusal branch 5 of 5, planned on its own.
     v_msgs := v_msgs || ARRAY(
         SELECT * FROM (
             SELECT format('ledger row (user_id %s, protocol_id %s, token_id %s) mixes chains: holder %s, token %s, protocol %s', r.user_id, r.protocol_id, r.token_id, u.chain_id, t.chain_id, p.chain_id)
@@ -177,9 +183,8 @@ BEGIN
         RAISE EXCEPTION 'materialize_aave_lending: inputs that would key wrongly, refusing to run: %', v_bad;
     END IF;
 
-    -- Record this run's gap: a debt reserve with no variable-debt token, a supply reserve with no
-    -- receipt token. A NULL address is a gap, never an ambiguous mapping -- SQL groups all NULLs into
-    -- one, so counting them as a repeated mapping refused the very runs this table exists to survive.
+    -- Record this run's gap. A NULL variable_debt_address is a gap, not an ambiguous mapping, and the
+    -- branch above excludes it before grouping; the supply side is a LEFT JOIN miss, the column is NOT NULL.
     INSERT INTO public.aave_unmapped_reserve (protocol_id, token_id, reason, observations, build_id, run_id)
     SELECT b.protocol_id, b.token_id, 'no_variable_debt_token', count(*), p_build_id, p_run_id
     FROM public.borrower b
@@ -193,13 +198,8 @@ BEGIN
     WHERE rt.receipt_token_address IS NULL
     GROUP BY c.protocol_id, c.token_id;
 
-    -- A mapping that disappears strands live exposure: the view stops emitting that instrument, the
-    -- stored rows keep their last quantity and nothing closes them. Reference data regressing is not a
-    -- data conflict, so refuse by name rather than leave the exposure reading as current.
-    -- Keyed off the two reference tables, not the view: instrument_key is only the hex of
-    -- debt_token.variable_debt_address or receipt_token.receipt_token_address, so asking whether the
-    -- mapping still exists needs those rather than a second full evaluation of the view -- which was a
-    -- hash anti-join over the whole of it, one extra unpredicated pass over both ledgers per call.
+    -- A mapping that disappears strands live exposure: the view stops emitting that instrument and
+    -- nothing closes the stored rows, so refuse rather than leave it reading as current.
     SELECT string_agg(DISTINCT s.instrument_key, ', ' ORDER BY s.instrument_key) INTO v_bad
     FROM (SELECT DISTINCT ON (p.position_id) p.instrument_key, p.quantity
             FROM public.position_state p
@@ -221,6 +221,6 @@ BEGIN
 END
 $fn$;
 
-COMMENT ON FUNCTION materialize_aave_lending(integer, bigint) IS '[Operational] VEC-404: materialize Aave-family lending positions into position_state via materialize_position_projection(position_aave_lending). Records each reserve it cannot key in aave_unmapped_reserve (tagged no_variable_debt_token or no_receipt_token) and projects the rest. Refuses to run, naming up to ten offenders, only for inputs that would key WRONGLY: a reserve mapped to several receipt tokens, one variable-debt token shared across reserves, or a ledger row mixing chains. Idempotent; run out of band. Caps its temp files at 4 GB per backend process (temp_file_limit; each parallel worker holds its own): one call spills 3.0 to 4.3 GB on a clone at 90% of prod against a 200 GB server default, so a runaway aborts with SQLSTATE 53400 whichever role calls it. p_build_id (build_registry.id; 0 = pre-tracking) and p_run_id (writer_run.id) are stamped on every row appended (ADR-0006 §2). Returns position_state rows appended.';
+COMMENT ON FUNCTION materialize_aave_lending(integer, bigint) IS '[Operational] VEC-404: materialize Aave-family lending positions into position_state via materialize_position_projection(position_aave_lending). Records each reserve it cannot key in aave_unmapped_reserve (tagged no_variable_debt_token or no_receipt_token) and projects the rest. Refuses to run, naming up to ten offenders: a reserve mapped to several receipt tokens, several reserves sharing one receipt token, one variable-debt token shared across reserves, an address registered as both a debt and a receipt token, a holder address that is not 20 bytes, a ledger row mixing chains, and live exposure whose instrument no longer resolves to any mapping. Idempotent; run out of band. Caps its temp files at 4 GB per backend process (temp_file_limit; each parallel worker holds its own): one call spills 3.0 to 4.3 GB on a clone at 90% of prod against a 200 GB server default, so a runaway aborts with SQLSTATE 53400 whichever role calls it. p_build_id (build_registry.id; 0 = pre-tracking) and p_run_id (writer_run.id) are stamped on every row appended (ADR-0006 §2). Returns position_state rows appended.';
 
 INSERT INTO migrations (filename) VALUES ('20260908_120000_materialize_aave_lending.sql') ON CONFLICT (filename) DO NOTHING;

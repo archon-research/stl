@@ -559,6 +559,39 @@ func TestMaterializeAaveLendingRefusesInputsThatWouldKeyWrongly(t *testing.T) {
 			 WHERE u.chain_id = 1 AND u.address = '` + holderA + `'
 			   AND p.chain_id = 1 AND p.address = '\x01' AND t.chain_id = 2 AND t.address = '\xdead';`,
 			"mixes chains"},
+		{"two reserves of one protocol sharing a receipt token",
+			// Two DIFFERENT reserves, so branch 2 (one reserve, several receipt tokens) does not fire.
+			// receipt_token is unique on its OWN chain_id, so one address maps both.
+			// Both tokens sit on the protocol's chain, so branch 5 stays quiet. receipt_token is unique on
+			// its OWN chain_id, which nothing ties to the protocol's, so one address maps both reserves.
+			`INSERT INTO token (chain_id, address, symbol, decimals) VALUES (1, '\xbead', 'USDT', 6), (1, '\xfeed', 'DAI', 18);
+			 INSERT INTO receipt_token (chain_id, protocol_id, underlying_token_id, receipt_token_address)
+			 SELECT 1, p.id, t.id, '\xa0aa' FROM protocol p, token t WHERE p.chain_id = 1 AND p.address = '\x01' AND t.chain_id = 1 AND t.address = '\xbead';
+			 INSERT INTO receipt_token (chain_id, protocol_id, underlying_token_id, receipt_token_address)
+			 SELECT 2, p.id, t.id, '\xa0aa' FROM protocol p, token t WHERE p.chain_id = 1 AND p.address = '\x01' AND t.chain_id = 1 AND t.address = '\xfeed';
+			 INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
+			 SELECT u.id, p.id, t.id, 100, 0, 5, 5, 'Supply', '\x01', true
+			 FROM "user" u, protocol p, token t
+			 WHERE u.chain_id = 1 AND u.address = '` + holderA + `' AND p.chain_id = 1 AND p.address = '\x01' AND t.chain_id = 1 AND t.address IN ('\xbead', '\xfeed');`,
+			"is mapped to 2 reserves of protocol_id"},
+		{"a supply row whose token is on another chain than the protocol",
+			`INSERT INTO token (chain_id, address, symbol, decimals) VALUES (2, '\xdeed', 'USDC', 6);
+			 INSERT INTO receipt_token (chain_id, protocol_id, underlying_token_id, receipt_token_address)
+			 SELECT 2, p.id, t.id, '\xa4a4' FROM protocol p, token t WHERE p.chain_id = 1 AND p.address = '\x01' AND t.chain_id = 2 AND t.address = '\xdeed';
+			 INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
+			 SELECT u.id, p.id, t.id, 100, 0, 5, 5, 'Supply', '\x01', true
+			 FROM "user" u, protocol p, token t
+			 WHERE u.chain_id = 1 AND u.address = '` + holderA + `' AND p.chain_id = 1 AND p.address = '\x01' AND t.chain_id = 2 AND t.address = '\xdeed';`,
+			"mixes chains"},
+		{"a supply holder whose address is not 20 bytes",
+			`INSERT INTO "user" (chain_id, address) VALUES (1, '\xbeefcafe');
+			 INSERT INTO receipt_token (chain_id, protocol_id, underlying_token_id, receipt_token_address)
+			 SELECT 1, p.id, t.id, '\xa5a5' FROM protocol p, token t WHERE p.chain_id = 1 AND p.address = '\x01' AND t.chain_id = 1 AND t.address = '\xbeef';
+			 INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled)
+			 SELECT u.id, p.id, t.id, 100, 0, 5, 5, 'Supply', '\x01', true
+			 FROM "user" u, protocol p, token t
+			 WHERE u.chain_id = 1 AND u.address = '\xbeefcafe' AND p.chain_id = 1 AND p.address = '\x01' AND t.chain_id = 1 AND t.address = '\xbeef';`,
+			"4-byte address"},
 		{"a holder whose address is not 20 bytes",
 			`INSERT INTO "user" (chain_id, address) VALUES (1, '\xbeefcafe');
 			 INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
