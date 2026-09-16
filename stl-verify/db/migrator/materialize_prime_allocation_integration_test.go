@@ -23,6 +23,7 @@ const (
 	allocTokenX = "3333333333333333333333333333333333333333"
 	allocTokenY = "4444444444444444444444444444444444444444"
 	allocVault  = "5555555555555555555555555555555555555555"
+	allocVault2 = "6666666666666666666666666666666666666666"
 )
 
 func allocInstrument(proxy, token string) string { return proxy + ":" + token }
@@ -669,6 +670,61 @@ func TestMaterializePrimeAllocationRefusesAChainMismatch(t *testing.T) {
 	}
 }
 
+// Each of the three addresses gets its own case: the vault fails the spine's 40-hex holder check, while
+// a short token or proxy renders a non-blank instrument_key that position_key() accepts, so an unguarded
+// one mints a plausible wrong identity with no error at all. Each case fails if its own term is removed.
+func TestMaterializePrimeAllocationRefusesAMalformedAddress(t *testing.T) {
+	for _, c := range []struct {
+		name, want string
+		setup      func(*testing.T, context.Context, *pgxpool.Pool)
+	}{
+		{"19-byte token address", "is 19 bytes", func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+			if _, err := pool.Exec(ctx, `UPDATE token SET address = decode($1, 'hex') WHERE chain_id = 1 AND address = decode($2, 'hex')`,
+				allocTokenX[:38], allocTokenX); err != nil {
+				t.Fatalf("shorten the token address: %v", err)
+			}
+		}},
+		{"zero-length token address", "is 0 bytes", func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+			if _, err := pool.Exec(ctx, `UPDATE token SET address = '\x'::bytea WHERE chain_id = 1 AND address = decode($1, 'hex')`,
+				allocTokenX); err != nil {
+				t.Fatalf("blank the token address: %v", err)
+			}
+		}},
+		{"19-byte proxy address", "is 19 bytes", func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+			if _, err := pool.Exec(ctx, `UPDATE allocation_position SET proxy_address = decode($1, 'hex') WHERE proxy_address = decode($2, 'hex')`,
+				allocProxyA[:38], allocProxyA); err != nil {
+				t.Fatalf("shorten the proxy address: %v", err)
+			}
+		}},
+		{"zero-length proxy address", "is 0 bytes", func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+			if _, err := pool.Exec(ctx, `UPDATE allocation_position SET proxy_address = '\x'::bytea WHERE proxy_address = decode($1, 'hex')`,
+				allocProxyA); err != nil {
+				t.Fatalf("blank the proxy address: %v", err)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx, pool := seedPrimeAllocationBase(t)
+			alloc(t, ctx, pool, allocProxyA, allocTokenX, 500, 100, 0, "2026-01-01T00:00:00Z", "in")
+			c.setup(t, ctx, pool)
+			err := pool.QueryRow(ctx, `SELECT materialize_prime_allocation()`).Scan(new(int64))
+			if err == nil {
+				t.Fatal("a malformed address must refuse by name, not mint an identity")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error %q does not report %s", err.Error(), c.want)
+			}
+			var rows int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&rows); err != nil {
+				t.Fatalf("count position_state: %v", err)
+			}
+			if rows != 0 {
+				t.Errorf("a refused run wrote %d rows, want 0", rows)
+			}
+		})
+	}
+}
+
 // A vault address that is not 20 bytes aborts inside position_key() naming no row, so it is named here.
 func TestMaterializePrimeAllocationRefusesAMalformedVault(t *testing.T) {
 	ctx, pool := seedPrimeAllocationBase(t)
@@ -684,5 +740,94 @@ func TestMaterializePrimeAllocationRefusesAMalformedVault(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "is 19 bytes") {
 		t.Errorf("error %q does not name the malformed holder", err.Error())
+	}
+}
+
+// The double count the multi-prime guard exists for is a per-block property: two primes holding one
+// proxy AT ONE BLOCK each store that block's balance. A proxy handed from one prime to another is a
+// legitimate history, and keying the guard on history alone would refuse it forever on an append-only
+// table with no way to correct the data.
+func TestMaterializePrimeAllocationOnAProxyHandedBetweenPrimes(t *testing.T) {
+	ctx, pool := seedPrimeAllocationBase(t)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'itest-alloc-2', decode($1, 'hex'))`,
+		allocVault2); err != nil {
+		t.Fatalf("seed the second prime: %v", err)
+	}
+	// Block 100 belongs to the first prime, block 200 to the second: a hand-over, never concurrent.
+	alloc(t, ctx, pool, allocProxyA, allocTokenX, 500, 100, 0, "2026-01-01T00:00:00Z", "in")
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO allocation_position
+		    (chain_id, token_id, proxy_address, balance, block_number, block_version,
+		     tx_hash, log_index, tx_amount, direction, created_at, prime_id)
+		SELECT 1, t.id, decode($1, 'hex'), 600, 200, 0, decode('000000ff', 'hex'), 1, 0, 'in',
+		       '2026-01-02T00:00:00Z'::timestamptz, p.id
+		FROM token t, prime p
+		WHERE t.chain_id = 1 AND t.address = decode($2, 'hex') AND p.name = 'itest-alloc-2'`,
+		allocProxyA, allocTokenX); err != nil {
+		t.Fatalf("seed the hand-over: %v", err)
+	}
+
+	var written int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_prime_allocation()`).Scan(&written); err != nil {
+		t.Fatalf("a proxy handed between primes across blocks must not refuse: %v", err)
+	}
+	if written == 0 {
+		t.Error("the run appended nothing, so the hand-over produced no positions")
+	}
+}
+
+// The same proxy held by two primes AT ONE BLOCK is the real double count, and must still refuse.
+func TestMaterializePrimeAllocationRefusesTwoPrimesAtOneBlock(t *testing.T) {
+	ctx, pool := seedPrimeAllocationBase(t)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'itest-alloc-2', decode($1, 'hex'))`,
+		allocVault2); err != nil {
+		t.Fatalf("seed the second prime: %v", err)
+	}
+	alloc(t, ctx, pool, allocProxyA, allocTokenX, 500, 100, 0, "2026-01-01T00:00:00Z", "in")
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO allocation_position
+		    (chain_id, token_id, proxy_address, balance, block_number, block_version,
+		     tx_hash, log_index, tx_amount, direction, created_at, prime_id)
+		SELECT 1, t.id, decode($1, 'hex'), 600, 100, 0, decode('000000fe', 'hex'), 2, 0, 'in',
+		       '2026-01-01T00:00:00Z'::timestamptz, p.id
+		FROM token t, prime p
+		WHERE t.chain_id = 1 AND t.address = decode($2, 'hex') AND p.name = 'itest-alloc-2'`,
+		allocProxyA, allocTokenX); err != nil {
+		t.Fatalf("seed the concurrent hold: %v", err)
+	}
+
+	err := pool.QueryRow(ctx, `SELECT materialize_prime_allocation()`).Scan(new(int64))
+	if err == nil {
+		t.Fatal("one proxy held by two primes at one block is a double count and must refuse")
+	}
+	if !strings.Contains(err.Error(), "is held by 2 primes") || !strings.Contains(err.Error(), "at block 100/0") {
+		t.Errorf("error %q does not name the two primes and the block", err.Error())
+	}
+}
+
+// The wrapper is the only path the runner calls, so a window it cannot forward is a window this
+// projection can never run with. The run record stamps what the spine actually received.
+func TestMaterializePrimeAllocationForwardsTheWindow(t *testing.T) {
+	ctx, pool := seedPrimeAllocationBase(t)
+	alloc(t, ctx, pool, allocProxyA, allocTokenX, 500, 100, 0, "2026-01-01T00:00:00Z", "in")
+
+	if _, err := pool.Exec(ctx, `SELECT materialize_prime_allocation(0, NULL, interval '36 hours')`); err != nil {
+		t.Fatalf("calling with a window: %v", err)
+	}
+
+	var window *string
+	if err := pool.QueryRow(ctx, `
+		SELECT window_interval::text FROM position_projection_run
+		 WHERE projection = 'public.position_prime_allocation'
+		 ORDER BY created_at DESC LIMIT 1`).Scan(&window); err != nil {
+		t.Fatalf("reading the run record: %v", err)
+	}
+	if window == nil {
+		t.Fatal("the run recorded no window, so the wrapper dropped it")
+	}
+	if *window != "36:00:00" {
+		t.Errorf("the run recorded window %q; want the 36 hours the wrapper was called with", *window)
 	}
 }
