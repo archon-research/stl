@@ -41,6 +41,8 @@
     "uniswap_v4_pool_manager",
     "uniswap_v4_pool_state",
     "uniswap_v4_position",
+    "uniswap_v4_position_manager",
+    "uniswap_v4_position_nft_transfer",
     "uniswap_v4_swap",
     "uniswap_v4_tick"
   ],
@@ -1019,6 +1021,10 @@
       "type": "int8",
       "class": "R"
     },
+    "external_id": {
+      "type": "uuid",
+      "class": "S"
+    },
     "principal_out": {
       "type": "numeric",
       "class": "S"
@@ -1529,7 +1535,7 @@
     "allocation_position": {
       "type": "raw_pipeline",
       "owner": "prime",
-      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
+      "transform_defer": "VEC-491: bucket 2 (block_timestamp via block_meta dimension, block headers sourced from S3)"
     },
     "allocation_position_current": {
       "type": "derived",
@@ -1562,19 +1568,23 @@
       "type": "infrastructure",
       "owner": "infra"
     },
-    "block_time": {
+    "block_meta": {
+      "type": "dimension",
+      "owner": "infra"
+    },
+    "block_meta_worklist": {
       "type": "infrastructure",
       "owner": "infra"
     },
     "borrower": {
       "type": "raw_pipeline",
       "owner": "lending",
-      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
+      "transform_defer": "VEC-491: bucket 2 (block_timestamp via block_meta dimension, block headers sourced from S3)"
     },
     "borrower_collateral": {
       "type": "raw_pipeline",
       "owner": "lending",
-      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
+      "transform_defer": "VEC-491: bucket 2 (block_timestamp via block_meta dimension, block headers sourced from S3)"
     },
     "borrower_collateral_current": {
       "type": "derived",
@@ -1798,7 +1808,7 @@
     "protocol_event": {
       "type": "raw_pipeline",
       "owner": "infra",
-      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
+      "transform_defer": "VEC-491: bucket 2 (block_timestamp via block_meta dimension, block headers sourced from S3)"
     },
     "protocol_oracle": {
       "type": "config",
@@ -1837,7 +1847,7 @@
     "sparklend_reserve_data": {
       "type": "raw_pipeline",
       "owner": "lending",
-      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
+      "transform_defer": "VEC-491: bucket 2 (block_timestamp via block_meta dimension, block headers sourced from S3)"
     },
     "sparklend_reserve_data_current": {
       "type": "derived",
@@ -2411,27 +2421,27 @@
     {
       "table": "borrower",
       "column": "block_timestamp",
-      "block_time": true
+      "block_meta": true
     },
     {
       "table": "borrower_collateral",
       "column": "block_timestamp",
-      "block_time": true
+      "block_meta": true
     },
     {
       "table": "allocation_position",
       "column": "block_timestamp",
-      "block_time": true
+      "block_meta": true
     },
     {
       "table": "protocol_event",
       "column": "block_timestamp",
-      "block_time": true
+      "block_meta": true
     },
     {
       "table": "sparklend_reserve_data",
       "column": "block_timestamp",
-      "block_time": true
+      "block_meta": true
     }
   ],
   "required_keys": [

@@ -25,6 +25,7 @@ Infrastructure code (Terraform/OpenTofu) lives in a separate repository for secu
 - **Dependencies flow inward** (hexagonal): domain has no dependencies; adapters depend on ports; ports depend on domain. Detailed port/adapter conventions live in `stl-verify/AGENTS.md`.
 - **On-chain data comes from chain RPC or the cached block payload, never third-party indexers.** Off-chain feeds need maintainer approval, justified in the PR description.
 - **Data pipelines and model pipelines stay separate**: ingest writes "what happened" to Postgres; models read from Postgres and write "what it means" to their own tables. Separate entry points, usually separate PRs.
+- **New tables are created plain**; a hypertable is a later migration, made once measurement calls for it. Rule, conversion path and the permanently-plain list: `stl-verify/db/migrations/AGENTS.md`.
 - **The database is append-only where it has been converted**: no `UPDATE`/`DELETE`/`DO UPDATE` on a converted table — identity is written once, everything else is a new versioned row and "current" is a query. Rule and the converted-table list: `stl-verify/db/migrations/AGENTS.md`.
 - **Language policy**: APIs and risk models are Python; workers/cronjobs/backfillers are Go (preferred) or Python; `stl-verify/ts/` is frontend only.
 - **Comments explain nothing absent** — repo-wide, CI workflows and manifests included: never explain what the code does *not* do (a flag left unpassed, an alternative rejected, a default deliberately untouched). No line anchors such a comment, so nothing prompts anyone to revisit it when the reason expires; that reasoning goes in the commit message or the PR. The full comment policy lives in `stl-verify/AGENTS.md`.
@@ -37,6 +38,9 @@ Infrastructure code (Terraform/OpenTofu) lives in a separate repository for secu
   (see `k8s/AGENTS.md`, ORB-362).
 - **Don't bypass git hooks** (lefthook). The CI workflows in `.github/workflows/` are the source of truth for linting and tests. The `stl-verify/Makefile` is the source of truth for workflows — grep it before inventing a command.
 - **Git**: branch `VEC-123-short-slug`; PR title `VEC-123: <what it does>`; GitHub squash-merges, don't squash locally. Run `make ci` (and `make test-integration` if data-adjacent) before pushing.
+- **PR body**: follow `.github/PULL_REQUEST_TEMPLATE.md`. `gh pr create --body` bypasses the
+  template, so pass its contents yourself. Fill the sections below the `---` from the diff; leave
+  `## Human Intent` empty with its comment intact — the author writes that in their own words.
 - **Skill naming**: canonical skill sources live in `skills/` and are deployed through the
   `Skillfile`; repo skills are prefixed `stl-` (e.g. `stl-review-phase`) so they're
   distinguishable from personal/global skills when both are in scope.
