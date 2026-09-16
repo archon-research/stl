@@ -732,3 +732,103 @@ func TestMaterializeAnchorageCustodyRefusesAnOversizeVault(t *testing.T) {
 		t.Errorf("error %q does not name the oversize vault", err.Error())
 	}
 }
+
+// VEC-809. The key was spelled twice: once in the view, once in the wrapper's injectivity guard, which
+// re-derived it from the source rather than reading the view's. The two agreed, so nothing was wrong
+// today — but changing the view alone left the guard validating the old shape, still passing and
+// protecting nothing. This pins the structural property the fix buys: exactly one definition.
+func TestAnchorageInstrumentKeyIsSpelledInOnePlace(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+
+	var helper, view, wrapper string
+	if err := pool.QueryRow(ctx, `
+		SELECT pg_get_functiondef('anchorage_instrument_key(text,text)'::regprocedure),
+		       pg_get_viewdef('position_anchorage_custody'::regclass),
+		       pg_get_functiondef('materialize_anchorage_custody(integer,bigint,interval)'::regprocedure)`).
+		Scan(&helper, &view, &wrapper); err != nil {
+		t.Fatalf("reading the catalogue definitions: %v", err)
+	}
+
+	if !strings.Contains(helper, "'anchorage:'") {
+		t.Error("anchorage_instrument_key does not build the prefix, so it is not the definition")
+	}
+	for _, c := range []struct{ what, def string }{
+		{"the view", view},
+		{"the wrapper's guard", wrapper},
+	} {
+		if strings.Contains(c.def, "'anchorage:'") {
+			t.Errorf("%s carries its own copy of the key expression; it must call anchorage_instrument_key", c.what)
+		}
+	}
+}
+
+// The structural test above can be satisfied by a helper nothing meaningfully depends on. This one
+// moves the single definition and requires BOTH the projected key and the guard to follow it: two
+// assets of one package render one key, which is precisely what the injectivity guard exists to catch.
+// Against the two-expression version the guard keeps deriving with asset_type, sees no collision, and
+// lets two assets interleave under one position_id with no error.
+func TestAnchorageGuardFollowsTheKeyDefinition(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-K", asset: "BTC", qty: 3, snapTS: "2026-04-07T00:00:00Z"})
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-K", asset: "ETH", qty: 7, snapTS: "2026-04-08T00:00:00Z"})
+
+	// Negative control: under the shipped key these are two instruments and the run is clean, so the
+	// refusal below is caused by the redefinition and not by the fixture.
+	var written int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_anchorage_custody()`).Scan(&written); err != nil {
+		t.Fatalf("two assets of one package are two instruments and must project: %v", err)
+	}
+	if written != 2 {
+		t.Fatalf("appended %d rows, want 2 — the fixture is not what this test assumes", written)
+	}
+
+	// Move the one definition so the key no longer separates assets.
+	if _, err := pool.Exec(ctx, `
+		CREATE OR REPLACE FUNCTION anchorage_instrument_key(p_package_id text, p_asset_type text)
+		    RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path FROM CURRENT AS
+		$fn$ SELECT 'anchorage:' || p_package_id $fn$`); err != nil {
+		t.Fatalf("redefining the key helper: %v", err)
+	}
+
+	// The view must follow it.
+	var keys []string
+	if err := pool.QueryRow(ctx, `
+		SELECT coalesce(array_agg(DISTINCT instrument_key), '{}') FROM position_anchorage_custody`).Scan(&keys); err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || keys[0] != "anchorage:PKG-K" {
+		t.Errorf("the view projects %v; it does not build instrument_key from the helper", keys)
+	}
+
+	// And so must the guard, which is the half that used to drift.
+	err := pool.QueryRow(ctx, `SELECT materialize_anchorage_custody()`).Scan(new(int64))
+	if err == nil {
+		t.Fatal("two assets now render one instrument_key and the guard permitted the run: it is not reading the key definition")
+	}
+	if !strings.Contains(err.Error(), "render the instrument_key") {
+		t.Errorf("the run failed, but not as the injectivity refusal: %s", err.Error())
+	}
+}
+
+// VEC-811. The unit and scale of a normalised quantity is not recoverable from NUMERIC, and
+// position_state.quantity is deliberately NOT normalised across protocols, so the source column has to
+// say which of the two it is.
+func TestAnchorageAssetQuantityDocumentsItsUnit(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+
+	var comment *string
+	if err := pool.QueryRow(ctx, `
+		SELECT col_description('anchorage_package_snapshot'::regclass, attnum)
+		FROM pg_attribute
+		WHERE attrelid = 'anchorage_package_snapshot'::regclass AND attname = 'asset_quantity'`).Scan(&comment); err != nil {
+		t.Fatalf("reading the column comment: %v", err)
+	}
+	if comment == nil {
+		t.Fatal("asset_quantity carries no COMMENT, so its unit and scale are recorded nowhere")
+	}
+	for _, want := range []string{"NORMALISED", "whole units"} {
+		if !strings.Contains(*comment, want) {
+			t.Errorf("the comment does not say the quantity is %q: %s", want, *comment)
+		}
+	}
+}
