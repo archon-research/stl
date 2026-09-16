@@ -573,3 +573,33 @@ func TestMorphoVaultForwardsTheWindow(t *testing.T) {
 		t.Errorf("the run recorded window %q; want the 36 hours the wrapper was called with", *window)
 	}
 }
+
+// Every other width case is SHORT, so <> 20 weakened to < 20 passes them all. 21 bytes is the case
+// above the bound: it renders 42 hex characters and fails the same 40-hex CHECK.
+func TestMaterializeMorphoVaultRefusesAnOversizeAddress(t *testing.T) {
+	ctx, pool := freshMorphoVaultDB(t)
+	if _, err := pool.Exec(ctx, `
+DO $$
+DECLARE pid bigint; atid bigint; uid bigint; vid bigint;
+BEGIN
+  INSERT INTO chain (chain_id, name) VALUES (1, 'ethereum') ON CONFLICT (chain_id) DO NOTHING;
+  INSERT INTO protocol (chain_id, address, name) VALUES (1, '\xfe', 'morpho') RETURNING id INTO pid;
+  INSERT INTO token (chain_id, address, symbol, decimals) VALUES (1, '\xda', 'USDC', 6) RETURNING id INTO atid;
+  -- 21 bytes, one over an address.
+  INSERT INTO "user" (chain_id, address) VALUES (1, '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaff') RETURNING id INTO uid;
+  INSERT INTO morpho_vault (chain_id, protocol_id, address, symbol, asset_token_id, vault_version, created_at_block)
+    VALUES (1, pid, '\xabcd', 'steakUSDC', atid, 1, 1) RETURNING id INTO vid;
+  INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, timestamp, shares, assets)
+    VALUES (uid, vid, 100, 0, '2026-01-01T00:00:00Z', 90, 100);
+END $$;`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var written int64
+	err := pool.QueryRow(ctx, `SELECT materialize_morpho_vault()`).Scan(&written)
+	if err == nil {
+		t.Fatalf("the run succeeded writing %d rows; want a refusal naming the oversize address", written)
+	}
+	if !strings.Contains(err.Error(), "21") {
+		t.Errorf("error %q does not report the oversize length", err.Error())
+	}
+}
