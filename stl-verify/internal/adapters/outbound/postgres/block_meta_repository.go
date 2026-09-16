@@ -71,10 +71,8 @@ type workListArm struct {
 // The same expression is both selected and compared to $1, so a constant arm reads "1 = $1" and
 // contributes nothing to another chain's run rather than labelling Sky's blocks with that chain.
 //
-// A shape this does not build is an error, not a best effort. The register also carries two-hop fills
-// (morpho_adapter_state reaches chain through morpho_adapter and then morpho_vault); neither declares a
-// block_meta fill today, and rendering one as its first hop would join a table that has no chain_id and
-// fail as SQL inside a production run instead of here.
+// A shape this does not build is an error, not a best effort: rendering a two-hop fill as its first hop
+// joins a table that has no chain_id, which fails as SQL inside a run rather than here.
 func armSQL(table string, chain schemamaster.Fill, declared bool) (string, error) {
 	const shape = `
 		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
@@ -84,14 +82,14 @@ func armSQL(table string, chain schemamaster.Fill, declared bool) (string, error
 		ON CONFLICT DO NOTHING`
 	chainExpr, join := "t.chain_id", ""
 	switch {
-	case declared && chain.Parent == "" && chain.Const == nil:
-		return "", fmt.Errorf("%s declares a chain_id fill with neither a parent nor a constant; a fill exists because the column is not native, so t.chain_id would not resolve", table)
-	case chain.Const != nil && *chain.Const <= 0:
-		return "", fmt.Errorf("%s declares chain_id as the constant %d; no chain has that id, so the arm would match no run and enumerate nothing", table, *chain.Const)
 	case chain.ThenParent != "":
 		return "", fmt.Errorf("%s resolves chain_id through two hops (%s then %s), which the work list does not build", table, chain.Parent, chain.ThenParent)
 	case chain.Parent != "" && chain.Const != nil:
 		return "", fmt.Errorf("%s declares chain_id as both a %s join and a constant", table, chain.Parent)
+	case chain.Const != nil && *chain.Const <= 0:
+		return "", fmt.Errorf("%s declares chain_id as the constant %d; no chain has that id, so the arm would match no run and enumerate nothing", table, *chain.Const)
+	case declared && chain.Parent == "" && chain.Const == nil:
+		return "", fmt.Errorf("%s declares a chain_id fill with neither a parent nor a constant; a fill exists because the column is not native, so t.chain_id would not resolve", table)
 	case chain.Parent != "":
 		chainExpr = "p.chain_id"
 		join = fmt.Sprintf(" JOIN %s p ON p.%s = t.%s", quoteIdent(chain.Parent), quoteIdent(chain.Ref), quoteIdent(chain.Key))
@@ -141,6 +139,11 @@ func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, 
 			return nil, err
 		}
 		chain, declared := chainFill[table]
+		if !declared {
+			if err := r.requireNativeChainColumn(ctx, table); err != nil {
+				return nil, err
+			}
+		}
 		sql, err := armSQL(table, chain, declared)
 		if err != nil {
 			return nil, err
@@ -152,6 +155,23 @@ func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, 
 		})
 	}
 	return arms, nil
+}
+
+// requireNativeChainColumn refuses a table that resolves chain neither by fill nor by its own column.
+// The register exempts several tables from the chain key entirely, and a block_meta fill added to one
+// of those would otherwise build an arm on t.chain_id and fail as SQL part way through a run.
+func (r *BlockMetaRepository) requireNativeChainColumn(ctx context.Context, table string) error {
+	var present bool
+	if err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		                WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'chain_id')`,
+		table).Scan(&present); err != nil {
+		return fmt.Errorf("reading %s's columns: %w", table, err)
+	}
+	if !present {
+		return fmt.Errorf("%s declares a block_meta fill but resolves chain_id neither natively nor by a fill", table)
+	}
+	return nil
 }
 
 // partitionColumn reads a hypertable's primary dimension from the catalogue.
@@ -179,10 +199,9 @@ const chunksPerWindow = 16
 // and a missing relation is a parse error rather than an empty result — hence the probe rather than a
 // LEFT JOIN or a to_regclass inside the query.
 //
-// The local catalogue is read as public only: the transformed layer names its hypertables after the raw
-// tables they canonicalise, so an unqualified lookup would union a table's chunks with its twin's and
-// group ranges that are not disjoint. The OSM side carries no schema column to filter on, so a tiered
-// transformed twin would still slip in; nothing is tiered and transformed today.
+// Both halves are read as public only. The transformed layer names its hypertables after the raw tables
+// they canonicalise, so an unqualified lookup unions a table's chunks with its twin's and groups ranges
+// that are not disjoint.
 const chunkRangeSQL = `
 		SELECT range_start_integer, range_end_integer, range_start, range_end
 		  FROM timescaledb_information.chunks
@@ -192,7 +211,7 @@ const chunkRangeWithTieredSQL = chunkRangeSQL + `
 		 UNION ALL
 		SELECT range_start_integer, range_end_integer, range_start, range_end
 		  FROM timescaledb_osm.tiered_chunks
-		 WHERE hypertable_name = $1`
+		 WHERE hypertable_schema = 'public' AND hypertable_name = $1`
 
 func (r *BlockMetaRepository) windowPredicates(ctx context.Context, table, partCol string) ([]string, error) {
 	var tieredVisible bool

@@ -672,6 +672,7 @@ func TestWindowPredicatesCoverTieredChunkRanges(t *testing.T) {
 	for _, ddl := range []string{
 		`CREATE SCHEMA IF NOT EXISTS timescaledb_osm`,
 		`CREATE TABLE IF NOT EXISTS timescaledb_osm.tiered_chunks (
+		    hypertable_schema    text,
 		    hypertable_name      text,
 		    range_start_integer  bigint,
 		    range_end_integer    bigint,
@@ -684,8 +685,9 @@ func TestWindowPredicatesCoverTieredChunkRanges(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO timescaledb_osm.tiered_chunks
-		    (hypertable_name, range_start_integer, range_end_integer)
-		VALUES ('sparklend_reserve_data', $1, $2)`, tieredLo, tieredHi); err != nil {
+		    (hypertable_schema, hypertable_name, range_start_integer, range_end_integer)
+		VALUES ('public', 'sparklend_reserve_data', $1, $2),
+		       ('transformed', 'sparklend_reserve_data', $1 - 50000, $2 - 50000)`, tieredLo, tieredHi); err != nil {
 		t.Fatalf("seed the tiered chunk range: %v", err)
 	}
 
@@ -703,5 +705,13 @@ func TestWindowPredicatesCoverTieredChunkRanges(t *testing.T) {
 	if !covered {
 		t.Errorf("the tiered range [%d, %d) is in no window (%d windows: %v); the loader would never scan "+
 			"the tiered tail and would report success having skipped it", tieredLo, tieredHi, len(after), after)
+	}
+	// The transformed layer names its hypertables after the raw ones, so the same name appears twice in
+	// the OSM catalogue. Its ranges belong to a different table, and unioned in they make the groups
+	// overlap, so the window's upper bound stops being the group's maximum.
+	for _, w := range after {
+		if strings.Contains(w, strconv.Itoa(tieredLo-50000)) {
+			t.Errorf("a window covers the transformed twin's tiered range: %s", w)
+		}
 	}
 }

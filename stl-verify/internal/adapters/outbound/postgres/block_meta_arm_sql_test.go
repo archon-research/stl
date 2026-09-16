@@ -7,8 +7,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/data_quality/schemamaster"
 )
 
-func constChain(n int) *int { return &n }
-
 // The chain expression is what decides whose blocks an arm claims, so each shape is pinned by the SQL
 // it produces rather than by the arm merely building.
 func TestArmSQLTakesChainFromTheFillsShape(t *testing.T) {
@@ -32,7 +30,7 @@ func TestArmSQLTakesChainFromTheFillsShape(t *testing.T) {
 		},
 		{
 			name:     "the fill's constant",
-			fill:     schemamaster.Fill{Const: constChain(1)},
+			fill:     schemamaster.Fill{Const: new(1)},
 			wantSel:  "SELECT 1,",
 			wantFrom: `FROM "protocol_event" t`,
 		},
@@ -55,7 +53,7 @@ func TestArmSQLTakesChainFromTheFillsShape(t *testing.T) {
 // The constant filters rather than labels: it is compared to the run's chain, so a constant arm
 // contributes nothing to another chain's run instead of stamping its blocks with that chain.
 func TestArmSQLComparesTheConstantToTheRunsChain(t *testing.T) {
-	got, err := armSQL("prime_debt", schemamaster.Fill{Const: constChain(1)}, true)
+	got, err := armSQL("prime_debt", schemamaster.Fill{Const: new(1)}, true)
 	if err != nil {
 		t.Fatalf("armSQL: %v", err)
 	}
@@ -78,7 +76,7 @@ func TestArmSQLRefusesShapesItCannotBuild(t *testing.T) {
 		},
 		{
 			name: "a join and a constant at once",
-			fill: schemamaster.Fill{Parent: "protocol", Key: "protocol_id", Ref: "id", Const: constChain(1)},
+			fill: schemamaster.Fill{Parent: "protocol", Key: "protocol_id", Ref: "id", Const: new(1)},
 			want: "both",
 		},
 		{
@@ -88,7 +86,7 @@ func TestArmSQLRefusesShapesItCannotBuild(t *testing.T) {
 		},
 		{
 			name: "a constant no chain can have",
-			fill: schemamaster.Fill{Const: constChain(0)},
+			fill: schemamaster.Fill{Const: new(0)},
 			want: "no chain has that id",
 		},
 	}
