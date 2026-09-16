@@ -20,8 +20,8 @@ CREATE TABLE IF NOT EXISTS aave_projection_note (
 COMMENT ON TABLE aave_projection_note IS '[Operational] VEC-404: one row per materialize_aave_lending() run per reserve the projection did not project as-read. reason names the case and the ledger: no_variable_debt_token for a debt reserve (borrower) absent from debt_token or carrying a NULL variable_debt_address, no_receipt_token for a supply reserve (borrower_collateral) absent from receipt_token, arbitrated_observation for a reserve where one observation key held rows disagreeing on the value the view emits, so the earliest-created_at pick decided it. observations counts the ledger rows skipped, or the keys arbitrated. Append-only: each run appends its own view, so a case closing is visible as its disappearance from later runs rather than as a mutation. Plain table, deliberately: it appends a handful of rows per run. A skipped reserve holds real exposure that position_state does not carry; an arbitrated key means two writers disagreed and one value was dropped.';
 COMMENT ON COLUMN aave_projection_note.protocol_id IS 'Roles: PK, FK->protocol.id. The lending protocol whose reserve is unmapped.';
 COMMENT ON COLUMN aave_projection_note.token_id IS 'Roles: PK, FK->token.id. The reserve''s underlying token, which is what the mapping is missing for.';
-COMMENT ON COLUMN aave_projection_note.reason IS 'Roles: PK, Derived. The tag, which also names the ledger: no_variable_debt_token (borrower) or no_receipt_token (borrower_collateral).';
-COMMENT ON COLUMN aave_projection_note.observations IS 'Roles: Derived. Ledger rows skipped for this reserve at the time of the run.';
+COMMENT ON COLUMN aave_projection_note.reason IS 'Roles: PK, Derived. The tag, which also names the ledger: no_variable_debt_token (borrower), no_receipt_token (borrower_collateral), or arbitrated_observation (either ledger, so this one reason does not name which) where one observation key held rows disagreeing on a value the view emits: the key''s rows always differ on created_at, which the view emits as block_timestamp, and may differ on amount too.';
+COMMENT ON COLUMN aave_projection_note.observations IS 'Roles: Derived. A count whose unit depends on reason: ledger rows skipped for this reserve for no_variable_debt_token and no_receipt_token, observation KEYS arbitrated for arbitrated_observation. Both as at the time of the run.';
 COMMENT ON COLUMN aave_projection_note.build_id IS 'Roles: Audit. build_registry.id of the run that recorded the gap (0 = pre-tracking).';
 COMMENT ON COLUMN aave_projection_note.run_id IS 'Roles: Audit. writer_run.id of the run that recorded the gap (ADR-0006 §2); NULL means it predates run tracking.';
 COMMENT ON COLUMN aave_projection_note.created_at IS 'Roles: PK, Audit. When the run recorded it: one clock_timestamp() read per call, so every row a run writes shares it and the run''s rows group by it without depending on run_id, which is NULL for a defaulted call. Two runs in one transaction still read different values, so they cannot collide.';
@@ -209,18 +209,19 @@ BEGIN
     WHERE rt.receipt_token_address IS NULL
     GROUP BY c.protocol_id, c.token_id
     UNION ALL
-    -- Both legs collapse an observation key to its earliest created_at. That pick is deterministic but
-    -- silent, so the keys where the dropped rows carried a different emitted value are counted here.
+    -- Both legs collapse an observation key to its earliest created_at, silently. Any key holding
+    -- more than one row is arbitrated: both PKs carry created_at, so the rows must differ on it, and
+    -- the view emits created_at as block_timestamp -- so a value is always dropped, not just on amount.
     SELECT d.protocol_id, d.token_id, 'arbitrated_observation', count(*), p_build_id, p_run_id, v_at
     FROM (SELECT protocol_id, token_id
             FROM public.borrower
            GROUP BY user_id, protocol_id, token_id, block_number, block_version, processing_version
-          HAVING count(DISTINCT amount) > 1
+          HAVING count(*) > 1
            UNION ALL
           SELECT protocol_id, token_id
             FROM public.borrower_collateral
            GROUP BY user_id, protocol_id, token_id, block_number, block_version, processing_version
-          HAVING count(DISTINCT amount) > 1 OR count(DISTINCT collateral_enabled) > 1) d
+          HAVING count(*) > 1) d
     GROUP BY d.protocol_id, d.token_id;
 
     -- A mapping that disappears OR moves strands live exposure: the view stops emitting that instrument

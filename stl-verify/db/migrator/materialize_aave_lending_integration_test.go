@@ -1036,6 +1036,50 @@ END $$;`); err != nil {
 	}
 }
 
+// Both ledger PKs carry created_at, so two rows at one observation key always differ on it, and the
+// view emits it as block_timestamp -- every multi-row key drops a value. Measured on staging: 27 such
+// keys, against 18 for an amount-only predicate. The single-row case is the control.
+func TestMaterializeAaveLendingArbitrationCoversEveryEmittedValue(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		rows string
+		want int64
+	}{
+		{"agreeing on amount, differing only on created_at", `
+			(ua, p1, usdc, 100, 0, 11, 11, 'Borrow', '\x01', '2026-01-01T00:00:00Z', 0),
+			(ua, p1, usdc, 100, 0, 11, 11, 'Borrow', '\x02', '2026-01-01T00:00:05Z', 0)`, 1},
+		{"differing on amount as well", `
+			(ua, p1, usdc, 100, 0, 11, 11, 'Borrow', '\x01', '2026-01-01T00:00:00Z', 0),
+			(ua, p1, usdc, 100, 0, 22, 22, 'Borrow', '\x02', '2026-01-01T00:00:05Z', 0)`, 1},
+		{"one row per key arbitrates nothing", `
+			(ua, p1, usdc, 100, 0, 11, 11, 'Borrow', '\x01', '2026-01-01T00:00:00Z', 0),
+			(ua, p1, usdc, 200, 0, 22, 11, 'Borrow', '\x02', '2026-01-02T00:00:00Z', 0)`, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx, pool := seedAaveLendingBase(t)
+			if _, err := pool.Exec(ctx, `
+DO $$`+aaveLedgerDeclare+`
+BEGIN`+aaveLedgerPrelude+`
+  INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, created_at, build_id) VALUES`+c.rows+`;
+END $$;`); err != nil {
+				t.Fatalf("seeding: %v", err)
+			}
+			if _, err := pool.Exec(ctx, `SELECT materialize_aave_lending()`); err != nil {
+				t.Fatalf("an arbitrated key is recorded, not refused: %v", err)
+			}
+			var keys int64
+			if err := pool.QueryRow(ctx, `
+				SELECT coalesce(sum(observations), 0) FROM aave_projection_note
+				 WHERE reason = 'arbitrated_observation'`).Scan(&keys); err != nil {
+				t.Fatalf("reading the note: %v", err)
+			}
+			if keys != c.want {
+				t.Errorf("recorded %d arbitrated keys, want %d", keys, c.want)
+			}
+		})
+	}
+}
+
 // Every row a run writes must carry one created_at, or the run's own rows cannot be grouped:
 // run_id is NULL for a defaulted call, so created_at is the only key left to group them by.
 func TestMaterializeAaveLendingNoteRowsOfOneRunShareATimestamp(t *testing.T) {
