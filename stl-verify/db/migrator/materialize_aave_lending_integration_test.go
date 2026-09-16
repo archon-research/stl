@@ -599,6 +599,15 @@ func TestMaterializeAaveLendingRefusesInputsThatWouldKeyWrongly(t *testing.T) {
 			 FROM "user" u, protocol p, token t
 			 WHERE u.chain_id = 1 AND u.address = '\xbeefcafe' AND p.chain_id = 1 AND p.address = '\x01' AND t.chain_id = 1 AND t.address = '\xdead';`,
 			"4-byte address"},
+		// Both width cases above are SHORT, so <> 20 weakened to < 20 passes them. 21 bytes is the
+		// case above the bound: it renders 42 hex characters and fails the same 40-hex CHECK.
+		{"a holder whose address is one byte over",
+			`INSERT INTO "user" (chain_id, address) VALUES (1, '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaff');
+			 INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
+			 SELECT u.id, p.id, t.id, 100, 0, 10, 10, 'Borrow', '\x01'
+			 FROM "user" u, protocol p, token t
+			 WHERE u.chain_id = 1 AND u.address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaff' AND p.chain_id = 1 AND p.address = '\x01' AND t.chain_id = 1 AND t.address = '\xdead';`,
+			"21-byte address"},
 		{"a holder on another chain than the protocol",
 			`INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
 			 SELECT u.id, p.id, t.id, 100, 0, 10, 10, 'Borrow', '\x01'
