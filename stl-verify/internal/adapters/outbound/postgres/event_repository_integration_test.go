@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -290,56 +291,64 @@ func assertBlockTimestamp(t *testing.T, ctx context.Context, blockNumber int64, 
 	}
 }
 
-func TestSaveEvent_WritesBlockTimestamp(t *testing.T) {
-	fixture := setupEventTest(t)
-
-	ctx := context.Background()
-	blockTime := time.Unix(1700000000, 0).UTC()
-
-	event, err := entity.NewProtocolEvent(1, fixture.protocolID, 5000, 0, []byte{0x01}, 0, []byte{0xaa}, "Supply", json.RawMessage(`{"user":"0xabc"}`), blockTime)
-	if err != nil {
-		t.Fatalf("failed to create event: %v", err)
+func TestEventRepository_WritesBlockTimestamp(t *testing.T) {
+	type row struct {
+		blockNumber int64
+		blockTime   time.Time
 	}
-
-	tx, err := eventPool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("failed to begin transaction: %v", err)
+	cases := []struct {
+		name string
+		rows []row
+		save func(ctx context.Context, repo *EventRepository, tx pgx.Tx, evts []*entity.ProtocolEvent) error
+	}{
+		{
+			name: "SaveEvent",
+			rows: []row{{5000, time.Unix(1700000000, 0).UTC()}},
+			save: func(ctx context.Context, repo *EventRepository, tx pgx.Tx, evts []*entity.ProtocolEvent) error {
+				return repo.SaveEvent(ctx, tx, evts[0])
+			},
+		},
+		{
+			name: "SaveBatch",
+			rows: []row{
+				{6000, time.Unix(1700000000, 0).UTC()},
+				{6001, time.Unix(1700000012, 0).UTC()},
+			},
+			save: func(ctx context.Context, repo *EventRepository, tx pgx.Tx, evts []*entity.ProtocolEvent) error {
+				return repo.SaveBatch(ctx, tx, evts)
+			},
+		},
 	}
-	defer tx.Rollback(ctx)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := setupEventTest(t)
+			ctx := context.Background()
 
-	if err := fixture.repo.SaveEvent(ctx, tx, event); err != nil {
-		t.Fatalf("SaveEvent failed: %v", err)
+			evts := make([]*entity.ProtocolEvent, 0, len(tc.rows))
+			for _, r := range tc.rows {
+				event, err := entity.NewProtocolEvent(1, fixture.protocolID, r.blockNumber, 0, []byte{0x01}, 0, []byte{0xaa}, "Supply", json.RawMessage(`{"user":"0xabc"}`), r.blockTime)
+				if err != nil {
+					t.Fatalf("failed to create event: %v", err)
+				}
+				evts = append(evts, event)
+			}
+
+			tx, err := eventPool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("failed to begin transaction: %v", err)
+			}
+			defer tx.Rollback(ctx)
+
+			if err := tc.save(ctx, fixture.repo, tx, evts); err != nil {
+				t.Fatalf("%s failed: %v", tc.name, err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatalf("failed to commit: %v", err)
+			}
+
+			for _, r := range tc.rows {
+				assertBlockTimestamp(t, ctx, r.blockNumber, r.blockTime)
+			}
+		})
 	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	assertBlockTimestamp(t, ctx, 5000, blockTime)
-}
-
-func TestSaveBatch_WritesBlockTimestamp(t *testing.T) {
-	fixture := setupEventTest(t)
-
-	ctx := context.Background()
-	blockTime := time.Unix(1700000000, 0).UTC()
-
-	event, err := entity.NewProtocolEvent(1, fixture.protocolID, 6000, 0, []byte{0x01}, 0, []byte{0xaa}, "Supply", json.RawMessage(`{"user":"0xabc"}`), blockTime)
-	if err != nil {
-		t.Fatalf("failed to create event: %v", err)
-	}
-
-	tx, err := eventPool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("failed to begin transaction: %v", err)
-	}
-	defer tx.Rollback(ctx)
-
-	if err := fixture.repo.SaveBatch(ctx, tx, []*entity.ProtocolEvent{event}); err != nil {
-		t.Fatalf("SaveBatch failed: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	assertBlockTimestamp(t, ctx, 6000, blockTime)
 }
