@@ -38,6 +38,8 @@ tree() {
   printf 'FROM --platform=$BUILDPLATFORM %s AS ui-builder\nFROM %s AS py-base\n' "$NODE_PIN" "$PY_PIN" \
     > "$d/stl-verify/python/Dockerfile"
   printf 'module github.com/archon-research/stl/stl-verify\n\ngo 1.26.6\n' > "$d/stl-verify/go.mod"
+  mkdir -p "$d/.devcontainer"
+  printf '{\n  "image": "mcr.microsoft.com/devcontainers/go:1.26"\n}\n' > "$d/.devcontainer/devcontainer.json"
 }
 
 # check <name> <expected-exit> <expected-substring> <dir>
@@ -126,6 +128,24 @@ check "go.mod disagreeing with .go-version is caught" 1 "does not match .go-vers
 D="${WORK}/gomod-missing"; tree "$D"
 rm "$D/stl-verify/go.mod"
 check "a missing go.mod is caught" 1 "go.mod" "$D"
+
+# The devcontainer image names the minor only, so it tracks .go-version's
+# major.minor and a patch bump must leave it alone.
+D="${WORK}/devcontainer-drift"; tree "$D"
+printf '{\n  "image": "mcr.microsoft.com/devcontainers/go:1.25"\n}\n' > "$D/.devcontainer/devcontainer.json"
+check "a devcontainer a minor behind .go-version is caught" 1 "does not match .go-version" "$D"
+
+D="${WORK}/devcontainer-patch"; tree "$D"
+printf '1.26.8\n' > "$D/.go-version"
+printf 'module github.com/archon-research/stl/stl-verify\n\ngo 1.26.8\n' > "$D/stl-verify/go.mod"
+printf 'FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine@sha256:%s AS builder\nFROM %s AS runtime-base\n' \
+  "3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83" "$ALPINE_PIN" \
+  > "$D/stl-verify/Dockerfile.common"
+check "a Go patch bump leaves the devcontainer minor alone" 0 "devcontainers/go:1.26" "$D"
+
+D="${WORK}/devcontainer-missing"; tree "$D"
+rm "$D/.devcontainer/devcontainer.json"
+check "a missing devcontainer.json is caught" 1 "devcontainer.json" "$D"
 
 echo "${PASSED} passed, ${FAILED} failed"
 [ "$FAILED" -eq 0 ] || exit 1

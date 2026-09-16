@@ -2,7 +2,7 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "description": "Executed by the Renovate GitHub App installed on this repository; there is no workflow in .github/ that runs it. Dependabot keeps github-actions and npm (.github/dependabot.yml).",
   "extends": ["config:recommended"],
-  "enabledManagers": ["dockerfile", "nodenv", "pyenv", "custom.regex"],
+  "enabledManagers": ["dockerfile", "devcontainer", "nodenv", "pyenv", "custom.regex"],
   "schedule": ["before 6am on monday"],
   "customManagers": [
     {
@@ -21,9 +21,9 @@
       "pinDigests": true
     },
     {
-      "description": "The Go toolchain is written in .go-version and in both Go Dockerfiles; grouping them puts the bump in one branch so it lands as a single commit.",
+      "description": "The Go toolchain is written in .go-version, in Dockerfile.common, in go.mod and in the devcontainer image; grouping them puts the bump in one branch so it lands as a single commit.",
       "groupName": "go toolchain",
-      "matchPackageNames": ["go", "golang"]
+      "matchPackageNames": ["go", "golang", "mcr.microsoft.com/devcontainers/go"]
     },
     {
       "description": "Python is written in .python-version and in python/Dockerfile's py-base stage; grouped for the same reason.",

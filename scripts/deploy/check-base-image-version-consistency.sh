@@ -22,6 +22,7 @@ NODE_VERSION="$(cat .node-version)"
 
 GO_DOCKERFILE=stl-verify/Dockerfile.common
 PYTHON_DOCKERFILE=stl-verify/python/Dockerfile
+DEVCONTAINER=.devcontainer/devcontainer.json
 
 FAILED=0
 
@@ -121,10 +122,36 @@ check_go_directive() {
   fi
 }
 
+# check_devcontainer_go <file> <major.minor>: the devcontainer image names the
+# Go minor (mcr.microsoft.com/devcontainers/go:1.26), so it is held to
+# .go-version's major.minor.
+check_devcontainer_go() {
+  local file="$1" expected="$2" found status=0
+  if [ ! -f "$file" ]; then
+    echo "  BAD  ${file}: not a readable file"
+    FAILED=1
+    return
+  fi
+  found="$(grep -oE "mcr\\.microsoft\\.com/devcontainers/go:[0-9]+\\.[0-9]+" "$file")" || status=$?
+  if [ "$status" -ne 0 ] || [ -z "$found" ]; then
+    echo "  BAD  ${file}: no devcontainers/go image found"
+    FAILED=1
+    return
+  fi
+  found="${found##*:}"
+  if [ "$found" = "$expected" ]; then
+    echo "  ok   ${file}: devcontainers/go:${found}"
+  else
+    echo "  BAD  ${file}: devcontainers/go:${found} does not match .go-version's ${expected}"
+    FAILED=1
+  fi
+}
+
 check_tag "$GO_DOCKERFILE" golang "${GO_VERSION}-alpine"
 check_tag "$PYTHON_DOCKERFILE" python "${PYTHON_VERSION}-slim"
 check_tag "$PYTHON_DOCKERFILE" node "${NODE_VERSION}-alpine"
 check_go_directive stl-verify/go.mod "$GO_VERSION"
+check_devcontainer_go "$DEVCONTAINER" "${GO_VERSION%.*}"
 
 check_pins_agree golang "$GO_DOCKERFILE"
 check_pins_agree alpine "$GO_DOCKERFILE"
