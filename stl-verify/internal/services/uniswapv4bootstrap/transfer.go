@@ -188,7 +188,6 @@ func (s *TransferService) Run(ctx context.Context) (_ TransferSummary, runErr er
 	return summary, nil
 }
 
-// resumePoint is the pin this run scans up to and the height it resumes from.
 // logResolvedBlockVersions reports what the run asked the archive for, the way
 // morpho-v2-bootstrap does. A version above 0 across deep history is the archive's
 // convention, not evidence of a reorg (see internal/pkg/blockversion).
@@ -214,6 +213,7 @@ func (s *TransferService) logResolvedBlockVersions(ctx context.Context, summary 
 	s.logger.LogAttrs(ctx, level, "uniswap-v4 posm transfer block versions resolved from the raw archive", attrs...)
 }
 
+// resumePoint is the pin this run scans up to and the height it resumes from.
 func (s *TransferService) resumePoint(ctx context.Context) (pinnedBlock, int64, error) {
 	recorded, found, err := s.progress.LoadProgress(ctx)
 	if err != nil {
