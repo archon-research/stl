@@ -7,10 +7,10 @@ import (
 	"time"
 )
 
-// retract appends the retraction row for one (position, date): the day's winning coordinate at the
-// next processing_version, every other column copied so the CHECK and NOT NULLs hold, is_retracted
-// TRUE. That is the ARCT-470 correction-run write, done here by hand because the
-// processing_version_log allocator (ARCT-428) does not exist yet.
+// retract appends the retraction row for one (position, date): the day's winning row copied whole,
+// at its OWN spine coordinate -- processing_version included -- and correction_seq + 1, is_retracted
+// TRUE. Taking processing_version + 1 instead would put the tombstone on the primary key the spine's
+// next correction crystallizes to, and the writer's ON CONFLICT DO NOTHING would drop it.
 func (f *positionDailyFixture) retract(id, date string) {
 	f.t.Helper()
 	f.retractAt(id, date, "DESC")
@@ -30,14 +30,14 @@ func (f *positionDailyFixture) retractAt(id, date, dir string) {
 		INSERT INTO position_daily_observation
 		    (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
 		     block_number, block_version, processing_version, block_timestamp, projection, build_id,
-		     run_id, deal_type, is_retracted)
+		     run_id, deal_type, is_retracted, correction_seq)
 		SELECT d.position_id, d.as_of_date, d.chain_id, d.protocol_id, d.instrument_key, d.holder_id,
-		       d.quantity, d.block_number, d.block_version, d.processing_version + 1, d.block_timestamp,
-		       d.projection, d.build_id, d.run_id, d.deal_type, TRUE
+		       d.quantity, d.block_number, d.block_version, d.processing_version, d.block_timestamp,
+		       d.projection, d.build_id, d.run_id, d.deal_type, TRUE, d.correction_seq + 1
 		  FROM position_daily_observation d
 		 WHERE d.position_id = sha256($1::bytea) AND d.as_of_date = $2
 		 ORDER BY d.block_number ` + dir + `, d.block_version ` + dir + `, d.processing_version ` + dir + `,
-		          d.block_timestamp ` + dir + `
+		          d.block_timestamp ` + dir + `, d.correction_seq ` + dir + `
 		 LIMIT 1`
 	tag, err := f.pool.Exec(f.ctx, q, id, date)
 	if err != nil {
@@ -48,21 +48,22 @@ func (f *positionDailyFixture) retractAt(id, date, dir string) {
 	}
 }
 
-// revive appends a live row above the retraction: a later correction that says the key was real
-// after all. is_retracted unset, so nothing special-cases a reversal.
+// revive appends a live row above the retraction, on the same local axis: a later correction that
+// says the key was real after all. is_retracted unset, so nothing special-cases a reversal.
 func (f *positionDailyFixture) revive(id, date string, qty int) {
 	f.t.Helper()
 	tag, err := f.pool.Exec(f.ctx, `
 		INSERT INTO position_daily_observation
 		    (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
 		     block_number, block_version, processing_version, block_timestamp, projection, build_id,
-		     run_id, deal_type)
+		     run_id, deal_type, correction_seq)
 		SELECT d.position_id, d.as_of_date, d.chain_id, d.protocol_id, d.instrument_key, d.holder_id,
-		       $3::numeric, d.block_number, d.block_version, d.processing_version + 1, d.block_timestamp,
-		       d.projection, d.build_id, d.run_id, d.deal_type
+		       $3::numeric, d.block_number, d.block_version, d.processing_version, d.block_timestamp,
+		       d.projection, d.build_id, d.run_id, d.deal_type, d.correction_seq + 1
 		  FROM position_daily_observation d
 		 WHERE d.position_id = sha256($1::bytea) AND d.as_of_date = $2
-		 ORDER BY d.block_number DESC, d.block_version DESC, d.processing_version DESC, d.block_timestamp DESC
+		 ORDER BY d.block_number DESC, d.block_version DESC, d.processing_version DESC,
+		          d.block_timestamp DESC, d.correction_seq DESC
 		 LIMIT 1`, id, date, qty)
 	if err != nil {
 		f.t.Fatalf("revive %s on %s: %v", id, date, err)
@@ -219,6 +220,12 @@ func TestPositionDailyRetractionWithdrawsAKeyWithoutRewritingIt(t *testing.T) {
 	})
 
 	t.Run("the view exposes the column and never a retracted row", func(t *testing.T) {
+		// Seeds its own retraction, so the case stands alone under -run rather than depending on
+		// the subtests above having appended one.
+		const id = "d-retract-view"
+		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		f.retract(id, date)
 		var n int
 		if err := f.pool.QueryRow(f.ctx,
 			`SELECT count(*) FROM position_daily WHERE is_retracted IS TRUE`).Scan(&n); err != nil {

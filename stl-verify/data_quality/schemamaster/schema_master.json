@@ -353,6 +353,11 @@
       "type": "text",
       "class": "S"
     },
+    "correction_seq": {
+      "type": "int4",
+      "class": "S",
+      "not_null": true
+    },
     "created_at": {
       "type": "timestamptz",
       "class": "A",
@@ -711,7 +716,7 @@
     },
     "is_retracted": {
       "type": "bool",
-      "class": "A"
+      "class": "R"
     },
     "is_syrup": {
       "type": "bool",

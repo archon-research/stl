@@ -14,20 +14,33 @@ import (
 // case can aim one below the winner, at an occupied coordinate, or at a date the row is not on.
 // srcDate is the day the copied row is read from; stampDate is the day the tombstone claims. They
 // are the same except in the case that checks a retraction cannot be parked on the wrong day.
-func (f *positionDailyFixture) retractKeyed(id, srcDate, stampDate string, block, bv, pv int, ts string) error {
+//
+// ORDER BY pins which row is copied once a day holds more than one, and a zero-row SELECT is
+// reported rather than returning a silent nil: that is the vacuous-INSERT class this file has
+// already been bitten by once.
+func (f *positionDailyFixture) retractKeyed(id, srcDate, stampDate string, block, bv, pv, seq int, ts string) error {
 	f.t.Helper()
-	_, err := f.pool.Exec(f.ctx, `
+	tag, err := f.pool.Exec(f.ctx, `
 		INSERT INTO position_daily_observation
 		    (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
 		     block_number, block_version, processing_version, block_timestamp, projection, build_id,
-		     run_id, deal_type, is_retracted)
+		     run_id, deal_type, is_retracted, correction_seq)
 		SELECT d.position_id, $3::date, d.chain_id, d.protocol_id, d.instrument_key, d.holder_id,
 		       d.quantity, $4::bigint, $5::int, $6::int, $7::timestamptz,
-		       d.projection, d.build_id, d.run_id, d.deal_type, TRUE
+		       d.projection, d.build_id, d.run_id, d.deal_type, TRUE, $8::int
 		  FROM position_daily_observation d
 		 WHERE d.position_id = sha256($1::bytea) AND d.as_of_date = $2
-		 LIMIT 1`, id, srcDate, stampDate, block, bv, pv, ts)
-	return err
+		 ORDER BY d.block_number DESC, d.block_version DESC, d.processing_version DESC,
+		          d.block_timestamp DESC, d.correction_seq DESC
+		 LIMIT 1`, id, srcDate, stampDate, block, bv, pv, ts, seq)
+	if err != nil {
+		return err
+	}
+	if n := tag.RowsAffected(); n != 1 {
+		f.t.Fatalf("retractKeyed(%s, %s) appended %d rows, want 1: it copied from a day that is not there",
+			id, srcDate, n)
+	}
+	return nil
 }
 
 // What breaks a retraction. Each case is a way the withdrawal fails to take, or takes too widely;
@@ -45,7 +58,7 @@ func TestPositionDailyRetractionAdversarial(t *testing.T) {
 		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
 		f.observe(id, dailyObs{qty: 20, block: 200, ts: "2026-01-01T05:00:00Z", dealType: "LOAN"})
 		f.crystallize()
-		if err := f.retractKeyed(id, date, date, 100, 0, 1, "2026-01-01T01:00:00Z"); err != nil {
+		if err := f.retractKeyed(id, date, date, 100, 0, 0, 1, "2026-01-01T01:00:00Z"); err != nil {
 			t.Fatalf("append a retraction at the losing block: %v", err)
 		}
 		if got := f.dayQty(id, date); got != 20 {
@@ -86,7 +99,7 @@ func TestPositionDailyRetractionAdversarial(t *testing.T) {
 		f.crystallize()
 		f.retract(id, date)
 		before := f.dayRows(id, date)
-		err := f.retractKeyed(id, date, date, 100, 0, 1, "2026-01-01T01:00:00Z")
+		err := f.retractKeyed(id, date, date, 100, 0, 0, 1, "2026-01-01T01:00:00Z")
 		var pgErr *pgconn.PgError
 		if err == nil {
 			t.Errorf("a second retraction at the same coordinate was accepted; the table now holds "+
@@ -105,7 +118,7 @@ func TestPositionDailyRetractionAdversarial(t *testing.T) {
 		const id = "adv-date"
 		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
 		f.crystallize()
-		err := f.retractKeyed(id, date, "2026-01-02", 100, 0, 1, "2026-01-01T01:00:00Z")
+		err := f.retractKeyed(id, date, "2026-01-02", 100, 0, 0, 1, "2026-01-01T01:00:00Z")
 		var pgErr *pgconn.PgError
 		if err == nil {
 			t.Errorf("a retraction stamped 2026-01-02 for an instant on 2026-01-01 was accepted")
@@ -120,20 +133,70 @@ func TestPositionDailyRetractionAdversarial(t *testing.T) {
 		const id = "adv-false"
 		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
 		f.crystallize()
-		if _, err := f.pool.Exec(f.ctx, `
+		tag, err := f.pool.Exec(f.ctx, `
 			INSERT INTO position_daily_observation
 			    (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
 			     block_number, block_version, processing_version, block_timestamp, projection, build_id,
-			     run_id, deal_type, is_retracted)
+			     run_id, deal_type, is_retracted, correction_seq)
 			SELECT d.position_id, d.as_of_date, d.chain_id, d.protocol_id, d.instrument_key, d.holder_id,
-			       55, d.block_number, d.block_version, d.processing_version + 1, d.block_timestamp,
-			       d.projection, d.build_id, d.run_id, d.deal_type, FALSE
+			       55, d.block_number, d.block_version, d.processing_version, d.block_timestamp,
+			       d.projection, d.build_id, d.run_id, d.deal_type, FALSE, d.correction_seq + 1
 			  FROM position_daily_observation d
-			 WHERE d.position_id = sha256($1::bytea) AND d.as_of_date = $2`, id, date); err != nil {
+			 WHERE d.position_id = sha256($1::bytea) AND d.as_of_date = $2
+			 ORDER BY d.block_number DESC, d.block_version DESC, d.processing_version DESC,
+			          d.block_timestamp DESC, d.correction_seq DESC
+			 LIMIT 1`, id, date)
+		if err != nil {
 			t.Fatalf("append an explicitly live row: %v", err)
+		}
+		if n := tag.RowsAffected(); n != 1 {
+			t.Fatalf("the explicitly live row appended %d rows, want 1", n)
 		}
 		if got := f.dayQty(id, date); got != 55 {
 			t.Errorf("the day reads %d, want 55 -- is_retracted = FALSE is live, the same as NULL", got)
+		}
+		if got := f.dayRow(id, date)["is_retracted"]; got != "false" {
+			t.Errorf("the view reports is_retracted = %q, want false -- the column must be emitted as written", got)
+		}
+	})
+
+	// The block_version leg. A reorg re-observes the same block at block_version 1; it outranks the
+	// retraction on a leg no other case in this file exercises, so the day must come back. Drop
+	// block_version from the read's ORDER BY and processing_version decides instead, leaving the day
+	// dead.
+	t.Run("a reorg outranks a retraction on block_version", func(t *testing.T) {
+		const id = "adv-reorg"
+		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		f.retract(id, date)
+		if f.dayPresent(id, date) {
+			t.Fatalf("the day survived its retraction; the reorg below would prove nothing")
+		}
+		f.observe(id, dailyObs{qty: 44, block: 100, bv: 1, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		if got := f.dayQty(id, date); got != 44 {
+			t.Errorf("after the reorg the day reads %d, want 44 -- block_version must outrank the retraction", got)
+		}
+	})
+
+	// The block_timestamp leg, the last one and the tie-break that makes the pick total. Two rows on
+	// one day at the same block and version: retracting the EARLIER instant must not withdraw the day,
+	// because the later instant wins it.
+	t.Run("a retraction of the earlier instant leaves the day standing", func(t *testing.T) {
+		const id = "adv-instant"
+		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		f.observe(id, dailyObs{qty: 20, block: 100, ts: "2026-01-01T09:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		if n := f.dayRows(id, date); n != 2 {
+			t.Fatalf("the day holds %d rows, want 2 differing only in block_timestamp", n)
+		}
+		if err := f.retractKeyed(id, date, date, 100, 0, 0, 1, "2026-01-01T01:00:00Z"); err != nil {
+			t.Fatalf("retract the earlier instant: %v", err)
+		}
+		if got := f.dayQty(id, date); got != 20 {
+			t.Errorf("the day reads %d, want 20 -- the later instant still wins, so the earlier one's "+
+				"retraction is inert", got)
 		}
 	})
 
@@ -154,35 +217,32 @@ func TestPositionDailyRetractionAdversarial(t *testing.T) {
 		}
 	})
 
-	// Append-only, behaviourally: the row a retraction withdraws is byte-identical afterwards. The
-	// ACL half (the owner holds no UPDATE or DELETE) is asserted by the grants case in
-	// TestPositionDailyIsWrittenOnlyByItsOwnerUnderTheRealRole.
-	t.Run("the retracted row itself is unchanged", func(t *testing.T) {
+	// Append-only, behaviourally: every row that existed before a retraction is untouched after it,
+	// compared on ctid and xmin as well as content, so an in-place rewrite that preserved the values
+	// would still fail. The ACL half (the owner holds no UPDATE or DELETE) is asserted by the grants
+	// case in TestPositionDailyIsWrittenOnlyByItsOwnerUnderTheRealRole.
+	t.Run("no existing row is touched by a retraction", func(t *testing.T) {
 		const id = "adv-immutable"
 		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
 		f.crystallize()
-		before := f.rowImage(id, date)
+		before := f.rowImages()
+		if len(before) == 0 {
+			t.Fatalf("no rows exist before the retraction; the comparison below would be vacuous")
+		}
 		f.retract(id, date)
-		if after := f.rowImage(id, date); after != before {
-			t.Errorf("the withdrawn row changed:\nbefore %s\nafter  %s", before, after)
+		after := f.rowImages()
+		for key, img := range before {
+			switch got, ok := after[key]; {
+			case !ok:
+				t.Errorf("row %s disappeared across the retraction", key)
+			case got != img:
+				t.Errorf("row %s changed:\nbefore %s\nafter  %s", key, img, got)
+			}
+		}
+		if len(after) != len(before)+1 {
+			t.Errorf("the table went from %d rows to %d; a retraction appends exactly one", len(before), len(after))
 		}
 	})
-}
-
-// rowImage is the original (lowest-version) row of a day, whole, as text. It is read at the exact
-// coordinate rather than "the day's winner", so a retraction appended above it does not change
-// which row this returns.
-func (f *positionDailyFixture) rowImage(id, date string) string {
-	f.t.Helper()
-	var img string
-	if err := f.pool.QueryRow(f.ctx, `
-		SELECT (to_jsonb(d) - 'position_id')::text FROM position_daily_observation d
-		 WHERE d.position_id = sha256($1::bytea) AND d.as_of_date = $2
-		 ORDER BY d.block_number, d.block_version, d.processing_version, d.block_timestamp
-		 LIMIT 1`, id, date).Scan(&img); err != nil {
-		f.t.Fatalf("rowImage(%s, %s): %v", id, date, err)
-	}
-	return img
 }
 
 // The case the retraction exists for, end to end from the projection through position_state: a
@@ -210,20 +270,32 @@ func TestPositionDailyRetractionClosesTheMovedDayGap(t *testing.T) {
 	if got := cachedDays(t, f, ik); len(got) != 2 {
 		t.Fatalf("position_daily holds %v before the retraction; want both days, or this case starts from the wrong state", got)
 	}
+	// The control the assertion below is worth nothing without: the caches DO disagree first.
+	if d := cacheDisagreement(t, f); len(d) != 1 {
+		t.Fatalf("the caches disagree on %d position(s) before the retraction, want exactly 1 -- if the "+
+			"gap is already gone this case proves nothing: %s", len(d), strings.Join(d, " | "))
+	}
 
 	// The correction run withdraws the day it moved away from: the stale row's own coordinate at the
 	// next processing_version, is_retracted TRUE, every other column copied.
-	if _, err := f.pool.Exec(f.ctx, `
+	tag, err := f.pool.Exec(f.ctx, `
 		INSERT INTO position_daily_observation
 		    (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
 		     block_number, block_version, processing_version, block_timestamp, projection, build_id,
-		     run_id, deal_type, is_retracted)
+		     run_id, deal_type, is_retracted, correction_seq)
 		SELECT d.position_id, d.as_of_date, d.chain_id, d.protocol_id, d.instrument_key, d.holder_id,
-		       d.quantity, d.block_number, d.block_version, d.processing_version + 1, d.block_timestamp,
-		       d.projection, d.build_id, d.run_id, d.deal_type, TRUE
+		       d.quantity, d.block_number, d.block_version, d.processing_version, d.block_timestamp,
+		       d.projection, d.build_id, d.run_id, d.deal_type, TRUE, d.correction_seq + 1
 		  FROM position_daily_observation d
-		 WHERE d.instrument_key = $1 AND d.as_of_date = '2026-06-02'`, ik); err != nil {
+		 WHERE d.instrument_key = $1 AND d.as_of_date = '2026-06-02'
+		 ORDER BY d.block_number DESC, d.block_version DESC, d.processing_version DESC,
+		          d.block_timestamp DESC, d.correction_seq DESC
+		 LIMIT 1`, ik)
+	if err != nil {
 		t.Fatalf("retract the day the correction moved away from: %v", err)
+	}
+	if n := tag.RowsAffected(); n != 1 {
+		t.Fatalf("the retraction appended %d rows, want 1", n)
 	}
 
 	if got := cachedDays(t, f, ik); len(got) != 1 || got[0] != "2026-06-01=555" {
@@ -252,8 +324,39 @@ func TestPositionDailyRetractionClosesTheMovedDayGap(t *testing.T) {
 			moved = append(moved, d)
 		}
 	}
-	if len(moved) != 1 || !strings.Contains(moved[0], "2026-06-02") {
+	if len(moved) != 1 || !strings.Contains(moved[0], "date=2026-06-02") {
 		t.Errorf("the retraction diverges from the spine on %d date(s), want exactly 2026-06-02: %s",
 			len(moved), strings.Join(moved, " | "))
+	}
+}
+
+// The collision the tombstone's coordinate invites. A retraction written at the retracted row's
+// coordinate with processing_version + 1 allocates a number in the SPINE's version namespace, which
+// this table does not own. The spine's next correction of that same observation is allocated the
+// same N by processing_version_log, crystallizes to the identical PK, and the writer's
+// ON CONFLICT DO NOTHING drops it -- silently, reporting the zero it reports on a quiet run.
+func TestPositionDailyRetractionDoesNotSquatOnTheSpinesNextVersion(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	const id, date = "adv-squat", "2026-01-01"
+
+	f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+	f.crystallize()
+	f.retract(id, date)
+	if f.dayPresent(id, date) {
+		t.Fatalf("the day survived its retraction; this case starts from the wrong state")
+	}
+
+	// The spine's own correction of that observation, at the version a per-table allocator hands
+	// out first: same block, same instant, processing_version 1.
+	f.observe(id, dailyObs{qty: 33, block: 100, pv: 1, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+	f.crystallize()
+
+	if !f.dayPresent(id, date) {
+		t.Fatalf("the corrected reading never reached position_daily: the retraction is sitting on the "+
+			"coordinate the spine correction crystallizes to, and ON CONFLICT DO NOTHING dropped it. "+
+			"Rows for the day: %d", f.dayRows(id, date))
+	}
+	if got := f.dayQty(id, date); got != 33 {
+		t.Errorf("the day reads %d, want 33 -- a genuine correction above the retraction must win", got)
 	}
 }

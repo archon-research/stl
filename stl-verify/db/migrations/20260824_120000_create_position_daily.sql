@@ -20,14 +20,17 @@ CREATE TABLE IF NOT EXISTS position_daily_observation (
     run_id             bigint,
     deal_type          text,
     created_at         timestamptz NOT NULL DEFAULT now(),
-    -- A retraction marker (ADR-0006 §3, ARCT-470): TRUE means this key should never have
-    -- existed. Nullable with no default, so the add stays metadata-only and no live writer
-    -- names it. NULL and FALSE are live.
     is_retracted       boolean,
-    -- A day's version is the coordinate of the observation that won it, copied from the spine. The
-    -- winner is the maximum of a set that only grows, so it can only move forward.
+    -- This table's OWN correction counter, and the reason a retraction does not use
+    -- processing_version: that column is the spine's to allocate, and a tombstone placed in it
+    -- squats on the coordinate the spine's next correction crystallizes to.
+    correction_seq     integer     NOT NULL DEFAULT 0,
+    -- A day's version is the coordinate of the observation that won it, copied from the spine, and
+    -- the winner is the maximum of a set that only grows. correction_seq breaks ties within one
+    -- coordinate, so a local correction outranks the row it corrects and nothing else.
     CONSTRAINT position_daily_observation_pkey PRIMARY KEY
-        (position_id, as_of_date, block_number, block_version, processing_version, block_timestamp),
+        (position_id, as_of_date, block_number, block_version, processing_version, block_timestamp,
+         correction_seq),
     -- Pins the date derivation to one expression, so no row can land on a day its instant is not on.
     CONSTRAINT position_daily_observation_as_of_date_chk
         CHECK (as_of_date = (block_timestamp AT TIME ZONE 'utc')::date)
@@ -54,7 +57,8 @@ COMMENT ON COLUMN position_daily_observation.deal_type IS 'Roles: Derived (copy 
 COMMENT ON COLUMN position_daily_observation.build_id IS 'Roles: Audit. Which build wrote the observation (build_registry.id; 0 = pre-tracking).';
 COMMENT ON COLUMN position_daily_observation.run_id IS 'Roles: Audit (copy of position_state.run_id). Which writer run appended the observation (writer_run.id; NULL means it predates run tracking).';
 COMMENT ON COLUMN position_daily_observation.created_at IS 'Roles: Audit. When this row was crystallized; never rewritten. The as-of axis position_daily_as_of(T) filters on. It is TRANSACTION START time (now()) and a row becomes visible at COMMIT, so a T newer than the start of a still-running crystallization gains rows afterwards: a pinned T is stable once older than every run open at T. Processing time, not block time (see block_timestamp).';
-COMMENT ON COLUMN position_daily_observation.is_retracted IS 'Roles: Audit. Retraction marker (ADR-0006 §3, ARCT-470): TRUE means this (position, date) key should never have existed, so position_daily and position_daily_as_of(T) treat the day as ABSENT rather than falling back to an older row. NULL and FALSE are live. Written only by a correction run, as a new row at the retracted row''s own coordinate and a higher processing_version; the crystallizer never sets it. A later row at a higher version with it unset revives the key. Raw reads of this table still return retracted rows, which is what keeps an earlier position_daily_as_of(T) reproducible.';
+COMMENT ON COLUMN position_daily_observation.is_retracted IS 'Roles: Reference (steers reads). Retraction marker (ADR-0006 §3, ARCT-470): TRUE means this (position, date) key should never have existed, so position_daily and position_daily_as_of(T) treat the day as ABSENT rather than falling back to an older row. NULL and FALSE are live. Written only by a correction run, as a new row at the retracted row''s FULL spine coordinate -- processing_version included -- and correction_seq + 1; the crystallizer never sets it. A later spine observation at a higher coordinate revives the key, so a mis-keyed projection must be fixed upstream too. Raw reads of this table still return retracted rows, which is what keeps an earlier position_daily_as_of(T) reproducible.';
+COMMENT ON COLUMN position_daily_observation.correction_seq IS 'Roles: PK. This table''s own correction counter within one spine coordinate; 0 is every crystallized row. It exists because processing_version here is a COPY of the source''s count and is the spine''s to allocate: a retraction written at processing_version + 1 would occupy the primary key the spine''s own next correction crystallizes to, and the writer''s ON CONFLICT DO NOTHING would then drop that correction silently. Last leg of the ordering, so it breaks ties within a coordinate and never outranks a genuinely newer observation.';
 
 -- The app role reads; only the owner writes, which is the crystallizer's caller. ALTER DEFAULT
 -- PRIVILEGES (20260122_140100) hands every migrator-owned table full DML, so the REVOKE closes it.
@@ -120,7 +124,7 @@ BEGIN
 END;
 $proc$;
 
-COMMENT ON PROCEDURE crystallize_position_daily(interval, bigint) IS '[Operational] Writes each settled UTC day''s winning position_state observation into position_daily_observation (VEC-636): CALL crystallize_position_daily(). Returns the number of rows it wrote, normally zero. Insert-only and idempotent -- it offers the recomputed winner per (position, date), and conflicts do nothing, so a re-run and a late observation that loses both write nothing while a genuine change appends exactly one row. settle_after (default 1 hour) holds back days that have just closed; it reduces churn rather than buying correctness, since a later correction is picked up by the next run. What it cannot repair: a row whose spine source was re-stamped in place, and the as-of history of a window it never saw. Never writes is_retracted: retracting a key is a correction run''s job, and reaches this table by copy once the spine carries the column. Pins enable_tiered_reads so the winner is computed over the whole spine, tiered chunks included.';
+COMMENT ON PROCEDURE crystallize_position_daily(interval, bigint) IS '[Operational] Writes each settled UTC day''s winning position_state observation into position_daily_observation (VEC-636): CALL crystallize_position_daily(). Returns the number of rows it wrote, normally zero. Insert-only and idempotent -- it offers the recomputed winner per (position, date), and conflicts do nothing, so a re-run and a late observation that loses both write nothing while a genuine change appends exactly one row. settle_after (default 1 hour) holds back days that have just closed; it reduces churn rather than buying correctness, since a later correction is picked up by the next run. What it cannot repair: a row whose spine source was re-stamped in place, and the as-of history of a window it never saw. Never writes is_retracted or correction_seq: retracting a key is a correction run''s job, and the crystallizer''s column list must be EXTENDED to copy is_retracted the day position_state gains it -- nothing copies it today, and TestPositionDailyEqualsTheSpineArgmaxOverRandomHistories fails when that day comes, because it compares every column the two tables share, taken from the catalogue rather than named. Pins enable_tiered_reads so the winner is computed over the whole spine, tiered chunks included.';
 
 -- A NULL bound would make every created_at <= NULL comparison NULL, so the read would return an empty
 -- set and a caller with an unset timestamp would read "held nothing" as an answer. Raise instead.
@@ -158,7 +162,8 @@ AS $fn$
           FROM public.position_daily_observation d
          WHERE d.created_at <= public.position_daily_as_of_bound(seen_before)
          ORDER BY d.position_id, d.as_of_date, d.holder_id,
-                  d.block_number DESC, d.block_version DESC, d.processing_version DESC, d.block_timestamp DESC
+                  d.block_number DESC, d.block_version DESC, d.processing_version DESC,
+                  d.block_timestamp DESC, d.correction_seq DESC
     ) w
     WHERE w.is_retracted IS NOT TRUE;
 $fn$;

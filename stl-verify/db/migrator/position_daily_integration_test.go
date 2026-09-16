@@ -898,7 +898,8 @@ func dailyCacheDigest(ctx context.Context, t *testing.T, pool *pgxpool.Pool, rel
 func (f *positionDailyFixture) rowImages() map[string]string {
 	f.t.Helper()
 	rows, err := f.pool.Query(f.ctx, `
-		SELECT (position_id, as_of_date, block_number, block_version, processing_version, block_timestamp)::text,
+		SELECT (position_id, as_of_date, block_number, block_version, processing_version, block_timestamp,
+		        correction_seq)::text,
 		       d.ctid::text, d.xmin::text, to_jsonb(d)::text
 		  FROM position_daily_observation d`)
 	if err != nil {
@@ -1246,7 +1247,10 @@ func TestPositionDailySchema(t *testing.T) {
 			name string
 			cols []string
 		}{
-			{name: "position_daily_observation_pkey", cols: []string{"position_id", "as_of_date", "block_number", "block_version", "processing_version", "block_timestamp"}},
+			// correction_seq is LAST on purpose: it breaks ties inside one spine coordinate and must
+			// never outrank a genuinely newer observation. Moving it earlier is a real mutation, killed
+			// by the inert-retraction and squat cases in the retraction suites.
+			{name: "position_daily_observation_pkey", cols: []string{"position_id", "as_of_date", "block_number", "block_version", "processing_version", "block_timestamp", "correction_seq"}},
 			{name: "position_daily_observation_holder_idx", cols: []string{"holder_id", "as_of_date"}},
 			{name: "position_daily_observation_as_of_date_idx", cols: []string{"as_of_date", "position_id"}},
 		} {
