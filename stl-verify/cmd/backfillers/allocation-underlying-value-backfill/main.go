@@ -195,23 +195,27 @@ func parseFlags(args []string) (cliConfig, error) {
 // inputs needed to resolve it: direct/aToken/erc4626 bucketing, and the
 // registry and price-history fields the erc4626 and price-ratio paths need.
 type candidateRow struct {
-	chainID              int64
-	tokenAddress         common.Address
-	tokenDecimals        int32
-	primeID              int64
-	proxyAddress         common.Address
-	balance              *big.Int // raw units, upscaled from the DB's human-normalized text via humanToRaw
-	balanceHuman         string
-	scaledBalance        *big.Int // raw units; nil when the original row's scaled_balance is NULL
-	blockNumber          int64
-	blockVersion         int32
-	txHash               string
-	logIndex             int32
-	txAmount             *big.Int
-	direction            string
-	fromAddress          *common.Address
-	toAddress            *common.Address
-	createdAt            time.Time
+	chainID       int64
+	tokenAddress  common.Address
+	tokenDecimals int32
+	primeID       int64
+	proxyAddress  common.Address
+	balance       *big.Int // raw units, upscaled from the DB's human-normalized text via humanToRaw
+	balanceHuman  string
+	scaledBalance *big.Int // raw units; nil when the original row's scaled_balance is NULL
+	blockNumber   int64
+	blockVersion  int32
+	txHash        string
+	logIndex      int32
+	txAmount      *big.Int
+	direction     string
+	fromAddress   *common.Address
+	toAddress     *common.Address
+	createdAt     time.Time
+	// processingVersion of THIS row, which candidateQuery's NOT EXISTS clause
+	// guarantees is the highest for its identity — so the correction belongs at
+	// processingVersion + 1.
+	processingVersion    int32
 	isReceiptToken       bool
 	underlyingAddress    *common.Address
 	underlyingDecimals   *int32 // NULL for a direct holding (self-referencing case)
@@ -252,8 +256,8 @@ func run(ctx context.Context, args []string) error {
 }
 
 // passResult is what one pass over the candidate query achieved: how many rows
-// it looked at, how many it resolved and submitted for writing, and the cursor
-// a caller resumes from. written is zero on a dry run.
+// it looked at, how many reached allocation_position, and the cursor a caller
+// resumes from. written is zero on a dry run.
 type passResult struct {
 	fetched int
 	written int
@@ -265,7 +269,7 @@ type passResult struct {
 // cfg.dryRun) writes them, sharing pool/deps/archiveResolver across calls so a
 // multi-pass caller pays for connection and multicaller setup once.
 func runPass(ctx context.Context, pool *pgxpool.Pool, deps runnerDeps, archiveResolver *erc4626ArchiveResolver, cfg cliConfig) (passResult, error) {
-	candidates, err := fetchCandidates(ctx, pool, cfg)
+	candidates, err := fetchCandidates(ctx, pool, cfg, deps.buildID)
 	if err != nil {
 		return passResult{}, fmt.Errorf("fetch candidates: %w", err)
 	}
@@ -286,10 +290,11 @@ func runPass(ctx context.Context, pool *pgxpool.Pool, deps runnerDeps, archiveRe
 		return result, nil
 	}
 
-	result.written = len(classified)
-	if err := persist(ctx, deps, classified); err != nil {
+	written, err := persist(ctx, deps, classified)
+	if err != nil {
 		return result, err
 	}
+	result.written = written
 	return result, nil
 }
 
@@ -308,6 +313,7 @@ func cursorOf(candidates []candidateRow) time.Time {
 type runnerDeps struct {
 	txm       *postgres.TxManager
 	allocRepo *postgres.AllocationRepository
+	buildID   buildregistry.BuildID
 }
 
 func wireDependencies(ctx context.Context, pool *pgxpool.Pool) (runnerDeps, error) {
@@ -334,7 +340,7 @@ func wireDependencies(ctx context.Context, pool *pgxpool.Pool) (runnerDeps, erro
 	}
 	allocRepo := postgres.NewAllocationRepository(pool, txm, tokenRepo, nil, registry.BuildID(), runID)
 
-	return runnerDeps{txm: txm, allocRepo: allocRepo}, nil
+	return runnerDeps{txm: txm, allocRepo: allocRepo, buildID: registry.BuildID()}, nil
 }
 
 // logCandidatesFetched reports the cursor a batched caller advances by. It is
@@ -458,24 +464,39 @@ func logDryRunPreview(classified []positionSource) {
 	}
 }
 
-func persist(ctx context.Context, deps runnerDeps, classified []positionSource) error {
+// persist writes one classified batch and returns the rows history received.
+//
+// Every row is expected to land: candidateQuery already excludes anything a
+// previous run corrected, so a row submitted here has no newer version to
+// collide with. Any shortfall is therefore real loss — rolled back with the
+// transaction and failed loudly, never logged as a success (VEC-759).
+func persist(ctx context.Context, deps runnerDeps, classified []positionSource) (int, error) {
 	positions := make([]*entity.AllocationPosition, len(classified))
 	for i, ps := range classified {
 		positions[i] = ps.position
 	}
 
+	var inserted int64
 	if err := deps.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return deps.allocRepo.SavePositions(ctx, tx, positions)
+		var saveErr error
+		inserted, saveErr = deps.allocRepo.SavePositions(ctx, tx, positions)
+		if saveErr != nil {
+			return saveErr
+		}
+		if inserted != int64(len(positions)) {
+			return fmt.Errorf(
+				"%d of %d rows reached allocation_position; the rest were discarded without an error, "+
+					"which is what a still-compressed target chunk does to a write",
+				inserted, len(positions),
+			)
+		}
+		return nil
 	}); err != nil {
-		return fmt.Errorf("save positions: %w", err)
+		return 0, fmt.Errorf("save positions: %w", err)
 	}
 
-	// "submitted", not "confirmed inserted": ON CONFLICT DO NOTHING can no-op
-	// an individual row (e.g. a concurrent run already wrote it), and
-	// SavePositions returns no per-row count to distinguish that from a real
-	// insert.
-	slog.Info("backfilled", "rows_submitted", len(positions))
-	return nil
+	slog.Info("backfilled", "rows_inserted", inserted)
+	return int(inserted), nil
 }
 
 // toEntity rebuilds the original event as a new AllocationPosition carrying the
@@ -483,6 +504,7 @@ func persist(ctx context.Context, deps runnerDeps, classified []positionSource) 
 // copied from the row that already exists in history — this is a correction,
 // not a new event.
 func toEntity(c candidateRow, underlyingAsset common.Address, underlyingDecimals int32, underlyingRaw *big.Int) *entity.AllocationPosition {
+	correctsVersion := int(c.processingVersion)
 	return &entity.AllocationPosition{
 		ChainID:       c.chainID,
 		TokenAddress:  c.tokenAddress,
@@ -497,17 +519,18 @@ func toEntity(c candidateRow, underlyingAsset common.Address, underlyingDecimals
 		// 18-decimal token. underlying_value escaped it only because
 		// Underlying.AssetDecimals is set, which is what made the bug survive a
 		// row-count-only check of the write.
-		TokenDecimals:  int(c.tokenDecimals),
-		BlockNumber:    c.blockNumber,
-		BlockVersion:   int(c.blockVersion),
-		TxHash:         c.txHash,
-		LogIndex:       int(c.logIndex),
-		TxAmount:       c.txAmount,
-		Direction:      c.direction,
-		FromAddress:    c.fromAddress,
-		ToAddress:      c.toAddress,
-		CreatedAtBlock: c.blockNumber,
-		CreatedAt:      c.createdAt, // block timestamp, unchanged from the original row
+		TokenDecimals:   int(c.tokenDecimals),
+		BlockNumber:     c.blockNumber,
+		BlockVersion:    int(c.blockVersion),
+		TxHash:          c.txHash,
+		LogIndex:        int(c.logIndex),
+		TxAmount:        c.txAmount,
+		Direction:       c.direction,
+		FromAddress:     c.fromAddress,
+		ToAddress:       c.toAddress,
+		CreatedAtBlock:  c.blockNumber,
+		CreatedAt:       c.createdAt, // block timestamp, unchanged from the original row
+		CorrectsVersion: &correctsVersion,
 		Underlying: &entity.UnderlyingValuation{
 			Value:         underlyingRaw,
 			AssetAddress:  underlyingAsset,
@@ -541,7 +564,7 @@ const candidateQuery = `
 		ap.prime_id, ap.proxy_address,
 		ap.balance::text, ap.scaled_balance::text, ap.block_number, ap.block_version,
 		encode(ap.tx_hash, 'hex'), ap.log_index, ap.tx_amount::text, ap.direction,
-		ap.from_address, ap.to_address, ap.created_at,
+		ap.from_address, ap.to_address, ap.created_at, ap.processing_version,
 		rt.receipt_token_address IS NOT NULL AS is_receipt_token,
 		ut.address, ut.decimals,
 		p.name,
@@ -614,18 +637,45 @@ const candidateQuery = `
 	        AND c.direction      = ap.direction
 	        AND c.processing_version > ap.processing_version
 	  )
+	  -- Never hand the write path an identity this build has already written.
+	  -- assign_processing_version_allocation_position's replay branch would
+	  -- force the row back onto that build's existing processing_version,
+	  -- overriding the version the insert supplied AFTER TimescaleDB resolved
+	  -- the conflict against it — which appends a duplicate primary key rather
+	  -- than deduplicating, and no error or row count reveals it (VEC-759).
+	  --
+	  -- The column list mirrors that branch's own lookup exactly, created_at
+	  -- included. created_at is the hypertable partition key, so matching it
+	  -- lets the planner prune chunks and keep the ordered created_at scan the
+	  -- LIMIT stops early on; without it the join degrades to a hash anti join
+	  -- under a blocking sort, and a pass cannot return a first row inside its
+	  -- activity timeout.
+	  AND NOT EXISTS (
+	      SELECT 1 FROM allocation_position b
+	      WHERE b.chain_id       = ap.chain_id
+	        AND b.token_id       = ap.token_id
+	        AND b.prime_id       = ap.prime_id
+	        AND b.proxy_address  = ap.proxy_address
+	        AND b.block_number   = ap.block_number
+	        AND b.block_version  = ap.block_version
+	        AND b.tx_hash        = ap.tx_hash
+	        AND b.log_index      = ap.log_index
+	        AND b.direction      = ap.direction
+	        AND b.created_at     = ap.created_at
+	        AND b.build_id       = $5
+	  )
 	-- block_number/log_index only break ties for a deterministic scan order;
 	-- the resume cursor itself is created_at alone (see the -after doc and
 	-- logCandidatesFetched's saturation warning for that cursor's limit).
 	ORDER BY ap.created_at, ap.block_number, ap.log_index
 	LIMIT $3`
 
-func fetchCandidates(ctx context.Context, pool *pgxpool.Pool, cfg cliConfig) ([]candidateRow, error) {
+func fetchCandidates(ctx context.Context, pool *pgxpool.Pool, cfg cliConfig, buildID buildregistry.BuildID) ([]candidateRow, error) {
 	var afterArg any
 	if !cfg.after.IsZero() {
 		afterArg = cfg.after
 	}
-	rows, err := pool.Query(ctx, candidateQuery, cfg.before, cfg.primeID, cfg.limit, afterArg)
+	rows, err := pool.Query(ctx, candidateQuery, cfg.before, cfg.primeID, cfg.limit, afterArg, int(buildID))
 	if err != nil {
 		return nil, err
 	}
@@ -663,7 +713,7 @@ func scanCandidateRow(rows pgx.Rows) (candidateRow, error) {
 		&c.primeID, &proxyAddr,
 		&balanceStr, &scaledBalanceStr, &c.blockNumber, &c.blockVersion,
 		&txHashHex, &c.logIndex, &txAmountStr, &c.direction,
-		&fromAddr, &toAddr, &c.createdAt,
+		&fromAddr, &toAddr, &c.createdAt, &c.processingVersion,
 		&c.isReceiptToken,
 		&underlyingAddr, &underlyingDecimals,
 		&protocolName,

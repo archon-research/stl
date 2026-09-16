@@ -2934,12 +2934,23 @@ groups:
         # NoPoolsTouched cannot cover it: a posm transfer is deliberately absent
         # from touchedIDs, so the two streams fail independently.
         #
-        # Window, `offset 6h` and `unless` are NoPoolsTouched's, for the reasons
-        # spelt out there — same permanent failure class, and the false-positive
-        # pressure is thinner: this stream is the whole contract, not a curated
-        # subset (2,001 blocks on 2026-08-31 carried 290 Transfers, ~260 per 6h).
+        # Window and `offset 6h` are NoPoolsTouched's, for the reasons spelt out
+        # there — same permanent failure class, and the false-positive pressure
+        # is thinner: this stream is the whole contract, not a curated subset
+        # (2,001 blocks on 2026-08-31 carried 290 Transfers, ~260 per 6h).
         # Keys on rows ATTEMPTED, not written, as NotWritingState does: a
         # same-build redelivery decodes fine and lands nothing.
+        #
+        # `== 0` rather than NoPoolsTouched's `unless … > 0`, because an ABSENT
+        # series here means the running build predates the posm decoder, not
+        # that the decoder is failing. The alert rules sync to Mimir when the PR
+        # merges while the image reaches the cluster minutes later, and the
+        # blocks-processed terms above are satisfied by the old build throughout
+        # that window, so `unless` fired on every rollout (observed on staging
+        # 2026-09-14, ~10 min after #854 merged). `== 0` needs the series to
+        # exist, and dextelemetry seeds it at construction, so it exists exactly
+        # when a build that can decode transfers is running. A pod that dies
+        # before it exports is VectorUniswapV4IndexerDown's case, not this one.
         expr: |
           sum by (chain, cluster) (
             rate(uniswap_v4_blocks_processed_total{status="success", k8s_namespace_name="vector"}[6h])
@@ -2948,10 +2959,10 @@ groups:
           sum by (chain, cluster) (
             rate(uniswap_v4_blocks_processed_total{status="success", k8s_namespace_name="vector"}[6h] offset 6h)
           ) > 0
-          unless
+          and
           sum by (chain, cluster) (
             rate(uniswap_v4_nft_transfer_rows_attempted_total{k8s_namespace_name="vector"}[6h])
-          ) > 0
+          ) == 0
         for: 10m
         labels:
           team: vector

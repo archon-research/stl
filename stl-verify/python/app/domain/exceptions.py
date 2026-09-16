@@ -71,6 +71,15 @@ class InvalidOverrideError(ValueError):
     """
 
 
+class InvalidPrimeIdentifierError(ValueError):
+    """Raised when a prime identifier is neither a well-formed address nor a name.
+
+    Inherits from ``ValueError`` so existing ``except ValueError`` blocks keep
+    catching it, while ``resolve_prime`` maps it to 422 — a malformed identifier
+    must stay distinguishable from the 503 a failed lookup gets.
+    """
+
+
 class ModelDataUnavailableError(Exception):
     """Raised by a RiskModel when it applies to the asset but has no data to compute from.
 

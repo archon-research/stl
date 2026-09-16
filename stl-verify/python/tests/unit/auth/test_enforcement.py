@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.adapters.postgres.reference_as_of import utc_now
 from app.api import deps
+from app.api.errors import register_error_handlers
 from app.auth.jwt import Principal
 
 VAULT = "0x" + "a" * 40
@@ -32,6 +33,7 @@ def _settings_on(monkeypatch: pytest.MonkeyPatch) -> None:
 def _app(*, verifier=None, fga=None, principal=None, engine=None) -> TestClient:
     """A tiny app exercising the real dependencies without the service graph."""
     app = FastAPI()
+    register_error_handlers(app)
     if verifier is not None:
         app.state.verifier = verifier
     if fga is not None:
@@ -57,6 +59,10 @@ def _app(*, verifier=None, fga=None, principal=None, engine=None) -> TestClient:
     @app.get("/v1/primes/{prime_id}/debt")
     async def debt(prime_id: str, _authz: None = Depends(deps.require_prime_view)):
         return {"prime": prime_id}
+
+    @app.get("/v1/primes")
+    async def primes(allowed: frozenset[str] | None = Depends(deps.allowed_prime_vaults)):
+        return sorted(allowed or [])
 
     return TestClient(app)
 
@@ -171,15 +177,8 @@ def test_list_filter_truncation_is_500():
 
     fga = AsyncMock()
     fga.list_objects.side_effect = FgaTruncated("ceiling")
-    app = FastAPI()
-    app.state.fga = fga
-    app.dependency_overrides[deps.get_principal] = lambda: _principal({"org:viewer"})
-
-    @app.get("/v1/primes")
-    async def primes(allowed: frozenset[str] | None = Depends(deps.allowed_prime_vaults)):
-        return sorted(allowed or [])
-
-    assert TestClient(app).get("/v1/primes").status_code == 500
+    c = _app(fga=fga, principal=_principal({"org:viewer"}))
+    assert c.get("/v1/primes").status_code == 500
 
 
 # --- the REAL _vault_for path ----------------------------------------------
@@ -314,18 +313,10 @@ def test_prime_check_emits_a_decision_event_naming_the_resource(monkeypatch, cap
 def test_list_filtering_emits_a_count_never_the_allow_list(caplog):
     """An allow-list runs to the ListObjects ceiling; logging it would put
     thousands of addresses on one line."""
-    fga = AsyncMock()
-    fga.list_objects.return_value = frozenset({VAULT.upper(), PROXY})
-    app = FastAPI()
-    app.state.fga = fga
-    app.dependency_overrides[deps.get_principal] = lambda: _principal({"org:viewer"})
-
-    @app.get("/v1/primes")
-    async def primes(allowed: frozenset[str] | None = Depends(deps.allowed_prime_vaults)):
-        return sorted(allowed or [])
+    client = _allow_list_client(frozenset({VAULT.upper(), PROXY}))
 
     with caplog.at_level(logging.INFO, logger="app.api.deps"):
-        assert TestClient(app).get("/v1/primes").status_code == 200
+        assert client.get("/v1/primes").status_code == 200
 
     (event,) = [r for r in caplog.records if getattr(r, "event", None) == deps.AUTHZ_EVENT]
     assert (event.gate, event.decision, event.reason) == ("prime_list", "allow", "filtered")
@@ -372,25 +363,17 @@ def test_a_database_outage_behind_the_prime_gate_is_503_not_500(monkeypatch, cap
     ]
 
 
-def _allow_list_client(objects: frozenset[str]) -> tuple[TestClient, AsyncMock]:
+def _allow_list_client(objects: frozenset[str]) -> TestClient:
     fga = AsyncMock()
     fga.list_objects.return_value = objects
-    app = FastAPI()
-    app.state.fga = fga
-    app.dependency_overrides[deps.get_principal] = lambda: _principal({"org:viewer"})
-
-    @app.get("/v1/primes")
-    async def primes(allowed: frozenset[str] | None = Depends(deps.allowed_prime_vaults)):
-        return sorted(allowed or [])
-
-    return TestClient(app), fga
+    return _app(fga=fga, principal=_principal({"org:viewer"}))
 
 
 def test_a_malformed_object_id_in_the_tuple_store_does_not_take_the_route_down():
     """The tuple reconciler is a different system. One id that is not an
     address must not 500 /v1/primes for everyone — and cannot grant anything,
     since it matches no vault_address."""
-    client, _ = _allow_list_client(frozenset({VAULT, "prime-with-no-address", ""}))
+    client = _allow_list_client(frozenset({VAULT, "prime-with-no-address", ""}))
 
     response = client.get("/v1/primes")
 
@@ -400,7 +383,7 @@ def test_a_malformed_object_id_in_the_tuple_store_does_not_take_the_route_down()
 
 def test_a_dropped_object_id_is_counted_on_the_decision_event(caplog):
     with caplog.at_level(logging.INFO, logger="app.api.deps"):
-        client, _ = _allow_list_client(frozenset({VAULT, "not-an-address"}))
+        client = _allow_list_client(frozenset({VAULT, "not-an-address"}))
         assert client.get("/v1/primes").status_code == 200
 
     (event,) = [r for r in caplog.records if getattr(r, "event", None) == deps.AUTHZ_EVENT]
@@ -410,6 +393,6 @@ def test_a_dropped_object_id_is_counted_on_the_decision_event(caplog):
 def test_an_uppercase_0x_prefix_is_normalised_not_dropped():
     """The address regex is case-sensitive on the `x`, so lowercasing has to
     happen BEFORE the parse or a `0X`-prefixed tuple silently loses access."""
-    client, _ = _allow_list_client(frozenset({VAULT.replace("0x", "0X").upper()}))
+    client = _allow_list_client(frozenset({VAULT.replace("0x", "0X").upper()}))
 
     assert client.get("/v1/primes").json() == [VAULT]

@@ -7,14 +7,15 @@
  * app that those paths do not exist, so every one of them is reachable here —
  * through `response.untyped`, which records that the gap is in the document.
  *
- * Body shapes follow FastAPI: a hand-raised `HTTPException` carries a string
- * `detail`, a rejected `Query`/path parameter carries the validation array.
+ * `422` bodies follow the API's own RFC 9457 problem detail (`ApiError`),
+ * so a mocked rejection is the shape the app parses in production; the statuses the
+ * document does not declare carry the string `detail` FastAPI puts on them.
  */
-import type { operations } from './schema.ts';
+import type { ApiError, operations } from './schema.ts';
 
 export type Problem = {
   status: number;
-  body: { detail: string | ValidationDetail[] };
+  body: { detail: string } | ApiError;
 };
 
 /**
@@ -48,12 +49,6 @@ export type DocumentDeclaresOnly200And422 = Assert<
   IsExactly<DeclaredStatus, 200 | 422>
 >;
 
-type ValidationDetail = {
-  loc: (string | number)[];
-  msg: string;
-  type: string;
-};
-
 export function problemResponse(problem: Problem): Response {
   return Response.json(problem.body, { status: problem.status });
 }
@@ -66,16 +61,27 @@ export function badRequest(detail: string): Problem {
   return { status: 400, body: { detail } };
 }
 
-/** A domain rule the API checks by hand, so a plain string, not the array. */
-export function unprocessable(detail: string): Problem {
-  return { status: 422, body: { detail } };
+/** A rejection the API raises by name, as the problem detail it puts on the wire. */
+export function rejection(
+  type: ApiError['type'],
+  title: ApiError['title'],
+  detail: string,
+): Problem {
+  return { status: 422, body: { type, title, status: 422, detail } };
 }
 
-/** A rejected query parameter, in the shape pydantic produces. */
+/** A rejected query parameter, carrying the `errors` member the real handler emits. */
 export function invalidQueryParam(name: string, msg: string): Problem {
+  const field = `query.${name}`;
   return {
     status: 422,
-    body: { detail: [{ loc: ['query', name], msg, type: 'value_error' }] },
+    body: {
+      type: 'invalid_request',
+      title: 'Invalid request',
+      status: 422,
+      detail: `${field}: ${msg}`,
+      errors: [{ field, code: 'value_error', message: msg }],
+    },
   };
 }
 

@@ -2938,10 +2938,20 @@ the left side exists for the fresh-deploy reason spelt out on `NoPoolsTouched`.
 Blocks are advancing (`uniswap_v4_blocks_processed_total{status="success"}` is
 non-zero, both now and 6h ago) but **not one** Uniswap V4 PositionManager
 ERC-721 `Transfer` has been decoded
-(`uniswap_v4_nft_transfer_rows_attempted_total` is zero or absent) for 6 hours.
+(`uniswap_v4_nft_transfer_rows_attempted_total` is exactly zero) for 6 hours.
 The series counts rows *queued*, not landed, so a redelivered range that lands
 nothing (every INSERT conflicts away) still keeps it alive;
 `uniswap_v4_nft_transfer_rows_written_total` is the growth counter.
+
+**Zero, not absent.** Unlike its siblings in this group, the rule requires the
+counter's series to exist. `dextelemetry` seeds it at construction, so it is
+present from the boot of any build carrying the posm decoder and absent from one
+that predates it. That distinction is load-bearing: the alert rules sync to Mimir
+the moment a PR merges, while the image reaches the cluster minutes later, and
+the blocks-processed terms are satisfied by the old build throughout. Written as
+`unless … > 0` this fired on every rollout of the feature rather than only when
+decoding was broken. A pod that dies before exporting anything is
+[`VectorUniswapV4IndexerDown`](#vectoruniswapv4indexerdown)'s case, not this one.
 
 `uniswap_v4_position_nft_transfer` is the only source of posm token holders, so
 while this fires "who holds token T" answers with stale data and no query can
