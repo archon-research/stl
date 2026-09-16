@@ -54,6 +54,12 @@ type Config struct {
 	// the indexers there, so without it every repeated run reports normal lag as missing objects.
 	// Zero means no margin.
 	HeadMargin int64
+
+	// MaxBlocks caps how many blocks one run reads. Zero is unbounded and is what a first pass over a
+	// chain needs; a positive value bounds a scheduled tick, so a schedule can never become an
+	// unattended multi-hour pass. A capped run stops on a page boundary and the next one resumes,
+	// because the work list is enumerated fresh and the anti-join drops what is already loaded.
+	MaxBlocks int64
 }
 
 // Service reads block headers from S3 and upserts block_meta for one chain.
@@ -115,24 +121,30 @@ func (s *Service) Run(ctx context.Context) (int64, error) {
 		return total, fmt.Errorf("opening the work list: %w", err)
 	}
 	defer work.Close(ctx)
+	var read int64
 	for {
 		if err := ctx.Err(); err != nil {
 			return total, err
 		}
-		refs, err := work.Next(ctx, s.cfg.BatchSize)
+		page := s.pageSize(read)
+		if page == 0 {
+			// Capped, not drained. The misses collected so far are whatever fell in this run's window,
+			// not what the archive is missing, so this run reports none of them: an absent object sorts
+			// first and would otherwise fail every tick with the same fragment forever, and a retryable
+			// error would re-run the activity and read past the cap this exists to impose.
+			s.logger.Warn("block_meta run reached its cap; blocks remain pending",
+				"chain", s.cfg.ChainID, "read", read, "cap", s.cfg.MaxBlocks, "missesSeen", len(misses))
+			s.metrics.recordCapped(ctx, s.cfg.ChainID)
+			return total, nil
+		}
+		refs, err := work.Next(ctx, page)
 		if err != nil {
 			return total, fmt.Errorf("loading pending blocks: %w", err)
 		}
 		if len(refs) == 0 {
-			// Misses are carried to the end rather than returned at the first one: the list
-			// is paged in ascending order, so stopping mid-page would leave every later block
-			// unloaded. What could be read is committed, and the run still fails naming them.
-			if len(misses) > 0 {
-				return total, fmt.Errorf("chain %d: %d referenced block(s) absent from the archive: %s",
-					s.cfg.ChainID, len(misses), strings.Join(cappedMisses(misses), ", "))
-			}
-			return total, nil
+			break
 		}
+		read += int64(len(refs))
 		s.metrics.recordPaged(ctx, s.cfg.ChainID, len(refs))
 
 		rows, batchMisses, err := s.readBatch(ctx, refs)
@@ -152,6 +164,31 @@ func (s *Service) Run(ctx context.Context) (int64, error) {
 		}
 		s.logger.Info("block_meta batch", "chain", s.cfg.ChainID, "upserted", n, "total", total)
 	}
+
+	// Misses are carried to the end rather than returned at the first one: the list is paged in
+	// ascending order, so stopping mid-page would leave every later block unloaded. What could be
+	// read is committed, and the run still fails naming them.
+	if len(misses) > 0 {
+		return total, fmt.Errorf("chain %d: %d referenced block(s) absent from the archive: %s",
+			s.cfg.ChainID, len(misses), strings.Join(cappedMisses(misses), ", "))
+	}
+	return total, nil
+}
+
+// pageSize is how many blocks the next page may hold: the batch size, or what is left of the run's
+// cap when it is bounded. Zero means the cap is reached.
+func (s *Service) pageSize(read int64) int {
+	if s.cfg.MaxBlocks <= 0 {
+		return s.cfg.BatchSize
+	}
+	remaining := s.cfg.MaxBlocks - read
+	if remaining <= 0 {
+		return 0
+	}
+	if remaining < int64(s.cfg.BatchSize) {
+		return int(remaining)
+	}
+	return s.cfg.BatchSize
 }
 
 // maxNamedMisses bounds how many absent blocks the final error names. The list is

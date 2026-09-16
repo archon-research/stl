@@ -63,3 +63,4 @@ cronjob morpho-v2-bootstrap        morpho-v2-bootstrap
 cronjob morpho-vault-backfill      morpho-vault-backfill
 cronjob block-republisher          block-republisher
 cronjob block-meta-loader          block-meta-loader
+cronjob block-meta-topup           block-meta-topup

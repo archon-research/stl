@@ -156,6 +156,62 @@ func TestRun_FillsAllPendingBlocksAcrossBatches(t *testing.T) {
 	}
 }
 
+// A bounded run reads its cap and stops, and the next one carries on. This is what lets a schedule
+// exist at all: an unbounded tick on an unbootstrapped chain is the multi-hour pass a deploy must
+// never start.
+func TestRun_StopsAtTheBlockCapAndTheNextRunResumes(t *testing.T) {
+	universe := []outbound.BlockRef{
+		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0},
+		{Number: 40, Version: 0}, {Number: 50, Version: 0},
+	}
+	repo := &mockBlockMetaRepo{universe: universe}
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 2, MaxBlocks: 3},
+		repo, &mockS3Reader{streamFn: streamTimestampByBlock}, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	total, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Three, not four: the cap cuts the second page short rather than letting a full batch overrun it.
+	if total != 3 {
+		t.Fatalf("first run upserted %d blocks, want 3 (the cap)", total)
+	}
+
+	// The blocks the cap left behind are the next run's work.
+	repo.universe = universe[3:]
+	repo.upserted = nil
+	rest, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if rest != 2 {
+		t.Errorf("second run upserted %d blocks, want the 2 the cap left", rest)
+	}
+}
+
+// Zero is unbounded, which is what a first pass over a chain needs.
+func TestRun_ZeroCapIsUnbounded(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
+		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0},
+	}}
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 1, MaxBlocks: 0},
+		repo, &mockS3Reader{streamFn: streamTimestampByBlock}, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	total, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if total != 3 {
+		t.Errorf("total = %d, want every pending block (3)", total)
+	}
+}
+
 func TestRun_NoPendingBlocksIsNoop(t *testing.T) {
 	repo := &mockBlockMetaRepo{universe: nil}
 	svc := newTestService(t, repo, &mockS3Reader{streamFn: streamTimestampByBlock}, 500)

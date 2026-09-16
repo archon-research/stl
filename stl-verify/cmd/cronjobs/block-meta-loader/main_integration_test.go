@@ -20,6 +20,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockmetacfg"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -87,7 +88,7 @@ func seedReferencedBlocks(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	}
 }
 
-// This drives the deployed wiring — loadConfig's env parsing and bucket guard, the real S3 reader
+// This drives the deployed wiring — blockmetacfg.Load's env parsing and bucket guard, the real S3 reader
 // built the way the binary builds it, register's activity wiring, and the workflow — against a real
 // database and LocalStack. run() itself only resolves the queue and hands off to RunWorker, which
 // needs a Temporal server; everything below that is exercised here.
@@ -118,9 +119,9 @@ func TestBlockMetaLoad_FillsReferencedBlocks(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 
-	cfg, err := loadConfig()
+	cfg, err := blockmetacfg.Load()
 	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
+		t.Fatalf("blockmetacfg.Load: %v", err)
 	}
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
@@ -170,7 +171,7 @@ func TestBlockMetaLoad_RefusesAnotherChainsBucket(t *testing.T) {
 	t.Setenv("S3_BUCKET", "stl-sentinelstaging-base-raw-itest")
 	t.Setenv("DATABASE_URL", "unused-here")
 
-	if _, err := loadConfig(); err == nil {
+	if _, err := blockmetacfg.Load(); err == nil {
 		t.Fatal("a bucket belonging to another chain was accepted")
 	}
 }
@@ -204,11 +205,11 @@ func TestBlockMetaLoad_HeadMarginHoldsBackTheNewestBlocks(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 
-	cfg, err := loadConfig()
+	cfg, err := blockmetacfg.Load()
 	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
+		t.Fatalf("blockmetacfg.Load: %v", err)
 	}
-	if cfg.headMargin == 0 {
+	if cfg.HeadMargin == 0 {
 		t.Fatal("the default head margin is 0; this test would prove nothing")
 	}
 
@@ -260,9 +261,9 @@ func TestBlockMetaLoad_RefusesToStartWithoutArchiveAccess(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 
-	cfg, err := loadConfig()
+	cfg, err := blockmetacfg.Load()
 	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
+		t.Fatalf("blockmetacfg.Load: %v", err)
 	}
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	err = register(ctx, cfg, temporal.Dependencies{Pool: pool, Logger: discardLogger()}, env)

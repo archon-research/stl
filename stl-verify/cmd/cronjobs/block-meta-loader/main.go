@@ -37,6 +37,7 @@ import (
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockmetacfg"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 )
@@ -78,6 +79,9 @@ func init() {
 // workflowTypeName is what an operator types into the Temporal UI's "Workflow
 // Type" field, so it is registered explicitly rather than derived from the Go
 // function name — a rename must not invalidate the runbook or muscle memory.
+// queueBaseName is this component's deployed name.
+const queueBaseName = "block-meta-loader"
+
 const workflowTypeName = "BlockMetaLoad"
 
 func run(ctx context.Context) error {
@@ -86,7 +90,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("resolving the task queue: %w", err)
 	}
 
-	cfg, err := loadConfig()
+	cfg, err := blockmetacfg.Load()
 	if err != nil {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
@@ -95,14 +99,14 @@ func run(ctx context.Context) error {
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.WorkerConfig{
 		Name:         taskQueue,
-		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(cfg.dsn)),
+		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(cfg.DSN)),
 		Register: func(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
 			return register(ctx, cfg, deps, r)
 		},
 	})
 }
 
-func register(ctx context.Context, cfg config, deps temporal.Dependencies, r worker.Registry) error {
+func register(ctx context.Context, cfg blockmetacfg.Config, deps temporal.Dependencies, r worker.Registry) error {
 	reader, err := newS3Reader(ctx, deps.Logger)
 	if err != nil {
 		return err
@@ -111,8 +115,8 @@ func register(ctx context.Context, cfg config, deps temporal.Dependencies, r wor
 	// s3:ListBucket and s3:GetObject come from an EKS Pod Identity association granted in the infra
 	// repo. Proven here, a missing grant is a pod that will not start rather than a run an operator
 	// started and has to come back to.
-	if err := s3adapter.NewArchiveReader(reader, cfg.bucket).Ping(ctx); err != nil {
-		return fmt.Errorf("the raw archive %s is unusable: %w", cfg.bucket, err)
+	if err := s3adapter.NewArchiveReader(reader, cfg.Bucket).Ping(ctx); err != nil {
+		return fmt.Errorf("the raw archive %s is unusable: %w", cfg.Bucket, err)
 	}
 
 	activities := &loadActivities{cfg: cfg, pool: deps.Pool, reader: reader, logger: deps.Logger}
@@ -121,7 +125,7 @@ func register(ctx context.Context, cfg config, deps temporal.Dependencies, r wor
 	activities.register(r)
 
 	deps.Logger.Info("block-meta-loader configured",
-		"chainID", cfg.chainID, "bucket", cfg.bucket, "environment", cfg.deployEnv)
+		"chainID", cfg.ChainID, "bucket", cfg.Bucket, "environment", cfg.DeployEnv)
 	return nil
 }
 
