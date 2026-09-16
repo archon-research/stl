@@ -291,7 +291,7 @@ func TestWorkListEnumeratesWithTieredReadsOn(t *testing.T) {
 		sql: `INSERT INTO tiered_probe (setting)
 		      SELECT current_setting('timescaledb.enable_tiered_reads')
 		        FROM sparklend_reserve_data sr
-		       WHERE $1::bigint > 0 AND %s
+		       WHERE $1::bigint > 0 AND $2::bigint > 0 AND %s
 		       LIMIT 1`,
 	}
 
@@ -549,8 +549,8 @@ func TestWorkListReEnumeratesAfterAnInterruptedEnumeration(t *testing.T) {
 
 	// The state a killed enumeration leaves: some rows, no marker.
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
-		VALUES (1, 7000001, 0) ON CONFLICT DO NOTHING`); err != nil {
+		INSERT INTO block_meta_worklist (chain_id, run_id, block_number, block_version)
+		VALUES (1, $1, 7000001, 0) ON CONFLICT DO NOTHING`, int64(runID)); err != nil {
 		t.Fatalf("leave a partial work list: %v", err)
 	}
 	var partial int
@@ -654,4 +654,130 @@ func TestWindowPredicatesCoverTieredChunkRanges(t *testing.T) {
 		t.Errorf("the tiered range [%d, %d) is in no window (%d windows: %v); the loader would never scan "+
 			"the tiered tail and would report success having skipped it", tieredLo, tieredHi, len(after), after)
 	}
+}
+
+// Two runs may cover one chain at once: an operator's on-demand pass and the scheduled top-up. Each
+// enumerates its own slice and deletes only that, so an overlap costs duplicated archive reads. Before
+// the slices were keyed by run, the second open cleared the chain outright -- the first run's cursor
+// then read an empty list, stopped early, and reported success having loaded a fraction of the chain.
+func TestAnOverlappingRunDoesNotTruncateTheOtherRunsWorkList(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	first, err := openRunList(t, ctx, pool, 1)
+	if err != nil {
+		t.Fatalf("open the first run's list: %v", err)
+	}
+	defer first.Close(ctx)
+	head, err := first.Next(ctx, 2)
+	if err != nil {
+		t.Fatalf("page the first run: %v", err)
+	}
+	if len(head) != 2 {
+		t.Fatalf("the first run read %d blocks, want 2; the seed is not exercising this", len(head))
+	}
+
+	// The second run, mid-flight of the first.
+	second, err := openRunList(t, ctx, pool, 1)
+	if err != nil {
+		t.Fatalf("open the second run's list: %v", err)
+	}
+	defer second.Close(ctx)
+
+	rest := drain(t, ctx, first)
+	if len(rest) == 0 {
+		t.Fatal("the first run's list is empty after the second run opened: the second run cleared the " +
+			"blocks the first had not reached, and that run reports success having skipped them")
+	}
+	// Both runs see the same pending set over the same sources; the first must not lose its tail.
+	if got, want := len(head)+len(rest), len(drain(t, ctx, second)); got != want {
+		t.Errorf("the first run enumerated %d blocks and the second %d over identical sources", got, want)
+	}
+}
+
+// A run killed before it closes leaves its slice behind; nothing else may delete another run's rows,
+// so without a sweep the table only grows. The sweep is bounded by age, not by liveness, because
+// writer_run records no end: a slice is another run's until that run is older than any run can be.
+func TestAbandonedSlicesAreSweptOnceTheirRunIsOldEnough(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	stale := backdatedRun(t, ctx, pool, buildID, "2 days")
+	fresh := backdatedRun(t, ctx, pool, buildID, "1 hour")
+	for _, owner := range []int64{stale, fresh} {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO block_meta_worklist (chain_id, run_id, block_number, block_version)
+			VALUES (1, $1, 8000000, 0)`, owner); err != nil {
+			t.Fatalf("seed an abandoned slice: %v", err)
+		}
+	}
+
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+	list, err := repo.OpenWorkList(ctx, 1, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer list.Close(ctx)
+
+	var staleRows, freshRows int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE run_id = $1), count(*) FILTER (WHERE run_id = $2)
+		  FROM block_meta_worklist WHERE chain_id = 1`, stale, fresh).Scan(&staleRows, &freshRows); err != nil {
+		t.Fatal(err)
+	}
+	if staleRows != 0 {
+		t.Errorf("%d row(s) of a two-day-old run survive; abandoned slices accumulate forever", staleRows)
+	}
+	if freshRows != 1 {
+		t.Errorf("the hour-old run's row count is %d, want 1; a run still in flight had its list deleted", freshRows)
+	}
+}
+
+// openRunList opens a work list under its own writer run, the way a separate process would.
+func openRunList(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64) (outbound.BlockWorkList, error) {
+	t.Helper()
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+	return repo.OpenWorkList(ctx, chainID, 0)
+}
+
+// drain reads a list to its end.
+func drain(t *testing.T, ctx context.Context, list outbound.BlockWorkList) []outbound.BlockRef {
+	t.Helper()
+	var out []outbound.BlockRef
+	for {
+		refs, err := list.Next(ctx, 3)
+		if err != nil {
+			t.Fatalf("page the work list: %v", err)
+		}
+		if len(refs) == 0 {
+			return out
+		}
+		out = append(out, refs...)
+	}
+}
+
+// backdatedRun inserts a writer_run that started age ago. writer_run is insert-only, so the age is
+// written at insert rather than updated afterwards.
+func backdatedRun(t *testing.T, ctx context.Context, pool *pgxpool.Pool, buildID buildregistry.BuildID, age string) int64 {
+	t.Helper()
+	var id int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO writer_run (build_id, started_at, reference_snapshot, reference_effective_at)
+		VALUES ($1, now() - $2::interval, 'test', now())
+		RETURNING id`, int64(buildID), age).Scan(&id); err != nil {
+		t.Fatalf("insert a %s-old writer run: %v", age, err)
+	}
+	return id
 }
