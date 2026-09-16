@@ -9,7 +9,9 @@ WORKDIR /ui
 COPY ts/package.json ts/package-lock.json ts/.npmrc ./
 COPY ts/ui/package.json ui/package.json
 
-RUN corepack enable npm
+# Node 26 ships no corepack (unbundled in Node 25); install it so the
+# packageManager pin (npm@12.0.2) is shimmed in place of the bundled npm 11.x.
+RUN npm install -g corepack@0.36.0 && corepack enable npm
 RUN npm ci
 
 COPY ts/ui ui/
