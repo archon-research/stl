@@ -63,7 +63,7 @@ ensure_postgres() {
 
         echo "Waiting for Postgres..."
         local ready=false
-        for i in $(seq 1 30); do
+        for _ in $(seq 1 30); do
             if docker exec "$name" pg_isready -U test -q 2>/dev/null; then
                 ready=true
                 break

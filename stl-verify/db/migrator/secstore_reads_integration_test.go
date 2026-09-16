@@ -880,10 +880,6 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 
 // TestSecStoreCurrentViewBoundaries tests the valid-time window boundaries on the _current
 // views using current_date so the test works regardless of when it runs.
-//
-// Kills: M050 (sec_node_current lower inclusive), M051 (sec_node_current upper exclusive),
-//
-//	M058 (sec_edge_current lower inclusive), M059 (sec_edge_current upper exclusive).
 func TestSecStoreCurrentViewBoundaries(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -960,21 +956,14 @@ func TestSecStoreCurrentViewBoundaries(t *testing.T) {
 
 // TestSecStoreRecordIDTiebreakAcrossAllReadObjects inserts two rows in the same transaction
 // so they share (id, valid_from, pv, ingest_xid) and differ only in record_id. The higher
-// record_id must win in every read object.
-//
-// Kills: M014 (sec_node_current record_id), M030 (sec_edge_current record_id),
-//
-//	M084 (drop_record_id sec_node_current), M087 (drop_record_id sec_node_as_of 1-arg),
-//	M090 (drop_record_id sec_node_as_of_kind), M096 (drop_record_id sec_edge_current),
-//	M099 (drop_record_id sec_edge_as_of 1-arg).
+// record_id must win in every read object. Index scans are disabled so the SQL ORDER BY
+// clause is exercised rather than being supplied by the index.
 func TestSecStoreRecordIDTiebreakAcrossAllReadObjects(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
 
 	const nodeID = "em-t-recid-tb"
-	// Two inserts in one transaction: same (id, valid_from, pv=0) and same ingest_xid.
-	// The first insert gets the lower record_id, the second the higher.
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -1011,8 +1000,6 @@ func TestSecStoreRecordIDTiebreakAcrossAllReadObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The higher record_id has change_reason = 'higher record_id' and status = INACTIVE (node).
-	// record_id DESC means the higher record_id wins.
 	nodeReads := []struct {
 		name, sql string
 	}{
@@ -1022,8 +1009,19 @@ func TestSecStoreRecordIDTiebreakAcrossAllReadObjects(t *testing.T) {
 	}
 	for _, q := range nodeReads {
 		t.Run(q.name, func(t *testing.T) {
+			qtx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer qtx.Rollback(ctx)
+			if _, err := qtx.Exec(ctx, "SET LOCAL enable_indexscan = off"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := qtx.Exec(ctx, "SET LOCAL enable_indexonlyscan = off"); err != nil {
+				t.Fatal(err)
+			}
 			var reason string
-			if err := pool.QueryRow(ctx, q.sql, nodeID).Scan(&reason); err != nil {
+			if err := qtx.QueryRow(ctx, q.sql, nodeID).Scan(&reason); err != nil {
 				t.Fatalf("%s: %v", q.name, err)
 			}
 			if reason != "higher record_id" {
@@ -1040,8 +1038,19 @@ func TestSecStoreRecordIDTiebreakAcrossAllReadObjects(t *testing.T) {
 	}
 	for _, q := range edgeReads {
 		t.Run(q.name, func(t *testing.T) {
+			qtx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer qtx.Rollback(ctx)
+			if _, err := qtx.Exec(ctx, "SET LOCAL enable_indexscan = off"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := qtx.Exec(ctx, "SET LOCAL enable_indexonlyscan = off"); err != nil {
+				t.Fatal(err)
+			}
 			var reason string
-			if err := pool.QueryRow(ctx, q.sql, edgeSrc).Scan(&reason); err != nil {
+			if err := qtx.QueryRow(ctx, q.sql, edgeSrc).Scan(&reason); err != nil {
 				t.Fatalf("%s: %v", q.name, err)
 			}
 			if reason != "higher record_id" {
@@ -1051,16 +1060,16 @@ func TestSecStoreRecordIDTiebreakAcrossAllReadObjects(t *testing.T) {
 	}
 }
 
-// TestSecStoreIngestXidTiebreakOnEdgeCurrent verifies ingest_xid wins over record_id on
-// sec_edge_current. The node tests already cover sec_node_current; this extends to edges.
-//
-// Kills: M097 (drop_ingest_xid sec_edge_current).
-func TestSecStoreIngestXidTiebreakOnEdgeCurrent(t *testing.T) {
+// TestSecStoreIngestXidTiebreakAcrossAllReadObjects verifies ingest_xid wins over record_id
+// on all read objects. Two interleaved transactions: txEarly gets a lower xid, txLate a
+// higher one. txLate inserts first (lower record_id) and txEarly second (higher record_id).
+// ingest_xid DESC must beat record_id DESC — the late-xid row wins.
+func TestSecStoreIngestXidTiebreakAcrossAllReadObjects(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
 
-	const src = "sec-t-xid-etb"
+	const nodeID = "em-t-xid-ntb"
 
 	txEarly, err := pool.Begin(ctx)
 	if err != nil {
@@ -1080,17 +1089,29 @@ func TestSecStoreIngestXidTiebreakOnEdgeCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// txLate inserts first (lower record_id, higher xid)
 	_, err = txLate.Exec(ctx, `
-		INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to, `+secstoreSpine+`)
-		VALUES ($1, 'SECURITY', 'em-t-xid-edst', 'ENTITY', 'ISSUED_BY', '2026-01-01', 'infinity', 'test', 'SEED_LOAD', 'late-xid wins', 'test')`, src)
+		INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, `+secstoreSpine+`)
+		VALUES ($1, 'ENTITY', 'INACTIVE', '2026-01-01', 'infinity', 'test', 'SEED_LOAD', 'late-xid wins', 'test')`, nodeID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// txEarly inserts second (higher record_id, lower xid)
+	_, err = txEarly.Exec(ctx, `
+		INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, `+secstoreSpine+`)
+		VALUES ($1, 'ENTITY', 'ACTIVE', '2026-01-01', '9999-12-31', 'test', 'SEED_LOAD', 'early-xid loses', 'test')`, nodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const edgeSrc = "sec-t-xid-etb"
+	_, err = txLate.Exec(ctx, `
+		INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to, `+secstoreSpine+`)
+		VALUES ($1, 'SECURITY', 'em-t-xid-edst', 'ENTITY', 'ISSUED_BY', '2026-01-01', 'infinity', 'test', 'SEED_LOAD', 'late-xid wins', 'test')`, edgeSrc)
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, err = txEarly.Exec(ctx, `
 		INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to, `+secstoreSpine+`)
-		VALUES ($1, 'SECURITY', 'em-t-xid-edst', 'ENTITY', 'ISSUED_BY', '2026-01-01', '9999-12-31', 'test', 'SEED_LOAD', 'early-xid loses', 'test')`, src)
+		VALUES ($1, 'SECURITY', 'em-t-xid-edst', 'ENTITY', 'ISSUED_BY', '2026-01-01', '9999-12-31', 'test', 'SEED_LOAD', 'early-xid loses', 'test')`, edgeSrc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1102,22 +1123,46 @@ func TestSecStoreIngestXidTiebreakOnEdgeCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var reason string
-	if err := pool.QueryRow(ctx, `
-		SELECT change_reason FROM sec_edge_current WHERE src_id = $1 AND rel_type = 'ISSUED_BY'`, src).Scan(&reason); err != nil {
-		t.Fatalf("sec_edge_current: %v", err)
+	nodeReads := []struct {
+		name, sql string
+	}{
+		{"sec_node_current", `SELECT change_reason FROM sec_node_current WHERE id = $1`},
+		{"sec_node_as_of", `SELECT change_reason FROM sec_node_as_of('2026-03-01'::date) WHERE id = $1`},
+		{"sec_node_as_of_kind", `SELECT change_reason FROM sec_node_as_of_kind('2026-03-01'::date, 'ENTITY') WHERE id = $1`},
 	}
-	if reason != "late-xid wins" {
-		t.Fatalf("got change_reason=%q, want \"late-xid wins\" — ingest_xid DESC must beat record_id DESC", reason)
+	for _, q := range nodeReads {
+		t.Run(q.name, func(t *testing.T) {
+			var reason string
+			if err := pool.QueryRow(ctx, q.sql, nodeID).Scan(&reason); err != nil {
+				t.Fatalf("%s: %v", q.name, err)
+			}
+			if reason != "late-xid wins" {
+				t.Fatalf("%s: got change_reason=%q, want \"late-xid wins\" — ingest_xid DESC must beat record_id DESC", q.name, reason)
+			}
+		})
+	}
+
+	edgeReads := []struct {
+		name, sql string
+	}{
+		{"sec_edge_current", `SELECT change_reason FROM sec_edge_current WHERE src_id = $1 AND rel_type = 'ISSUED_BY'`},
+		{"sec_edge_as_of", `SELECT change_reason FROM sec_edge_as_of('2026-03-01'::date) WHERE src_id = $1 AND rel_type = 'ISSUED_BY'`},
+	}
+	for _, q := range edgeReads {
+		t.Run(q.name, func(t *testing.T) {
+			var reason string
+			if err := pool.QueryRow(ctx, q.sql, edgeSrc).Scan(&reason); err != nil {
+				t.Fatalf("%s: %v", q.name, err)
+			}
+			if reason != "late-xid wins" {
+				t.Fatalf("%s: got change_reason=%q, want \"late-xid wins\" — ingest_xid DESC must beat record_id DESC", q.name, reason)
+			}
+		})
 	}
 }
 
 // TestSecStoreOverlappingWindowsOnCurrentViews tests that _current views pick the latest
 // valid_from when two open windows overlap today.
-//
-// Kills: M015 (valid_from DESC outer on sec_node_current),
-//
-//	M031 (valid_from DESC outer on sec_edge_current).
 func TestSecStoreOverlappingWindowsOnCurrentViews(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -1167,18 +1212,6 @@ func TestSecStoreOverlappingWindowsOnCurrentViews(t *testing.T) {
 // TestSecStoreSnapshotVariantResolutionAndBoundaries exercises the 2-arg (pg_snapshot)
 // overloads of sec_node_as_of and sec_edge_as_of. The existing tests cover the 1-arg
 // variants; these mirror them for the snapshot variants that have their own SQL.
-//
-// Kills: M025 (xid ASC snapshot node), M026 (record_id ASC snapshot node),
-//
-//	M027 (valid_from ASC outer snapshot node), M036 (pv ASC snapshot edge),
-//	M037 (xid ASC snapshot edge), M038 (record_id ASC snapshot edge),
-//	M039 (valid_from ASC outer snapshot edge), M043 (step_reversal snapshot node),
-//	M046 (step_reversal snapshot edge), M057 (upper inclusive snapshot node),
-//	M062 (lower exclusive snapshot edge), M063 (upper inclusive snapshot edge),
-//	M070 (delete_window_filter snapshot edge),
-//	M093 (drop_record_id snapshot node), M094 (drop_ingest_xid snapshot node),
-//	M095 (swap_pv_ingest_xid snapshot node), M102 (drop_record_id snapshot edge),
-//	M103 (drop_ingest_xid snapshot edge), M104 (swap_pv_ingest_xid snapshot edge).
 func TestSecStoreSnapshotVariantResolutionAndBoundaries(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -1732,8 +1765,6 @@ func TestSecStoreSnapshotVariantResolutionAndBoundaries(t *testing.T) {
 
 // TestSecStoreAsOfKindWindowFilter ensures sec_node_as_of_kind has a working window filter
 // that excludes future and past-expired rows.
-//
-// Kills: M067 (delete_window_filter on sec_node_as_of_kind).
 func TestSecStoreAsOfKindWindowFilter(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -1765,12 +1796,68 @@ func TestSecStoreAsOfKindWindowFilter(t *testing.T) {
 	}
 }
 
+// TestSecStoreStepReversalOnAsOfKindAndEdgeAsOf verifies that the window filter runs AFTER
+// resolution on sec_node_as_of_kind and 1-arg sec_edge_as_of. A pv=N correction narrows
+// valid_to; querying at a date between the original and corrected valid_to distinguishes the
+// two orderings.
+func TestSecStoreStepReversalOnAsOfKindAndEdgeAsOf(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	t.Run("sec_node_as_of_kind", func(t *testing.T) {
+		const id = "em-t-steprev-kind"
+		insertNode(ctx, t, pool, id, "ACTIVE", "2026-01-01", "'infinity'", "original open window")
+
+		pvN := correctionVersion(ctx, t, pool, "sec_node")
+		_, err := pool.Exec(ctx, fmt.Sprintf(`
+			INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, processing_version, `+secstoreSpine+`)
+			VALUES ('em-t-steprev-kind', 'ENTITY', 'ACTIVE', '2026-01-01', '2026-06-01', %d, 'test', 'RESTATEMENT', 'correction narrows window', 'test')`, pvN))
+		if err != nil {
+			t.Fatalf("insert correction: %v", err)
+		}
+
+		var count int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM sec_node_as_of_kind('2026-07-01'::date, 'ENTITY') WHERE id = $1`, id).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("got count=%d, want 0 — pv-N correction narrowed valid_to to Jun; Jul must be excluded (resolve before window)", count)
+		}
+	})
+
+	t.Run("sec_edge_as_of", func(t *testing.T) {
+		const src = "sec-t-steprev-eas"
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, `+secstoreSpine+`)
+			VALUES ($1, 'SECURITY', 'em-t-steprev-eas', 'ENTITY', 'ISSUED_BY', '2026-01-01', 'test', 'SEED_LOAD', 'original open', 'test')`, src)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		edgePv := correctionVersion(ctx, t, pool, "sec_edge")
+		_, err = pool.Exec(ctx, fmt.Sprintf(`
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to, processing_version, `+secstoreSpine+`)
+			VALUES ('sec-t-steprev-eas', 'SECURITY', 'em-t-steprev-eas', 'ENTITY', 'ISSUED_BY', '2026-01-01', '2026-06-01', %d, 'test', 'RESTATEMENT', 'correction narrows window', 'test')`, edgePv))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var count int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM sec_edge_as_of('2026-07-01'::date)
+			WHERE src_id = $1 AND rel_type = 'ISSUED_BY'`, src).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("got count=%d, want 0 — pv-N correction narrowed valid_to to Jun; Jul must be excluded (resolve before window)", count)
+		}
+	})
+}
+
 // TestSecStorePlanShapeEdgeSrcIdx checks that sec_edge_src_idx is present in plans that
 // traverse edges by source.
-//
-// Kills: M010 (valid_from DESC on sec_edge_src_idx),
-//
-//	M011 (processing_version DESC on sec_edge_src_idx).
 func TestSecStorePlanShapeEdgeSrcIdx(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
