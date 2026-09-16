@@ -1,7 +1,8 @@
-import { SyncedChartGroup } from '@archon-research/charting';
+import { SyncedChartGroup } from '@archon-research/charting/xychart';
 import {
   Badge,
   type BadgeColorPalette,
+  SkeletonStack,
   SurfaceMessageBody,
   SurfaceMessageRoot,
 } from '@archon-research/design-system';
@@ -17,7 +18,6 @@ import {
   formatWadValue,
 } from '../../shared/lib/dashboard';
 import type { PrimeRiskCapital } from '../../shared/types/allocation';
-import { Placeholder } from '../../shared/ui/Placeholder';
 import { ExposureCard, PrimeCollateralCard } from './HiddenMetricCards';
 import { MetricCardLegend, MetricCardTrend } from './metricCardChart';
 import {
@@ -411,7 +411,7 @@ function PrimeDebtCard({
       // only card in the row with no chart box reserved.
       value={
         isLoading ? (
-          <Placeholder width="8rem" height={28} />
+          <SkeletonStack count={1} itemHeight={28} style={{ width: '8rem' }} />
         ) : (
           formatWadValue(wad)
         )
@@ -423,7 +423,11 @@ function PrimeDebtCard({
               when it is the unrounded debt the headline already states. */}
           <div className={metricCaptionClassName}>
             {isLoading ? (
-              <Placeholder width="12rem" height={16} />
+              <SkeletonStack
+                count={1}
+                itemHeight={16}
+                style={{ width: '12rem' }}
+              />
             ) : (
               (ilkLabel ?? '\u00A0')
             )}

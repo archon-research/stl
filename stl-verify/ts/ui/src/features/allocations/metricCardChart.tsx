@@ -1,29 +1,31 @@
 import {
-  AreaSeries,
-  Axis,
-  buildChartTheme,
-  ChartCursorLayer,
   ChartLegend,
   type ChartLegendItem,
   chartColorToken,
   type ChartColorToken,
   chartTokens,
+  resolveChartColor,
+  useContainerWidth,
+} from '@archon-research/charting/core';
+import {
+  AreaSeries,
+  Axis,
+  buildChartTheme,
+  ChartCursorLayer,
   DataContext,
   Grid,
   LineSeries,
   ReferenceBand,
-  resolveChartColor,
   Tooltip,
-  useContainerWidth,
   useHoveredTimestamp,
   useSyncedCursorHandlers,
   XYChart,
-} from '@archon-research/charting';
+} from '@archon-research/charting/xychart';
+import { SkeletonStack } from '@archon-research/design-system';
 import { useContext, useMemo } from 'react';
 
 import { css } from '#styled-system/css';
 
-import { Placeholder } from '../../shared/ui/Placeholder';
 import {
   CHART_HEIGHT,
   type ChartDatum,
@@ -107,7 +109,7 @@ export function MetricCardLegend({
 const chartTooltipSurfaceClassName = css({
   borderColor: 'border.subtle',
   borderStyle: 'solid',
-  borderWidth: '1px',
+  borderWidth: 'hairline',
   borderRadius: 'md',
   background: 'surface.default',
   boxShadow: 'sm',
@@ -240,7 +242,7 @@ export function MetricCardTrend({
     // in.
     return (
       <div className={css({ mt: '2' })}>
-        <Placeholder width="100%" height={CHART_HEIGHT} />
+        <SkeletonStack count={1} itemHeight={CHART_HEIGHT} />
       </div>
     );
   }

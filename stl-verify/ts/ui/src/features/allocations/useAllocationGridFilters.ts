@@ -79,6 +79,13 @@ export function useAllocationGridFilters({
   filteredAllocations,
 }: UseAllocationGridFiltersArgs): UseAllocationGridFiltersResult {
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
+  // Mirrors the prop into local state during render — React's documented
+  // alternative to a sync Effect — so a prop change lands in the same paint.
+  const [previousSearchValue, setPreviousSearchValue] = useState(searchValue);
+  if (searchValue !== previousSearchValue) {
+    setPreviousSearchValue(searchValue);
+    setLocalSearchValue(searchValue);
+  }
 
   // The category filter lives in the URL rather than in local state so it is
   // shareable alongside the other grid filters, and so the shell's per-prime
@@ -94,10 +101,6 @@ export function useAllocationGridFilters({
     () => filterAllocationsByCategory(filteredAllocations, categoryFilter),
     [categoryFilter, filteredAllocations],
   );
-
-  useEffect(() => {
-    setLocalSearchValue(searchValue);
-  }, [searchValue]);
 
   useEffect(() => {
     if (localSearchValue === searchValue) {
