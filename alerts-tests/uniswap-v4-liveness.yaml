@@ -1,10 +1,12 @@
 # Unit tests for the uniswap-v4-indexer liveness pair.
 #
 # Both rules derive `chain` from the Deployment NAME, because prod kube-state
-# exports no Deployment labels: the bare `uniswap-v4-indexer` is mainnet, every
-# other chain is `<chain>-uniswap-v4-indexer` with the entity.ChainName value
-# verbatim, and the `avalanche-` prefix every other 43114 Deployment carries is
-# mapped onto the worker's own `avalanche-c`. The mainnet cases come first, then
+# exports no Deployment labels: the bare `uniswap-v4-indexer` is mainnet and
+# every other chain is `<chain>-uniswap-v4-indexer`, where `<chain>` is the
+# chainutil.ChainSlug value every deployed resource is named from. The worker
+# labels its own series with entity.ChainName, which differs only for 43114
+# (`avalanche` against `avalanche-c`), so the rules map that one prefix onto the
+# worker's value. The mainnet cases come first, then
 # the two-chain ones: per-chain labelling, the zero-fill and the replica gate
 # joining `on (chain, cluster)`, and the avalanche mapping.
 rule_files:
@@ -234,7 +236,7 @@ tests:
               runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerdown"
               summary: "Vector uniswap-v4-indexer has no available replica on base (base-uniswap-v4-indexer)"
 
-  # 43114 is the one chain whose k8s prefix (`avalanche-`, the name every other
+  # 43114 is the one chain whose ChainSlug (`avalanche`, the name every
   # Avalanche Deployment carries) differs from its entity.ChainName
   # (`avalanche-c`, what the worker labels its own series with). Without the
   # third label_replace this stall would page on a phantom `chain="avalanche"`.
@@ -322,3 +324,34 @@ tests:
                 TimescaleDB is going stale. Check the pod logs and SQS backlog.
               runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerstalled"
               summary: "Vector uniswap-v4-indexer stalled on arbitrum (no block consumed >15m)"
+
+  # The runbook tells an operator the indexer tolerates either Avalanche spelling
+  # (the rules bridge them), so the tolerated one is pinned too: tighten the
+  # third label_replace or the Deployment regex and this is what notices.
+  - name: "stalled: the avalanche-c- Deployment form the runbook allows also lands on avalanche-c"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="avalanche-c"}'
+        values: '100x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="avalanche-c-uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerStalled
+        exp_alerts:
+          - exp_labels:
+              chain: "avalanche-c"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "critical"
+              team: "vector"
+            exp_annotations:
+              description: |
+                The `avalanche-c` uniswap-v4-indexer Deployment is up but has
+                consumed no block for >15m (or its uniswap_v4_blocks_processed_total
+                series vanished). The SQS consume loop is wedged or the OTLP metric
+                export broke; Uniswap V4 pool state for `avalanche-c` in
+                TimescaleDB is going stale. Check the pod logs and SQS backlog.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerstalled"
+              summary: "Vector uniswap-v4-indexer stalled on avalanche-c (no block consumed >15m)"

@@ -210,7 +210,7 @@ func TestTaskQueueName(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("CHAIN_ID", tc.chainID)
 
-			got, err := chainutil.TaskQueueName(ethereumQueueName)
+			got, err := chainutil.TaskQueueName(queueBaseName)
 
 			if err != nil {
 				t.Fatalf("TaskQueueName error = %v", err)

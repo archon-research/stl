@@ -60,7 +60,7 @@ func init() {
 const workflowTypeName = "BlockRepublish"
 
 func run(ctx context.Context) error {
-	taskQueue, err := chainutil.TaskQueueName(ethereumQueueName)
+	taskQueue, err := chainutil.TaskQueueName(queueBaseName)
 	if err != nil {
 		return fmt.Errorf("resolving the task queue: %w", err)
 	}

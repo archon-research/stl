@@ -162,17 +162,17 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("startup configuration: %w", err)
 	}
 
-	taskQueue, err := chainutil.TaskQueueName(ethereumQueueName)
-	if err != nil {
-		return fmt.Errorf("resolving the task queue: %w", err)
-	}
-
 	bootstrap := &bootstrapWorker{}
 	defer bootstrap.close()
 
+	workerConfig, err := bootstrap.workerConfigFromEnv(dbURL)
+	if err != nil {
+		return err
+	}
+
 	return temporal.RunWorker(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
-	}, bootstrap.workerConfig(taskQueue, dbURL))
+	}, workerConfig)
 }
 
 // bootstrapWorker owns process-scoped resources because WorkerConfig cannot
@@ -181,12 +181,19 @@ type bootstrapWorker struct {
 	cleanup func()
 }
 
-func (b *bootstrapWorker) workerConfig(taskQueue, dbURL string) temporal.WorkerConfig {
+// workerConfigFromEnv resolves this deployment's queue and is what run() wires
+// into RunWorker, so a test can assert the deployed name without a Temporal
+// server: WorkerConfig.Name is the OTel service name the alert selectors match.
+func (b *bootstrapWorker) workerConfigFromEnv(dbURL string) (temporal.WorkerConfig, error) {
+	taskQueue, err := chainutil.TaskQueueName(queueBaseName)
+	if err != nil {
+		return temporal.WorkerConfig{}, fmt.Errorf("resolving the task queue: %w", err)
+	}
 	return temporal.WorkerConfig{
 		Name:         taskQueue,
 		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
 		Register:     b.register,
-	}
+	}, nil
 }
 
 func (b *bootstrapWorker) close() {

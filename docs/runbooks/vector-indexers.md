@@ -2156,10 +2156,16 @@ natural key is `(chain_id, pool_id)` and never `pool_id` alone).
 5. **Bootstrap** — a second chain needs its own worker Deployment, the
    `block-republisher` shape: copy `k8s/base/uniswap-v4-position-bootstrap/` to
    `k8s/base/<chain>-uniswap-v4-position-bootstrap/` changing only the names
-   (`<chain>` as in step 3), with its own ConfigMap (`CHAIN_ID`,
-   `ALCHEMY_HTTP_URL`, and an explicit `FINALITY_DEPTH` chosen for that chain's
-   finality — see *Pin semantics* above), ExternalSecret and overlay
-   `resources:` entries; keep `image: uniswap-v4-position-bootstrap`, the roster
+   (`<chain>` as in step 3), with its own ConfigMap carrying every key mainnet's
+   carries — `TEMPORAL_HOST_PORT`, `TEMPORAL_NAMESPACE`, `CHAIN_ID`,
+   `ALCHEMY_HTTP_URL`, `AWS_REGION`, `DEPLOY_ENV` — plus an explicit
+   `FINALITY_DEPTH` chosen for that chain's finality (see *Pin semantics*
+   above). Only two of those fail loudly: `DEPLOY_ENV` and `CHAIN_ID` are
+   required at boot, but `TEMPORAL_HOST_PORT` and `TEMPORAL_NAMESPACE` default
+   to `localhost:7233` and `sentinel`, so a worker missing them starts, polls a
+   queue in the wrong namespace, and every run an operator starts in `vector`
+   sits unassigned. Its ExternalSecret carries `DATABASE_URL`,
+   `ALCHEMY_API_KEY` and `S3_BUCKET`; add the overlay `resources:` entries; keep `image: uniswap-v4-position-bootstrap`, the roster
    line already covers it. The worker derives its task queue from `CHAIN_ID` —
    `<chain>-uniswap-v4-position-bootstrap` — so a run for that chain is started
    on that queue and can land on no other chain's worker. Then start a run from
@@ -2392,9 +2398,11 @@ it.
 
 ### Verify recovery
 
-`kube_deployment_status_replicas_available{deployment=~"([a-z0-9-]+-)?uniswap-v4-indexer"} >= 1`
-(a PromQL matcher, so the chain's Deployment is named or matched — nothing
-expands `$DEPLOY` in Mimir), and the
+`kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer"} >= 1`
+with the alert's own `deployment` value in place of mainnet's — this is a PromQL
+matcher, not a shell, so `$DEPLOY` is not expanded here the way it is in the
+`kubectl` lines above, and a regex over every V4 Deployment would answer for a
+chain that never went down. The
 pod logs show the `uniswap-v4-indexer started` line with a non-zero `pools`
 count.
 
@@ -3201,7 +3209,8 @@ decoding was broken. A pod that dies before exporting anything is
 [`VectorUniswapV4IndexerDown`](#vectoruniswapv4indexerdown)'s case, not this one.
 
 **The live indexers only.** The selector excludes
-`service_name="uniswap-v4-position-bootstrap"`, whose posm transfer backfill moves
+`service_name=~"(^|.*-)uniswap-v4-position-bootstrap"` (every chain's worker, not
+mainnet's alone), whose posm transfer backfill moves
 this same counter under the same `chain`. A run would lift the sum off zero on the
 live indexer's behalf and hold this alert quiet for the run plus the 6h the window
 remembers it, precisely while a wrong PositionManager address in the LIVE path went
@@ -3337,7 +3346,7 @@ a redelivered range whose INSERTs all conflict away adds nothing, so the rate is
 real table growth.
 
 **The rule reads the live indexers only.** It excludes
-`service_name="uniswap-v4-position-bootstrap"`, because that worker hosts the
+`service_name=~"(^|.*-)uniswap-v4-position-bootstrap"` (every chain's worker), because that worker hosts the
 VEC-790 posm transfer backfill, and one hand-started run bulk-loads a chain's
 whole posm history — 487,908 rows on mainnet over ~7.5h, ~18 rows/s, six times
 the budget — for a load that is bounded, known, and not a growth regime.
@@ -3530,9 +3539,11 @@ the budget; several of those in a day is what the threshold is set for.
    GROUP BY 1, 2 ORDER BY 2, 1;
    ```
 
-2. **Confirm the runs are deliberate.** Temporal UI, namespace `vector`, task
-   queue `uniswap-v4-position-bootstrap`, workflow type
-   `UniswapV4PosmTransferBackfill`. A run closes with one
+2. **Confirm the runs are deliberate.** Temporal UI, namespace `vector`, workflow
+   type `UniswapV4PosmTransferBackfill`, on each chain's own task queue —
+   `uniswap-v4-position-bootstrap` for mainnet and
+   `<chain>-uniswap-v4-position-bootstrap` for every other, so a seeding run on
+   one chain is not missed by looking only at mainnet's. A run closes with one
    `uniswap-v4 posm transfer backfill finished` line carrying `transfersWritten`.
    Several chains being seeded in one day is the expected cause.
 

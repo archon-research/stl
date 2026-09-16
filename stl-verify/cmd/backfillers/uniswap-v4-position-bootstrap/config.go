@@ -18,17 +18,12 @@ type config struct {
 	bootstrap uniswapv4bootstrap.Config
 }
 
-// ethereumQueueName is the base chainutil.TaskQueueName builds this
-// deployment's queue from: Ethereum polls it bare, every other chain prefixes it
-// with the chain's slug, the way its Deployment is named. A run pins the
-// worker's own chain, so each chain needs its own queue: on a shared one a run
-// would land on whichever chain's worker polled first.
-const ethereumQueueName = "uniswap-v4-position-bootstrap"
+// queueBaseName is this component's deployed name.
+const queueBaseName = "uniswap-v4-position-bootstrap"
 
 // archiveSource is what this component records itself as in the archive and on
-// its write counter. It is chain-independent, as every other binary's is,
-// because the archive records the chain alongside it — and it is deliberately
-// not the queue name, which moves per chain.
+// its write counter; it is chain-independent, as every other binary's is,
+// because the archive records the chain alongside it.
 const archiveSource = "uniswap-v4-position-bootstrap"
 
 // loadConfig reads the scan knobs from the environment; an unset knob is the

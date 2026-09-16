@@ -664,7 +664,7 @@ func receiveOneSQSMessage(t *testing.T, ctx context.Context, sqsc *awssqs.Client
 func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
 	t.Setenv("CHAIN_ID", "1")
 
-	queue, err := chainutil.TaskQueueName(ethereumQueueName)
+	queue, err := chainutil.TaskQueueName(queueBaseName)
 	if err != nil {
 		t.Fatalf("TaskQueueName error = %v", err)
 	}

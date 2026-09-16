@@ -2504,8 +2504,9 @@ groups:
         #
         # The zero-fill can only come from kube-state, which knows nothing about
         # chains, so its `chain` is derived from the Deployment name exactly as
-        # VectorUniswapV4IndexerDown derives it (prefix = entity.ChainName, bare
-        # name = mainnet). That derived label is what lets the zero-fill `or` and
+        # VectorUniswapV4IndexerDown derives it (prefix = the chainutil.ChainSlug
+        # the Deployment is named from, bare name = mainnet, `avalanche` bridged
+        # onto the worker's `avalanche-c`). That derived label is what lets the zero-fill `or` and
         # the replica gate join `on (chain, cluster)` against the worker's own
         # `chain` label: one chain stalling reaches zero on its own series while
         # a second chain's Deployment keeps running, and a dead second-chain pod

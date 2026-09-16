@@ -37,10 +37,8 @@ const (
 	// worker's RPC fallback covers a consumer that arrives after it expires.
 	cacheTTL = 2 * time.Hour
 
-	// ethereumQueueName is the base chainutil.TaskQueueName builds this
-	// deployment's queue from: Ethereum polls it bare, every other chain prefixes
-	// it with the chain's slug, the way its Deployment is named.
-	ethereumQueueName = "block-republisher"
+	// queueBaseName is this component's deployed name.
+	queueBaseName = "block-republisher"
 )
 
 func loadConfig() (config, error) {
