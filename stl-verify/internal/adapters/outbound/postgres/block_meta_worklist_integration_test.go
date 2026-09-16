@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1024,5 +1025,189 @@ func TestTheHeadMarginTrimsOnlyTheRunApplyingIt(t *testing.T) {
 	if got := blockNumbers(drain(t, ctx, first)); !slices.Equal(got, want) {
 		t.Errorf("the first run read %v, want %v: the second run's head margin trimmed a list it does not own",
 			got, want)
+	}
+}
+
+// The sweep must not reach its own run. Ordering hides it on the chain being opened -- that slice is
+// cleared first -- so this run's rows sit on another chain, where only the sweep can touch them.
+func TestTheSweepSpareItsOwnRunsRows(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	buildID, _ := testutil.OpenTestRun(t, ctx, pool)
+	old := backdatedRun(t, ctx, pool, buildID, "72 hours") // older than the sweep age
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO block_meta_worklist (chain_id, run_id, block_number, block_version)
+		VALUES (8453, $1, 9100000, 0)`, old); err != nil {
+		t.Fatalf("seed the run's own rows on another chain: %v", err)
+	}
+
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, buildregistry.RunID(old))
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+	list, err := repo.OpenWorkList(ctx, 1, 0)
+	if err != nil {
+		t.Fatalf("open on chain 1: %v", err)
+	}
+	defer list.Close(ctx)
+
+	var mine int64
+	if err := pool.QueryRow(ctx, sliceSizeSQL, int64(8453), old).Scan(&mine); err != nil {
+		t.Fatal(err)
+	}
+	if mine != 1 {
+		t.Errorf("the run swept %d of its own rows; a long-lived run deletes the list it is paging", 1-mine)
+	}
+}
+
+// The sweep age is a threshold, not a range: a run at it is swept, a run inside it is not.
+func TestTheSweepAgeIsTheThreshold(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	at := backdatedRun(t, ctx, pool, buildID, "48 hours")
+	inside := backdatedRun(t, ctx, pool, buildID, "47 hours 59 minutes")
+	for _, owner := range []int64{at, inside} {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO block_meta_worklist (chain_id, run_id, block_number, block_version)
+			VALUES (1, $1, 8100000, 0)`, owner); err != nil {
+			t.Fatalf("seed a slice: %v", err)
+		}
+	}
+
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+	list, err := repo.OpenWorkList(ctx, 1, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer list.Close(ctx)
+
+	var atRows, insideRows int64
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE run_id = $1), count(*) FILTER (WHERE run_id = $2)
+		  FROM block_meta_worklist WHERE chain_id = 1`, at, inside).Scan(&atRows, &insideRows); err != nil {
+		t.Fatal(err)
+	}
+	if atRows != 0 {
+		t.Errorf("a run at the sweep age kept its rows; the threshold is not where it is documented")
+	}
+	if insideRows != 1 {
+		t.Errorf("a run a minute inside the sweep age lost its rows; the threshold is not where it is documented")
+	}
+}
+
+// A chain with nothing pending ends the list cleanly. The cursor's short-slice check must read an
+// empty slice as empty, not as one that went missing.
+func TestAnEmptyPendingSetEndsWithoutError(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	list, _ := openRunList(t, ctx, pool, 8453) // seeded as a chain, but nothing references it
+	defer list.Close(ctx)
+	refs, err := list.Next(ctx, 10)
+	if err != nil {
+		t.Fatalf("an empty pending set reported an error: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Errorf("chain 8453 enumerated %d blocks, want 0", len(refs))
+	}
+}
+
+// Close is idempotent, and a second call must not delete a slice the run has since reopened.
+func TestCloseIsIdempotentAndDoesNotTouchALaterSlice(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+	first, err := repo.OpenWorkList(ctx, 1, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	first.Close(ctx)
+
+	second, err := repo.OpenWorkList(ctx, 1, 0)
+	if err != nil {
+		t.Fatalf("re-open under the same run: %v", err)
+	}
+	defer second.Close(ctx)
+	first.Close(ctx) // the stale handle, closed again
+
+	if blocks := drain(t, ctx, second); len(blocks) == 0 {
+		t.Error("a second Close on the old handle emptied the list the run had just reopened")
+	}
+}
+
+// Two runs paging the same chain at the same time. The second opens while the first holds an open
+// list -- the order that matters, since an open is what clears and enumerates -- and then both page in
+// parallel. Neither may fail, and both must read the whole pending set.
+func TestTwoRunsPageOneChainConcurrently(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	first, firstRun := openRunList(t, ctx, pool, 1)
+	defer first.Close(ctx)
+	want := sliceBlocks(t, ctx, pool, 1, firstRun)
+	if len(want) == 0 {
+		t.Fatal("the first run enumerated nothing; the seed is not exercising this")
+	}
+
+	// The second run opens against the first's live list, then both page together.
+	second, _ := openRunList(t, ctx, pool, 1)
+	defer second.Close(ctx)
+
+	type result struct {
+		blocks []outbound.BlockRef
+		err    error
+	}
+	results := make(chan result, 2)
+	var start sync.WaitGroup
+	start.Add(1)
+	for _, list := range []outbound.BlockWorkList{first, second} {
+		go func() {
+			start.Wait()
+			var blocks []outbound.BlockRef
+			for {
+				refs, err := list.Next(ctx, 2)
+				if err != nil {
+					results <- result{err: err}
+					return
+				}
+				if len(refs) == 0 {
+					results <- result{blocks: blocks}
+					return
+				}
+				blocks = append(blocks, refs...)
+			}
+		}()
+	}
+	start.Done()
+
+	for range 2 {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("a concurrent run failed: %v", r.err)
+		}
+		if got := blockNumbers(r.blocks); !slices.Equal(got, want) {
+			t.Errorf("a concurrent run read %v, want %v", got, want)
+		}
 	}
 }
