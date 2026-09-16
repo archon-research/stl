@@ -964,12 +964,13 @@ func TestSecStoreRecordIDTiebreakAcrossAllReadObjects(t *testing.T) {
 	defer cleanup()
 
 	const nodeID = "em-t-recid-tb"
+	const edgeSrc = "sec-t-recid-tb"
+
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-
 	_, err = tx.Exec(ctx, `
 		INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, `+secstoreSpine+`)
 		VALUES ($1, 'ENTITY', 'ACTIVE', '2026-01-01', 'infinity', 'test', 'SEED_LOAD', 'lower record_id', 'test')`, nodeID)
@@ -982,8 +983,6 @@ func TestSecStoreRecordIDTiebreakAcrossAllReadObjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	const edgeSrc = "sec-t-recid-tb"
 	_, err = tx.Exec(ctx, `
 		INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to, `+secstoreSpine+`)
 		VALUES ($1, 'SECURITY', 'em-t-recid-edst', 'ENTITY', 'ISSUED_BY', '2026-01-01', 'infinity', 'test', 'SEED_LOAD', 'lower record_id', 'test')`, edgeSrc)
@@ -1000,63 +999,45 @@ func TestSecStoreRecordIDTiebreakAcrossAllReadObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	nodeReads := []struct {
-		name, sql string
-	}{
-		{"sec_node_current", `SELECT change_reason FROM sec_node_current WHERE id = $1`},
-		{"sec_node_as_of", `SELECT change_reason FROM sec_node_as_of('2026-03-01'::date) WHERE id = $1`},
-		{"sec_node_as_of_kind", `SELECT change_reason FROM sec_node_as_of_kind('2026-03-01'::date, 'ENTITY') WHERE id = $1`},
+	qtx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, q := range nodeReads {
-		t.Run(q.name, func(t *testing.T) {
-			qtx, err := pool.Begin(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer qtx.Rollback(ctx)
-			if _, err := qtx.Exec(ctx, "SET LOCAL enable_indexscan = off"); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := qtx.Exec(ctx, "SET LOCAL enable_indexonlyscan = off"); err != nil {
-				t.Fatal(err)
-			}
-			var reason string
-			if err := qtx.QueryRow(ctx, q.sql, nodeID).Scan(&reason); err != nil {
-				t.Fatalf("%s: %v", q.name, err)
-			}
-			if reason != "higher record_id" {
-				t.Fatalf("%s: got change_reason=%q, want \"higher record_id\" — record_id DESC tiebreak failed", q.name, reason)
-			}
-		})
+	defer qtx.Rollback(ctx)
+
+	for _, ddl := range []string{
+		`DROP INDEX sec_node_resolve_idx`,
+		`CREATE INDEX sec_node_resolve_idx ON sec_node (id, valid_from, processing_version DESC, ingest_xid DESC)`,
+		`DROP INDEX sec_node_type_idx`,
+		`CREATE INDEX sec_node_type_idx ON sec_node (record_type, id, valid_from, processing_version DESC, ingest_xid DESC)`,
+		`DROP INDEX sec_edge_resolve_idx`,
+		`CREATE INDEX sec_edge_resolve_idx ON sec_edge (rel_type, src_id, dst_id, edge_disc, valid_from, processing_version DESC, ingest_xid DESC)`,
+	} {
+		if _, err := qtx.Exec(ctx, ddl); err != nil {
+			t.Fatalf("DDL %q: %v", ddl, err)
+		}
 	}
 
-	edgeReads := []struct {
+	reads := []struct {
 		name, sql string
+		args      []any
 	}{
-		{"sec_edge_current", `SELECT change_reason FROM sec_edge_current WHERE src_id = $1 AND rel_type = 'ISSUED_BY'`},
-		{"sec_edge_as_of", `SELECT change_reason FROM sec_edge_as_of('2026-03-01'::date) WHERE src_id = $1 AND rel_type = 'ISSUED_BY'`},
+		{"sec_node_current", `SELECT change_reason FROM sec_node_current WHERE id = $1`, []any{nodeID}},
+		{"sec_node_as_of", `SELECT change_reason FROM sec_node_as_of('2026-03-01'::date) WHERE id = $1`, []any{nodeID}},
+		{"sec_node_as_of_kind", `SELECT change_reason FROM sec_node_as_of_kind('2026-03-01'::date, 'ENTITY') WHERE id = $1`, []any{nodeID}},
+		{"sec_node_as_of_snapshot", `SELECT change_reason FROM sec_node_as_of('2026-03-01'::date, pg_current_snapshot()) WHERE id = $1`, []any{nodeID}},
+		{"sec_edge_current", `SELECT change_reason FROM sec_edge_current WHERE src_id = $1 AND rel_type = 'ISSUED_BY'`, []any{edgeSrc}},
+		{"sec_edge_as_of", `SELECT change_reason FROM sec_edge_as_of('2026-03-01'::date) WHERE src_id = $1 AND rel_type = 'ISSUED_BY'`, []any{edgeSrc}},
+		{"sec_edge_as_of_snapshot", `SELECT change_reason FROM sec_edge_as_of('2026-03-01'::date, pg_current_snapshot()) WHERE src_id = $1 AND rel_type = 'ISSUED_BY'`, []any{edgeSrc}},
 	}
-	for _, q := range edgeReads {
-		t.Run(q.name, func(t *testing.T) {
-			qtx, err := pool.Begin(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer qtx.Rollback(ctx)
-			if _, err := qtx.Exec(ctx, "SET LOCAL enable_indexscan = off"); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := qtx.Exec(ctx, "SET LOCAL enable_indexonlyscan = off"); err != nil {
-				t.Fatal(err)
-			}
-			var reason string
-			if err := qtx.QueryRow(ctx, q.sql, edgeSrc).Scan(&reason); err != nil {
-				t.Fatalf("%s: %v", q.name, err)
-			}
-			if reason != "higher record_id" {
-				t.Fatalf("%s: got change_reason=%q, want \"higher record_id\"", q.name, reason)
-			}
-		})
+	for _, q := range reads {
+		var reason string
+		if err := qtx.QueryRow(ctx, q.sql, q.args...).Scan(&reason); err != nil {
+			t.Fatalf("%s: %v", q.name, err)
+		}
+		if reason != "higher record_id" {
+			t.Fatalf("%s: got change_reason=%q, want \"higher record_id\" — record_id DESC tiebreak failed", q.name, reason)
+		}
 	}
 }
 
