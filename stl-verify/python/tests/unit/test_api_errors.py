@@ -1,8 +1,10 @@
 """The shared 422 contract as a client sees it, over the real app.
 
-The conformance cases run against `app.main.app`: the typed body on every published
-operation, the window echo, the cache policy, and a known-but-empty answer told apart
-from an unknown resource. An operation that loses any of them fails here.
+The conformance cases run against `app.main.app`. The typed body is asserted on every
+published operation, so an operation that loses it fails here. The window echo, the
+cache policy, and a known-but-empty answer told apart from an unknown resource are
+asserted once each -- on `/v1/protocol-events` and `/v1/primes/{prime_id}/debt` -- as
+the shared statement of what a route owes; each router's own tests hold it to that.
 
 A probe app built from the same shared parts carries what no route reaches without
 inventing a repository: the max-points ceiling, which needs a point count no mocked
@@ -11,6 +13,7 @@ overflow guard behind its lookback.
 """
 
 from datetime import UTC, datetime, timedelta
+from http import HTTPMethod
 from unittest.mock import AsyncMock
 
 import pytest
@@ -40,6 +43,10 @@ from app.services.protocol_event_service import ProtocolEventService
 _VALID_TX_HASH = "0x" + "ab" * 32
 _KNOWN_PRIME = "0x" + "ab" * 20
 _UNKNOWN_PRIME = "0x" + "cd" * 20
+
+# A path item may also carry `parameters`, `summary` or `servers`; only operations
+# declare responses.
+_HTTP_METHODS = {method.value for method in HTTPMethod}
 
 # A window an hour wide ending at `now`: pinned below, and narrow enough that the
 # unfiltered-window ceiling never answers first.
@@ -103,7 +110,10 @@ def test_the_schema_declares_the_shared_body_on_every_route() -> None:
 
     for path, operations in schema["paths"].items():
         for method, operation in operations.items():
-            declared = operation["responses"]["422"]["content"]["application/json"]["schema"]["$ref"]
+            if method.upper() not in _HTTP_METHODS:
+                continue
+            content = operation.get("responses", {}).get("422", {}).get("content", {})
+            declared = content.get("application/json", {}).get("schema", {}).get("$ref", "")
             assert declared.endswith("/ApiErrorResponse"), f"{method} {path}"
 
 
@@ -221,8 +231,8 @@ _OBSERVATIONS = [
 
 
 def _probe_app() -> FastAPI:
-    app = FastAPI(responses=API_ERROR_RESPONSES)
-    register_error_handlers(app)
+    probe = FastAPI(responses=API_ERROR_RESPONSES)
+    register_error_handlers(probe)
     router = APIRouter()
 
     @router.get("/probe/{identifier}")
@@ -242,8 +252,8 @@ def _probe_app() -> FastAPI:
         observed = _in_window(window)
         return {"window": build_raw_window(window).model_dump(mode="json"), "data": observed[-1:]}
 
-    app.include_router(router)
-    return app
+    probe.include_router(router)
+    return probe
 
 
 def _require_known(identifier: str) -> None:
