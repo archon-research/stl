@@ -9,12 +9,15 @@ COMMENT ON COLUMN anchorage_package_snapshot.asset_quantity IS '[Timeseries] Rol
 -- VEC-809. The key was spelled once in the view and again in the wrapper's injectivity guard, which
 -- re-derived it from the source. Changing the view alone left the guard validating the old shape: it
 -- kept passing and protected nothing, with no error. One definition, called by both.
+-- No SET search_path, deliberately: a SQL function carrying a SET clause cannot be inlined, and this
+-- body names no object at all -- two literals and its own parameters -- so there is nothing to
+-- qualify. Measured: with the SET it plans as a per-row anchorage_instrument_key() call; without it
+-- the plan carries the concatenation itself.
 CREATE OR REPLACE FUNCTION anchorage_instrument_key(p_package_id text, p_asset_type text)
     RETURNS text
     LANGUAGE sql
     IMMUTABLE
-    PARALLEL SAFE
-    SET search_path FROM CURRENT AS $fn$
+    PARALLEL SAFE AS $fn$
 SELECT 'anchorage:' || p_package_id || ':' || p_asset_type
 $fn$;
 

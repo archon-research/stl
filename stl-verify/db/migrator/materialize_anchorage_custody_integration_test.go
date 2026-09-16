@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -830,5 +831,43 @@ func TestAnchorageAssetQuantityDocumentsItsUnit(t *testing.T) {
 		if !strings.Contains(*comment, want) {
 			t.Errorf("the comment does not say the quantity is %q: %s", want, *comment)
 		}
+	}
+}
+
+// TestMaterializeAnchorageCustodyForwardsTheWindow proves the argument REACHES the spine, by reading
+// it back off the run record. It does not prove the window bounds anything. This does: the spine
+// applies `block_timestamp > now() - p_window` to the view's output, so an observation outside the
+// window must not reach position_state at all.
+func TestMaterializeAnchorageCustodyWindowBoundsWhatItReads(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+	recent := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-NEW", qty: 5, snapTS: recent})
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-OLD", qty: 9, snapTS: "2026-04-07T00:00:00Z"})
+
+	var written int64
+	if err := pool.QueryRow(ctx,
+		`SELECT materialize_anchorage_custody(0, NULL, interval '1 day')`).Scan(&written); err != nil {
+		t.Fatalf("bounded run: %v", err)
+	}
+
+	var keys []string
+	if err := pool.QueryRow(ctx, `
+		SELECT coalesce(array_agg(DISTINCT instrument_key ORDER BY instrument_key), '{}')
+		FROM position_state`).Scan(&keys); err != nil {
+		t.Fatal(err)
+	}
+	if written != 1 || len(keys) != 1 || keys[0] != anchorageKey("PKG-NEW", "BTC") {
+		t.Errorf("a 1-day window appended %d rows %v; want only the observation inside it, %s",
+			written, keys, anchorageKey("PKG-NEW", "BTC"))
+	}
+
+	// Negative control: unbounded, the same fixture carries both, so the exclusion above is the
+	// window's doing and not something else dropping the old row.
+	var total int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_anchorage_custody()`).Scan(&total); err != nil {
+		t.Fatalf("unbounded run: %v", err)
+	}
+	if total != 1 {
+		t.Errorf("the unbounded run appended %d rows; want the 1 the window had excluded", total)
 	}
 }
