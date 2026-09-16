@@ -103,6 +103,10 @@ const staleNoteClassName = css({
   px: '2.5',
 });
 
+// Flags a partial total the same way a stale figure is flagged elsewhere in
+// the band, appended inline rather than replacing the caption it follows.
+const coverageNoteClassName = css({ color: 'text.warning' });
+
 /**
  * A card still holding the figure from before its read failed.
  *
@@ -192,6 +196,7 @@ function TotalAllocationCard({
 }) {
   const isFiltered = hasSearchQuery && overallSummary !== null;
   const chartErrorMessage = chart?.errorMessage ?? null;
+  const coverage = chart?.coverage ?? null;
 
   return (
     <MetricCard
@@ -216,6 +221,11 @@ function TotalAllocationCard({
             {isFiltered
               ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
               : `${summary.allocationCount} allocations`}
+            {coverage === null ? null : (
+              <span className={coverageNoteClassName}>
+                {` · ${coverage.pricedEntityCount} of ${coverage.entityCount} positions priced`}
+              </span>
+            )}
           </div>
           <MetricCardTrend
             chart={chart}
