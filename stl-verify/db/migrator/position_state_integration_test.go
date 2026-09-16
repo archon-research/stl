@@ -2451,7 +2451,7 @@ func psTestDealTypeCodeMigrationIsReRunnable(t *testing.T, f *psFixture) {
 	t.Run("re-applying the later files restores the current spine, and the old overload is gone", func(t *testing.T) {
 		apply(t, "20260818_150000_add_run_id_to_position_stack.sql")
 		apply(t, "20260909_160000_fix_offchain_check_before_closure.sql")
-		apply(t, "20260911_120000_projection_window.sql")
+		apply(t, "20260911_140000_projection_window.sql")
 		var n int
 		if err := f.pool.QueryRow(f.ctx, `
 			SELECT count(*) FROM pg_proc WHERE proname = 'materialize_position_projection'`).Scan(&n); err != nil {
