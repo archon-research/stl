@@ -160,8 +160,8 @@ func TestInstrumentRegisterHoldsOneAddressOnTwoChains(t *testing.T) {
 	defer cleanup()
 
 	const key = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-	mainnet := newInstrumentRow(key, "sec-gaclo1")
-	base := newInstrumentRow(key, "sec-gaclo1")
+	mainnet := newInstrumentRow(key, "sec-multi-mainnet")
+	base := newInstrumentRow(key, "sec-multi-base")
 	base.chainID = chainID(8453)
 	mustInsertInstrument(ctx, t, pool, mainnet)
 	mustInsertInstrument(ctx, t, pool, base)
@@ -176,13 +176,25 @@ func TestInstrumentRegisterHoldsOneAddressOnTwoChains(t *testing.T) {
 		t.Fatalf("got %d current rows for one address on two chains, want 2", rows)
 	}
 
-	for _, want := range []int32{1, 8453} {
-		var scope int32
+	// Assert the SECURITY each chain resolves to, not the chain_scope the query already filtered
+	// on: scanning the filter value back proves only that a row matched.
+	for _, tc := range []struct {
+		chain int32
+		want  string
+	}{
+		{chain: 1, want: "sec-multi-mainnet"},
+		{chain: 8453, want: "sec-multi-base"},
+	} {
+		var got string
 		if err := pool.QueryRow(ctx, `
-			SELECT chain_scope FROM instrument_register_current
-			WHERE instrument_key = $1 AND chain_scope = coalesce($2::int4, 0)`, key, want,
-		).Scan(&scope); err != nil {
-			t.Errorf("resolve chain %d: %v — the read predicate the position stream uses", want, err)
+			SELECT security_id FROM instrument_register_current
+			WHERE instrument_key = $1 AND chain_scope = coalesce($2::int4, 0)`, key, tc.chain,
+		).Scan(&got); err != nil {
+			t.Errorf("resolve chain %d: %v — the read predicate the position stream uses", tc.chain, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("chain %d resolves %s, want %s — the two deployments must not cross", tc.chain, got, tc.want)
 		}
 	}
 }
@@ -308,6 +320,89 @@ func TestInstrumentRegisterAcceptsTheSameKeyOnAnotherChain(t *testing.T) {
 	mustInsertInstrument(ctx, t, pool, base)
 }
 
+// TestInstrumentRegisterRefusesASecondRowOnOneWindow is the shadow-row defect, found in review.
+//
+// valid_to is in the primary key but NOT in what the reads group on, so two rows sharing
+// (key, chain_scope, valid_from) and differing only in valid_to never collide. Both land, step
+// one of the read keeps whichever arrived last, and the displaced row never reaches the
+// valid-time filter — so once the survivor's window ends the key resolves to NOTHING while an
+// open mapping sits in the table. Reproduced before the fix:
+//
+//	open   (K, chain 1, 2026-01-01 -> infinity)   sec-first
+//	shadow (K, chain 1, 2026-01-01 -> 2027-01-01) sec-second   <- accepted, no error
+//	as_of 2027-01-02 -> nothing, with sec-first still open in the table
+//
+// Nothing downstream can detect it: instrument_register_current distincts on
+// (instrument_key, chain_scope) with security_id outside that key, so it returns one row by
+// construction and the discarded mapping leaves no trace. Hence a write-time rule.
+func TestInstrumentRegisterRefusesASecondRowOnOneWindow(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	const key = "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
+	var opened int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO instrument_register
+			(instrument_key, key_namespace, security_id, chain_id, valid_from, valid_to, `+registerSpine+`)
+		VALUES ($1, 'token_address', 'sec-first', 1, '2026-01-01', 'infinity',
+		        'test', 'SEED_LOAD', 'open the window', 'test')
+		RETURNING record_id`, key).Scan(&opened); err != nil {
+		t.Fatalf("open the window: %v", err)
+	}
+
+	second := func(supersedes any, security, validTo string) error {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO instrument_register
+				(instrument_key, key_namespace, security_id, chain_id, valid_from, valid_to,
+				 supersedes_record_id, `+registerSpine+`)
+			VALUES ($1, 'token_address', $2, 1, '2026-01-01', $3::date, $4,
+			        'test', 'SEED_LOAD', 'second row on the window', 'test')`,
+			key, security, validTo, supersedes)
+		return err
+	}
+
+	t.Run("an unattributed second row is refused", func(t *testing.T) {
+		if err := second(nil, "sec-second", "2027-01-01"); !raisedWith(err, "must name the row it closes") {
+			t.Fatalf("shadow row gave %v, want a refusal — it would displace sec-first by insert order alone", err)
+		}
+	})
+
+	t.Run("superseding a row on another window is refused", func(t *testing.T) {
+		var other int64
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO instrument_register
+				(instrument_key, key_namespace, security_id, chain_id, valid_from, valid_to, `+registerSpine+`)
+			VALUES ($1, 'token_address', 'sec-later', 1, '2026-06-01', 'infinity',
+			        'test', 'SEED_LOAD', 'a different window', 'test')
+			RETURNING record_id`, key).Scan(&other); err != nil {
+			t.Fatalf("open a second window: %v", err)
+		}
+		if err := second(other, "sec-second", "2027-01-01"); !raisedWith(err, "not on the window it lands on") {
+			t.Fatalf("superseding a row on another window gave %v, want a refusal", err)
+		}
+	})
+
+	t.Run("a close that names the row it closes lands", func(t *testing.T) {
+		if err := second(opened, "sec-first", "2026-09-01"); err != nil {
+			t.Fatalf("an attributed close was refused: %v", err)
+		}
+	})
+
+	t.Run("only the original row on the window names nothing", func(t *testing.T) {
+		var n int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM instrument_register
+			WHERE instrument_key = $1 AND valid_from = '2026-01-01' AND supersedes_record_id IS NULL`, key,
+		).Scan(&n); err != nil {
+			t.Fatalf("count unattributed rows on the window: %v", err)
+		}
+		if n != 1 {
+			t.Errorf("%d rows on the window name nothing, want 1 (the original open row)", n)
+		}
+	})
+}
+
 // TestAliasRegisterEnforcesTheSchemesNodeKinds is the applies_to rule, which was declared and
 // documented from the day the vocabulary was seeded and read by nothing until now: an LEI
 // declares applies_to {ENTITY}, so it cannot alias a security.
@@ -431,6 +526,36 @@ func TestInstrumentRegisterResolvesEveryHeldKeyToExactlyOneSecurity(t *testing.T
 		}
 	})
 
+	// The count above is satisfied by any permutation of the seed, so pin the pairs themselves.
+	// A transposition of two rows — the realistic generator bug — passes every count.
+	t.Run("each held key resolves to its own security", func(t *testing.T) {
+		for _, tc := range []struct {
+			key      string
+			chain    int32
+			security string
+		}{
+			{"a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", 1, "sec-usdc"},
+			{"833589fcd6edb6e08f4c7c32d4f71b54bda02913", 8453, "sec-usdc"},
+			{"6b175474e89094c44da98b954eedeac495271d0f", 1, "sec-dai"},
+			{"dac17f958d2ee523a2206206994597c13d831ec7", 1, "sec-usdt"},
+			{"2c0adff8e114f3ca106051144353ac703d24b901", 43114, "sec-gaclo1"},
+			{"a3931d71877c0e7a3148cb7eb4463524fec27fbd", 1, "sec-susds"},
+			{"5875eee11cf8398102fdad704c9e96607675467a", 8453, "sec-susds"},
+		} {
+			var got string
+			if err := pool.QueryRow(ctx, `
+				SELECT security_id FROM instrument_register_current
+				WHERE instrument_key = $1 AND chain_scope = $2`, tc.key, tc.chain,
+			).Scan(&got); err != nil {
+				t.Errorf("%s on chain %d does not resolve: %v", tc.key, tc.chain, err)
+				continue
+			}
+			if got != tc.security {
+				t.Errorf("%s on chain %d resolves %s, want %s", tc.key, tc.chain, got, tc.security)
+			}
+		}
+	})
+
 }
 
 // TestInstrumentRegisterContentHashCoversTheStoredRow is what verifies the append guard's
@@ -510,26 +635,44 @@ func TestAliasRegisterClosesAWindowByAppending(t *testing.T) {
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
 
-	insertAlias := func(validToSQL, node string) error {
-		_, err := pool.Exec(ctx, `
+	const value = "7a2f1c9e4b8d6a05f3e2c1b0a9d8e7f6c5b4a3c1"
+	openWindow := func() int64 {
+		t.Helper()
+		var id int64
+		if err := pool.QueryRow(ctx, `
 			INSERT INTO alias_register (id_scheme, id_value, node_id, valid_from, valid_to, `+registerSpine+`)
-			VALUES ('BLOCKCHAIN_ADDRESS', '7a2f1c9e4b8d6a05f3e2c1b0a9d8e7f6c5b4a3c1', $1, '2026-01-01', `+validToSQL+`,
-			        'test', 'SEED_LOAD', 'alias acceptance', 'test')`, node)
+			VALUES ('BLOCKCHAIN_ADDRESS', $1, 'em-holder-first', '2026-01-01', 'infinity',
+			        'test', 'SEED_LOAD', 'alias acceptance', 'test')
+			RETURNING record_id`, value).Scan(&id); err != nil {
+			t.Fatalf("open the window: %v", err)
+		}
+		return id
+	}
+	closeWindow := func(supersedes any) error {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO alias_register (id_scheme, id_value, node_id, valid_from, valid_to,
+			                            supersedes_record_id, `+registerSpine+`)
+			VALUES ('BLOCKCHAIN_ADDRESS', $1, 'em-holder-first', '2026-01-01', '2026-06-01', $2,
+			        'test', 'SEED_LOAD', 'alias acceptance', 'test')`, value, supersedes)
 		return err
 	}
 
-	if err := insertAlias("'infinity'", "em-holder-first"); err != nil {
-		t.Fatalf("open the window: %v", err)
-	}
-	if err := insertAlias("'2026-06-01'", "em-holder-first"); err != nil {
-		t.Fatalf("close the window: %v — valid_to in the key is what makes this an append", err)
+	opened := openWindow()
+
+	t.Run("a close that names nothing is refused", func(t *testing.T) {
+		if err := closeWindow(nil); !raisedWith(err, "must name the row it closes") {
+			t.Fatalf("an unattributed second row on the window gave %v, want a refusal — it would displace the open row by insert order alone", err)
+		}
+	})
+
+	if err := closeWindow(opened); err != nil {
+		t.Fatalf("close the window naming record %d: %v — valid_to in the key is what makes this an append", opened, err)
 	}
 
 	t.Run("the closed alias is absent from current", func(t *testing.T) {
 		var rows int
-		if err := pool.QueryRow(ctx, `
-			SELECT count(*) FROM alias_register_current
-			WHERE id_value = '7a2f1c9e4b8d6a05f3e2c1b0a9d8e7f6c5b4a3c1'`,
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM alias_register_current WHERE id_value = $1`, value,
 		).Scan(&rows); err != nil {
 			t.Fatalf("count current: %v", err)
 		}
@@ -540,9 +683,8 @@ func TestAliasRegisterClosesAWindowByAppending(t *testing.T) {
 
 	t.Run("as_of inside the closed window still resolves it", func(t *testing.T) {
 		var node string
-		if err := pool.QueryRow(ctx, `
-			SELECT node_id FROM alias_register_as_of('2026-03-01')
-			WHERE id_value = '7a2f1c9e4b8d6a05f3e2c1b0a9d8e7f6c5b4a3c1'`,
+		if err := pool.QueryRow(ctx,
+			`SELECT node_id FROM alias_register_as_of('2026-03-01') WHERE id_value = $1`, value,
 		).Scan(&node); err != nil {
 			t.Fatalf("alias_register_as_of(2026-03-01): %v", err)
 		}

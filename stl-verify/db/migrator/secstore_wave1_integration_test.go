@@ -433,6 +433,8 @@ func TestSecStoreWave1IsAppendOnlyUnderTheRealRoles(t *testing.T) {
 	vocabularies := []string{
 		"rel_type_vocabulary", "weight_basis_vocabulary", "change_reason_vocabulary",
 		"concept_class_vocabulary", "node_status_vocabulary",
+		// VEC-616's two, which are FK parents on the same terms and so take the same route.
+		"key_namespace_vocabulary", "id_scheme_vocabulary",
 	}
 
 	t.Run("app_role_keeps_select_insert_and_holds_no_update_delete", func(t *testing.T) {

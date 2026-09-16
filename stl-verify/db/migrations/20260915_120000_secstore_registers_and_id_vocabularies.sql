@@ -73,7 +73,9 @@ CREATE TABLE instrument_register (
     CONSTRAINT instrument_register_record_id_key UNIQUE (record_id),
     CONSTRAINT instrument_register_valid_chk CHECK (valid_from <= valid_to),
     CONSTRAINT instrument_register_security_id_prefix_chk CHECK (security_id LIKE 'sec-%'),
-    CONSTRAINT instrument_register_key_nonblank_chk CHECK (instrument_key !~ '^\s*$'),
+    -- No surrounding whitespace, not merely non-blank: position_id hashes this text, so a
+    -- leading space forks the identity of every position on the key.
+    CONSTRAINT instrument_register_key_nonblank_chk CHECK (instrument_key <> '' AND instrument_key = btrim(instrument_key)),
     -- position_key() renders the key between ';' delimiters, so a ';' inside one collapses two
     -- identities onto one position_id. A key this register accepts but position_id forks is worse
     -- than a rejected load.
@@ -89,7 +91,7 @@ COMMENT ON COLUMN instrument_register.chain_id IS 'Roles: FK→chain.chain_id (s
 COMMENT ON COLUMN instrument_register.chain_scope IS 'Roles: PK component, Derived. EXISTS FOR THE KEY AND IS NOT THE CHAIN — read chain_id for that. coalesce(chain_id, 0), because the same contract address is deployed on several chains (13 addresses today, 3 of them held) and a key without chain rejects the second one; chain_id itself cannot go in the key because a PRIMARY KEY forces NOT NULL, which would make the two chainless namespaces unregisterable unless they carried a sentinel in real data. 0 is safe: EVM chain ids start at 1 and the chain_id CHECK refuses anything lower. Reads join on instrument_key = $1 AND chain_scope = coalesce($2, 0), on columns the position stream already carries. Excluded from content_hash, which covers chain_id instead — a STORED generated column is computed AFTER the BEFORE INSERT guard, so hashing it would hash a NULL and never reproduce from the stored row.';
 COMMENT ON COLUMN instrument_register.attrs IS 'Instrument-level attributes that are not identity: symbol, decimals, venue, first-seen block. Decimals here are the token''s own scale, never applied to a quantity by this table.';
 COMMENT ON COLUMN instrument_register.valid_from IS 'Roles: PK component. Valid-time window start, UTC date, half-open [valid_from, valid_to). A re-point is a new row with a later valid_from, never an UPDATE: MKR -> SKY leaves the MKR row in place and the SKY row becomes current. Grain is a day, as sec_node.valid_from.';
-COMMENT ON COLUMN instrument_register.valid_to IS 'Roles: PK component. Valid-time window end, exclusive; ''infinity'' = open, never NULL. In the key so ending a mapping is an ordinary append at processing_version 0 rather than an UPDATE the append-only grants refuse — a key whose instrument is retired with no successor security has to stop resolving somehow. A zero-length window is a retraction tombstone, as sec_node.valid_to — and it withdraws ONE WINDOW, so retiring an open mapping means tombstoning the window it opened, not appending a later one. Note the converse too: giving a re-point a finite valid_to does not end the key, it resurrects whatever the re-point superseded.';
+COMMENT ON COLUMN instrument_register.valid_to IS 'Roles: PK component. Valid-time window end, exclusive; ''infinity'' = open, never NULL. In the key so ending a mapping is an ordinary append at processing_version 0 rather than an UPDATE the append-only grants refuse — a key whose instrument is retired with no successor security has to stop resolving somehow. A zero-length window is a retraction tombstone, as sec_node.valid_to — and it withdraws ONE WINDOW, so retiring an open mapping means tombstoning the window it opened, not appending a later one. Note the converse too: giving a re-point a finite valid_to does not end the key, it resurrects whatever the re-point superseded. Because this column is in the key but NOT in what the reads group on, a second row on one window would otherwise land silently and displace the first; sec_register_supersession_guard requires such an append to name the row it closes.';
 COMMENT ON COLUMN instrument_register.record_id IS 'Roles: Audit, UNIQUE. Per-append surrogate; what supersedes_record_id and a reproduction manifest point at (PR-2.1).';
 COMMENT ON COLUMN instrument_register.processing_version IS 'Roles: Audit, PK component. Correction version, caller-assigned per ADR-0006 §3: 0 live, N per correction run. A re-point is a VALID-TIME change and stays at 0 — which is exactly what the drafted key (instrument_key, processing_version) could not hold, since the second row collided. See sec_node.processing_version for what a correction at N then does to later loads.';
 COMMENT ON COLUMN instrument_register.ingest_xid IS 'Roles: Audit. Knowledge-time visibility key (ADR-0006 §5) and the supersession tiebreak inside a valid window. Never writer-supplied; enforced by the append guard.';
@@ -144,11 +146,13 @@ CREATE TABLE alias_register (
     ),
     -- Addresses are stored in the same form position_state.holder_id uses, so seam 2 is a plain
     -- equality join: lowercase hex, no 0x. Any other casing forks the holder's identity.
+    -- 40 exactly, matching position_state_holder_hex_chk. A shorter value is well-formed hex
+    -- that seam 2 can never join, so it would register and silently resolve nothing.
     CONSTRAINT alias_register_hex_chk CHECK (
         id_scheme NOT IN ('CONTRACT_ADDRESS','BLOCKCHAIN_ADDRESS')
-        OR id_value ~ '^[0-9a-f]+$'
+        OR id_value ~ '^[0-9a-f]{40}$'
     ),
-    CONSTRAINT alias_register_value_nonblank_chk CHECK (id_value !~ '^\s*$'),
+    CONSTRAINT alias_register_value_nonblank_chk CHECK (id_value <> '' AND id_value = btrim(id_value)),
     CONSTRAINT alias_register_valid_chk CHECK (valid_from <= valid_to),
     CONSTRAINT alias_register_valid_from_finite_chk CHECK (valid_from <> 'infinity' AND valid_from <> '-infinity')
 );
@@ -157,7 +161,7 @@ COMMENT ON COLUMN alias_register.id_scheme IS 'Roles: FK→id_scheme_vocabulary.
 COMMENT ON COLUMN alias_register.id_value IS 'Roles: PK component. The identifier within the scheme, verbatim from its assigner — except addresses, which are normalised to lowercase hex with no 0x (CHECK) so this joins position_state.holder_id directly.';
 COMMENT ON COLUMN alias_register.node_id IS 'Roles: FK→sec_node.id (soft; resolve through sec_node_current). Any node kind — the scheme''s applies_to says which are legal. No foreign key, for the reason instrument_register.security_id gives.';
 COMMENT ON COLUMN alias_register.valid_from IS 'Roles: PK component. Valid-time window start, UTC date, half-open [valid_from, valid_to). An alias re-pointing is a versioned append, as an instrument re-point is.';
-COMMENT ON COLUMN alias_register.valid_to IS 'Roles: PK component. Valid-time window end, exclusive; ''infinity'' = open, never NULL. In the key so closing an alias — a lapsed LEI, a wallet that changed hands — is an append at processing_version 0. It is exactly what a nullable valid_to outside the key could not express: the closing row would collide with the open one it closes, leaving an UPDATE as the only route and the append-only grants refusing it. A zero-length window is a retraction tombstone.';
+COMMENT ON COLUMN alias_register.valid_to IS 'Roles: PK component. Valid-time window end, exclusive; ''infinity'' = open, never NULL. In the key so closing an alias — a lapsed LEI, a wallet that changed hands — is an append at processing_version 0, which must name the row it closes (sec_register_supersession_guard). It is exactly what a nullable valid_to outside the key could not express: the closing row would collide with the open one it closes, leaving an UPDATE as the only route and the append-only grants refusing it. A zero-length window is a retraction tombstone.';
 COMMENT ON COLUMN alias_register.record_id IS 'Roles: Audit, UNIQUE. See instrument_register.record_id.';
 COMMENT ON COLUMN alias_register.processing_version IS 'Roles: Audit, PK component. Correction version, 0 live (ADR-0006 §3).';
 COMMENT ON COLUMN alias_register.ingest_xid IS 'Roles: Audit. Knowledge-time visibility key and supersession tiebreak; never writer-supplied.';
@@ -474,6 +478,69 @@ BEGIN
 END $$;
 COMMENT ON FUNCTION alias_register_scheme_guard() IS 'BEFORE INSERT on alias_register: enforces id_scheme_vocabulary.applies_to against the node kind implied by node_id''s prefix. value_form stays prose and validator-owned — one value column serves every scheme, so its form is not a column CHECK.';
 
+-- A second row on a window that already exists must say which row it closes. Without this the
+-- two are indistinguishable from a race: they differ only in valid_to, so the key does not
+-- collide, both land, and step one of the read — which groups on valid_from and ignores
+-- valid_to — keeps whichever was inserted last. The displaced row never reaches the valid-time
+-- filter, so once the survivor's window ends the key resolves to NOTHING while an open mapping
+-- sits in the table. No DQ check can find it afterwards either: the _current views distinct on
+-- the identity with security_id/node_id OUTSIDE that key, so they return one row by
+-- construction and the discarded one leaves no trace (sec_edge_current keeps dst_id IN its
+-- distinct key, which is what lets wave 1's equivalent rule fire).
+--
+-- AFTER INSERT because chain_scope is generated and is still NULL in a BEFORE trigger. The
+-- advisory lock is the read-then-write rule (ADR-0002 §3): two concurrent appends would
+-- otherwise each miss the other's uncommitted row.
+--
+-- NOT attached to sec_node or sec_edge, which have the same gap: wave 1 shipped the opposite
+-- convention, where a close names nothing, and three of its tests assert it. Changing a merged
+-- write contract is its own ticket, not this one's.
+CREATE FUNCTION sec_register_supersession_guard() RETURNS trigger
+  LANGUAGE plpgsql AS $$
+DECLARE
+    identity  jsonb;
+    predicate text := '';
+    col       text;
+    coltype   text;
+    clash     bigint;
+    named     bigint;
+BEGIN
+    identity := (SELECT jsonb_object_agg(k, to_jsonb(NEW) -> k) FROM unnest(TG_ARGV) AS k);
+    PERFORM pg_advisory_xact_lock(hashtext(TG_TABLE_NAME || ':' || identity::text));
+
+    -- Cast the parameter to each column's own type rather than the column to text, so the
+    -- equality stays indexable on the resolve index whose leading columns these are.
+    FOREACH col IN ARRAY TG_ARGV LOOP
+        SELECT atttypid::regtype::text INTO coltype
+          FROM pg_attribute WHERE attrelid = TG_RELID AND attname = col;
+        predicate := predicate || format(' AND t.%I = ($2->>%L)::%s', col, col, coltype);
+    END LOOP;
+
+    EXECUTE format('SELECT t.record_id FROM %I.%I t WHERE t.record_id <> $1%s LIMIT 1',
+                   TG_TABLE_SCHEMA, TG_TABLE_NAME, predicate)
+       INTO clash USING NEW.record_id, identity;
+
+    IF clash IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    IF NEW.supersedes_record_id IS NULL THEN
+        RAISE EXCEPTION 'append to %.% lands on a window that record % already holds (%); a second row on one window must name the row it closes in supersedes_record_id, or the two differ only by insert order and the displaced one becomes unreachable',
+            TG_TABLE_SCHEMA, TG_TABLE_NAME, clash, identity;
+    END IF;
+
+    EXECUTE format('SELECT t.record_id FROM %I.%I t WHERE t.record_id = $1%s',
+                   TG_TABLE_SCHEMA, TG_TABLE_NAME, predicate)
+       INTO named USING NEW.supersedes_record_id, identity;
+
+    IF named IS NULL THEN
+        RAISE EXCEPTION 'append to %.% supersedes record %, which is not on the window it lands on (%); a close names the row it closes, not one on another window',
+            TG_TABLE_SCHEMA, TG_TABLE_NAME, NEW.supersedes_record_id, identity;
+    END IF;
+    RETURN NULL;
+END $$;
+COMMENT ON FUNCTION sec_register_supersession_guard() IS 'AFTER INSERT on the registers: a second append on one valid-time window must name the row it closes in supersedes_record_id, and that row must be on the same window. Identity columns come from TG_ARGV, so one function serves both registers. Without it two rows differing only in valid_to both land, the read keeps whichever was inserted last, and once its window ends the key resolves to nothing while an open mapping remains in the table — invisible to any check over the _current views, which return one row per identity by construction.';
+
 CREATE TRIGGER instrument_register_append_guard BEFORE INSERT ON instrument_register
     FOR EACH ROW EXECUTE FUNCTION sec_store_append_guard();
 CREATE TRIGGER instrument_register_namespace_guard BEFORE INSERT ON instrument_register
@@ -482,6 +549,11 @@ CREATE TRIGGER alias_register_append_guard BEFORE INSERT ON alias_register
     FOR EACH ROW EXECUTE FUNCTION sec_store_append_guard();
 CREATE TRIGGER alias_register_scheme_guard BEFORE INSERT ON alias_register
     FOR EACH ROW EXECUTE FUNCTION alias_register_scheme_guard();
+
+CREATE TRIGGER instrument_register_supersession_guard AFTER INSERT ON instrument_register
+    FOR EACH ROW EXECUTE FUNCTION sec_register_supersession_guard('instrument_key', 'chain_scope', 'valid_from');
+CREATE TRIGGER alias_register_supersession_guard AFTER INSERT ON alias_register
+    FOR EACH ROW EXECUTE FUNCTION sec_register_supersession_guard('id_scheme', 'id_value', 'valid_from');
 
 DO $$
 DECLARE
