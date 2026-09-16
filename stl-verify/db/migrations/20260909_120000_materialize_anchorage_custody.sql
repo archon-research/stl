@@ -67,11 +67,11 @@ BEGIN
             GROUP BY key
             HAVING count(*) > 1
             UNION ALL
-            -- A ';' reaches position_key() as an unnamed raise; a blank component mints a degenerate
-            -- identity that raises nowhere. Both are named here instead.
+            -- position_key()'s own blank predicate, so the two cannot disagree: btrim() strips spaces
+            -- only, and the 'anchorage:' prefix means a whitespace component never reaches it blank.
             SELECT format('package %L asset %L has a blank or delimiter-bearing identity on %s snapshot(s)', s.package_id, s.asset_type, count(*))
             FROM src s
-            WHERE btrim(s.package_id) = '' OR btrim(s.asset_type) = ''
+            WHERE s.package_id ~ '^\s*$' OR s.asset_type ~ '^\s*$'
                OR s.package_id LIKE '%;%' OR s.asset_type LIKE '%;%'
             GROUP BY s.package_id, s.asset_type
         ) all_msgs
