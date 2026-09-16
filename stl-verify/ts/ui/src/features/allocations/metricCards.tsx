@@ -1,7 +1,11 @@
-import type { ChartColor, ChartColorToken } from '@archon-research/charting';
+import type {
+  ChartColor,
+  ChartColorToken,
+} from '@archon-research/charting/core';
 import {
   ErrorState,
   InfoPopover,
+  SkeletonStack,
   StatTile,
 } from '@archon-research/design-system';
 import { Info } from 'lucide-react';
@@ -14,7 +18,6 @@ import {
   formatFreshnessLabel,
 } from '../../shared/lib/dashboard';
 import { preferReference } from '../../shared/lib/provenance';
-import { Placeholder } from '../../shared/ui/Placeholder';
 
 export type ChartDatum = {
   label: string;
@@ -45,6 +48,10 @@ export type MetricChartSpec = {
   // Why the card has nothing to draw, for a card that cannot stand itself up
   // from a current value: without it a failed read plots as the empty state.
   errorMessage?: string | null;
+  // The latest bucket's own pricing coverage. Null once its total prices
+  // every position it knows about, so a caption only names counts when the
+  // total is partial (VEC-760).
+  coverage?: { pricedEntityCount: number; entityCount: number } | null;
   // Each draws a dashed limit line with a labelled edge. `showInTooltip` also
   // reports it at the cursor, in its own stroke — for a limit the series is
   // read directly against. Off by default: a limit the reader is not comparing
@@ -304,11 +311,13 @@ export function MetricCardSkeleton({ label }: { label: string }) {
       // Widths are a typical figure and subtitle rather than the full column: a
       // placeholder the width of the card reads as a filled card, not a loading
       // one.
-      value={<Placeholder width="8rem" height={28} />}
+      value={
+        <SkeletonStack count={1} itemHeight={28} style={{ width: '8rem' }} />
+      }
       detail={
         <div className={metricDetailClassName}>
-          <Placeholder width="12rem" height={16} />
-          <Placeholder width="100%" height={CHART_HEIGHT} />
+          <SkeletonStack count={1} itemHeight={16} style={{ width: '12rem' }} />
+          <SkeletonStack count={1} itemHeight={CHART_HEIGHT} />
         </div>
       }
     />
@@ -378,7 +387,7 @@ export function MetricCardError({
 const metricsCardClassName = css({
   borderRadius: 'sm',
   borderStyle: 'solid',
-  borderWidth: '1px',
+  borderWidth: 'hairline',
   borderColor: 'border.default',
   bg: 'surface.subtle',
   p: { base: '3', md: '3.5' },

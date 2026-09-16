@@ -2,6 +2,7 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
+from app.api.errors import register_error_handlers
 from app.api.provenance import get_requested_provenance, resolve_or_422
 from app.domain.provenance import Provenance
 
@@ -9,6 +10,7 @@ from app.domain.provenance import Provenance
 @pytest.fixture
 def client() -> TestClient:
     app = FastAPI()
+    register_error_handlers(app)
 
     @app.get("/probe")
     def probe(requested: Provenance | None = Depends(get_requested_provenance)):

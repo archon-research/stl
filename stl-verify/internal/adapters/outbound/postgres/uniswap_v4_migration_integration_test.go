@@ -1584,7 +1584,11 @@ func TestUniswapV4PoolSnapshotSupportedDefaultsToTrue(t *testing.T) {
 func TestUniswapV4DeployBlockIsNotNullable(t *testing.T) {
 	ctx := context.Background()
 
-	for _, table := range []string{"uniswap_v4_pool", "uniswap_v4_pool_manager"} {
+	// uniswap_v4_position_manager is here because scanUniswapV4PoolRow dereferences
+	// its deploy_block unguarded, on the path the live dex-indexer factory boots
+	// through, so this constraint is what stands between a relaxed column and a
+	// nil-pointer panic at startup.
+	for _, table := range []string{"uniswap_v4_pool", "uniswap_v4_pool_manager", "uniswap_v4_position_manager"} {
 		var isNullable string
 		if err := uniswapV4TestPool.QueryRow(ctx, `
 			SELECT is_nullable

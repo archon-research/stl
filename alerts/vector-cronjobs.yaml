@@ -27,12 +27,13 @@
 # template's `Cluster:` header is populated. `namespace` is a static rule label
 # (mimir-rules-sync lint forbids `cluster`/`env` as static labels but allows it).
 #
-# Eight jobs are EXCLUDED from VectorCronjobAllRunsFailing by service_name:
+# Nine jobs are EXCLUDED from VectorCronjobAllRunsFailing by service_name:
 # maple-graphql-indexer, which has richer dedicated rules in
-# vector-indexers.yaml (VEC-320); the six on-demand ones —
+# vector-indexers.yaml (VEC-320); the seven on-demand ones —
 # offchain-price-backfill, reference-capital-backfill, morpho-vault-backfill,
-# morpho-v2-bootstrap, uniswap-v4-position-bootstrap and block-republisher (one
-# deployment per chain, below), none of which carries a schedule;
+# morpho-v2-bootstrap, uniswap-v4-position-bootstrap, block-republisher and
+# block-meta-loader (the last two one deployment per chain, below), none of
+# which carries a schedule;
 # and core-model-runner, which does carry a schedule but ticks only every 24h with
 # no retry (RetryPolicy.maximum_attempts=1) — see VectorCronjobAllRunsFailing
 # for why "no successes in an hour" is their healthy state. Every other
@@ -40,6 +41,10 @@
 # ones are covered by VectorCronjobRunFailing (and VectorOnDemandWorkerDown /
 # VectorCronjobWorkerDown for availability) instead; core-model-runner also
 # gets its own stall rule, VectorCoreModelRunnerStale.
+#
+# block-meta-loader is deployed the same way and matched by the same shape of
+# regex, `([a-z0-9-]+-)?block-meta-loader`: `block-meta-loader` on ethereum and
+# `<chain>-block-meta-loader` elsewhere.
 #
 # block-republisher is deployed once per chain with a raw archive, each on its
 # own task queue and therefore its own service_name and Deployment name:
@@ -52,7 +57,7 @@
 # Severity → routing (per the alerting routing spec):
 #   critical       → pages, prod #at_stl_prod_alerts / staging
 #                    #at_stl_staging_alerts, [CRITICAL], 1h repeat.
-#   warning / info → no page, prod #at_stl_alerts / staging
+#   warning / info → no page, prod #at_stl_prod_alerts / staging
 #                    #at_stl_staging_alerts, [WARNING]/[INFO], 4h repeat.
 # Per-env routing is automatic via each Mimir tenant's default_webhook_url; no
 # `alert_env` label is needed — every rule reads objects in its own tenant.
@@ -137,6 +142,7 @@ groups:
                 service_name!="morpho-vault-backfill",
                 service_name!="uniswap-v4-position-bootstrap",
                 service_name!~"([a-z0-9-]+-)?block-republisher",
+                service_name!~"([a-z0-9-]+-)?block-meta-loader",
                 service_name!="core-model-runner",
                 k8s_namespace_name="vector"
               }[1h])
@@ -154,6 +160,7 @@ groups:
                 service_name!="morpho-vault-backfill",
                 service_name!="uniswap-v4-position-bootstrap",
                 service_name!~"([a-z0-9-]+-)?block-republisher",
+                service_name!~"([a-z0-9-]+-)?block-meta-loader",
                 service_name!="core-model-runner",
                 k8s_namespace_name="vector"
               }[1h])
@@ -257,7 +264,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|uniswap-v4-position-bootstrap|([a-z0-9-]+-)?block-republisher"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|uniswap-v4-position-bootstrap|([a-z0-9-]+-)?block-republisher|([a-z0-9-]+-)?block-meta-loader"
               }
             ) < 1
           )
@@ -265,7 +272,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|uniswap-v4-position-bootstrap|([a-z0-9-]+-)?block-republisher"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|uniswap-v4-position-bootstrap|([a-z0-9-]+-)?block-republisher|([a-z0-9-]+-)?block-meta-loader"
               }
             ) > 0
           )
@@ -284,6 +291,51 @@ groups:
             back. Check the pod (CrashLoopBackOff, OOM, image pull); an
             ImagePullBackOff here usually means the release wiring is missing.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorondemandworkerdown
+
+      # -----------------------------------------------------------------------
+      # WARNING — block_meta_worklist outgrowing its scratch-table budget
+      # -----------------------------------------------------------------------
+      - alert: VectorBlockMetaWorklistGrowthHigh
+        # block_meta_worklist is an UNLOGGED scratch table holding one chain's pending
+        # blocks for the length of a run; a run that reaches the end clears its chain.
+        # Its peak size is therefore the pending set, and this counter is what a run
+        # pages off it. The tripwire is on the assumption that the set stays bounded —
+        # nothing is broken when it fires.
+        #
+        # Threshold derivation:
+        #   - chain 1's first pass is 981,915 pending blocks (measured, VEC-491);
+        #   - once caught up, a run pages only the blocks referenced since the last
+        #     one, which is orders of magnitude smaller;
+        #   - trip at 3,000,000 rows in 24h per chain, ~3x a full first pass, so the
+        #     initial backfill and its retries cannot reach it.
+        # Reaching it means the chain re-enumerated its whole history several times in
+        # a day, or the referenced set grew past what a scratch table should hold.
+        #
+        # 24h window AND `for: 6h`: runs are hand-started, so a short window is empty
+        # almost always and would make this un-evaluable rather than under threshold.
+        #
+        # No zero-fill companion is needed: the counter is seeded per chain at service
+        # construction, so the series exists from the worker's first export.
+        expr: |
+          sum by (cluster, chain_id) (
+            increase(block_meta_worklist_rows_paged_total{k8s_namespace_name="vector"}[24h])
+          ) > 3000000
+        for: 6h
+        labels:
+          team: vector
+          severity: warning
+          component: temporal-cronjobs
+          namespace: vector
+        annotations:
+          summary: "block_meta_worklist for chain `{{ $labels.chain_id }}` outgrowing its scratch-table budget"
+          description: |
+            The block-meta loader paged more than 3,000,000 work-list rows for chain
+            `{{ $labels.chain_id }}` in 24h, about three times chain 1's full first
+            pass. Nothing is broken: block_meta_worklist is UNLOGGED and cleared by a
+            completed run. Check whether runs are repeatedly re-enumerating (a run
+            that keeps failing before it finishes), whether block_meta lost rows, or
+            whether a new referencing table widened the pending set.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorblockmetaworklistgrowthhigh
 
       # -----------------------------------------------------------------------
       # CRITICAL — core-model-runner has not completed a tick in 30h

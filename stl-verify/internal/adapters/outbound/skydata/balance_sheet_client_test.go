@@ -399,18 +399,28 @@ func TestFetchPositionsRejectsADuplicateRowIdentityAcrossCasing(t *testing.T) {
 	}
 }
 
-// The feed's own vocabulary is lowercase; a casing difference upstream must
-// still resolve rather than silently reading as an unmapped network.
-func TestFetchPositionsMapsChainIDCaseInsensitively(t *testing.T) {
-	client, _ := newPositionsTestClient(t, []map[string]any{positionRow(map[string]any{"network": "Ethereum"})}, 1)
+// Upstream's casing is not trustworthy, and a network that fails to resolve is
+// served with a null chain id that reads as a chain of its own on the page.
+func TestFetchPositionsMapsNetworkToChainID(t *testing.T) {
+	for _, tc := range []struct {
+		network string
+		want    int64
+	}{
+		{"Ethereum", 1},
+		{"robinhood", 4663},
+	} {
+		t.Run(tc.network, func(t *testing.T) {
+			client, _ := newPositionsTestClient(t, []map[string]any{positionRow(map[string]any{"network": tc.network})}, 1)
 
-	rows, err := client.FetchPositions(context.Background(), []string{"spark"})
-	if err != nil {
-		t.Fatalf("FetchPositions() = %v", err)
-	}
+			rows, err := client.FetchPositions(context.Background(), []string{"spark"})
+			if err != nil {
+				t.Fatalf("FetchPositions() = %v", err)
+			}
 
-	if rows[0].ChainID == nil || *rows[0].ChainID != 1 {
-		t.Errorf("ChainID = %v, want 1 for network \"Ethereum\"", rows[0].ChainID)
+			if rows[0].ChainID == nil || *rows[0].ChainID != tc.want {
+				t.Errorf("ChainID = %v, want %d for network %q", rows[0].ChainID, tc.want, tc.network)
+			}
+		})
 	}
 }
 

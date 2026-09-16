@@ -5,9 +5,9 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
-)
 
-var transferEventTopic = common.HexToHash("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+)
 
 var transferAmountArgs abi.Arguments
 
@@ -47,7 +47,7 @@ func (e *TransferExtractor) Extract(receipt TransactionReceipt) []*TransferEvent
 		if len(log.Topics) < 3 {
 			continue
 		}
-		if log.Topics[0] != transferEventTopic {
+		if log.Topics[0] != abis.TransferTopic0() {
 			continue
 		}
 

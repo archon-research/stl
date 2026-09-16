@@ -21,6 +21,7 @@ func TestLoadConfig(t *testing.T) {
 		"MIN_WINDOW":       "",
 		"MAX_WINDOW":       "",
 		"POSITION_BATCH":   "",
+		"TRANSFER_BATCH":   "",
 	}
 
 	tests := []struct {
@@ -44,11 +45,13 @@ func TestLoadConfig(t *testing.T) {
 				"MIN_WINDOW":     "10",
 				"MAX_WINDOW":     "5000",
 				"POSITION_BATCH": "50",
+				"TRANSFER_BATCH": "250",
 			},
 			want: config{
 				rpcURL: mainnetRPCURL + "/test-key",
 				bootstrap: uniswapv4bootstrap.Config{
-					ChainID: 1, FinalityDepth: 128, InitialWindow: 1000, MinWindow: 10, MaxWindow: 5000, PositionBatch: 50,
+					ChainID: 1, FinalityDepth: 128, InitialWindow: 1000, MinWindow: 10, MaxWindow: 5000,
+					PositionBatch: 50, TransferBatch: 250,
 				},
 			},
 		},

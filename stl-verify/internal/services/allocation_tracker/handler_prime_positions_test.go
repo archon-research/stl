@@ -28,12 +28,12 @@ type fakeAllocRepo struct {
 	err   error
 }
 
-func (r *fakeAllocRepo) SavePositions(_ context.Context, _ pgx.Tx, positions []*entity.AllocationPosition) error {
+func (r *fakeAllocRepo) SavePositions(_ context.Context, _ pgx.Tx, positions []*entity.AllocationPosition) (int64, error) {
 	if r.err != nil {
-		return r.err
+		return 0, r.err
 	}
 	r.saved = append(r.saved, positions...)
-	return nil
+	return int64(len(positions)), nil
 }
 
 // fakeSupplyRepo captures supplies passed to SaveSupplies.

@@ -1378,7 +1378,7 @@ func (h *liveHarness) decodeOnePosmTransfer(t *testing.T, ctx context.Context, r
 // cannot drift apart silently.
 func positionManagerTransferTopic0(t *testing.T) common.Hash {
 	t.Helper()
-	ev, err := positionManagerTransferEvent()
+	ev, err := PositionManagerTransferEvent()
 	if err != nil {
 		t.Fatalf("loading the PositionManager Transfer event: %v", err)
 	}

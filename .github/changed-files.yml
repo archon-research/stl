@@ -48,6 +48,14 @@ ts:
 k8s:
   - k8s/**
 
+# VEC-802: promtool evaluates the rule expressions against the synthetic series
+# in alerts-tests/, so an edit to either side — or to the pinned promtool
+# version in the root Makefile — has to run the alert-rules job.
+alerts:
+  - alerts/**
+  - alerts-tests/**
+  - Makefile
+
 # ORB-362: a roster or renderer change must run the deploy even when no code
 # changed — the bot regenerates the overlays' images blocks from the roster, so
 # a new image entry only reaches ArgoCD through a deploy run. No test suite keys

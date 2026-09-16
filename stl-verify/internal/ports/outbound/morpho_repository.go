@@ -94,6 +94,19 @@ type MorphoRepository interface {
 	// incarnation for a snapshot to be stranded by.
 	ObserveAdapterMembership(ctx context.Context, tx pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error)
 
+	// AdapterSetEnumeratedAt reports whether an end-of-block adapter-set enumeration
+	// for this adapter already exists at a block position — the observation discovery
+	// writes at entity.EndOfBlockLogIndex, ordering above every log in that block.
+	//
+	// It exists to tell the two reasons an Allocate's implied membership got appended
+	// apart. A vault discovered in the block it allocates in enumerates its set above
+	// the allocation's position, so the allocation reads below the seed, finds no
+	// answer and appends: expected, self-healing, and true every time rather than a
+	// race. An append with no such enumeration means the set enumeration did not cover
+	// the adapter at all, which is the discovery gap
+	// VectorMorphoV2LazyAdapterRegistrations exists to catch.
+	AdapterSetEnumeratedAt(ctx context.Context, tx pgx.Tx, morphoAdapterID int64, at entity.BlockPosition) (bool, error)
+
 	// GetActiveAdapterAt returns the adapter and its membership for (vault, address) as of a
 	// block position, for replay and for the pre-transaction probe decision: it answers
 	// "was this adapter a member HERE", not "is it a member now", so a backfiller replaying

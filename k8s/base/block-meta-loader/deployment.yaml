@@ -1,0 +1,71 @@
+# block-meta-loader (VEC-491): fills the block_meta dimension for one chain from
+# that chain's S3 raw-block archive, the authoritative block-header timestamp.
+#
+# A long-running Deployment, not a k8s Job or CronJob: it polls the Temporal task
+# queue "block-meta-loader" and stays idle until someone starts a run from the
+# Temporal UI. The run must be a deliberate operator action, never a deploy or an
+# ArgoCD sync — a first pass over a chain's history is hours of S3 reads. It
+# registers NO schedule, so an always-on pod costs nothing but a poller.
+#
+#   temporal workflow start --task-queue block-meta-loader --type BlockMetaLoad \
+#     --workflow-id block-meta-loader-ethereum-<date> --input '{}'
+#
+# The workflow id guards concurrency, cancel is a button, and an attempt that is
+# cancelled or hits its timeout resumes from the committed work list rather than
+# re-enumerating the chain.
+#
+# s3:ListBucket and s3:GetObject on the chain's raw bucket come from an EKS Pod
+# Identity association on this ServiceAccount, granted in the infra repo
+# (k8s/README.md). It must exist before the first run.
+#
+# Chain-agnostic base — one chain per instantiation. Another chain is another
+# base dir naming its own task queue, ConfigMap and ExternalSecret, the way the
+# per-chain block-republishers are wired.
+#
+# replicas: 1 — one pod on one task queue. A run pages the work list with a
+# single cursor, so a second replica would buy nothing and double the S3 request
+# rate against the same bucket.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: block-meta-loader
+spec:
+  replicas: 1
+  # Recreate, because replicas: 1 above is a correctness bound, not a cost
+  # choice. The default RollingUpdate rounds maxSurge up to 1, so every rollout
+  # would run two pods polling the same task queue until the new one is Ready.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: block-meta-loader
+  template:
+    metadata:
+      labels:
+        app: block-meta-loader
+    spec:
+      serviceAccountName: block-meta-loader
+      containers:
+        - name: block-meta-loader
+          image: block-meta-loader
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            # CHAIN_ID, DEPLOY_ENV, AWS_REGION, BATCH_SIZE.
+            - configMapRef:
+                name: block-meta-loader
+            # DATABASE_URL (write role) and S3_BUCKET, both from the
+            # ExternalSecret — S3_BUCKET is per-environment infra config, which is
+            # where every sibling takes it from.
+            - secretRef:
+                name: block-meta-loader
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      # A run is one long activity; the worker heartbeats and the attempt resumes,
+      # so a drain does not need to wait for the pass to finish.
+      terminationGracePeriodSeconds: 90
