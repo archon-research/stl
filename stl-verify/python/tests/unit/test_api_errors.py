@@ -40,7 +40,6 @@ from app.main import app
 from app.services.prime_debt_service import PrimeDebtService
 from app.services.protocol_event_service import ProtocolEventService
 
-_VALID_TX_HASH = "0x" + "ab" * 32
 _KNOWN_PRIME = "0x" + "ab" * 20
 _UNKNOWN_PRIME = "0x" + "cd" * 20
 
