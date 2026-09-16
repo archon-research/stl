@@ -1,0 +1,41 @@
+# Actions are pinned to commit SHAs for supply-chain security.
+# To update: git ls-remote --tags https://github.com/<org>/<action>.git | grep <tag>
+#
+# Renovate runs self-hosted from this workflow, as it does in uikit and synome,
+# rather than from the hosted App. RENOVATE_REPOSITORIES holds it to this
+# repository. What it manages is in renovate.json5.
+name: Renovate
+
+on:
+  schedule:
+    # Weekly on Monday at 10:00 UTC, matching the dependabot schedule it takes
+    # base images over from.
+    - cron: '0 10 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+jobs:
+  renovate:
+    name: Renovate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # branches for the update PRs
+      pull-requests: write
+      issues: write # the dependency dashboard, which gates major updates
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Self-hosted Renovate
+        uses: renovatebot/github-action@79dc0ba74dc3de28db0a7aeb1d0b95d5bf5fde2a # v46.1.13
+        env:
+          RENOVATE_AUTODISCOVER: "false"
+          RENOVATE_REPOSITORIES: ${{ github.repository }}
+        with:
+          configurationFile: renovate.json5
+          token: ${{ secrets.GITHUB_TOKEN }}

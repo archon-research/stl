@@ -215,10 +215,17 @@ jobs:
         run: scripts/deploy/compare-image-layers.test.sh
 
       # VEC-783: the Dockerfiles pin base-image tag+digest together rather than
-      # interpolating the tag from .go-version/.python-version, so nothing else
-      # keeps them in step with a version-file bump.
-      - name: Base-image tags match .go-version / .python-version
+      # interpolating the tag from a version file, so nothing else keeps them in
+      # step with a version-file bump, or with each other.
+      - name: Base-image pins match the version files and each other
         run: scripts/deploy/check-base-image-version-consistency.sh
+
+      # The guard's dangerous failure is a reassuring one — "pinned identically"
+      # for a file it never opened, or for a FROM line whose digest survives only
+      # in a comment above it. Those trees cannot occur in a real checkout, so
+      # they are built as fixtures here. Needs no credentials and takes seconds.
+      - name: Base-image guard rejects the trees it must
+        run: scripts/deploy/check-base-image-version-consistency.test.sh
 
   shell:
     name: Shell
