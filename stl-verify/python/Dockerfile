@@ -2,7 +2,7 @@
 
 # Build UI on the native builder architecture — the output is static JS/HTML/CSS,
 # so there's no reason to run npm under QEMU arm64 emulation (which crashes node).
-FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:50c8e8ca1d27439048670df5883f32d57cf81cff6233222c893fd0d9884cbd81 AS ui-builder
+FROM --platform=$BUILDPLATFORM node:24.20.0-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf AS ui-builder
 
 WORKDIR /ui
 
