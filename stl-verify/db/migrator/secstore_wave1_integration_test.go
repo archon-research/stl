@@ -477,36 +477,19 @@ func TestSecStoreWave1IsAppendOnlyUnderTheRealRoles(t *testing.T) {
 	// holds nothing" for a table where the REVOKE never ran, which is precisely the failure
 	// these subtests exist to catch. acldefault('r', relowner) materialises the implicit
 	// default so a missing revoke reads as the privilege still being held.
-	ownerHas := func(t *testing.T, table, priv string) bool {
-		t.Helper()
-		var held bool
-		if err := pool.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1
-				FROM pg_class c,
-				     aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
-				WHERE c.oid = $1::regclass
-				  AND a.grantee = c.relowner
-				  AND a.privilege_type = $2
-			)`, table, priv).Scan(&held); err != nil {
-			t.Fatalf("read %s ACL for %s: %v", table, priv, err)
-		}
-		return held
-	}
-
 	t.Run("owner_holds_no_update_delete_or_truncate_on_the_stores", func(t *testing.T) {
 		for _, table := range stores {
-			if ownerHas(t, table, "UPDATE") {
+			if ownerACLHolds(ctx, t, pool, table, "UPDATE") {
 				t.Errorf("%s: the owner still holds UPDATE in the ACL — the full revoke (position_state pattern) did not land", table)
 			}
-			if ownerHas(t, table, "DELETE") {
+			if ownerACLHolds(ctx, t, pool, table, "DELETE") {
 				t.Errorf("%s: the owner still holds DELETE in the ACL", table)
 			}
 			// TRUNCATE is revoked by the migration and was asserted nowhere, so dropping the word
 			// from the REVOKE left the whole suite green while stl_migrator — the role that runs
 			// every migration — could erase all history in one statement. No row trigger can catch
 			// it either: TRUNCATE fires none.
-			if ownerHas(t, table, "TRUNCATE") {
+			if ownerACLHolds(ctx, t, pool, table, "TRUNCATE") {
 				t.Errorf("%s: the owner still holds TRUNCATE in the ACL", table)
 			}
 		}
@@ -514,13 +497,13 @@ func TestSecStoreWave1IsAppendOnlyUnderTheRealRoles(t *testing.T) {
 
 	t.Run("owner_keeps_update_on_the_vocabularies_for_the_fk_probe", func(t *testing.T) {
 		for _, table := range vocabularies {
-			if !ownerHas(t, table, "UPDATE") {
+			if !ownerACLHolds(ctx, t, pool, table, "UPDATE") {
 				t.Errorf("%s: the owner lost UPDATE — the FK integrity probe runs as the parent's owner and needs it, so every INSERT into sec_node/sec_edge would fail under the prod roles (20260714_160000, #574)", table)
 			}
-			if ownerHas(t, table, "DELETE") {
+			if ownerACLHolds(ctx, t, pool, table, "DELETE") {
 				t.Errorf("%s: the owner still holds DELETE; append-only leaves no delete channel", table)
 			}
-			if ownerHas(t, table, "TRUNCATE") {
+			if ownerACLHolds(ctx, t, pool, table, "TRUNCATE") {
 				t.Errorf("%s: the owner still holds TRUNCATE, which no row trigger can intercept", table)
 			}
 		}
