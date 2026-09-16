@@ -1140,3 +1140,127 @@ func TestMaterializeAaveLendingForwardsTheWindow(t *testing.T) {
 		t.Errorf("the run recorded window %q; want the 36 hours the wrapper was called with", *window)
 	}
 }
+
+// The mirror of the debt case on the supply leg: a receipt mapping re-registered under another
+// protocol leaves the address findable globally while the stored position's own reserve resolves to
+// nothing. Without the receipt branch's protocol scoping the guard stays silent.
+func TestMaterializeAaveLendingRefusesWhenAReceiptMappingMovesToAnotherProtocol(t *testing.T) {
+	ctx, pool, written := seedAaveLending(t)
+	if written == 0 {
+		t.Fatal("the base fixture appended nothing, so there is no stored exposure to strand")
+	}
+
+	// P1's aUSDC re-registered as P2's aWETH: a1a1 still exists, but no longer under P1/USDC.
+	// Parked on WETH so P2/USDC does not gain a second receipt token and trip b2 instead.
+	res, err := pool.Exec(ctx, `
+		UPDATE receipt_token
+		   SET protocol_id = (SELECT id FROM protocol WHERE chain_id = 1 AND address = '\x02'),
+		       underlying_token_id = (SELECT id FROM token WHERE chain_id = 1 AND address = '\xbeef')
+		 WHERE encode(receipt_token_address, 'hex') = $1`, p1UsdcAToken)
+	if err != nil {
+		t.Fatalf("moving the receipt mapping: %v", err)
+	}
+	if res.RowsAffected() != 1 {
+		t.Fatalf("moved %d receipt mappings; want exactly the one %s was keyed from", res.RowsAffected(), p1UsdcAToken)
+	}
+
+	var stillRegistered bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM receipt_token WHERE encode(receipt_token_address, 'hex') = $1)`,
+		p1UsdcAToken).Scan(&stillRegistered); err != nil {
+		t.Fatalf("checking the address is still registered: %v", err)
+	}
+	if !stillRegistered {
+		t.Fatal("the address is gone from receipt_token, so this is the disappearance case, not the move")
+	}
+
+	_, err = pool.Exec(ctx, `SELECT materialize_aave_lending()`)
+	if err == nil {
+		t.Fatal("the run succeeded while its stored P1 supply exposure no longer resolved under P1")
+	}
+	if !strings.Contains(err.Error(), "no longer emits") || !strings.Contains(err.Error(), p1UsdcAToken) {
+		t.Errorf("refused with %v; want the stranded-exposure refusal naming %s", err, p1UsdcAToken)
+	}
+}
+
+// A mapping that crosses LEGS under the same protocol. The stored position is a BORROW, so only
+// debt_token may satisfy it; an unscoped guard finds the address in receipt_token and stays silent
+// while the borrow position strands.
+func TestMaterializeAaveLendingRefusesWhenAMappingMovesToTheOtherLeg(t *testing.T) {
+	ctx, pool, written := seedAaveLending(t)
+	if written == 0 {
+		t.Fatal("the base fixture appended nothing, so there is no stored exposure to strand")
+	}
+
+	// d1d1 stops being P1's variable-debt token and becomes a receipt token of P1, on a reserve with
+	// no collateral rows so it cannot trip the ambiguity branches.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO token (chain_id, address, symbol, decimals) VALUES (1, '\xfeed', 'DAI', 18);
+		UPDATE debt_token SET variable_debt_address = NULL
+		 WHERE encode(variable_debt_address, 'hex') = '`+p1UsdcDebt+`';
+		INSERT INTO receipt_token (chain_id, protocol_id, underlying_token_id, receipt_token_address)
+		SELECT 1, p.id, t.id, decode('`+p1UsdcDebt+`', 'hex')
+		  FROM protocol p, token t
+		 WHERE p.chain_id = 1 AND p.address = '\x01' AND t.chain_id = 1 AND t.address = '\xfeed'`); err != nil {
+		t.Fatalf("moving the mapping across legs: %v", err)
+	}
+
+	_, err := pool.Exec(ctx, `SELECT materialize_aave_lending()`)
+	if err == nil {
+		t.Fatal("the run succeeded while a BORROW position's instrument resolved only as a receipt token")
+	}
+	if !strings.Contains(err.Error(), "no longer emits") || !strings.Contains(err.Error(), p1UsdcDebt) {
+		t.Errorf("refused with %v; want the stranded-exposure refusal naming %s", err, p1UsdcDebt)
+	}
+}
+
+// The mirror of the leg test on the supply side: a COLLATERAL position may only be satisfied by a
+// receipt token. Without the debt arm's gate, a debt_token registration of the same address under the
+// same protocol silences the guard while the supply position strands.
+func TestMaterializeAaveLendingASupplyPositionIsNotSatisfiedByADebtMapping(t *testing.T) {
+	ctx, pool, written := seedAaveLending(t)
+	if written == 0 {
+		t.Fatal("the base fixture appended nothing, so there is no stored exposure to strand")
+	}
+
+	// a1a1 stops being P1's aUSDC and becomes P1's variable-debt token on a reserve with no borrower
+	// rows, so it cannot trip the debt-side ambiguity branches.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO token (chain_id, address, symbol, decimals) VALUES (1, '\xfeed', 'DAI', 18);
+		DELETE FROM receipt_token WHERE encode(receipt_token_address, 'hex') = '`+p1UsdcAToken+`';
+		INSERT INTO debt_token (protocol_id, underlying_token_id, variable_debt_address)
+		SELECT p.id, t.id, decode('`+p1UsdcAToken+`', 'hex')
+		  FROM protocol p, token t
+		 WHERE p.chain_id = 1 AND p.address = '\x01' AND t.chain_id = 1 AND t.address = '\xfeed'`); err != nil {
+		t.Fatalf("moving the mapping across legs: %v", err)
+	}
+
+	_, err := pool.Exec(ctx, `SELECT materialize_aave_lending()`)
+	if err == nil {
+		t.Fatal("the run succeeded while a supply position's instrument resolved only as a debt token")
+	}
+	if !strings.Contains(err.Error(), "no longer emits") || !strings.Contains(err.Error(), p1UsdcAToken) {
+		t.Errorf("refused with %v; want the stranded-exposure refusal naming %s", err, p1UsdcAToken)
+	}
+}
+
+// b2 asks whether a reserve maps to several receipt ADDRESSES, not several rows. Two rows carrying
+// the SAME address key one instrument unambiguously, so the run must proceed. Only (chain_id,
+// receipt_token_address) is unique since 20260319_100000, so the pair differs on chain_id.
+func TestMaterializeAaveLendingTwoReceiptRowsSharingOneAddressAreNotAmbiguous(t *testing.T) {
+	ctx, pool := seedAaveLendingBase(t)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO receipt_token (chain_id, protocol_id, underlying_token_id, receipt_token_address)
+		SELECT 2, p.id, t.id, decode('`+p1UsdcAToken+`', 'hex')
+		  FROM protocol p, token t
+		 WHERE p.chain_id = 1 AND p.address = '\x01' AND t.chain_id = 1 AND t.address = '\xdead'`); err != nil {
+		t.Fatalf("seeding the duplicate-address receipt row: %v", err)
+	}
+	if _, err := pool.Exec(ctx, aaveLedger); err != nil {
+		t.Fatalf("seeding the ledger: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `SELECT materialize_aave_lending()`); err != nil {
+		t.Fatalf("two receipt rows carrying one address key one instrument, so the run must not refuse: %v", err)
+	}
+}
