@@ -313,6 +313,7 @@ whatever input the job declares. Nothing here has a schedule or a button.
 | `cmd/cronjobs/morpho-v2-bootstrap` | `morpho-v2-bootstrap` | `MorphoV2Bootstrap` | none (`{}` is accepted and ignored) |
 | `cmd/backfillers/block-republisher` | `block-republisher` (ethereum), `<chain>-block-republisher` elsewhere | `BlockRepublish` | `{"blocks":[25395651,25087888]}` (the version is derived per height from the raw archive; naming one, or any other field, fails the run) |
 | `cmd/backfillers/uniswap-v4-position-bootstrap` | `uniswap-v4-position-bootstrap` | `UniswapV4PositionBootstrap` | none (`{}` is accepted and ignored); the run pins its own finalized head and resumes it across attempts from the activity's heartbeat details |
+| `cmd/backfillers/uniswap-v4-position-bootstrap` (same worker, second type) | `uniswap-v4-position-bootstrap` | `UniswapV4PosmTransferBackfill` | none (`{}` is accepted and ignored); the run pins its own finality-safe head and resumes across attempts from a block cursor in the activity's heartbeat details |
 
 ### Shape of an on-demand job
 
@@ -363,6 +364,22 @@ func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry
 workflow takes none: an operator supplies nothing. Changing it is a redeploy —
 unlike a schedule, whose action bakes the bounds in until the schedule is
 deleted.
+
+**One worker can host several runner jobs.** Call `RegisterRunner` once per job,
+each with its own `WorkflowType` and its own `Progress` store; an operator then
+picks the type when starting a run and `uniswap-v4-position-bootstrap` is the
+worked example (positions and posm transfers).
+
+Every job shares one `Execute` method and the registry admits a name once, so each
+job after the first sets `ActivityName: temporal.RunnerActivityName(itsType)`. The
+**first job leaves it empty**, which keeps the bare `Execute` its already-deployed
+workflow histories record: a moved `ActivityType` is a non-determinism error that
+wedges a run in flight across the rollout until `ScheduleToClose`. Two jobs both
+left empty is not silent — the SDK panics at registration.
+
+Two further consequences: heartbeat details stay per job, which is why each needs
+its own store; and `cronjob.runs.total` carries only the task queue, so an alert
+keyed on it names the worker, while the Temporal UI's execution list names the job.
 
 ### Starting a run from the Temporal UI
 
@@ -421,7 +438,7 @@ twice. Re-running later means the same form with a new ID.
    retry free — but note the scope: `offchain_token_price`'s PK includes
    `processing_version`, and its trigger reuses a version only for the same
    `build_id`. A re-run from a *different* build appends a new version rather than
-   doing nothing (ADR-0002 §3). Additive, never destructive — but do not read
+   doing nothing (ADR-0006). Additive, never destructive — but do not read
    "idempotent" as "byte-identical across deploys".
 3. **Validate parameters in the workflow and fail non-retryably**
    (`temporalsdk.NewNonRetryableApplicationError`). Bad input fails identically on

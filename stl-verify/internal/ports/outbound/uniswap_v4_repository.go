@@ -19,6 +19,9 @@ type UniswapV4PoolRow struct {
 	// whole registry.
 	PositionManagerID int64
 	PositionManager   common.Address
+	// PositionManagerDeployBlock is where the posm transfer backfill starts its
+	// scan: no posm token exists below it.
+	PositionManagerDeployBlock int64
 	// PoolIDHash is the raw on-chain PoolId — keccak256 of the abi-encoded
 	// PoolKey — which every PoolManager log is indexed by, not the surrogate key
 	// in ID.
@@ -50,6 +53,20 @@ type UniswapV4BlockWrites struct {
 type UniswapV4PositionWriter interface {
 	// Returns how many rows it inserted — zero when every slot's stored state already matches.
 	SavePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) (insertedRows int64, err error)
+}
+
+// UniswapV4NFTTransferWriter is the posm transfer backfill's one write: transfer
+// rows alone, through the same insert SaveBlock's transfer phase takes.
+//
+// Idempotency is the live path's, which is the repo's convention for a replay
+// (morpho-v2-bootstrap states it in full): a re-run on the same build conflicts
+// away and writes nothing, while one from a different build re-records the range
+// as parallel provenance rows, since processing_version keys on build_id. Row
+// counts move, the holder answer does not — the newest processing_version wins the
+// ordering and carries identical content.
+type UniswapV4NFTTransferWriter interface {
+	// Returns how many rows it inserted.
+	SaveNFTTransfers(ctx context.Context, tx pgx.Tx, transfers []*entity.UniswapV4PositionNFTTransfer) (insertedRows int64, err error)
 }
 
 type UniswapV4Repository interface {

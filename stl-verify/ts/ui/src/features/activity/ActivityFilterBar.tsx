@@ -118,7 +118,7 @@ export function ActivityFilterBar({
             className={css({
               h: '8',
               borderRadius: 'md',
-              borderWidth: '1px',
+              borderWidth: 'hairline',
               borderStyle: 'solid',
               borderColor: 'border.subtle',
               bg: 'surface.default',

@@ -10,7 +10,7 @@ import (
 // AppendOnChange serializes a read-latest-then-insert decision for one natural
 // key: it takes the per-key advisory xact lock, reads the latest row, and calls
 // insert only when there is no prior row or the candidate differs. This closes
-// the read-then-write race that ON CONFLICT alone cannot guard (ADR-0002 §3).
+// the read-then-write race that ON CONFLICT alone cannot guard (ADR-0006).
 //
 // lockKey must identify the ENTITY whose append-decision is being serialized:
 // a block-free natural key (e.g. "curve_config|<pool_id>",
@@ -59,6 +59,34 @@ func AppendOnChange[T any](
 
 	if err := insert(ctx, tx); err != nil {
 		return fmt.Errorf("inserting for %q: %w", lockKey, err)
+	}
+	return nil
+}
+
+// lockAdvisoryKeys is AppendOnChange's batch pre-lock: it takes one
+// transaction-scoped advisory lock per key in a single round-trip, in the order
+// given. A batch writer calls it before reading the latest rows for a whole
+// block, and AppendOnChange's own acquisition of the same key then costs nothing
+// — xact advisory locks are reentrant.
+//
+// Callers pass keys already sorted on a total order every writer of the same
+// domain agrees on; two transactions acquiring an overlapping pair in opposite
+// orders deadlock. pg_advisory_xact_lock is taken left-to-right as unnest()
+// yields rows, so ORDER BY ord is what preserves the caller's order.
+//
+// subject names the domain in the error, since the callers guard different
+// read-latest-then-insert decisions.
+func lockAdvisoryKeys(ctx context.Context, tx pgx.Tx, keys []string, subject string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended(k, 0))
+		 FROM unnest($1::text[]) WITH ORDINALITY AS u(k, ord)
+		 ORDER BY ord`,
+		keys,
+	); err != nil {
+		return fmt.Errorf("locking %d %s: %w", len(keys), subject, err)
 	}
 	return nil
 }
