@@ -14,13 +14,13 @@
 # stopped a version-file bump from silently building a different toolchain than
 # the one CI compiles and tests against. This check is that stop.
 #
-# VEC-818 added two things. node is now guarded too: python/Dockerfile used to
-# pin node:24-alpine, a major-only tag with no patch for this check to compare,
-# and its digest had already drifted to 24.21.0 while .node-version said
-# 24.20.0 with nothing to notice. And check_pins_agree covers what check_tag
-# cannot — alpine has no version file at all, and check_tag compares only the
-# tag half, so two Dockerfiles could carry the same tag against different
-# digests and pass.
+# node is guarded on the same terms, which is why python/Dockerfile pins a full
+# patch tag: a major-only tag such as node:24-alpine carries nothing for this
+# check to compare .node-version against.
+#
+# Paths are resolved against the working directory, not the script's location,
+# so check-base-image-version-consistency.test.sh can drive it over fixture
+# trees.
 #
 # Usage:
 #   check-base-image-version-consistency.sh
@@ -62,26 +62,46 @@ check_tag() {
   done <<<"$matches"
 }
 
-# check_pins_agree <image> <file>...: every pinned FROM line naming <image>,
-# across all the given files, must carry the same tag AND the same digest. This
-# is the only guard on alpine, which has no version file to check against, and
-# it is what catches two Dockerfiles agreeing on a tag while pointing at
-# different images -- the exact drift VEC-783 hardcoded the tag to prevent.
+# check_pins_agree <image> <file>...: assert every file pins <image> on a FROM
+# line, and that all of them name the same tag and the same digest. alpine has
+# no version file, so this is the whole of its guard; for golang it is what
+# catches two files agreeing on a tag while naming different images, which
+# check_tag cannot see because it compares the tag and discards the digest.
+#
+# Per file rather than over the set: one grep across every file cannot tell
+# "all of them pin it" from "one of them does", and the file that stopped
+# pinning is the one worth knowing about. Anchored on FROM so a digest left
+# behind in a comment cannot stand in for the instruction.
 check_pins_agree() {
   local image="$1"
   shift
-  local pattern="${image}:[^@[:space:]]+@sha256:[0-9a-f]{64}"
-  local refs distinct count
-  refs="$(grep -hoE "$pattern" "$@" || true)"
-  if [ -z "$refs" ]; then
-    echo "  BAD  no pinned '${image}' FROM line found in: $*"
+  if [ "$#" -eq 0 ]; then
+    echo "  BAD  check_pins_agree ${image}: called with no files"
     FAILED=1
     return
   fi
-  distinct="$(printf '%s\n' "$refs" | sort -u)"
+  local from_pattern="FROM[[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)?${image}:[^@[:space:]]+@sha256:[0-9a-f]{64}"
+  local ref_pattern="${image}:[^@[:space:]]+@sha256:[0-9a-f]{64}"
+  local refs="" file hits status distinct count
+  for file in "$@"; do
+    if [ ! -f "$file" ]; then
+      echo "  BAD  ${file}: not a readable file"
+      FAILED=1
+      return
+    fi
+    status=0
+    hits="$(grep -hoE "^${from_pattern}" "$file" | grep -oE "$ref_pattern")" || status=$?
+    if [ "$status" -ne 0 ] || [ -z "$hits" ]; then
+      echo "  BAD  ${file}: no pinned '${image}' FROM line found"
+      FAILED=1
+      return
+    fi
+    refs="${refs}${hits}"$'\n'
+  done
+  distinct="$(printf '%s' "$refs" | sort -u)"
   count="$(printf '%s\n' "$distinct" | wc -l | tr -d ' ')"
   if [ "$count" -eq 1 ]; then
-    echo "  ok   ${image} pinned identically across $# file(s): ${distinct}"
+    echo "  ok   ${image} pinned identically in all $# file(s): ${distinct}"
   else
     echo "  BAD  ${image} is pinned ${count} different ways across: $*"
     printf '%s\n' "$distinct" | sed 's/^/         /'
@@ -97,7 +117,7 @@ check_tag stl-verify/python/Dockerfile node "${NODE_VERSION}-alpine"
 
 # shellcheck disable=SC2086 # deliberate word-splitting: the list is a filename list
 check_pins_agree golang $GO_DOCKERFILES
-# shellcheck disable=SC2086
+# shellcheck disable=SC2086 # deliberate word-splitting: the list is a filename list
 check_pins_agree alpine $GO_DOCKERFILES
 
 if [ "$FAILED" -ne 0 ]; then
