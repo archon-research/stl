@@ -1,12 +1,7 @@
 -- Corrections for position_daily (VEC-636): the writer that appends a retraction, and the view that
--- says where the reading and the spine disagree. Separate from 20260824_120000 because that file
--- creates the objects and this one is about operating them; it redefines none of them.
+-- says where the reading and the spine disagree.
 
--- The retraction writer. Callers name a (position, date) and a ticket; the procedure copies that
--- day's winning row at its own spine coordinate and correction_seq + 1, with is_retracted TRUE.
---
--- It needs no version allocator: correction_seq belongs to this table, so unlike ARCT-470's
--- processing_version encoding there is no shared namespace to serialise against (ARCT-428).
+-- Copies the day's winning row at its own spine coordinate and correction_seq + 1, is_retracted TRUE.
 CREATE OR REPLACE PROCEDURE retract_position_daily(
     p_position_id bytea,
     p_as_of_date  date,
@@ -27,9 +22,11 @@ BEGIN
         RAISE EXCEPTION 'retract_position_daily: a reason is required';
     END IF;
 
-    -- The day's current answer. A retraction copies the row it withdraws, and after one has been
-    -- written that row IS the tombstone -- so without this guard a retry copies the tombstone at the
-    -- next correction_seq and the conflict clause never fires.
+    -- The insert's coordinate is chosen from this read, which ON CONFLICT cannot guard: two callers
+    -- would each copy the other's tombstone at the next correction_seq (db/migrations/AGENTS.md).
+    PERFORM pg_advisory_xact_lock(
+        hashtext('position_daily:' || encode(p_position_id, 'hex') || ':' || p_as_of_date::text));
+
     SELECT d.is_retracted INTO winner_retracted
       FROM public.position_daily_observation d
      WHERE d.position_id = p_position_id AND d.as_of_date = p_as_of_date
@@ -58,24 +55,38 @@ BEGIN
      WHERE d.position_id = p_position_id AND d.as_of_date = p_as_of_date
      ORDER BY d.block_number DESC, d.block_version DESC, d.processing_version DESC,
               d.block_timestamp DESC, d.correction_seq DESC
-     LIMIT 1
-    -- A re-run of the same correction is a retry, not a second withdrawal.
-    ON CONFLICT ON CONSTRAINT position_daily_observation_pkey DO NOTHING;
+     LIMIT 1;
 
     GET DIAGNOSTICS appended = ROW_COUNT;
+
+    -- The crystallizer takes no key lock, so it can commit a higher coordinate between the read
+    -- above and this insert, leaving the tombstone inert. Raise rather than report a withdrawal.
+    IF EXISTS (SELECT 1 FROM public.position_daily d
+                WHERE d.position_id = p_position_id AND d.as_of_date = p_as_of_date) THEN
+        RAISE EXCEPTION 'retract_position_daily: % on % is still readable after the retraction; a newer observation outranks it',
+            encode(p_position_id, 'hex'), p_as_of_date;
+    END IF;
 END;
 $proc$;
 
-COMMENT ON PROCEDURE retract_position_daily(bytea, date, text, text, bigint) IS '[Operational] Withdraws one (position, UTC date) from position_daily by appending a retraction (VEC-636, ADR-0006 §3): CALL retract_position_daily(position_id, as_of_date, ticket, reason). Copies that day''s winning row at its own spine coordinate and correction_seq + 1 with is_retracted TRUE, so it outranks what it withdraws and never occupies a primary key the spine can reach. Idempotent: a day whose current answer is already retracted is left alone, returning 0. Raises if the day has no rows, or if ticket or reason is blank. Needs no version allocator, because correction_seq is this table''s own axis. Use it only for a key that should never have existed; a day whose VALUE is wrong is corrected upstream and supersedes on its own.';
+COMMENT ON PROCEDURE retract_position_daily(bytea, date, text, text, bigint) IS '[Operational] Withdraws one (position, UTC date) from position_daily by appending a retraction (VEC-636, ADR-0006 §3): CALL retract_position_daily(position_id, as_of_date, ticket, reason). Copies that day''s winning row at its own spine coordinate and correction_seq + 1 with is_retracted TRUE, so it outranks what it withdraws and never occupies a primary key the spine can reach. Serialises on the key with pg_advisory_xact_lock, because the coordinate it writes is chosen from a prior read. Idempotent: a day whose current answer is already retracted is left alone, returning 0. Raises if the day is still readable afterwards, which means a newer observation landed and the tombstone is inert. Raises if the day has no rows, or if ticket or reason is blank. Needs no version allocator, because correction_seq is this table''s own axis. Use it only for a key that should never have existed; a day whose VALUE is wrong is corrected upstream and supersedes on its own.';
 
--- Where the reading and the spine disagree, and why. Nothing here fires on its own: these are the
--- cases a human or a data-quality job has to decide about, and before this view each of them was a
--- paragraph in a PR rather than something you could query.
-CREATE OR REPLACE VIEW position_daily_anomaly AS
+-- Where the reading and the spine disagree, and why. Each row is a case a human or a data-quality
+-- job decides about; nothing here fires on its own.
+--
+-- A function rather than a view because newest-per-day over the spine's local chunks alone reads a
+-- PARTIAL history, and only a function can pin enable_tiered_reads.
+CREATE OR REPLACE FUNCTION position_daily_anomalies()
+    RETURNS TABLE (reason text, position_id bytea, as_of_date date, detail text)
+    LANGUAGE sql STABLE
+    SET search_path = pg_catalog, public
+    SET timescaledb.enable_tiered_reads = 'on'
+    SET work_mem = '64MB'
+AS $fn$
 WITH spine AS (
     SELECT DISTINCT ON (p.position_id, (p.block_timestamp AT TIME ZONE 'utc')::date)
            p.position_id, (p.block_timestamp AT TIME ZONE 'utc')::date AS as_of_date,
-           p.block_number, p.block_version, p.processing_version, p.projection
+           p.block_number, p.block_version, p.processing_version, p.block_timestamp, p.projection
       FROM public.position_state p
      ORDER BY p.position_id, (p.block_timestamp AT TIME ZONE 'utc')::date,
               p.block_number DESC, p.block_version DESC, p.processing_version DESC, p.block_timestamp DESC
@@ -83,13 +94,13 @@ WITH spine AS (
 -- A day the spine has moved past. The writer catches up on its next tick, so a row here that
 -- survives a crystallization is the real signal.
 SELECT 'stale_day'::text AS reason, d.position_id, d.as_of_date,
-       format('reading at (%s,%s,%s), spine winner at (%s,%s,%s)',
-              d.block_number, d.block_version, d.processing_version,
-              s.block_number, s.block_version, s.processing_version) AS detail
+       format('reading at (%s,%s,%s,%s), spine winner at (%s,%s,%s,%s)',
+              d.block_number, d.block_version, d.processing_version, d.block_timestamp,
+              s.block_number, s.block_version, s.processing_version, s.block_timestamp) AS detail
   FROM public.position_daily d
   JOIN spine s ON s.position_id = d.position_id AND s.as_of_date = d.as_of_date
- WHERE (d.block_number, d.block_version, d.processing_version)
-       IS DISTINCT FROM (s.block_number, s.block_version, s.processing_version)
+ WHERE (d.block_number, d.block_version, d.processing_version, d.block_timestamp)
+       IS DISTINCT FROM (s.block_number, s.block_version, s.processing_version, s.block_timestamp)
 
 UNION ALL
 
@@ -107,13 +118,16 @@ SELECT DISTINCT 'moved_day'::text, d.position_id, d.as_of_date,
 
 UNION ALL
 
--- A key that was withdrawn and has come back, because a later observation outranked the tombstone.
--- Correct when the day genuinely moved on, and the signature of a mis-keyed projection still emitting.
+-- A key that was withdrawn and has come back. The live row must both outrank the tombstone and
+-- postdate it, or a retraction that was inert from birth would report as a resurrection.
 SELECT DISTINCT 'resurrected'::text, d.position_id, d.as_of_date,
-       'a live row now outranks a retraction on this key'
+       'a live row written after a retraction now outranks it'
   FROM public.position_daily d
   JOIN public.position_daily_observation r
     ON r.position_id = d.position_id AND r.as_of_date = d.as_of_date AND r.is_retracted
+   AND (d.block_number, d.block_version, d.processing_version, d.block_timestamp, d.correction_seq)
+       > (r.block_number, r.block_version, r.processing_version, r.block_timestamp, r.correction_seq)
+   AND d.created_at > r.created_at
 
 UNION ALL
 
@@ -133,10 +147,14 @@ SELECT 'projection_drift'::text, d.position_id, d.as_of_date,
        format('reading says %s, spine says %s', d.projection, s.projection)
   FROM public.position_daily d
   JOIN spine s ON s.position_id = d.position_id AND s.as_of_date = d.as_of_date
- WHERE (d.block_number, d.block_version, d.processing_version)
-       IS NOT DISTINCT FROM (s.block_number, s.block_version, s.processing_version)
+ WHERE (d.block_number, d.block_version, d.processing_version, d.block_timestamp)
+       IS NOT DISTINCT FROM (s.block_number, s.block_version, s.processing_version, s.block_timestamp)
    AND d.projection IS DISTINCT FROM s.projection;
+$fn$;
 
+CREATE OR REPLACE VIEW position_daily_anomaly AS SELECT * FROM public.position_daily_anomalies();
+
+COMMENT ON FUNCTION position_daily_anomalies() IS '[Operational] The rows position_daily_anomaly exposes; pins enable_tiered_reads so the spine is computed over the whole history (VEC-636).';
 COMMENT ON VIEW position_daily_anomaly IS '[Operational] Every (position, UTC date) where position_daily does not match the position_state argmax, with a reason (VEC-636). stale_day: the spine has moved past the reading, which the next crystallization fixes -- only a row that SURVIVES a tick is a finding. moved_day: a correction crossed UTC midnight, so the reading''s block now belongs to another date and no ordering rule can withdraw it; retract_position_daily is the instrument. resurrected: a live row outranks a retraction on that key, which is correct when the day gained a real observation and is the signature of a mis-keyed projection still emitting. orphaned_day: the spine has no observation on that date at all, so no tick can clear it and only retract_position_daily can. projection_drift: the spine row was re-stamped in place by the 20260818_130000 recovery path and this copy cannot be repaired. Scans the whole spine, so it is a data-quality read, not a hot path. Empty is the steady state.';
 
 GRANT SELECT ON position_daily_anomaly TO stl_readonly;

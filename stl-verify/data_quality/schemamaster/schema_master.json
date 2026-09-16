@@ -355,7 +355,7 @@
     },
     "correction_seq": {
       "type": "int4",
-      "class": "S",
+      "class": "A",
       "not_null": true
     },
     "created_at": {

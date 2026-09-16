@@ -261,3 +261,87 @@ func TestPositionDailyAnomaly(t *testing.T) {
 		}
 	})
 }
+
+// The cases the review found the suite could not see.
+func TestPositionDailyCorrectionEdges(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	const date = "2026-01-01"
+
+	// A SQL NULL, not Go's empty string, so the procedure's IS NULL arms are actually executed.
+	t.Run("a null ticket or reason is refused", func(t *testing.T) {
+		const id = "edge-null"
+		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		for _, q := range []string{
+			`CALL retract_position_daily(sha256($1::bytea), $2, NULL, 'why', NULL)`,
+			`CALL retract_position_daily(sha256($1::bytea), $2, 'VEC-636', NULL, NULL)`,
+		} {
+			// P0001 is the procedure's own RAISE. Without its IS NULL arms the call reaches the
+			// INSERT and the CHECK refuses it as 23514, which is a different guarantee.
+			_, err := f.pool.Exec(f.ctx, q, id, date)
+			var pgErr *pgconn.PgError
+			if err == nil {
+				t.Errorf("%s was accepted", q)
+			} else if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
+				t.Errorf("%s failed with %v, want the procedure's own raise (P0001)", q, err)
+			}
+		}
+		if !f.dayPresent(id, date) {
+			t.Errorf("the day was withdrawn by a call that should have been refused")
+		}
+	})
+
+	// The CHECK has to hold the same line as the procedure, or a migration can write a tombstone
+	// whose attribution is whitespace.
+	t.Run("the table refuses blank attribution", func(t *testing.T) {
+		const id = "edge-blank"
+		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		_, err := f.pool.Exec(f.ctx, `
+			INSERT INTO position_daily_observation
+			    (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
+			     block_number, block_version, processing_version, block_timestamp, projection, build_id,
+			     run_id, deal_type, is_retracted, correction_seq, retraction_ticket, retraction_reason)
+			SELECT d.position_id, d.as_of_date, d.chain_id, d.protocol_id, d.instrument_key, d.holder_id,
+			       d.quantity, d.block_number, d.block_version, d.processing_version, d.block_timestamp,
+			       d.projection, d.build_id, d.run_id, d.deal_type, TRUE, d.correction_seq + 1, '  ', '  '
+			  FROM position_daily_observation d
+			 WHERE d.position_id = sha256($1::bytea) AND d.as_of_date = $2
+			 ORDER BY d.correction_seq DESC LIMIT 1`, id, date)
+		var pgErr *pgconn.PgError
+		if err == nil {
+			t.Errorf("a tombstone with whitespace attribution was accepted")
+		} else if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+			t.Errorf("failed with %v, want a check_violation (23514)", err)
+		}
+	})
+
+	// A tombstone aimed below the winner never withdrew anything, so the key was never resurrected.
+	t.Run("an inert tombstone is not a resurrection", func(t *testing.T) {
+		const id = "edge-inert"
+		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		f.observe(id, dailyObs{qty: 20, block: 200, ts: "2026-01-01T05:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		f.retractLoser(id, date)
+		if got := f.dayQty(id, date); got != 20 {
+			t.Fatalf("the day reads %d; the tombstone was meant to be inert", got)
+		}
+		if got := reasonsOf(f.anomalies(id)); len(got) != 0 {
+			t.Errorf("the view reports %v for a tombstone that never won the day, want nothing", got)
+		}
+	})
+
+	// Two spine rows on one date differing only in block_timestamp: the reading is behind and the
+	// view has to say so, which it cannot if the comparison stops at processing_version.
+	t.Run("stale_day sees a block_timestamp-only move", func(t *testing.T) {
+		const id = "edge-instant"
+		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		f.observe(id, dailyObs{qty: 20, block: 100, ts: "2026-01-01T09:00:00Z", dealType: "LOAN"})
+		if got := reasonsOf(f.anomalies(id)); len(got) != 1 || got[0] != "stale_day" {
+			t.Errorf("the view reports %v, want exactly [stale_day]: the spine's winner differs only "+
+				"in block_timestamp", got)
+		}
+	})
+}
