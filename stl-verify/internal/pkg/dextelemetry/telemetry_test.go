@@ -627,7 +627,9 @@ func readSingleSumCount(t *testing.T, rm *metricdata.ResourceMetrics, name strin
 	return 0
 }
 
-func newTestTelemetry(t *testing.T, prefix string, chainID int64) (*Telemetry, *metricsdk.ManualReader) {
+// installTestMeterProvider makes the global provider one this test can read, for
+// the constructors that bind their instruments to it as they are built.
+func installTestMeterProvider(t *testing.T) *metricsdk.ManualReader {
 	t.Helper()
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
@@ -637,6 +639,12 @@ func newTestTelemetry(t *testing.T, prefix string, chainID int64) (*Telemetry, *
 		otel.SetMeterProvider(prev)
 		_ = mp.Shutdown(context.Background())
 	})
+	return reader
+}
+
+func newTestTelemetry(t *testing.T, prefix string, chainID int64) (*Telemetry, *metricsdk.ManualReader) {
+	t.Helper()
+	reader := installTestMeterProvider(t)
 
 	tel, err := NewTelemetry(prefix, chainID)
 	if err != nil {

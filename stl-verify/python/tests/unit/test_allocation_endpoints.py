@@ -940,10 +940,16 @@ def test_list_allocation_activity_returns_aggregated_buckets():
             "event_count": 3,
             "total_tx_amount": "450.5",
             "net_flow_usd": "-120.25",
+            # Null on the flow series, which is the default: the two series are
+            # alternatives and only one query runs (VEC-760).
+            "balance_usd": None,
+            "priced_entity_count": None,
+            "entity_count": None,
         }
     ]
     kwargs = service.list_activity_buckets.await_args.kwargs
     assert kwargs["bucket_seconds"] == 5 * 60  # 24h window -> PT5M default
+    assert kwargs["series"] == "flow"
     service.list_allocation_activity.assert_not_awaited()
 
 
@@ -957,6 +963,27 @@ def test_list_allocation_activity_returns_422_for_invalid_prime_id():
     response = client.get(
         "/v1/allocations/activity",
         params={"prime_id": "0xdeadbeef"},
+    )
+
+    assert response.status_code == 422
+    service.list_allocation_activity.assert_not_awaited()
+
+
+def test_list_allocation_activity_returns_422_for_series_without_aggregation():
+    """``series`` selects between two aggregate queries; the raw arm has neither.
+
+    Silently ignoring it (VEC-760) would let ``series=balance`` on a raw request
+    look like it took effect.
+    """
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/allocations/activity",
+        params={"series": "balance"},
     )
 
     assert response.status_code == 422

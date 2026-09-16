@@ -111,7 +111,7 @@ func TestActivityProgress_ResetSilencesTheBeatUntilSomethingIsRecorded(t *testin
 	if err := progress.SaveProgress(ctx, sweepPoint{Scope: "chain-1", Block: 23_400_000}); err != nil {
 		t.Fatalf("SaveProgress: %v", err)
 	}
-	progress.Reset()
+	progress.Reset(ctx)
 	progress.Beat(ctx)
 
 	if len(sent) != 1 {
@@ -127,7 +127,7 @@ func TestActivityProgress_BeatsResumeOnceTheAttemptRecordsItsOwnProgress(t *test
 	recorded := sweepPoint{Scope: "chain-1", Block: 23_500_000}
 
 	progress := NewActivityProgress[sweepPoint]()
-	progress.Reset()
+	progress.Reset(ctx)
 	var sent [][]any
 	progress.record = func(_ context.Context, details ...any) { sent = append(sent, details) }
 
@@ -216,7 +216,7 @@ func TestActivityProgress_ResetSilencesTheBeatAfterAnEstablishedAbsence(t *testi
 		if _, _, err := progress.LoadProgress(ctx); err != nil {
 			return err
 		}
-		progress.Reset()
+		progress.Reset(ctx)
 		progress.Beat(ctx)
 		return nil
 	}
@@ -245,4 +245,87 @@ func TestActivityProgress_BeatBeforeLoadOrRecordSendsNothing(t *testing.T) {
 	if len(sent) != 0 {
 		t.Errorf("heartbeats sent = %d (%v), want none before a load or a record", len(sent), sent)
 	}
+}
+
+// TestActivityProgress_EachExecutionsBeatCarriesOnlyItsOwnRecord: one store
+// serves every run on a worker, and Temporal's duplicate guard is per Workflow
+// ID, so an operator can have two executions of one job in flight at once. A
+// beat carrying the other execution's position hands this execution's next
+// attempt a resume point over blocks it never covered.
+func TestActivityProgress_EachExecutionsBeatCarriesOnlyItsOwnRecord(t *testing.T) {
+	firstExecution, secondExecution := twoActivityExecutions(t)
+	firstPoint := sweepPoint{Scope: "chain-1", Block: 23_400_000}
+	secondPoint := sweepPoint{Scope: "chain-8453", Block: 21_000_000}
+
+	progress := NewActivityProgress[sweepPoint]()
+	var sent [][]any
+	progress.record = func(_ context.Context, details ...any) { sent = append(sent, details) }
+
+	if err := progress.SaveProgress(firstExecution, firstPoint); err != nil {
+		t.Fatalf("SaveProgress: %v", err)
+	}
+	if err := progress.SaveProgress(secondExecution, secondPoint); err != nil {
+		t.Fatalf("SaveProgress: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		ctx  context.Context
+		want sweepPoint
+	}{
+		{name: "the execution that recorded first", ctx: firstExecution, want: firstPoint},
+		{name: "the execution that recorded last", ctx: secondExecution, want: secondPoint},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sent = nil
+			progress.Beat(tc.ctx)
+			if len(sent) != 1 || len(sent[0]) != 1 || sent[0][0] != tc.want {
+				t.Errorf("the beat carried %v, want this execution's own %+v", sent, tc.want)
+			}
+		})
+	}
+}
+
+// TestActivityProgress_OneExecutionsResetLeavesAnothersBeatSpeaking: Reset runs
+// at the top of every execution. Reaching a run already in flight would silence
+// its liveness beat until its next unit of work lands, and a window longer than
+// HeartbeatTimeout fails that attempt.
+func TestActivityProgress_OneExecutionsResetLeavesAnothersBeatSpeaking(t *testing.T) {
+	sweeping, starting := twoActivityExecutions(t)
+	recorded := sweepPoint{Scope: "chain-1", Block: 23_400_000}
+
+	progress := NewActivityProgress[sweepPoint]()
+	var sent [][]any
+	progress.record = func(_ context.Context, details ...any) { sent = append(sent, details) }
+
+	if err := progress.SaveProgress(sweeping, recorded); err != nil {
+		t.Fatalf("SaveProgress: %v", err)
+	}
+	progress.Reset(starting)
+	sent = nil
+	progress.Beat(sweeping)
+
+	if len(sent) != 1 || len(sent[0]) != 1 || sent[0][0] != recorded {
+		t.Errorf("the sweeping execution's beat carried %v, want the %+v it recorded", sent, recorded)
+	}
+}
+
+// twoActivityExecutions returns the contexts of two activity executions of one
+// worker: the identity a store keys its records by.
+func twoActivityExecutions(t *testing.T) (first, second context.Context) {
+	t.Helper()
+	env := (&testsuite.WorkflowTestSuite{}).NewTestActivityEnvironment()
+	var captured []context.Context
+	capture := func(ctx context.Context) error {
+		captured = append(captured, ctx)
+		return nil
+	}
+	env.RegisterActivity(capture)
+	for range 2 {
+		if _, err := env.ExecuteActivity(capture); err != nil {
+			t.Fatalf("ExecuteActivity: %v", err)
+		}
+	}
+	return captured[0], captured[1]
 }
