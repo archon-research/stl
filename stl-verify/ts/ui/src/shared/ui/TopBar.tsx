@@ -118,7 +118,7 @@ const signOutClassName = css({
   fontWeight: 'medium',
   color: 'text.muted',
   textDecoration: 'none',
-  borderWidth: '1px',
+  borderWidth: 'hairline',
   borderStyle: 'solid',
   borderColor: 'border.subtle',
   borderRadius: 'md',
