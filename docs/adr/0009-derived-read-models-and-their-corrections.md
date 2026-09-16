@@ -55,7 +55,7 @@ The two claims coincide only when every source row behind a derived key is retra
 
 **4. The retraction filter sits outside the resolution, never inside it.** The read picks the winning row per key first, then drops the key if that winner is retracted. Inside the resolution it picks the newest *live* row instead and answers with a reading the correction withdrew. The distinction is invisible in a table with one row per key and load-bearing in every table this ADR covers.
 
-> *Enforced by*: moving the filter inside kills five of seven cases in the withdrawal suite; removing it kills nine across the three.
+> *Enforced by*: moving the filter inside the resolution fails 19 cases; removing it fails 20. Both were re-measured after the read stopped being defined in two migrations — the later definition had been winning, so an earlier round of these numbers described a copy that no longer ran.
 
 **5. A derived model is refreshed by a scheduled writer that recomputes and offers.** The writer never applies the change that just arrived. For each *settled* period it recomputes that period's winner over the whole source and offers it with `ON CONFLICT DO NOTHING`. Three properties follow, and they are why it is safe to put on a schedule at all: a missed run catches up, a double run writes nothing, and a crash rolls back and is redone. The writer reports the rows it wrote, so a run says what it did rather than that it ran; zero is the steady state.
 
@@ -76,6 +76,10 @@ A period is refreshed only once it has closed, plus a settling margin. The margi
 **8. A derived model publishes where it disagrees with its source, and why.** The ways a derived answer can legitimately differ from a recomputation of its source are finite, and each is either self-healing or a decision. They belong in a view with a reason per row, not in a document, because a case nobody can list is one nobody checks. Empty is the steady state; a row that survives a refresh is the finding.
 
 > *Enforced by*: `TestPositionDailyAnomaly`, which asserts a healthy key reports nothing, and that each reason fires on its own cause and clears on its own remedy.
+
+**9. Each object is defined once.** A migration that widens a table must not restate the reads over it, because the later definition silently wins and a mutation of the earlier one becomes inert — which is how an earlier round of this ADR's own enforcement figures came to describe code that no longer ran. Where the migrations land together, the column belongs in the `CREATE TABLE`; where they cannot, the redefinition is the only definition and the original is removed.
+
+> *Enforced by*: removing the retraction filter from the superseded copy passed the entire suite, which is what surfaced it. Nothing yet fails on a re-definition itself; the protection is that there is one.
 
 ## The shape, worked
 
