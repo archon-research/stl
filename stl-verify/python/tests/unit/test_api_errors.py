@@ -1,25 +1,30 @@
-"""The shared 422 contract as a client sees it, over routes built from the shared parts.
+"""The shared 422 contract as a client sees it, over the real app.
 
-A probe app rather than a dataset route: the dataset routes land in later tickets,
-and what is under test here is the machinery every one of them will inherit — the
-handlers, the typed body, the window echo, and the cache policy.
+The conformance cases run against `app.main.app`: the typed body on every published
+operation, the window echo, the cache policy, and a known-but-empty answer told apart
+from an unknown resource. An operation that loses any of them fails here.
+
+A probe app built from the same shared parts carries what no route reaches without
+inventing a repository: the max-points ceiling, which needs a point count no mocked
+service produces; `/latest`, which no route serves yet; and the start-of-time
+overflow guard behind its lookback.
 """
 
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
+from fastapi.openapi.utils import get_openapi
 from fastapi.testclient import TestClient
 
-from app.api._validators import OptionalTxHashParam
 from app.api.errors import API_ERROR_RESPONSES, ApiErrorResponse, RejectionType, register_error_handlers
 from app.api.time_series import (
-    apply_cache_control,
     build_raw_window,
     get_latest_query_params,
     get_time_series_query_params,
 )
+from app.api.v1 import prime_debts, protocol_events
 from app.domain.time_series import (
     MAX_POINTS,
     MAX_WINDOW,
@@ -28,6 +33,181 @@ from app.domain.time_series import (
     TimeWindow,
     enforce_max_points,
 )
+from app.main import app
+from app.services.prime_debt_service import PrimeDebtService
+from app.services.protocol_event_service import ProtocolEventService
+
+_VALID_TX_HASH = "0x" + "ab" * 32
+_KNOWN_PRIME = "0x" + "ab" * 20
+_UNKNOWN_PRIME = "0x" + "cd" * 20
+
+# A window an hour wide ending at `now`: pinned below, and narrow enough that the
+# unfiltered-window ceiling never answers first.
+_AN_HOUR_AGO = (datetime.now(UTC) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+
+
+def _override_with(service: AsyncMock):
+    async def _dep():
+        yield service
+
+    return _dep
+
+
+@pytest.fixture
+def events_client() -> TestClient:
+    """`/v1/protocol-events`: a real default-frequency route, reading an empty repository."""
+    service = AsyncMock(spec=ProtocolEventService)
+    service.list_events.return_value = []
+    service.list_event_buckets.return_value = []
+    app.dependency_overrides[protocol_events._get_protocol_event_service] = _override_with(service)
+    return TestClient(app)
+
+
+@pytest.fixture
+def debt_client() -> TestClient:
+    """`/v1/primes/{prime_id}/debt`: a real route over an identified resource, with no rows for it."""
+    service = AsyncMock(spec=PrimeDebtService)
+    service.resolve_prime_id.side_effect = lambda address: 7 if address == _KNOWN_PRIME else None
+    service.list_debt_snapshots.return_value = []
+    service.list_debt_buckets.return_value = []
+    app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_with(service)
+    return TestClient(app)
+
+
+def _events(client: TestClient, **params):
+    return client.get("/v1/protocol-events", params=params)
+
+
+def _source_schema() -> dict:
+    # get_openapi over the routes rather than app.openapi(), which strips the
+    # operations tagged `internal`: they are published to the UI's typed client
+    # and inherit the same contract.
+    return get_openapi(title=app.title, version=app.version, routes=app.routes)
+
+
+# --- one typed body on every operation ------------------------------------
+
+
+def test_the_schema_publishes_the_rejection_types_as_a_closed_set() -> None:
+    schema = _source_schema()
+
+    assert set(schema["components"]["schemas"]["RejectionType"]["enum"]) == set(RejectionType)
+
+
+def test_every_domain_rejection_is_published_as_a_rejection_type() -> None:
+    assert {error.error_type for error in TimeSeriesQueryError.__subclasses__()} <= set(RejectionType)
+
+
+def test_the_schema_declares_the_shared_body_on_every_route() -> None:
+    schema = _source_schema()
+
+    for path, operations in schema["paths"].items():
+        for method, operation in operations.items():
+            declared = operation["responses"]["422"]["content"]["application/json"]["schema"]["$ref"]
+            assert declared.endswith("/ApiErrorResponse"), f"{method} {path}"
+
+
+# --- the window that answered ---------------------------------------------
+
+
+def test_a_response_echoes_the_window_that_answered(events_client: TestClient) -> None:
+    body = _events(events_client, from_timestamp="2026-03-05T08:00:00Z", to_timestamp="2026-03-05T13:00:00Z").json()
+
+    assert body["window"] == {"from_timestamp": "2026-03-05T08:00:00Z", "to_timestamp": "2026-03-05T13:00:00Z"}
+
+
+def test_a_known_prime_with_nothing_in_range_is_an_empty_two_hundred(debt_client: TestClient) -> None:
+    response = debt_client.get(
+        f"/v1/primes/{_KNOWN_PRIME}/debt",
+        params={"from_timestamp": "2020-01-01T00:00:00Z", "to_timestamp": "2020-01-02T00:00:00Z"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+    assert response.json()["window"]["to_timestamp"] == "2020-01-02T00:00:00Z"
+
+
+def test_an_unknown_prime_is_a_404(debt_client: TestClient) -> None:
+    assert debt_client.get(f"/v1/primes/{_UNKNOWN_PRIME}/debt").status_code == 404
+
+
+# --- one typed body for every rejection -----------------------------------
+
+
+def test_a_domain_rejection_carries_no_suggestion_fields(events_client: TestClient) -> None:
+    response = _events(events_client, from_timestamp="2020-01-01T00:00:00Z", to_timestamp="2026-01-01T00:00:00Z")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["type"] == "window_too_large"
+    assert set(body) == {"type", "title", "status", "detail"}
+
+
+def test_a_validation_failure_uses_the_same_model(events_client: TestClient) -> None:
+    response = _events(events_client, to_timestamp="not-a-timestamp")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["type"] == "invalid_request"
+    assert "to_timestamp" in body["detail"]
+    assert ApiErrorResponse.model_validate(body)
+
+
+def test_a_rejected_enum_value_uses_the_same_model(events_client: TestClient) -> None:
+    response = _events(events_client, aggregation_method="period-mean")
+
+    assert response.status_code == 422
+    assert response.json()["type"] == "invalid_request"
+
+
+def test_a_validation_failure_does_not_echo_what_was_sent(events_client: TestClient) -> None:
+    response = _events(events_client, to_timestamp="totally-bogus-value")
+
+    assert "totally-bogus-value" not in response.text
+
+
+def test_a_validator_that_splices_the_value_into_its_own_message_still_does_not_echo_it(
+    events_client: TestClient,
+) -> None:
+    response = _events(events_client, tx_hash="0xnot-a-hash")
+
+    assert response.status_code == 422
+    assert "0xnot-a-hash" not in response.text
+
+
+def test_a_validation_failure_names_each_parameter_and_why_without_prose_parsing(events_client: TestClient) -> None:
+    response = _events(events_client, to_timestamp="not-a-timestamp", aggregation_method="period-mean")
+
+    errors = response.json()["errors"]
+    assert {error["field"] for error in errors} == {"query.to_timestamp", "query.aggregation_method"}
+    assert all(error["code"] for error in errors)
+
+
+def test_a_domain_rejection_carries_no_per_field_errors(events_client: TestClient) -> None:
+    response = _events(events_client, from_timestamp="2020-01-01T00:00:00Z", to_timestamp="2026-01-01T00:00:00Z")
+
+    assert "errors" not in response.json()
+
+
+# --- cache policy ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "params,expected",
+    [
+        ({"from_timestamp": "2026-03-05T08:00:00Z", "to_timestamp": "2026-03-05T13:00:00Z"}, "private, max-age=300"),
+        ({"from_timestamp": _AN_HOUR_AGO}, "no-store"),
+        ({}, "no-store"),
+    ],
+    ids=["pinned", "open-upper-bound", "defaulted"],
+)
+def test_cache_control_follows_whether_the_window_is_pinned(
+    events_client: TestClient, params: dict, expected: str
+) -> None:
+    assert _events(events_client, **params).headers["Cache-Control"] == expected
+
+
+# --- the probe: the shared parts no route reaches yet ----------------------
 
 _KNOWN_SERIES = "known"
 
@@ -48,25 +228,17 @@ def _probe_app() -> FastAPI:
     @router.get("/probe/{identifier}")
     def history(
         identifier: str,
-        response: Response,
         query: TimeSeriesQuery = Depends(get_time_series_query_params),
         point_count: int = Query(default=0),
     ) -> dict:
         _require_known(identifier)
-        apply_cache_control(response, query)
         if not query.is_bucketed:
             enforce_max_points(point_count or len(_in_window(query)), query=query)
         return {"window": build_raw_window(query).model_dump(mode="json"), "data": _in_window(query)}
 
-    @router.get("/probe/{identifier}/by-tx")
-    def by_tx(identifier: str, tx_hash: Annotated[OptionalTxHashParam, Query()] = None) -> dict:
-        _require_known(identifier)
-        return {"tx_hash": tx_hash}
-
     @router.get("/probe/{identifier}/latest")
-    def latest(identifier: str, response: Response, window: TimeWindow = Depends(get_latest_query_params)) -> dict:
+    def latest(identifier: str, window: TimeWindow = Depends(get_latest_query_params)) -> dict:
         _require_known(identifier)
-        apply_cache_control(response, window)
         observed = _in_window(window)
         return {"window": build_raw_window(window).model_dump(mode="json"), "data": observed[-1:]}
 
@@ -115,24 +287,6 @@ def test_history_includes_an_observation_exactly_on_the_bound(client: TestClient
     body = _history(client, from_timestamp="2026-03-05T10:00:00Z", to_timestamp="2026-03-05T12:00:00Z").json()
 
     assert body["data"] == ["2026-03-05T10:00:00Z", "2026-03-05T12:00:00Z"]
-
-
-def test_history_echoes_the_window_that_answered(client: TestClient) -> None:
-    body = _history(client, from_timestamp="2026-03-05T08:00:00Z", to_timestamp="2026-03-05T13:00:00Z").json()
-
-    assert body["window"] == {"from_timestamp": "2026-03-05T08:00:00Z", "to_timestamp": "2026-03-05T13:00:00Z"}
-
-
-def test_a_known_series_with_nothing_in_range_is_an_empty_two_hundred(client: TestClient) -> None:
-    response = _history(client, from_timestamp="2020-01-01T00:00:00Z", to_timestamp="2020-01-02T00:00:00Z")
-
-    assert response.status_code == 200
-    assert response.json()["data"] == []
-    assert response.json()["window"]["to_timestamp"] == "2020-01-02T00:00:00Z"
-
-
-def test_an_unknown_series_is_a_404(client: TestClient) -> None:
-    assert client.get("/probe/mistyped").status_code == 404
 
 
 # --- max-points rejection -------------------------------------------------
@@ -193,81 +347,16 @@ def test_an_oversized_request_is_rejected_rather_than_truncated(client: TestClie
     assert "data" not in response.json()
 
 
-# --- one typed body for every rejection -----------------------------------
+def test_a_rejection_that_cannot_suggest_a_window_still_suggests_a_frequency(client: TestClient) -> None:
+    body = _history(
+        client,
+        from_timestamp="2026-03-05T11:50:00Z",
+        to_timestamp="2026-03-05T12:00:00Z",
+        point_count=MAX_POINTS * 1000,
+    ).json()
 
-
-def test_a_domain_rejection_carries_no_suggestion_fields(client: TestClient) -> None:
-    response = _history(client, from_timestamp="2020-01-01T00:00:00Z", to_timestamp="2026-01-01T00:00:00Z")
-
-    assert response.status_code == 422
-    body = response.json()
-    assert body["type"] == "window_too_large"
-    assert set(body) == {"type", "title", "status", "detail"}
-
-
-def test_a_validation_failure_uses_the_same_model(client: TestClient) -> None:
-    response = _history(client, to_timestamp="not-a-timestamp")
-
-    assert response.status_code == 422
-    body = response.json()
-    assert body["type"] == "invalid_request"
-    assert "to_timestamp" in body["detail"]
-    assert ApiErrorResponse.model_validate(body)
-
-
-def test_a_rejected_enum_value_uses_the_same_model(client: TestClient) -> None:
-    response = _history(client, aggregation_method="period-mean")
-
-    assert response.status_code == 422
-    assert response.json()["type"] == "invalid_request"
-
-
-def test_a_validation_failure_does_not_echo_what_was_sent(client: TestClient) -> None:
-    response = _history(client, to_timestamp="totally-bogus-value")
-
-    assert "totally-bogus-value" not in response.text
-
-
-def test_a_validator_that_splices_the_value_into_its_own_message_still_does_not_echo_it(
-    client: TestClient,
-) -> None:
-    response = client.get(f"/probe/{_KNOWN_SERIES}/by-tx", params={"tx_hash": "0xnot-a-hash"})
-
-    assert response.status_code == 422
-    assert "0xnot-a-hash" not in response.text
-
-
-def test_a_validation_failure_names_each_parameter_and_why_without_prose_parsing(client: TestClient) -> None:
-    response = _history(client, to_timestamp="not-a-timestamp", aggregation_method="period-mean")
-
-    errors = response.json()["errors"]
-    assert {error["field"] for error in errors} == {"query.to_timestamp", "query.aggregation_method"}
-    assert all(error["code"] for error in errors)
-
-
-def test_a_domain_rejection_carries_no_per_field_errors(client: TestClient) -> None:
-    response = _history(client, from_timestamp="2020-01-01T00:00:00Z", to_timestamp="2026-01-01T00:00:00Z")
-
-    assert "errors" not in response.json()
-
-
-def test_the_schema_publishes_the_rejection_types_as_a_closed_set(client: TestClient) -> None:
-    schema = client.app.openapi()
-
-    assert set(schema["components"]["schemas"]["RejectionType"]["enum"]) == set(RejectionType)
-
-
-def test_every_domain_rejection_is_published_as_a_rejection_type() -> None:
-    assert {error.error_type for error in TimeSeriesQueryError.__subclasses__()} <= set(RejectionType)
-
-
-def test_the_schema_declares_the_shared_body_on_every_route(client: TestClient) -> None:
-    schema = client.app.openapi()
-
-    for path, operations in schema["paths"].items():
-        for method, operation in operations.items():
-            declared = operation["responses"]["422"]["content"]["application/json"]["schema"]["$ref"]
-            assert declared.endswith("/ApiErrorResponse"), f"{method} {path}"
+    assert "narrower_window" not in body["suggestions"]
+    assert body["suggestions"]["resampled"]["frequency"] == "PT1M"
 
 
 # --- bounded /latest ------------------------------------------------------
@@ -300,30 +389,6 @@ def test_latest_distinguishes_an_unknown_series_from_an_empty_one(client: TestCl
     assert client.get("/probe/mistyped/latest").status_code == 404
 
 
-# --- cache policy ---------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "path,params,expected",
-    [
-        (
-            "/probe/known",
-            {"from_timestamp": "2026-03-05T08:00:00Z", "to_timestamp": "2026-03-05T13:00:00Z"},
-            "private, max-age=300",
-        ),
-        ("/probe/known", {"from_timestamp": "2026-03-05T08:00:00Z"}, "no-store"),
-        ("/probe/known", {}, "no-store"),
-        ("/probe/known/latest", {"to_timestamp": "2026-03-05T13:00:00Z"}, "private, max-age=300"),
-        ("/probe/known/latest", {}, "no-store"),
-    ],
-    ids=["history-pinned", "history-open-upper-bound", "history-defaulted", "latest-pinned", "latest-defaulted"],
-)
-def test_cache_control_follows_whether_the_window_is_pinned(
-    client: TestClient, path: str, params: dict, expected: str
-) -> None:
-    assert client.get(path, params=params).headers["Cache-Control"] == expected
-
-
 def test_a_bound_near_the_start_of_time_is_rejected_rather_than_crashing(client: TestClient) -> None:
     start_of_time = {"to_timestamp": "0001-01-01T00:00:00Z"}
 
@@ -334,15 +399,3 @@ def test_a_bound_near_the_start_of_time_is_rejected_rather_than_crashing(client:
     assert latest.json()["type"] == "timestamp_out_of_range"
     assert history.status_code == 422
     assert history.json()["type"] == "timestamp_out_of_range"
-
-
-def test_a_rejection_that_cannot_suggest_a_window_still_suggests_a_frequency(client: TestClient) -> None:
-    body = _history(
-        client,
-        from_timestamp="2026-03-05T11:50:00Z",
-        to_timestamp="2026-03-05T12:00:00Z",
-        point_count=MAX_POINTS * 1000,
-    ).json()
-
-    assert "narrower_window" not in body["suggestions"]
-    assert body["suggestions"]["resampled"]["frequency"] == "PT1M"
