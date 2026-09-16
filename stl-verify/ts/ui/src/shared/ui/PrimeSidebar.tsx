@@ -34,12 +34,13 @@ const switchStyles = toggleSwitch();
  *
  * Counted over the prime's allocation rows on `allocationNetworkKey`, the key
  * the top bar's network filter groups by, so this number and the "All networks"
- * list span the same set — reference-only networks included.
+ * list span the same set, in whichever provenance the view is showing.
+ *
+ * A dash until every one of the prime's queries has answered: the fold is empty
+ * both before a fetch settles and after one fails, and zero is a real count.
  */
 function PrimeNetworkCount({ primeGroup }: { primeGroup: PrimeGroup }) {
   const { allocations, isLoaded } = useAllocationRows(primeGroup);
-
-  if (!isLoaded) return null;
 
   const count = new Set(allocations.map(allocationNetworkKey)).size;
 
@@ -51,7 +52,7 @@ function PrimeNetworkCount({ primeGroup }: { primeGroup: PrimeGroup }) {
         whiteSpace: 'nowrap',
       })}
     >
-      {count} {count === 1 ? 'network' : 'networks'}
+      {isLoaded ? `${count} ${count === 1 ? 'network' : 'networks'}` : '—'}
     </span>
   );
 }
