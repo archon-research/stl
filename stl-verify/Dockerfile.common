@@ -2,8 +2,8 @@
 # =============================================================================
 # Unified Go service Dockerfile
 # =============================================================================
-# One multi-stage build shared by every Go service and cronjob. Pick the target
-# with build args:
+# One multi-stage build shared by every Go binary here — services, cronjobs and
+# the local-dev mock servers alike. Pick the target with build args:
 #   CMD_PATH  Go package to build, relative to the module root (e.g. cmd/base/watcher)
 #   BIN       output binary name. Kept per-service on purpose: the k8s liveness
 #             probes match the process with `pgrep -f <BIN>`, so the running

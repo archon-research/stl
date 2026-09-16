@@ -1165,10 +1165,6 @@ GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GIT_COMMIT_FULL ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 GIT_BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-# Keep the literal fallback in step with ../.go-version. It only applies when that
-# file is unreachable, but a stale value here silently builds images on an older
-# toolchain — 1.26.3 shipped the stdlib CVEs that vulncheck flags.
-GO_VERSION ?= $(shell cat ../.go-version 2>/dev/null || cat .go-version 2>/dev/null || echo "1.26.5")
 
 # Image tag (default to git sha, can override)
 IMAGE_TAG ?= $(GIT_COMMIT)
@@ -2421,7 +2417,7 @@ _docker-release-reference-capital-backfill-internal:
 # uniswap-v4-position-bootstrap (VEC-639): an on-demand Temporal worker with no
 # schedule, so it is not auto-discovered as a cronjob; it only shares the ECR repo.
 docker-build-uniswap-v4-position-bootstrap:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/uniswap-v4-position-bootstrap --build-arg BIN=uniswap-v4-position-bootstrap -t stl-uniswap-v4-position-bootstrap:local -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/uniswap-v4-position-bootstrap --build-arg BIN=uniswap-v4-position-bootstrap -t stl-uniswap-v4-position-bootstrap:local -f Dockerfile.common .
 
 docker-release-uniswap-v4-position-bootstrap: ecr-login _docker-release-uniswap-v4-position-bootstrap-internal
 
@@ -2468,7 +2464,7 @@ _docker-release-morpho-vault-backfill-internal:
 # block-meta-loader: a per-chain on-demand Temporal worker that fills the block_meta dimension from a
 # chain's S3 raw-block archive. Ships in the shared cronjob ECR repo with a name-prefixed tag.
 docker-build-block-meta-loader:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/cronjobs/block-meta-loader --build-arg BIN=block-meta-loader -t stl-block-meta-loader:$(LOCAL_TAG) -f Dockerfile.common .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/cronjobs/block-meta-loader --build-arg BIN=block-meta-loader -t stl-block-meta-loader:$(LOCAL_TAG) -f Dockerfile.common .
 
 docker-release-block-meta-loader: ecr-login _docker-release-block-meta-loader-internal
 
@@ -2651,6 +2647,11 @@ docker-release-python-api-staging:
 
 ECR_REPO_MOCK_BLOCKCHAIN_SERVER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-mock-blockchain-server
 
+# Both mock servers build from Dockerfile.common like every other Go binary
+# here (VEC-818); only the package path and output name differ.
+MOCK_BLOCKCHAIN_SERVER_CMD_PATH = cmd/util/stress-test/mock-blockchain-server
+MOCK_COINGECKO_SERVER_CMD_PATH = cmd/util/mock-coingecko-server
+
 # Build Docker image for mock-blockchain-server (ARM64 for Fargate Graviton)
 docker-build-mock-blockchain-server:
 	@echo "==> Building Mock Blockchain Server Docker image for ARM64..."
@@ -2659,11 +2660,12 @@ docker-build-mock-blockchain-server:
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
 	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
+		--build-arg CMD_PATH=$(MOCK_BLOCKCHAIN_SERVER_CMD_PATH) \
+		--build-arg BIN=mock-blockchain-server \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.mock-blockchain-server \
+		-f Dockerfile.common \
 		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):$(IMAGE_TAG) \
 		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):latest \
 		--load .
@@ -2683,8 +2685,9 @@ _docker-release-mock-blockchain-server-internal:
 	echo "    Repository: $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER)" && \
 	echo "    Tag: $$TAG" && \
 	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		-f Dockerfile.mock-blockchain-server \
+		--build-arg CMD_PATH=$(MOCK_BLOCKCHAIN_SERVER_CMD_PATH) \
+		--build-arg BIN=mock-blockchain-server \
+		-f Dockerfile.common \
 		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):$$TAG \
 		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):latest \
 		--load . && \
@@ -2702,14 +2705,14 @@ docker-release-mock-blockchain-server-staging:
 
 # Build local Docker image for kind
 kind-build-mock-blockchain-server:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) -f Dockerfile.mock-blockchain-server -t stl-mock-blockchain-server:$(LOCAL_TAG) .
+	docker build --build-arg CMD_PATH=$(MOCK_BLOCKCHAIN_SERVER_CMD_PATH) --build-arg BIN=mock-blockchain-server -f Dockerfile.common -t stl-mock-blockchain-server:$(LOCAL_TAG) .
 
 # Build and load image into kind cluster
 kind-load-mock-blockchain-server: kind-build-mock-blockchain-server
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-mock-blockchain-server:$(LOCAL_TAG)"
 
 kind-build-mock-coingecko-server:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) -f Dockerfile.mock-coingecko-server -t stl-mock-coingecko-server:$(LOCAL_TAG) .
+	docker build --build-arg CMD_PATH=$(MOCK_COINGECKO_SERVER_CMD_PATH) --build-arg BIN=mock-coingecko-server -f Dockerfile.common -t stl-mock-coingecko-server:$(LOCAL_TAG) .
 
 kind-load-mock-coingecko-server: kind-build-mock-coingecko-server
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-mock-coingecko-server:$(LOCAL_TAG)"
