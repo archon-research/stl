@@ -758,6 +758,28 @@ func TestMapleLoanViewContract(t *testing.T) {
 		}
 	})
 
+	t.Run("an oversize loan address is refused by name", func(t *testing.T) {
+		// Both width cases above are SHORT, so <> 20 weakened to < 20 passes them. 21 bytes is the
+		// case above the bound, and it is the one the comment calls out as silently minting a wider key.
+		f.exec(t, `INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
+		           SELECT 1, p.id, '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaff'::bytea, mp.id, l.borrower_user_id
+		           FROM protocol p JOIN maple_pool mp ON mp.chain_id = p.chain_id
+		           JOIN maple_loan l ON l.chain_id = 1
+		           WHERE p.chain_id = 1 AND p.name = 'Maple' LIMIT 1`)
+		var badID int64
+		if err := pool.QueryRow(ctx, `SELECT id FROM maple_loan WHERE loan_address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaff'::bytea`).Scan(&badID); err != nil {
+			t.Fatal(err)
+		}
+		_, err := f.run(t)
+		if err == nil || !strings.Contains(err.Error(), "21-byte loan address") {
+			t.Fatalf("want the oversize loan-address refusal naming 21 bytes, got %v", err)
+		}
+		f.exec(t, `DELETE FROM maple_loan WHERE id = $1`, badID)
+		if _, err := f.run(t); err != nil {
+			t.Fatalf("removing the oversize loan must let the run proceed: %v", err)
+		}
+	})
+
 	t.Run("a borrower address that is not 20 bytes is refused by name", func(t *testing.T) {
 		// Without the guard this surfaces only as position_state_holder_hex_chk on a chunk, naming no
 		// loan, chain or user. "user" is written by every indexer, so one bad row poisons every run.
