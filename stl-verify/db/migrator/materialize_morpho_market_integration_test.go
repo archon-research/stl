@@ -492,3 +492,27 @@ func TestMorphoMarketForwardsTheWindow(t *testing.T) {
 		t.Errorf("the run recorded window %q; want the 36 hours the wrapper was called with", *window)
 	}
 }
+
+// Every other width case is SHORT, so <> 20 weakened to < 20 passes them all. 21 bytes is the case
+// above the bound: it renders 42 hex characters and fails the same 40-hex CHECK.
+func TestMaterializeMorphoMarketRefusesAnOversizeHolder(t *testing.T) {
+	ctx, pool, _ := materializeMorphoMarketFixture(t)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO "user" (chain_id, address) VALUES (1, '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaff')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+		SELECT u.id, m.id, 961, 0, '2026-02-01T00:00:00Z', 0, 0, 0, 10, 0
+		FROM "user" u, morpho_market m
+		WHERE u.chain_id = 1 AND u.address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaff' AND m.market_id = '\x1234'`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(new(int64))
+	if err == nil {
+		t.Fatal("a 21-byte holder address must refuse by name")
+	}
+	if !strings.Contains(err.Error(), "21-byte address") {
+		t.Errorf("error %q does not name the oversize holder", err.Error())
+	}
+}
