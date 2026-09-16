@@ -60,3 +60,19 @@ def test_static_hosting_keeps_reserved_prefixes_unhandled(tmp_path) -> None:
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Not Found"}
+
+
+def test_static_hosting_marks_the_index_uncacheable(tmp_path) -> None:
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<html>ui</html>", encoding="utf-8")
+    (static_dir / "assets").mkdir()
+    (static_dir / "assets" / "app.js").write_text("console.log('ui')", encoding="utf-8")
+
+    app = FastAPI()
+    configure_static_hosting(app, static_dir)
+    client = TestClient(app)
+
+    assert client.get("/").headers["cache-control"] == "no-store"
+    assert client.get("/portfolio/overview").headers["cache-control"] == "no-store"
+    assert "cache-control" not in client.get("/assets/app.js").headers
