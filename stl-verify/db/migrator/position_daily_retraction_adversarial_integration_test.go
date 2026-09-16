@@ -46,8 +46,7 @@ func (f *positionDailyFixture) retractKeyed(id, srcDate, stampDate string, block
 // What breaks a retraction. Each case is a way the withdrawal fails to take, or takes too widely;
 // the design's claim is only as good as these, because every one of them is an append that the
 // append-only contract cannot undo once written.
-func TestPositionDailyRetractionAdversarial(t *testing.T) {
-	f := newPositionDailyFixture(t)
+func retractionAdversarialCases(t *testing.T, f *positionDailyFixture) {
 	const date = "2026-01-01"
 
 	// A retraction is ranked like any other row, so one written below the day's winner is INERT --
@@ -335,8 +334,7 @@ func TestPositionDailyRetractionClosesTheMovedDayGap(t *testing.T) {
 // this table does not own. The spine's next correction of that same observation is allocated the
 // same N by processing_version_log, crystallizes to the identical PK, and the writer's
 // ON CONFLICT DO NOTHING drops it -- silently, reporting the zero it reports on a quiet run.
-func TestPositionDailyRetractionDoesNotSquatOnTheSpinesNextVersion(t *testing.T) {
-	f := newPositionDailyFixture(t)
+func retractionSquatCase(t *testing.T, f *positionDailyFixture) {
 	const id, date = "adv-squat", "2026-01-01"
 
 	f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})

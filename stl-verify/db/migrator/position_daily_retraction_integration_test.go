@@ -119,12 +119,21 @@ func (f *positionDailyFixture) dayPresent(id, date string) bool {
 	return n == 1
 }
 
+// One database for every retraction case. Each owns its position and asserts per position or per
+// date, and the two whole-table assertions only get stronger with more rows present, so sharing
+// weakens nothing -- and this package sits close to its per-package CI timeout.
+func TestPositionDailyRetraction(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	t.Run("withdraws a key without rewriting it", func(t *testing.T) { retractionWithdrawalCases(t, f) })
+	t.Run("adversarial", func(t *testing.T) { retractionAdversarialCases(t, f) })
+	t.Run("does not squat on the spine's next version", func(t *testing.T) { retractionSquatCase(t, f) })
+}
+
 // A retraction withdraws a (position, date) whose KEY is wrong -- the case no ordering rule can
 // reach, because the corrected row hashes or dates to a different key and never collides with the
 // bad one (ADR-0006 §3, ARCT-470). Everything here is an append: nothing is updated or deleted, so
 // an as-of read taken before the retraction still reproduces the answer that was given.
-func TestPositionDailyRetractionWithdrawsAKeyWithoutRewritingIt(t *testing.T) {
-	f := newPositionDailyFixture(t)
+func retractionWithdrawalCases(t *testing.T, f *positionDailyFixture) {
 	const date = "2026-01-01"
 
 	t.Run("a retracted key is absent from position_daily", func(t *testing.T) {
