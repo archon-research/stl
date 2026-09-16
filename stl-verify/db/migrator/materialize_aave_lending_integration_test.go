@@ -381,7 +381,7 @@ func TestMaterializeAaveLendingRecordsUnmappedReservesAndProjectsTheRest(t *test
 	if err := pool.QueryRow(ctx, `
 		SELECT coalesce(array_agg(t.symbol || '=' || g.reason || 'x' || g.observations || '@' || g.build_id
 		                          ORDER BY t.symbol, g.reason), '{}')
-		FROM aave_unmapped_reserve g JOIN token t ON t.id = g.token_id`).Scan(&gaps); err != nil {
+		FROM aave_projection_note g JOIN token t ON t.id = g.token_id`).Scan(&gaps); err != nil {
 		t.Fatalf("read the gap table: %v", err)
 	}
 	want := "WETH=no_receipt_tokenx1@9,WETH=no_variable_debt_tokenx1@9"
@@ -406,7 +406,7 @@ func TestMaterializeAaveLendingRecordsUnmappedReservesAndProjectsTheRest(t *test
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE run_id = 9182 AND build_id = 7),
 		       count(*) FILTER (WHERE run_id IS NULL AND build_id = 9)
-		  FROM aave_unmapped_reserve`).Scan(&stamped, &unstamped); err != nil {
+		  FROM aave_projection_note`).Scan(&stamped, &unstamped); err != nil {
 		t.Fatal(err)
 	}
 	if stamped != 2 || unstamped != 2 {
@@ -467,7 +467,7 @@ func TestMaterializeAaveLendingTwoUnmappedDebtReservesAreGapsNotAnAmbiguity(t *t
 	if err := pool.QueryRow(ctx, `
 		SELECT coalesce(string_agg(t.symbol || '=' || g.reason || 'x' || g.observations,
 		                           ',' ORDER BY t.symbol), '')
-		FROM aave_unmapped_reserve g JOIN token t ON t.id = g.token_id
+		FROM aave_projection_note g JOIN token t ON t.id = g.token_id
 		WHERE g.reason = 'no_variable_debt_token'`).Scan(&gaps); err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +494,7 @@ func TestMaterializeAaveLendingGapTableIsAppendOnlyPerRun(t *testing.T) {
 		}
 	}
 	var rows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM aave_unmapped_reserve`).Scan(&rows); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM aave_projection_note`).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
 	if rows != 2 {
@@ -511,7 +511,7 @@ func TestMaterializeAaveLendingGapTableIsAppendOnlyPerRun(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT materialize_aave_lending()`).Scan(&written); err != nil {
 		t.Fatalf("run after closing the mapping: %v", err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM aave_unmapped_reserve`).Scan(&rows); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM aave_projection_note`).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
 	if written != 1 || rows != 2 {
@@ -621,7 +621,7 @@ func TestMaterializeAaveLendingRefusesInputsThatWouldKeyWrongly(t *testing.T) {
 				t.Errorf("error %q does not refuse naming %q", err.Error(), c.wantInError)
 			}
 			var rows, gaps int
-			if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM position_state), (SELECT count(*) FROM aave_unmapped_reserve)`).Scan(&rows, &gaps); err != nil {
+			if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM position_state), (SELECT count(*) FROM aave_projection_note)`).Scan(&rows, &gaps); err != nil {
 				t.Fatal(err)
 			}
 			if rows != 0 || gaps != 0 {
@@ -839,7 +839,7 @@ func TestMaterializeAaveLendingForwardsTheWriterRun(t *testing.T) {
 // resets proconfig) runs against the 200 GB server default again. Asserted on the mechanism: CI cannot spill 4 GB.
 func TestMaterializeAaveLendingPinsTempFileLimit(t *testing.T) {
 	ctx, pool := seedAaveLendingBase(t)
-	if cfg := functionSettings(ctx, t, pool, "materialize_aave_lending(integer, bigint)"); !slices.Contains(cfg, "temp_file_limit=4GB") {
+	if cfg := functionSettings(ctx, t, pool, "materialize_aave_lending(integer, bigint, interval)"); !slices.Contains(cfg, "temp_file_limit=4GB") {
 		t.Errorf("proconfig = %v; want a temp_file_limit=4GB entry", cfg)
 	}
 }
@@ -925,11 +925,11 @@ func TestMaterializeAaveLendingTempFileCapAbortsASpillingRun(t *testing.T) {
 			t.Fatalf("seeding the spill-sized history (batch %d): %v", batch, err)
 		}
 	}
-	if _, err := pool.Exec(ctx, `ALTER FUNCTION materialize_aave_lending(integer, bigint) SET temp_file_limit = '1kB' SET work_mem = '64kB'`); err != nil {
+	if _, err := pool.Exec(ctx, `ALTER FUNCTION materialize_aave_lending(integer, bigint, interval) SET temp_file_limit = '1kB' SET work_mem = '64kB'`); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if _, err := pool.Exec(ctx, `ALTER FUNCTION materialize_aave_lending(integer, bigint) SET temp_file_limit = '4GB' RESET work_mem`); err != nil {
+		if _, err := pool.Exec(ctx, `ALTER FUNCTION materialize_aave_lending(integer, bigint, interval) SET temp_file_limit = '4GB' RESET work_mem`); err != nil {
 			t.Error(err)
 		}
 	})
@@ -940,7 +940,7 @@ func TestMaterializeAaveLendingTempFileCapAbortsASpillingRun(t *testing.T) {
 	}
 	// Negative control: the same spilling sort under the shipped 4 GB cap projects, so the abort above
 	// was the cap and not the seeded rows.
-	if _, err := pool.Exec(ctx, `ALTER FUNCTION materialize_aave_lending(integer, bigint) SET temp_file_limit = '4GB'`); err != nil {
+	if _, err := pool.Exec(ctx, `ALTER FUNCTION materialize_aave_lending(integer, bigint, interval) SET temp_file_limit = '4GB'`); err != nil {
 		t.Fatal(err)
 	}
 	var written int64
@@ -949,5 +949,150 @@ func TestMaterializeAaveLendingTempFileCapAbortsASpillingRun(t *testing.T) {
 	}
 	if written < 20000 {
 		t.Errorf("wrote %d rows, want at least the 20,000 seeded observations", written)
+	}
+}
+
+// A mapping that MOVES rather than disappears is the case the unscoped guard could not see: the
+// address is still registered somewhere, so a global EXISTS finds it, while the position's own
+// reserve no longer resolves and its stored rows strand exactly as if the mapping had gone.
+func TestMaterializeAaveLendingRefusesWhenAMappingMovesToAnotherProtocol(t *testing.T) {
+	ctx, pool, written := seedAaveLending(t)
+	if written == 0 {
+		t.Fatal("the base fixture appended nothing, so there is no stored exposure to strand")
+	}
+
+	// P1's debt reserve re-registered under P2. d1d1 still exists in debt_token, so the guard can
+	// only catch this by scoping the lookup to the stored position's own protocol.
+	res, err := pool.Exec(ctx, `
+		UPDATE debt_token SET protocol_id = (SELECT id FROM protocol WHERE chain_id = 1 AND address = '\x02')
+		 WHERE encode(variable_debt_address, 'hex') = $1`, p1UsdcDebt)
+	if err != nil {
+		t.Fatalf("moving the debt mapping: %v", err)
+	}
+	if res.RowsAffected() != 1 {
+		t.Fatalf("moved %d debt mappings; want exactly the one %s was keyed from", res.RowsAffected(), p1UsdcDebt)
+	}
+
+	var stillRegistered bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM debt_token WHERE encode(variable_debt_address, 'hex') = $1)`,
+		p1UsdcDebt).Scan(&stillRegistered); err != nil {
+		t.Fatalf("checking the address is still registered: %v", err)
+	}
+	if !stillRegistered {
+		t.Fatal("the address is gone from debt_token, so this case is the disappearance one, not the move")
+	}
+
+	_, err = pool.Exec(ctx, `SELECT materialize_aave_lending()`)
+	if err == nil {
+		t.Fatal("the run succeeded while its stored P1 exposure no longer resolved under P1")
+	}
+	if !strings.Contains(err.Error(), "no longer emits") || !strings.Contains(err.Error(), p1UsdcDebt) {
+		t.Errorf("refused with %v; want the stranded-exposure refusal naming %s", err, p1UsdcDebt)
+	}
+}
+
+// The view collapses an observation key to its earliest created_at. That pick is deterministic but
+// silent, so a key whose dropped row carried a different amount is counted in aave_projection_note.
+func TestMaterializeAaveLendingRecordsAnArbitratedObservation(t *testing.T) {
+	ctx, pool := seedAaveLendingBase(t)
+
+	// One observation key, two rows disagreeing on amount. created_at is in the PK, so both persist
+	// and the view's DISTINCT ON picks the earlier (11), dropping 22 with no other signal.
+	if _, err := pool.Exec(ctx, `
+DO $$`+aaveLedgerDeclare+`
+BEGIN`+aaveLedgerPrelude+`
+  INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, created_at, build_id) VALUES
+    (ua, p1, usdc, 100, 0, 11, 11, 'Borrow', '\x01', '2026-01-01T00:00:00Z', 0),
+    (ua, p1, usdc, 100, 0, 22, 22, 'Borrow', '\x02', '2026-01-01T00:00:05Z', 0);
+END $$;`); err != nil {
+		t.Fatalf("seeding the disagreement: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `SELECT materialize_aave_lending()`); err != nil {
+		t.Fatalf("the run refused although an arbitrated key is recorded, not refused: %v", err)
+	}
+
+	var keys int64
+	if err := pool.QueryRow(ctx, `
+		SELECT coalesce(sum(observations), 0) FROM aave_projection_note
+		 WHERE reason = 'arbitrated_observation'`).Scan(&keys); err != nil {
+		t.Fatalf("reading the arbitration note: %v", err)
+	}
+	if keys != 1 {
+		t.Errorf("recorded %d arbitrated keys; want the single disagreeing key", keys)
+	}
+
+	// The earlier row is what landed, so the note describes a real drop rather than a phantom.
+	var q string
+	if err := pool.QueryRow(ctx, `
+		SELECT quantity::text FROM position_state
+		 WHERE projection = 'public.position_aave_lending' AND block_number = 100
+		 ORDER BY block_timestamp LIMIT 1`).Scan(&q); err != nil {
+		t.Fatalf("reading the projected quantity: %v", err)
+	}
+	if q != "11" {
+		t.Errorf("projected quantity %s; want the earliest-created_at pick 11", q)
+	}
+}
+
+// Every row a run writes must carry one created_at, or the run's own rows cannot be grouped:
+// run_id is NULL for a defaulted call, so created_at is the only key left to group them by.
+func TestMaterializeAaveLendingNoteRowsOfOneRunShareATimestamp(t *testing.T) {
+	ctx, pool, _ := seedAaveLending(t)
+
+	// A second unmapped reserve, so one run writes more than one note row and the count can tell a
+	// per-run stamp from a per-row one.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO token (chain_id, address, symbol, decimals) VALUES (1, '\xfeed', 'DAI', 18);
+		INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, created_at)
+		SELECT u.id, p.id, t.id, 300, 0, 12, 12, 'Borrow', '\x09', '2026-01-03T00:00:00Z'
+		FROM "user" u, protocol p, token t
+		WHERE u.chain_id = 1 AND u.address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+		  AND p.chain_id = 1 AND p.address = '\x01' AND t.chain_id = 1 AND t.address = '\xfeed'`); err != nil {
+		t.Fatalf("seeding a second unmapped reserve: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `SELECT materialize_aave_lending()`); err != nil {
+		t.Fatalf("the second run: %v", err)
+	}
+
+	// Two runs, each writing at least two rows. One stamp per run is 2 distinct values; one per row
+	// would be 4 or more.
+	var stamps, rows, newest int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(DISTINCT created_at), count(*),
+		       count(*) FILTER (WHERE created_at = (SELECT max(created_at) FROM aave_projection_note))
+		  FROM aave_projection_note`).Scan(&stamps, &rows, &newest); err != nil {
+		t.Fatalf("reading the note table: %v", err)
+	}
+	if newest < 2 {
+		t.Fatalf("the newest run wrote %d note rows; this cannot discriminate below 2", newest)
+	}
+	if stamps != 2 {
+		t.Errorf("%d note rows across 2 runs carry %d distinct created_at values; want one per run", rows, stamps)
+	}
+}
+
+// The wrapper is the only path the runner calls, so a window it cannot forward is a window the
+// projection can never be run with. The run record stamps what the spine actually received.
+func TestMaterializeAaveLendingForwardsTheWindow(t *testing.T) {
+	ctx, pool, _ := seedAaveLending(t)
+
+	if _, err := pool.Exec(ctx, `SELECT materialize_aave_lending(0, NULL, interval '36 hours')`); err != nil {
+		t.Fatalf("calling with a window: %v", err)
+	}
+
+	var window *string
+	if err := pool.QueryRow(ctx, `
+		SELECT window_interval::text FROM position_projection_run
+		 WHERE projection = 'public.position_aave_lending'
+		 ORDER BY created_at DESC LIMIT 1`).Scan(&window); err != nil {
+		t.Fatalf("reading the run record: %v", err)
+	}
+	if window == nil {
+		t.Fatal("the run recorded no window, so the wrapper dropped it")
+	}
+	if *window != "36:00:00" {
+		t.Errorf("the run recorded window %q; want the 36 hours the wrapper was called with", *window)
 	}
 }

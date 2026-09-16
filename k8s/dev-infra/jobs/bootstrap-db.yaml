@@ -36,8 +36,9 @@ spec:
               # create non-public schemas (e.g. 20260706_140000's transformed);
               # staging/prod get this from the infra repo's bootstrap-db.sh.
               psql "$ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 -c "GRANT CREATE ON DATABASE stl_verify TO stl_migrator;"
-              # materialize_aave_lending pins temp_file_limit, a superuser-context GUC, so creating and
-              # calling it needs this grant; Timescale Cloud has it on PUBLIC, staging/prod otherwise via bootstrap-db.sh.
+              # materialize_aave_lending pins temp_file_limit, a superuser-context GUC, so both the
+              # migrator creating it and whichever role calls it need this grant. Measured on staging:
+              # held by PUBLIC. Not confirmed on prod (VEC-812).
               psql "$ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 -c "GRANT SET ON PARAMETER temp_file_limit TO PUBLIC;"
               echo "Bootstrap complete."
           env:

@@ -1773,7 +1773,7 @@
       "type": "infrastructure",
       "owner": "prime"
     },
-    "aave_unmapped_reserve": {
+    "aave_projection_note": {
       "type": "infrastructure",
       "owner": "prime"
     },
