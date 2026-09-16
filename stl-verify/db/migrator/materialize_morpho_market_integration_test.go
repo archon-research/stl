@@ -468,3 +468,27 @@ func TestMaterializeMorphoMarketSplitsLegsOnTheTokenAddress(t *testing.T) {
 		t.Errorf("%d rows at block 970 with quantity %q; want 1 row at 140 — one address on both sides is a single instrument, so the collateral nets into the loan leg", legs, qty)
 	}
 }
+
+// The wrapper is the only path the runner calls, so a window it cannot forward is a window this
+// projection can never run with. The run record stamps what the spine actually received.
+func TestMorphoMarketForwardsTheWindow(t *testing.T) {
+	ctx, pool, _ := materializeMorphoMarketFixture(t)
+
+	if _, err := pool.Exec(ctx, `SELECT materialize_morpho_market(0, NULL, interval '36 hours')`); err != nil {
+		t.Fatalf("calling with a window: %v", err)
+	}
+
+	var window *string
+	if err := pool.QueryRow(ctx, `
+		SELECT window_interval::text FROM position_projection_run
+		 WHERE projection = 'public.position_morpho_market'
+		 ORDER BY created_at DESC LIMIT 1`).Scan(&window); err != nil {
+		t.Fatalf("reading the run record: %v", err)
+	}
+	if window == nil {
+		t.Fatal("the run recorded no window, so the wrapper dropped it")
+	}
+	if *window != "36:00:00" {
+		t.Errorf("the run recorded window %q; want the 36 hours the wrapper was called with", *window)
+	}
+}

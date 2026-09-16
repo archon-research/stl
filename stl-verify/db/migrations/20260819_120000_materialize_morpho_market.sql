@@ -68,9 +68,11 @@ COMMENT ON VIEW position_morpho_market IS '[Operational] VEC-402 projection: Mor
 -- Refuses a negative source amount first: the loan leg takes abs() of the net, so a negative supply or
 -- borrow is laundered into a plausible exposure the spine's negative-quantity check never sees.
 DROP FUNCTION IF EXISTS materialize_morpho_market(integer);
+DROP FUNCTION IF EXISTS materialize_morpho_market(integer, bigint);
 
 CREATE OR REPLACE FUNCTION materialize_morpho_market(p_build_id integer DEFAULT 0,
-                                                     p_run_id bigint DEFAULT NULL) RETURNS bigint
+                                                     p_run_id bigint DEFAULT NULL,
+                                                     p_window interval DEFAULT NULL) RETURNS bigint
     LANGUAGE plpgsql
     SET search_path FROM CURRENT
     -- Pinned to the materializer's own setting, or the check below reads fewer chunks than the run:
@@ -115,10 +117,10 @@ BEGIN
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'materialize_morpho_market: unresolved inputs, refusing to run: %', v_bad;
     END IF;
-    RETURN public.materialize_position_projection('public.position_morpho_market'::regclass, p_build_id, p_run_id);
+    RETURN public.materialize_position_projection('public.position_morpho_market'::regclass, p_build_id, p_run_id, p_window);
 END
 $fn$;
 
-COMMENT ON FUNCTION materialize_morpho_market(integer, bigint) IS '[Operational] VEC-402: appends Morpho market position observations into position_state via materialize_position_projection(position_morpho_market). Refuses to run, naming up to five offenders: a negative source supply, borrow or collateral amount, which the loan leg''s abs() would launder into a plausible exposure; one address held by several "user" rows, which renders one position_id since holder_id carries the address alone; and a holder address that is not 20 bytes. The legs are split on the token ADDRESSES rather than the token ids, because the address is what instrument_key is built from. See that function''s comment for the run contract. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2).';
+COMMENT ON FUNCTION materialize_morpho_market(integer, bigint, interval) IS '[Operational] VEC-402: appends Morpho market position observations into position_state via materialize_position_projection(position_morpho_market). Refuses to run, naming up to five offenders: a negative source supply, borrow or collateral amount, which the loan leg''s abs() would launder into a plausible exposure; one address held by several "user" rows, which renders one position_id since holder_id carries the address alone; and a holder address that is not 20 bytes. The legs are split on the token ADDRESSES rather than the token ids, because the address is what instrument_key is built from. See that function''s comment for the run contract. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2). p_window is forwarded to the materializer, which bounds the batch it reads; against this view it filters rows without pruning chunks.';
 
 INSERT INTO migrations (filename) VALUES ('20260819_120000_materialize_morpho_market.sql') ON CONFLICT (filename) DO NOTHING;
