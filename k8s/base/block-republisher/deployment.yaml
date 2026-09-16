@@ -42,8 +42,18 @@ spec:
     metadata:
       labels:
         app: block-republisher
+        archon.io/spread-group: chain-ingest
     spec:
       serviceAccountName: block-republisher
+      # Soft spread across every chain-ingest pod (watchers + block republishers) so one
+      # node replacement cannot re-pack all chains onto a single new node. ORB-439.
+      topologySpreadConstraints:
+        - topologyKey: kubernetes.io/hostname
+          maxSkew: 1
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              archon.io/spread-group: chain-ingest
       containers:
         - name: block-republisher
           image: block-republisher

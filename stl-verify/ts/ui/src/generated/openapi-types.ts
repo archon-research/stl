@@ -671,29 +671,47 @@ export interface components {
      */
     AllocationActivityBucketResponse: {
       /**
+       * Balance Usd
+       * @description Position value in USD read from each bucket's own recorded state, present only when `series=balance`. Unlike `net_flow_usd` this needs no client-side reconstruction and no anchor, so it is valid for a window that does not end at now. It is also a different measure: true mark-to-market rather than cost basis, so a share-price move on a receipt token appears here even in a bucket with no transaction, and yield accrual is included. Valued as COALESCE(underlying_value, balance) x the registry underlying's latest oracle price, refusing any row whose own underlying diverges from the registry's. Null on `series=flow`. Totals only the positions this bucket can price -- compare `priced_entity_count` with `entity_count` before treating it as complete.
+       * @example 3280541138.58
+       */
+      balance_usd?: string | null;
+      /**
        * Bucket Start
        * Format: date-time
        * @description Inclusive start of the time bucket (UTC).
        */
       bucket_start: string;
       /**
+       * Entity Count
+       * @description How many positions the bucket knows about, present only when `series=balance`. Equal to `priced_entity_count` when the total is complete, and greater when some position could not be priced -- pricing is all-or-nothing per token, so one token without an enabled oracle makes every position in it unpriceable. Counts only positions observed at or before this bucket, so a leading bucket reports 0 rather than treating a position that does not exist yet as missing. Null on `series=flow`.
+       * @example 58
+       */
+      entity_count?: number | null;
+      /**
        * Event Count
-       * @description Number of activity events in the bucket.
+       * @description Number of activity events in the bucket. Null on `series=balance`, which does not compute it.
        * @example 42
        */
-      event_count: number;
+      event_count?: number | null;
       /**
        * Net Flow Usd
-       * @description Signed net flow valued in USD (inflows positive, outflows negative). Only receipt-token flows are valued: each is converted to underlying units at its row's share ratio (underlying_value / balance), borrowing the nearest same-token row's ratio when the row's own is unavailable and falling back to the raw tx_amount only when the token has no valued row at all, then priced at the receipt token's latest underlying oracle price. Rows whose recorded underlying diverges from the registry's are refused and contribute 0, as do direct holdings. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards.
+       * @description Signed net flow valued in USD (inflows positive, outflows negative). Only receipt-token flows are valued: each is converted to underlying units at its row's share ratio (underlying_value / balance), borrowing the nearest same-token row's ratio when the row's own is unavailable and falling back to the raw tx_amount only when the token has no valued row at all, then priced at the receipt token's latest underlying oracle price. Rows whose recorded underlying diverges from the registry's are refused and contribute 0, as do direct holdings. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards. Null on `series=balance`, which does not compute it.
        * @example 1234567.89
        */
-      net_flow_usd: string;
+      net_flow_usd?: string | null;
+      /**
+       * Priced Entity Count
+       * @description How many of the bucket's positions `balance_usd` accounts for, present only when `series=balance`. A position counts when its most recent recorded state could be priced; one carrying only an older price, superseded by a newer state that cannot be priced, does not. Null on `series=flow`.
+       * @example 31
+       */
+      priced_entity_count?: number | null;
       /**
        * Total Tx Amount
-       * @description Sum of `tx_amount` across the bucket's events, serialized as a JSON string.
+       * @description Sum of `tx_amount` across the bucket's events, serialized as a JSON string. Null on `series=balance`, which does not compute it.
        * @example 1234567890000000000000
        */
-      total_tx_amount: string;
+      total_tx_amount?: string | null;
     };
     /**
      * AllocationActivityEnvelope
@@ -971,7 +989,7 @@ export interface components {
       underlying_token_id?: number | null;
       /**
        * Wallet Address
-       * @description The ALM proxy holding this position, as upstream reports it. Populated on reference rows only — the same (`network`, `receipt_token_address`/`held_token_address`) can legitimately recur under a prime's different proxy wallets, and this is what distinguishes those rows. `null` on an indexed row, which is already scoped to a single queried proxy.
+       * @description The ALM proxy holding this position, as upstream reports it. Populated on reference rows only, and `null` there where several of a prime's proxies hold the position: upstream reports those per wallet and they are served as one summed row. Also `null` on an indexed row, which is already scoped to a single queried proxy.
        * @example 0x1234567890abcdef1234567890abcdef12345678
        */
       wallet_address?: string | null;
@@ -1080,6 +1098,52 @@ export interface components {
         | ('share_data_missing' | 'share_data_stale')
         | 'price_data_missing'
         | null;
+    };
+    /**
+     * ApiErrorResponse
+     * @description The body of every ``422`` on the surface, as an RFC 9457 problem detail.
+     *
+     *     The extension members below are populated on a max-points rejection and absent
+     *     otherwise, so a client can branch on ``type`` and read only what that type
+     *     promises.
+     */
+    ApiErrorResponse: {
+      /**
+       * Detail
+       * @description Human-readable explanation of this occurrence. Never the only signal.
+       */
+      detail: string;
+      /**
+       * Errors
+       * @description The parameters that failed, one entry each. `invalid_request` only.
+       */
+      errors?: components['schemas']['FieldError'][] | null;
+      /**
+       * Max Points
+       * @description Ceiling the request exceeded. Max-points rejections only.
+       */
+      max_points?: number | null;
+      /**
+       * Point Count
+       * @description Observations the request would return. Max-points rejections only.
+       */
+      point_count?: number | null;
+      /**
+       * Status
+       * @description HTTP status of the response carrying this body.
+       * @default 422
+       */
+      status: number;
+      /** @description Ways out of the rejection. Max-points rejections only. */
+      suggestions?: components['schemas']['RejectionSuggestions'] | null;
+      /**
+       * Title
+       * @description Short static label for the `type`. Same across every occurrence of one type.
+       * @example Too many points
+       */
+      title: string;
+      /** @description Stable, machine-readable rejection identifier. */
+      type: components['schemas']['RejectionType'];
     };
     /**
      * BadDebtResponse
@@ -1339,6 +1403,29 @@ export interface components {
       window: components['schemas']['ResampledTimeSeriesWindow'];
     };
     /**
+     * FieldError
+     * @description One parameter's rejection, so a client branches per field instead of on prose.
+     */
+    FieldError: {
+      /**
+       * Code
+       * @description Machine-readable reason code for this field.
+       * @example datetime_parsing
+       */
+      code: string;
+      /**
+       * Field
+       * @description Dotted path to the parameter, as `location.name`.
+       * @example query.to_timestamp
+       */
+      field: string;
+      /**
+       * Message
+       * @description Human-readable reason. The submitted value is redacted out of it.
+       */
+      message: string;
+    };
+    /**
      * GapSweepDetails
      * @description Gap-sweep model-specific output embedded in an RrcResult.
      *
@@ -1362,10 +1449,27 @@ export interface components {
        */
       risk_model: 'gap_sweep';
     };
-    /** HTTPValidationError */
-    HTTPValidationError: {
-      /** Detail */
-      detail?: components['schemas']['ValidationError'][];
+    /**
+     * NarrowerWindow
+     * @description A window to retry the same request over, keyed like the query parameters.
+     *
+     *     Scaled by the requested window's average density, so it is exact only for evenly
+     *     spaced observations: a series clustered in this span is rejected again, with a
+     *     further-narrowed suggestion.
+     */
+    NarrowerWindow: {
+      /**
+       * From Timestamp
+       * Format: date-time
+       * @description Lower bound to retry with (UTC).
+       */
+      from_timestamp: string;
+      /**
+       * To Timestamp
+       * Format: date-time
+       * @description Upper bound to retry with — the requested one (UTC).
+       */
+      to_timestamp: string;
     };
     /**
      * PrimeDebtBucketResponse
@@ -1963,6 +2067,53 @@ export interface components {
       window: components['schemas']['TimeSeriesWindow'];
     };
     /**
+     * RejectionSuggestions
+     * @description The ways out of a max-points rejection, each a complete set of query parameters.
+     *
+     *     Grouped and keyed to match the request so a client merges one of them into the
+     *     parameters it sent, with no key to rename or trim. The two are alternatives, not
+     *     a set: taking both narrows a window that the frequency alone would have served
+     *     in full.
+     */
+    RejectionSuggestions: {
+      /** @description Absent once the scaled span rounds below a second. */
+      narrower_window?: components['schemas']['NarrowerWindow'] | null;
+      /** @description Grid that fits the window as asked. */
+      resampled: components['schemas']['ResampledRetry'];
+    };
+    /**
+     * RejectionType
+     * @description Every ``type`` the surface can put on a 422, closed so a client can be exhaustive.
+     *
+     *     An enum rather than a free string: this is the member a caller branches on, and
+     *     publishing the closed set is what lets a generated TS client fail to compile when
+     *     a new rejection appears rather than fall through its `switch`. ``INVALID_REQUEST``
+     *     covers every rejection FastAPI raises before a route is reached — the branch is the
+     *     same either way, and which parameter failed is in ``errors``.
+     * @enum {string}
+     */
+    RejectionType:
+      | 'invalid_request'
+      | 'invalid_time_range'
+      | 'timestamp_out_of_range'
+      | 'window_too_large'
+      | 'frequency_too_fine'
+      | 'frequency_requires_aggregation_method'
+      | 'max_points_exceeded';
+    /**
+     * ResampledRetry
+     * @description A frequency to retry the same window on, keyed like the query parameters.
+     *
+     *     Fits the window as asked, so unlike ``narrower_window`` it needs no second round
+     *     trip and returns the whole span the caller requested.
+     */
+    ResampledRetry: {
+      /** @description Method to cut on that grid. A frequency without one is itself a rejection. */
+      aggregation_method: components['schemas']['AggregationMethod'];
+      /** @description Grid to resample onto. */
+      frequency: components['schemas']['TimeSeriesFrequency'];
+    };
+    /**
      * ResampledTimeSeriesWindow
      * @description The window echo for a resampled response, naming the grid it sits on.
      *
@@ -2507,19 +2658,6 @@ export interface components {
       /** @description The window and frequency applied to this response. */
       window: components['schemas']['ResampledTimeSeriesWindow'];
     };
-    /** ValidationError */
-    ValidationError: {
-      /** Context */
-      ctx?: Record<string, never>;
-      /** Input */
-      input?: unknown;
-      /** Location */
-      loc: (string | number)[];
-      /** Message */
-      msg: string;
-      /** Error Type */
-      type: string;
-    };
   };
   responses: never;
   parameters: never;
@@ -2546,6 +2684,8 @@ export interface operations {
         tx_hash?: string | null;
         /** @description Max results (default 100, max 1000). */
         limit?: number;
+        /** @description Which aggregated series to return. `flow` (default) keeps the existing behaviour: event counts, tx-amount sums and signed USD net flow, from which a client reconstructs a balance by anchoring at the current total. `balance` returns `balance_usd` read directly from each bucket's recorded state — substantially cheaper, valid for windows that do not end at now, and mark-to-market rather than cost basis. Ignored unless `aggregation_method=end-period`. */
+        series?: 'flow' | 'balance';
         /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
         from_timestamp?: string | null;
         /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
@@ -2570,13 +2710,13 @@ export interface operations {
           'application/json': components['schemas']['AllocationActivityEnvelope'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2599,6 +2739,15 @@ export interface operations {
           'application/json': components['schemas']['ChainResponse'][];
         };
       };
+      /** @description Request rejected; branch on `type`. */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiErrorResponse'];
+        };
+      };
     };
   };
   get_data_sources_v1_data_sources_get: {
@@ -2619,6 +2768,15 @@ export interface operations {
           'application/json': components['schemas']['DataSourcesResponse'];
         };
       };
+      /** @description Request rejected; branch on `type`. */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiErrorResponse'];
+        };
+      };
     };
   };
   list_primes_v1_primes_get: {
@@ -2637,6 +2795,15 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['PrimeResponse'][];
+        };
+      };
+      /** @description Request rejected; branch on `type`. */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2670,13 +2837,13 @@ export interface operations {
           'application/json': components['schemas']['AllocationResponse'][];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2704,7 +2871,7 @@ export interface operations {
       };
       header?: never;
       path: {
-        /** @description Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses — this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`. */
+        /** @description Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses — this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`. Results are whole-prime: passing a proxy address returns the entire prime, including the chains that proxy has nothing to do with. */
         prime_id: string;
       };
       cookie?: never;
@@ -2720,13 +2887,13 @@ export interface operations {
           'application/json': components['schemas']['PrimeDebtEnvelope'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2770,13 +2937,13 @@ export interface operations {
           'application/json': components['schemas']['ExposureEnvelope'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2810,13 +2977,13 @@ export interface operations {
           'application/json': components['schemas']['PrimeRiskCapitalResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2860,13 +3027,13 @@ export interface operations {
           'application/json': components['schemas']['TotalCapitalEnvelope'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2904,13 +3071,13 @@ export interface operations {
           'application/json': components['schemas']['ProtocolEventsEnvelope'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -2933,6 +3100,15 @@ export interface operations {
           'application/json': components['schemas']['ProtocolResponse'][];
         };
       };
+      /** @description Request rejected; branch on `type`. */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiErrorResponse'];
+        };
+      };
     };
   };
   get_provenance_availability_v1_provenance_available_get: {
@@ -2953,6 +3129,15 @@ export interface operations {
           'application/json': components['schemas']['ProvenanceAvailabilityResponse'];
         };
       };
+      /** @description Request rejected; branch on `type`. */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiErrorResponse'];
+        };
+      };
     };
   };
   get_ready_v1_ready_get: {
@@ -2971,6 +3156,15 @@ export interface operations {
         };
         content: {
           'application/json': unknown;
+        };
+      };
+      /** @description Request rejected; branch on `type`. */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3004,13 +3198,13 @@ export interface operations {
           'application/json': components['schemas']['RrcEnvelope'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3037,13 +3231,13 @@ export interface operations {
           'application/json': components['schemas']['RrcEnvelope'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3074,13 +3268,13 @@ export interface operations {
           'application/json': components['schemas']['BadDebtResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3111,13 +3305,13 @@ export interface operations {
           'application/json': components['schemas']['RiskBreakdownResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3145,13 +3339,13 @@ export interface operations {
           'application/json': components['schemas']['BadDebtResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3179,13 +3373,13 @@ export interface operations {
           'application/json': components['schemas']['RiskBreakdownResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3206,6 +3400,15 @@ export interface operations {
         };
         content: {
           'application/json': unknown;
+        };
+      };
+      /** @description Request rejected; branch on `type`. */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3235,13 +3438,13 @@ export interface operations {
           'application/json': components['schemas']['TokenResponse'][];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3269,13 +3472,13 @@ export interface operations {
           'application/json': components['schemas']['TokenResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3303,13 +3506,13 @@ export interface operations {
           'application/json': components['schemas']['TokenPriceResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3334,13 +3537,13 @@ export interface operations {
           'application/json': components['schemas']['TokenResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3365,13 +3568,13 @@ export interface operations {
           'application/json': components['schemas']['TokenPriceResponse'];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };
@@ -3397,13 +3600,13 @@ export interface operations {
           'application/json': components['schemas']['ProtocolEventResponse'][];
         };
       };
-      /** @description Validation Error */
+      /** @description Request rejected; branch on `type`. */
       422: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['HTTPValidationError'];
+          'application/json': components['schemas']['ApiErrorResponse'];
         };
       };
     };

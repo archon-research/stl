@@ -114,7 +114,7 @@ export function LogoAvatar({
           borderRadius: 'full',
           overflow: 'hidden',
           bg: isSelected ? 'interactive.accent' : 'surface.subtle',
-          borderWidth: '1px',
+          borderWidth: 'hairline',
           borderStyle: 'solid',
           borderColor: isSelected ? 'interactive.accent' : 'border.subtle',
           flexShrink: 0,

@@ -31,6 +31,19 @@ Root repo map and cross-cutting rules: [../AGENTS.md](../AGENTS.md).
   single-consumer workload (one pod on an SQS or Temporal task queue) wants `Recreate` —
   `maxSurge: 0` is not equivalent, it only removes the *Ready*-pod overlap.
 
+## Scheduling spread (chain ingest)
+
+- Every chain watcher and block republisher Deployment carries the pod label
+  `archon.io/spread-group: chain-ingest` and a soft hostname `topologySpreadConstraints`
+  selecting that label (`whenUnsatisfiable: ScheduleAnyway`). A single-replica Deployment
+  cannot spread against itself, so the selector spans the whole group: the scheduler prefers
+  the node holding the fewest chain-ingest pods. A new chain's watcher or republisher copies
+  both from an existing one (ORB-439).
+- Soft on purpose. Staging nodes are spot and must stay replaceable, so nothing here may block
+  an eviction: no hard constraint, no `karpenter.sh/do-not-disrupt`, and no PDB on
+  single-replica workloads (`minAvailable: 1` there blocks every eviction, see
+  `k8s/base/python-api/pdb.yaml`). PDBs for prod are a separate decision.
+
 ## Deploy
 
 - **Never hand-edit the `images:` block** in `k8s/overlays/{staging,prod}/kustomization.yaml` — it is

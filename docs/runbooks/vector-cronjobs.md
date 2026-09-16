@@ -18,8 +18,9 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
 | `morpho-vault-backfill` | `morpho-vault-backfill` | **on demand** | Discovers Morpho vaults from the archived S3 receipts and replays their VaultV2 structured events, for a block range supplied at start time (VEC-218) |
 | `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **on demand** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
-| `uniswap-v4-position-bootstrap` | `uniswap-v4-position-bootstrap` | **on demand** | Snapshots every historical Uniswap V4 LP position of the registered pools at one finality-safe block, closing the gap event-driven indexing cannot (VEC-639); operated from [vector-indexers.md](vector-indexers.md#uniswap-v4-indexer-vec-475) |
+| `uniswap-v4-position-bootstrap` | `uniswap-v4-position-bootstrap` | **on demand** | Two hand-started workflow types on one queue, each closing a gap event-driven indexing cannot: `UniswapV4PositionBootstrap` snapshots every historical Uniswap V4 LP position of the registered pools at one finality-safe block into `uniswap_v4_position` (VEC-639), `UniswapV4PosmTransferBackfill` replays the PositionManager's whole ERC-721 `Transfer` history into `uniswap_v4_position_nft_transfer` (VEC-790); operated from [vector-indexers.md](vector-indexers.md#uniswap-v4-indexer-vec-475) |
 | `block-republisher`, `<chain>-block-republisher` | `block-republisher`, `<chain>-block-republisher` | **on demand** | Re-publishes named block heights under the next `block_version` their raw archive leaves free, so every indexer appends the canonical block for a height whose only published version is a losing fork (ARCT-383). One deployment per chain — see the table under its section below |
+| `block-meta-loader`, `<chain>-block-meta-loader` | `block-meta-loader`, `<chain>-block-meta-loader` | **on demand** | Fills `block_meta` (the canonical block-coordinate → header-timestamp lookup) for one chain from that chain's S3 raw-block archive (VEC-491). One deployment per chain |
 | `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (Python harness; staging + prod; N_MC=10000, pod sized from a live-data pass in #891) |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
@@ -451,9 +452,9 @@ Warning severity for that reason.
 
 Currently matches: `offchain-price-backfill`, `reference-capital-backfill`,
 `morpho-vault-backfill`, `morpho-v2-bootstrap`, `uniswap-v4-position-bootstrap`, and
-every chain's republisher —
-`block-republisher` and `<chain>-block-republisher`, which the rule matches with
-one prefix-agnostic regex rather than a list of chains.
+every chain's republisher and block-meta loader — `block-republisher` /
+`<chain>-block-republisher` and `block-meta-loader` / `<chain>-block-meta-loader`,
+each matched with one prefix-agnostic regex rather than a list of chains.
 
 ### First checks
 
@@ -923,14 +924,34 @@ under a version no canonical block was archived under.
 Another **on-demand** Temporal worker (`temporal.RunWorker`, parameterless via
 `RegisterRunner` like `morpho-v2-bootstrap`). Everything said about
 `offchain-price-backfill` above applies — nothing is missed while it is down, and
-it is excluded from `VectorCronjobAllRunsFailing` for the same reason. It writes
-only `uniswap_v4_position`, through the live indexer's own append-on-change
-writer, so a run shows up on the
-[`VectorUniswapV4AppendOnChangeGrowthHigh`](vector-indexers.md#vectoruniswapv4appendonchangegrowthhigh)
-rate once, by design.
+it is excluded from `VectorCronjobAllRunsFailing` for the same reason.
 
-When to run it, how to start a run, what it does and how a killed attempt resumes
-are in the indexer runbook:
+**One queue, two workflow types, two tables.** Both are hand-started and either
+one runs on its own; the task queue keeps the older name:
+
+| Workflow Type | Writes | Closing log line | Row-growth tripwire |
+|---|---|---|---|
+| `UniswapV4PositionBootstrap` | `uniswap_v4_position` | `uniswap-v4 position bootstrap finished` | [`VectorUniswapV4AppendOnChangeGrowthHigh`](vector-indexers.md#vectoruniswapv4appendonchangegrowthhigh) |
+| `UniswapV4PosmTransferBackfill` | `uniswap_v4_position_nft_transfer` | `uniswap-v4 posm transfer backfill finished` | [`VectorUniswapV4NFTTransferBackfillGrowthHigh`](vector-indexers.md#vectoruniswapv4nfttransferbackfillgrowthhigh) |
+
+Positions go in through the live indexer's own append-on-change writer, so a run
+shows up on that rate once, by design. The posm transfer backfill's bulk load
+lands on its own tripwire, at a threshold one run stays under, while the live
+`uniswap_v4_position_nft_transfer` rules keep measuring the live decoder alone.
+
+**Which of the two failed.** `cronjob_runs_total` (OTel `cronjob.runs.total`)
+carries only the task queue, so a
+[`VectorCronjobRunFailing`](#vectorcronjobrunfailing) for
+`uniswap-v4-position-bootstrap` names the worker, and the Temporal UI's execution
+list (namespace **`vector`**) names the type. The pod answers too:
+`kubectl -n vector logs deploy/uniswap-v4-position-bootstrap`. A run that
+completed closes with its line from the table above; a failed attempt logs
+`uniswap-v4 position bootstrap stopped with partial progress` or
+`uniswap-v4 posm transfer backfill stopped with partial progress` at Warn, carrying
+the counters it reached — grep for `stopped with partial progress` after a failure.
+
+When to run each, how to start a run, what each does and how a killed attempt
+resumes are in the indexer runbook:
 [Uniswap V4 indexer — position coverage and the bootstrap](vector-indexers.md#uniswap-v4-indexer-vec-475).
 
 ---
@@ -1289,6 +1310,56 @@ which the worker's startup guard rejects — it requires the deployed
 `S3_BUCKET` is guarded the same way, against `stl-sentinel<env>-<chain>-raw`.
 
 ---
+
+## VectorBlockMetaWorklistGrowthHigh
+
+### What it means
+
+The block-meta loader paged more than 3,000,000 `block_meta_worklist` rows for one
+chain in 24h — about three times chain 1's full first pass of 981,915 pending
+blocks. **Nothing is broken.** `block_meta_worklist` is an UNLOGGED scratch table
+holding one chain's pending blocks for the length of a run, and a run that reaches
+the end clears its own chain. This is the tripwire on the assumption that the
+pending set stays bounded, so that the table can stay plain and unpartitioned.
+
+Warning severity: no data is wrong and nothing is stale. It is a capacity signal.
+
+### First checks
+
+1. **Is the same run failing repeatedly?** A run that dies before it finishes
+   leaves its rows behind, and the next run resumes from them rather than
+   re-enumerating. Repeated failures re-page the same set over and over:
+
+   ```sql
+   SELECT chain_id, count(*) FROM block_meta_worklist GROUP BY chain_id;
+   ```
+
+   Rows sitting there while no run is in flight mean the last one did not finish.
+   Check `VectorCronjobRunFailing` for that chain's `service_name`, and the
+   Temporal UI for the workflow's last outcome.
+
+2. **Did `block_meta` lose rows?** The pending set is what the arms find minus what
+   `block_meta` already holds, so a truncated or partially restored `block_meta`
+   makes every run re-enumerate history:
+
+   ```sql
+   SELECT chain_id, count(*), min(block_number), max(block_number)
+     FROM block_meta GROUP BY chain_id;
+   ```
+
+3. **Did the referenced set widen?** A table added to the loader's arms
+   (`workListArms` in `internal/adapters/outbound/postgres/block_meta_repository.go`)
+   brings every block it references into scope.
+
+### What to do
+
+- A repeatedly failing run is the common cause and is fixed on its own terms —
+  the growth is a symptom, not the problem.
+- If the pending set is genuinely and permanently larger (a new chain, a new
+  referencing table), the threshold is the thing to revisit: raise it to suit the
+  new normal, and record the new first-pass figure here.
+- If the set is large because the loader has never completed a first pass for that
+  chain, let it finish. The first pass is expected to be ~10^6 rows for chain 1.
 
 ## VectorCoreModelRunnerStale
 
@@ -1772,8 +1843,9 @@ exposure.
 Failure + all-failing alerts are automatic (they group by `service_name`).
 `VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`, the on-demand
 jobs (`offchain-price-backfill`, `reference-capital-backfill`,
-`morpho-vault-backfill`, `morpho-v2-bootstrap`, and every chain's republisher:
-`block-republisher` and `<chain>-block-republisher`), and `core-model-runner`;
+`morpho-vault-backfill`, `morpho-v2-bootstrap`, and every chain's republisher and
+block-meta loader: `block-republisher` / `<chain>-block-republisher` and
+`block-meta-loader` / `<chain>-block-meta-loader`), and `core-model-runner`;
 `VectorCronjobRunFailing` excludes only maple. Two manual steps:
 
 1. Add the new **Deployment name** to the `deployment=~"..."` regex in the

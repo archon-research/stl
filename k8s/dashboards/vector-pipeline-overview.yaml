@@ -82,7 +82,7 @@ spec:
         },
         {
           "type": "stat",
-          "title": "Watcher block polls / min",
+          "title": "Watcher block fetches / min",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
           "gridPos": { "h": 4, "w": 5, "x": 0, "y": 1 },
           "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
@@ -97,7 +97,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[5m]))",
+            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=~\"batch|eth_getBlockByHash|eth_getBlockByNumber|eth_getBlockReceipts|trace_block\", chain=~\"$chain\"}[5m]))",
             "refId": "A",
             "legendFormat": "all chains"
           }]
@@ -195,7 +195,7 @@ spec:
         },
         {
           "type": "timeseries",
-          "title": "eth_getBlockByNumber rate per chain — VectorWatcherNoBlocks fires at 0 for 1m",
+          "title": "Block fetch rate per chain — VectorWatcherNoBlocks fires at 0 for 1m",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
           "fieldConfig": {
@@ -209,7 +209,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[1m]))",
+            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=~\"batch|eth_getBlockByHash|eth_getBlockByNumber|eth_getBlockReceipts|trace_block\", chain=~\"$chain\"}[1m]))",
             "refId": "A",
             "legendFormat": "{{chain}}"
           }]
@@ -482,7 +482,7 @@ spec:
         },
         {
           "type": "stat",
-          "title": "Watcher block polls / min",
+          "title": "Watcher block fetches / min",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
           "gridPos": { "h": 4, "w": 5, "x": 0, "y": 1 },
           "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
@@ -497,7 +497,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[5m]))",
+            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=~\"batch|eth_getBlockByHash|eth_getBlockByNumber|eth_getBlockReceipts|trace_block\", chain=~\"$chain\"}[5m]))",
             "refId": "A",
             "legendFormat": "all chains"
           }]
@@ -595,7 +595,7 @@ spec:
         },
         {
           "type": "timeseries",
-          "title": "eth_getBlockByNumber rate per chain — VectorWatcherNoBlocks fires at 0 for 1m",
+          "title": "Block fetch rate per chain — VectorWatcherNoBlocks fires at 0 for 1m",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
           "fieldConfig": {
@@ -609,7 +609,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[1m]))",
+            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=~\"batch|eth_getBlockByHash|eth_getBlockByNumber|eth_getBlockReceipts|trace_block\", chain=~\"$chain\"}[1m]))",
             "refId": "A",
             "legendFormat": "{{chain}}"
           }]

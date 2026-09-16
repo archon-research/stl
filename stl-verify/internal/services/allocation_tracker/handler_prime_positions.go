@@ -127,7 +127,7 @@ func (h *PrimePositionHandler) HandleBatch(
 
 	return h.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		if len(positions) > 0 {
-			if err := h.repo.SavePositions(ctx, tx, positions); err != nil {
+			if _, err := h.repo.SavePositions(ctx, tx, positions); err != nil {
 				return fmt.Errorf("save positions: %w", err)
 			}
 		}
