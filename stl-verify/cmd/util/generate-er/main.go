@@ -104,6 +104,7 @@ var tablePriority = map[string]int{
 	"token":                  2,
 	"protocol":               3,
 	"user":                   4,
+	"asset":                  5,
 	"receipt_token":          10,
 	"debt_token":             11,
 	"sparklend_reserve_data": 12,
