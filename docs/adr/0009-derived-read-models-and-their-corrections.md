@@ -119,7 +119,7 @@ SELECT w.* FROM (
 WHERE w.is_retracted IS NOT TRUE;
 ```
 
-`holder_id` joins the `DISTINCT ON` key for a reason worth recording, because it looks redundant: it is functionally determined by `position_id`, but a qual on a non-key column cannot be pushed below a `DISTINCT ON`. Measured on 4.32M rows, a holder filter reaches its index at 1.70ms with it and post-filters the whole table at 6,454ms without.
+`holder_id` joins the `DISTINCT ON` key for a reason worth recording, because it looks redundant: it is functionally determined by `position_id`, but a qual on a non-key column cannot be pushed below a `DISTINCT ON`. Measured on 4.32M rows against the read as it stands: a holder filter reaches `position_daily_observation_holder_idx` at 1.5ms with it, and post-filters the whole table at 4,905ms without.
 
 The scheduled writer recomputes and offers (decision 5):
 
