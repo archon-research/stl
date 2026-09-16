@@ -1,0 +1,44 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Executed by the Renovate GitHub App installed on this repository; there is no workflow in .github/ that runs it. Dependabot keeps github-actions and npm (.github/dependabot.yml).",
+  "extends": ["config:recommended"],
+  "enabledManagers": ["dockerfile", "nodenv", "pyenv", "custom.regex"],
+  "schedule": ["before 6am on monday"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "`.go-version` is a bare version string with no manager of its own. `golang-version` tracks upstream Go releases and is the datasource the built-in gomod manager uses for the toolchain directive.",
+      "managerFilePatterns": ["/^\\.go-version$/"],
+      "matchStrings": ["^(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "go",
+      "datasourceTemplate": "golang-version"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Base images are referenced as tag@digest (VEC-783); pinDigests keeps new and unpinned references that way.",
+      "matchManagers": ["dockerfile"],
+      "pinDigests": true
+    },
+    {
+      "description": "The Go toolchain is written in .go-version and in both Go Dockerfiles; grouping them puts the bump in one branch so it lands as a single commit.",
+      "groupName": "go toolchain",
+      "matchPackageNames": ["go", "golang"]
+    },
+    {
+      "description": "Python is written in .python-version and in python/Dockerfile's py-base stage; grouped for the same reason.",
+      "groupName": "python toolchain",
+      "matchPackageNames": ["python"]
+    },
+    {
+      "description": "Node is written in .node-version and in python/Dockerfile's ui-builder stage; grouped for the same reason. The tag there must stay a full patch version for the check to compare it.",
+      "groupName": "node toolchain",
+      "matchPackageNames": ["node"]
+    },
+    {
+      "description": "A major is a migration, not a bump. Majors wait behind an explicit tick on the dependency dashboard; closing one there keeps it closed without blocking the minor and patch updates underneath it.",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    }
+  ]
+}
