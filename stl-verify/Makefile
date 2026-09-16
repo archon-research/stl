@@ -60,6 +60,7 @@ include lint.mk
 		docker-build-python-api docker-push-python-api docker-release-python-api \
 		docker-release-python-api-staging \
 		docker-build-mock-blockchain-server docker-push-mock-blockchain-server docker-release-mock-blockchain-server \
+		docker-build-mock-blockchain-server-staging docker-push-mock-blockchain-server-staging \
 		docker-release-mock-blockchain-server-staging \
 		kind-build-mock-blockchain-server kind-load-mock-blockchain-server kind-deploy-mock-blockchain-server kind-deploy-mock-blockchain-server-s3 \
 		kind-build-mock-coingecko-server kind-load-mock-coingecko-server kind-deploy-mock-coingecko-server kind-use-coingecko \
@@ -2647,72 +2648,38 @@ docker-release-python-api-staging:
 
 ECR_REPO_MOCK_BLOCKCHAIN_SERVER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-mock-blockchain-server
 
-# Both mock servers build from Dockerfile.common like every other Go binary
-# here (VEC-818); only the package path and output name differ.
-MOCK_BLOCKCHAIN_SERVER_CMD_PATH = cmd/util/stress-test/mock-blockchain-server
-MOCK_COINGECKO_SERVER_CMD_PATH = cmd/util/mock-coingecko-server
+# RPC+WS on 8546 and the admin API on 8547, passed as args by
+# k8s/dev-infra/mock-blockchain-server.yaml and by the Fargate task definition
+# in the infrastructure repo.
+$(eval $(call GO_SERVICE_TARGETS,mock-blockchain-server,Mock Blockchain Server,MOCK_BLOCKCHAIN_SERVER,cmd/util/stress-test/mock-blockchain-server,mock-blockchain-server, GO_LOCAL_TAG=stl-mock-blockchain-server:$(LOCAL_TAG)))
 
-# Build Docker image for mock-blockchain-server (ARM64 for Fargate Graviton)
-docker-build-mock-blockchain-server:
-	@echo "==> Building Mock Blockchain Server Docker image for ARM64..."
-	@echo "    Repository: $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER)"
-	@echo "    Tag: $(IMAGE_TAG)"
-	@echo "    Commit: $(GIT_COMMIT_FULL)"
-	@echo "    Branch: $(GIT_BRANCH)"
-	docker buildx build --platform linux/arm64 \
-		--build-arg CMD_PATH=$(MOCK_BLOCKCHAIN_SERVER_CMD_PATH) \
-		--build-arg BIN=mock-blockchain-server \
-		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
-		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
-		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.common \
-		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):$(IMAGE_TAG) \
-		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):latest \
-		--load .
-
-# Push mock-blockchain-server Docker image to ECR
-docker-push-mock-blockchain-server: ecr-login
-	@echo "==> Pushing Mock Blockchain Server Docker image to ECR..."
-	docker push $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):$(IMAGE_TAG)
-	docker push $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):latest
-
-# Build and push mock-blockchain-server in one step (captures tag at start for consistency)
 docker-release-mock-blockchain-server: ecr-login _docker-release-mock-blockchain-server-internal
 
 _docker-release-mock-blockchain-server-internal:
-	@TAG=$(IMAGE_TAG) && \
-	echo "==> Building Mock Blockchain Server Docker image for ARM64..." && \
-	echo "    Repository: $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER)" && \
-	echo "    Tag: $$TAG" && \
-	docker buildx build --platform linux/arm64 \
-		--build-arg CMD_PATH=$(MOCK_BLOCKCHAIN_SERVER_CMD_PATH) \
-		--build-arg BIN=mock-blockchain-server \
-		-f Dockerfile.common \
-		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):$$TAG \
-		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):latest \
-		--load . && \
-	echo "==> Pushing Mock Blockchain Server Docker image to ECR..." && \
-	docker push $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):$$TAG && \
-	docker push $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):latest && \
-	echo "==> Mock Blockchain Server Docker image released: $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):$$TAG"
+	@$(MAKE) _docker-release-go-service \
+		GO_NAME="Mock Blockchain Server" \
+		GO_REPO="$(ECR_REPO_MOCK_BLOCKCHAIN_SERVER)" \
+		GO_CMD_PATH=cmd/util/stress-test/mock-blockchain-server \
+		GO_BIN=mock-blockchain-server \
+		GO_CACHE_KEY=mock-blockchain-server
 
 docker-release-mock-blockchain-server-staging:
 	@$(MAKE) docker-release-mock-blockchain-server ENV=sentinelstaging
 
 # =============================================================================
-# Kind (local k8s) - Mock Blockchain Server
+# Kind (local k8s) - Mock Servers
 # =============================================================================
 
-# Build local Docker image for kind
 kind-build-mock-blockchain-server:
-	docker build --build-arg CMD_PATH=$(MOCK_BLOCKCHAIN_SERVER_CMD_PATH) --build-arg BIN=mock-blockchain-server -f Dockerfile.common -t stl-mock-blockchain-server:$(LOCAL_TAG) .
+	@$(MAKE) docker-build-mock-blockchain-server LOCAL=1
 
 # Build and load image into kind cluster
 kind-load-mock-blockchain-server: kind-build-mock-blockchain-server
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-mock-blockchain-server:$(LOCAL_TAG)"
 
+# Serves the CoinGecko API on 8080; local dev only, so it has no ECR repo.
 kind-build-mock-coingecko-server:
-	docker build --build-arg CMD_PATH=$(MOCK_COINGECKO_SERVER_CMD_PATH) --build-arg BIN=mock-coingecko-server -f Dockerfile.common -t stl-mock-coingecko-server:$(LOCAL_TAG) .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/util/mock-coingecko-server --build-arg BIN=mock-coingecko-server -t stl-mock-coingecko-server:$(LOCAL_TAG) -f Dockerfile.common .
 
 kind-load-mock-coingecko-server: kind-build-mock-coingecko-server
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-mock-coingecko-server:$(LOCAL_TAG)"
