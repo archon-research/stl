@@ -11,7 +11,7 @@ retire: delete this file in the PR that records the completed run
 
 # Backfilling `protocol_event.block_timestamp`
 
-One-time repair. `20260911_120000_add_block_timestamp_to_protocol_event.sql` adds the column
+One-time repair. `20260911_120100_add_block_timestamp_to_protocol_event.sql` adds the column
 nullable; every row predating it is NULL. Runs out of band, **staging then prod** — an `UPDATE` of
 this size over compressed chunks does not belong in the migrator's single transaction, the same
 reason VEC-491 kept `block_meta` DDL-only.

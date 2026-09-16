@@ -24,5 +24,5 @@ COMMENT ON COLUMN protocol_event.created_at IS
   'Partition key. Set to the block-header timestamp by every writer (deterministic, so a replay dedups against the PK). DEFAULT NOW() is a safety net that, before 2026-04-14, let some rows record ingest time instead; read block_timestamp, not this column, for event time.';
 
 INSERT INTO migrations (filename)
-VALUES ('20260911_120000_add_block_timestamp_to_protocol_event.sql')
+VALUES ('20260911_120100_add_block_timestamp_to_protocol_event.sql')
 ON CONFLICT (filename) DO NOTHING;
