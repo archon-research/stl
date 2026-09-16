@@ -1903,10 +1903,11 @@ temporal workflow start --namespace vector \
 The Workflow ID is the concurrency guard: Temporal rejects a duplicate while a
 run with that ID is in flight. It is per ID, not per queue, so give the two
 workflow types distinct IDs. Follow a run with
-`kubectl -n vector logs -f deploy/uniswap-v4-position-bootstrap` or in the
-execution's history; it closes with one `uniswap-v4 position bootstrap finished`
-or `uniswap-v4 posm transfer backfill finished` line carrying its counters, and a
-failed attempt logs the partial ones at Warn.
+`kubectl -n vector logs -f deploy/uniswap-v4-position-bootstrap` — the Deployment
+carries the same per-chain name as the queue — or in the execution's history; it
+closes with one `uniswap-v4 position bootstrap finished` or `uniswap-v4 posm
+transfer backfill finished` line carrying its counters, and a failed attempt logs
+the partial ones at Warn.
 
 The scan knobs are the Deployment's ConfigMap, all optional and defaulted when
 unset except `FINALITY_DEPTH` off mainnet (below): `FINALITY_DEPTH`,
@@ -2034,7 +2035,7 @@ or non-existent token.
   its bulk load is neither a growth regime nor evidence the live decoder is
   healthy. The run still records through the same `dextelemetry`
   counters, so its rows stay visible on
-  `uniswap_v4_nft_transfer_rows_written_total{service_name="uniswap-v4-position-bootstrap"}`,
+  `uniswap_v4_nft_transfer_rows_written_total{service_name=~"([a-z0-9-]+-)?uniswap-v4-position-bootstrap"}`,
   and
   [`VectorUniswapV4NFTTransferBackfillGrowthHigh`](#vectoruniswapv4nfttransferbackfillgrowthhigh)
   watches exactly that series at a threshold a single run cannot reach. Remember
