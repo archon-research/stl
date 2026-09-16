@@ -98,14 +98,14 @@ func (f *mapleFixture) cycleState(t *testing.T, loan, ts, state, principal strin
 func (f *mapleFixture) runWith(t *testing.T, tolerance string) (int64, error) {
 	t.Helper()
 	var n int64
-	err := f.pool.QueryRow(f.ctx, `SELECT materialize_maple_loan(0, $1::interval)`, tolerance).Scan(&n)
+	err := f.pool.QueryRow(f.ctx, `SELECT materialize_maple_loan(p_build_id => 0, p_max_skew => $1::interval)`, tolerance).Scan(&n)
 	return n, err
 }
 
 func (f *mapleFixture) run(t *testing.T) (int64, error) {
 	t.Helper()
 	var n int64
-	err := f.pool.QueryRow(f.ctx, `SELECT materialize_maple_loan(0, $1::interval)`, mapleTolerance).Scan(&n)
+	err := f.pool.QueryRow(f.ctx, `SELECT materialize_maple_loan(p_build_id => 0, p_max_skew => $1::interval)`, mapleTolerance).Scan(&n)
 	return n, err
 }
 
@@ -476,7 +476,7 @@ func TestMapleLoanRefusals(t *testing.T) {
 	t.Run("a widened tolerance is the only way to accept that gap", func(t *testing.T) {
 		var n int64
 		if err := pool.QueryRow(ctx,
-			`SELECT materialize_maple_loan(0, INTERVAL '200 days')`).Scan(&n); err != nil {
+			`SELECT materialize_maple_loan(p_build_id => 0, p_max_skew => INTERVAL '200 days')`).Scan(&n); err != nil {
 			t.Fatalf("an explicitly widened tolerance must accept it: %v", err)
 		}
 		if n != 1 {
@@ -968,7 +968,7 @@ func TestMapleLoanForwardsTheWriterRun(t *testing.T) {
 	f.blocks(t, 1, 100, "2026-04-01T00:00:00Z", 40, 3600)
 	f.cycle(t, "run-fwd", "2026-04-01T05:00:00Z", "1000", 0)
 	var n int64
-	if err := pool.QueryRow(ctx, `SELECT materialize_maple_loan(7, $1::interval, 9182)`, mapleTolerance).Scan(&n); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT materialize_maple_loan(p_build_id => 7, p_max_skew => $1::interval, p_run_id => 9182)`, mapleTolerance).Scan(&n); err != nil {
 		t.Fatalf("materialize_maple_loan with a run: %v", err)
 	}
 	if n != 1 {
