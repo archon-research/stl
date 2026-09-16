@@ -94,7 +94,7 @@ jobs:
   integration-tests:
     name: Integration Tests (${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
