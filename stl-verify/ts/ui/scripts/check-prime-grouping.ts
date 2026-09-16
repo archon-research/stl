@@ -78,7 +78,6 @@ async function main() {
         sparkBase,
       ]);
       assert.equal(groups.length, 1);
-      assert.equal(groups[0].chainCount, 3);
     }
 
     // The grouped entry lists every proxy address of the prime.
@@ -114,7 +113,6 @@ async function main() {
       });
       const [group] = groupPrimesByVault([offContractMainnet, offContractBase]);
       assert.deepEqual(group.proxyAddresses, [offContractMainnet.address]);
-      assert.equal(group.chainCount, 2);
     }
 
     // A null prime_vault_address still yields an entry, keyed on name instead

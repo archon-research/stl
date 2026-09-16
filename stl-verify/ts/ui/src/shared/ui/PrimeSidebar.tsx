@@ -12,7 +12,8 @@ import { flex } from '#styled-system/patterns';
 import { toggleSwitch } from '#styled-system/recipes';
 
 import { ProtocolLogo } from '.';
-import { truncateMiddle } from '../lib/dashboard';
+import { useAllocationRows } from '../hooks/useAllocationRows';
+import { allocationNetworkKey, truncateMiddle } from '../lib/dashboard';
 import type { PrimeGroup } from '../lib/dashboard';
 
 type PrimeSidebarProps = {
@@ -27,6 +28,33 @@ type PrimeSidebarProps = {
 };
 
 const switchStyles = toggleSwitch();
+
+/**
+ * How many networks a prime holds positions on.
+ *
+ * Counted over the prime's allocation rows on `allocationNetworkKey`, the key
+ * the top bar's network filter groups by, so this number and the "All networks"
+ * list span the same set — reference-only networks included.
+ */
+function PrimeNetworkCount({ primeGroup }: { primeGroup: PrimeGroup }) {
+  const { allocations, isLoaded } = useAllocationRows(primeGroup);
+
+  if (!isLoaded) return null;
+
+  const count = new Set(allocations.map(allocationNetworkKey)).size;
+
+  return (
+    <span
+      className={css({
+        fontSize: 'xs',
+        color: 'text.muted',
+        whiteSpace: 'nowrap',
+      })}
+    >
+      {count} {count === 1 ? 'network' : 'networks'}
+    </span>
+  );
+}
 
 export function PrimeSidebar({
   primeGroups,
@@ -211,16 +239,7 @@ export function PrimeSidebar({
                         >
                           {primeGroup.name}
                         </p>
-                        <span
-                          className={css({
-                            fontSize: 'xs',
-                            color: 'text.muted',
-                            whiteSpace: 'nowrap',
-                          })}
-                        >
-                          {primeGroup.chainCount}{' '}
-                          {primeGroup.chainCount === 1 ? 'chain' : 'chains'}
-                        </span>
+                        <PrimeNetworkCount primeGroup={primeGroup} />
                       </div>
                       <span
                         className={css({
