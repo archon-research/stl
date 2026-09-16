@@ -12,6 +12,14 @@
       "matchStrings": ["^(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
       "depNameTemplate": "go",
       "datasourceTemplate": "golang-version"
+    },
+    {
+      "customType": "regex",
+      "description": "go.mod's `go` directive states the same toolchain version, and check-base-image-version-consistency.sh holds it to .go-version. Matched by regex so the directive alone is in scope; the gomod manager would bring every module dependency with it.",
+      "managerFilePatterns": ["/^stl-verify\\/go\\.mod$/"],
+      "matchStrings": ["\\ngo (?<currentValue>\\d+\\.\\d+\\.\\d+)\\n"],
+      "depNameTemplate": "go",
+      "datasourceTemplate": "golang-version"
     }
   ],
   "packageRules": [

@@ -129,6 +129,14 @@ D="${WORK}/gomod-missing"; tree "$D"
 rm "$D/stl-verify/go.mod"
 check "a missing go.mod is caught" 1 "go.mod" "$D"
 
+# Both checks read FROM lines, so neither may be satisfied or tripped by one
+# quoted in a comment. check_pins_agree's case is above; this is check_tag's.
+D="${WORK}/commented-from"; tree "$D"
+printf 'FROM --platform=$BUILDPLATFORM %s AS builder\n# was: FROM golang:1.25.1-alpine@sha256:%s AS builder\nFROM %s AS runtime-base\n' \
+  "$GO_PIN" "3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83" "$ALPINE_PIN" \
+  > "$D/stl-verify/Dockerfile.common"
+check "a commented-out FROM does not trip check_tag" 0 "Each base image carries one pin" "$D"
+
 # The devcontainer image names the minor only, so it tracks .go-version's
 # major.minor and a patch bump must leave it alone.
 D="${WORK}/devcontainer-drift"; tree "$D"

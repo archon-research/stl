@@ -33,7 +33,7 @@ check_tag() {
   local file="$1" image="$2" expected="$3"
   local pattern="FROM[[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)?${image}:[^@[:space:]]+@sha256:[0-9a-f]{64}"
   local matches status=0
-  matches="$(grep -noE "$pattern" "$file")" || status=$?
+  matches="$(grep -noE "^$pattern" "$file")" || status=$?
   if [ "$status" -ne 0 ] || [ -z "$matches" ]; then
     echo "  BAD  ${file}: no pinned '${image}' FROM line found"
     FAILED=1

@@ -102,7 +102,6 @@ FROM runtime-base AS payload-none
 FROM runtime-base AS payload-migrations
 COPY db/migrations/ /app/db/migrations/
 
-ARG RUNTIME_PAYLOAD
 FROM payload-${RUNTIME_PAYLOAD} AS runtime
 
 # Copy the service binary, keeping its per-service name (see BIN note above)
