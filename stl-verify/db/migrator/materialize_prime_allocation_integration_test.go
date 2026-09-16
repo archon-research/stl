@@ -602,3 +602,87 @@ func TestMaterializePrimeAllocationForwardsTheWriterRun(t *testing.T) {
 		}
 	}
 }
+
+// The prime is carried by holder_id alone, never by instrument_key, so two primes on one proxy would
+// store the same proxy balance twice under two position_ids and the spine could not see the double count.
+func TestMaterializePrimeAllocationRefusesOneProxyUnderTwoPrimes(t *testing.T) {
+	ctx, pool := seedPrimeAllocationBase(t)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'itest-alloc-2', decode($1, 'hex'))`,
+		"cccc000000000000000000000000000000000000"); err != nil {
+		t.Fatalf("seed the second prime: %v", err)
+	}
+	alloc(t, ctx, pool, allocProxyA, allocTokenX, 500, 100, 0, "2026-01-01T00:00:00Z", "in")
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO allocation_position
+		    (chain_id, token_id, proxy_address, balance, block_number, block_version,
+		     tx_hash, log_index, tx_amount, direction, created_at, prime_id)
+		SELECT 1, t.id, decode($1, 'hex'), 500, 100, 0, decode('0000000a', 'hex'), 10, 0, 'in',
+		       '2026-01-01T00:00:00Z'::timestamptz, p.id
+		FROM token t, prime p
+		WHERE t.chain_id = 1 AND t.address = decode($2, 'hex') AND p.name = 'itest-alloc-2'`,
+		allocProxyA, allocTokenX); err != nil {
+		t.Fatalf("seed the second prime's row: %v", err)
+	}
+	var written int64
+	err := pool.QueryRow(ctx, `SELECT materialize_prime_allocation()`).Scan(&written)
+	if err == nil {
+		t.Fatalf("the run stored %d rows; one proxy balance counted under two primes must refuse", written)
+	}
+	if !strings.Contains(err.Error(), "would key wrongly") || !strings.Contains(err.Error(), "is held by 2 primes") {
+		t.Errorf("error %q does not name the two primes sharing the proxy", err.Error())
+	}
+	var rows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Errorf("a refused run wrote %d rows, want 0", rows)
+	}
+}
+
+// A row whose chain_id disagrees with its token's renders the same instrument_key as the row on the
+// other chain. Unguarded it aborts in the spine naming only a position_id hash.
+func TestMaterializePrimeAllocationRefusesAChainMismatch(t *testing.T) {
+	ctx, pool := seedPrimeAllocationBase(t)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO chain (chain_id, name) VALUES (8453, 'base') ON CONFLICT (chain_id) DO NOTHING`); err != nil {
+		t.Fatalf("seed the second chain: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO allocation_position
+		    (chain_id, token_id, proxy_address, balance, block_number, block_version,
+		     tx_hash, log_index, tx_amount, direction, created_at, prime_id)
+		SELECT 8453, t.id, decode($1, 'hex'), 500, 100, 0, decode('0000000b', 'hex'), 11, 0, 'in',
+		       '2026-01-01T00:00:00Z'::timestamptz, p.id
+		FROM token t, prime p
+		WHERE t.chain_id = 1 AND t.address = decode($2, 'hex') AND p.name = 'itest-alloc'`,
+		allocProxyA, allocTokenX); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	err := pool.QueryRow(ctx, `SELECT materialize_prime_allocation()`).Scan(new(int64))
+	if err == nil {
+		t.Fatal("a row whose chain disagrees with its token's must refuse")
+	}
+	if !strings.Contains(err.Error(), "is registered on chain 1") {
+		t.Errorf("error %q does not name the token's real chain", err.Error())
+	}
+}
+
+// A vault address that is not 20 bytes aborts inside position_key() naming no row, so it is named here.
+func TestMaterializePrimeAllocationRefusesAMalformedVault(t *testing.T) {
+	ctx, pool := seedPrimeAllocationBase(t)
+	if _, err := pool.Exec(ctx,
+		`UPDATE prime SET vault_address = decode($1, 'hex') WHERE name = 'itest-alloc'`,
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); err != nil {
+		t.Fatalf("shorten the vault address: %v", err)
+	}
+	alloc(t, ctx, pool, allocProxyA, allocTokenX, 500, 100, 0, "2026-01-01T00:00:00Z", "in")
+	err := pool.QueryRow(ctx, `SELECT materialize_prime_allocation()`).Scan(new(int64))
+	if err == nil {
+		t.Fatal("a 19-byte vault address must refuse by name")
+	}
+	if !strings.Contains(err.Error(), "is 19 bytes") {
+		t.Errorf("error %q does not name the malformed holder", err.Error())
+	}
+}
