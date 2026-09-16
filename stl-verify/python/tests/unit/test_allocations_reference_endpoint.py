@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.api.deps import get_reference_positions_service_factory
 from app.api.v1 import allocations
-from app.domain.entities.allocation import AnchorageCustodyHolding, EthAddress
+from app.domain.entities.allocation import AnchorageCustodyHolding, EthAddress, ReceiptTokenPosition
 from app.domain.entities.reference_position import ReferencePosition, ReferencePositionSnapshot
 from app.main import app
 from app.services.allocation_service import AllocationService
@@ -21,6 +21,31 @@ _V4_POOL_ID = "0x" + "ef" * 32
 _OTHER_PROXY = "0x" + "99" * 20
 _SYNCED_AT = datetime(2026, 8, 26, 9, 15, tzinfo=UTC)
 _SYNCED_AT_ISO = "2026-08-26T09:15:00Z"
+
+
+def _indexed_position(amount_usd: Decimal | None) -> ReceiptTokenPosition:
+    return ReceiptTokenPosition(
+        chain_id=1,
+        receipt_token_id=41,
+        receipt_token_address=_TOKEN,
+        underlying_token_id=7,
+        underlying_token_address="0x" + "77" * 20,
+        symbol="spUSDT",
+        underlying_symbol="USDT",
+        protocol_name="sparklend",
+        balance=Decimal("1"),
+        amount_usd=amount_usd,
+        latest_activity_at=None,
+        latest_activity_action=None,
+        latest_activity_amount=None,
+    )
+
+
+def _stub_indexed(service: AsyncMock, *positions: ReceiptTokenPosition) -> None:
+    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
+    service.list_direct_asset_holdings.return_value = []
+    service.primary_proxy_address.return_value = None
+    service.list_receipt_token_positions.return_value = list(positions)
 
 
 def _custody_holding() -> AnchorageCustodyHolding:
@@ -452,29 +477,8 @@ def test_both_keeps_skys_value_beside_stls_on_a_matched_row(reference_client):
     the match left nothing for a total to fall back to — six of spark's rows,
     $423M, priced by Sky alone.
     """
-    from app.domain.entities.allocation import ReceiptTokenPosition
-
     client, service = reference_client
-    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
-    service.list_direct_asset_holdings.return_value = []
-    service.primary_proxy_address.return_value = None
-    service.list_receipt_token_positions.return_value = [
-        ReceiptTokenPosition(
-            chain_id=1,
-            receipt_token_id=41,
-            receipt_token_address=_TOKEN,
-            underlying_token_id=7,
-            underlying_token_address="0x" + "77" * 20,
-            symbol="spUSDT",
-            underlying_symbol="USDT",
-            protocol_name="sparklend",
-            balance=Decimal("1"),
-            amount_usd=None,
-            latest_activity_at=None,
-            latest_activity_action=None,
-            latest_activity_amount=None,
-        )
-    ]
+    _stub_indexed(service, _indexed_position(amount_usd=None))
 
     response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
 
@@ -516,29 +520,8 @@ def test_both_binds_the_indexed_counterpart_to_the_collapsed_reference_row(refer
     merge sees it, so it binds to its indexed counterpart once and Sky's figure
     arrives as the sum of both wallets.
     """
-    from app.domain.entities.allocation import ReceiptTokenPosition
-
     client, service = reference_client
-    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
-    service.list_direct_asset_holdings.return_value = []
-    service.primary_proxy_address.return_value = None
-    service.list_receipt_token_positions.return_value = [
-        ReceiptTokenPosition(
-            chain_id=1,
-            receipt_token_id=41,
-            receipt_token_address=_TOKEN,
-            underlying_token_id=7,
-            underlying_token_address="0x" + "77" * 20,
-            symbol="spUSDT",
-            underlying_symbol="USDT",
-            protocol_name="sparklend",
-            balance=Decimal("1"),
-            amount_usd=Decimal("500000000"),
-            latest_activity_at=None,
-            latest_activity_action=None,
-            latest_activity_amount=None,
-        )
-    ]
+    _stub_indexed(service, _indexed_position(amount_usd=Decimal("500000000")))
 
     response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
 
@@ -547,6 +530,31 @@ def test_both_binds_the_indexed_counterpart_to_the_collapsed_reference_row(refer
     assert row["source"] == "both"
     assert row["amount_usd"] == "500000000"
     assert row["reference_amount_usd"] == "688375011.32"
+
+
+@pytest.mark.parametrize(
+    "reference_client",
+    [
+        _positions(
+            _reference_position(protocol_name="sparklend"),
+            _reference_position(protocol_name="morpho"),
+        )
+    ],
+    indirect=True,
+)
+def test_both_binds_one_indexed_row_to_a_single_reference_row_per_token(reference_client):
+    """Two reference rows on one token address survive the collapse when their
+    protocols differ, and `PositionFacts` identity does not carry protocol, so
+    both answer to the one indexed row. Binding both would serve STL's
+    `amount_usd` twice.
+    """
+    client, service = reference_client
+    _stub_indexed(service, _indexed_position(amount_usd=Decimal("500000000")))
+
+    rows = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both").json()
+
+    assert [row["source"] for row in rows] == ["both", "reference"]
+    assert [row["amount_usd"] for row in rows] == ["500000000", "344187505.66"]
 
 
 @pytest.mark.parametrize(
