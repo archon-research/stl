@@ -114,11 +114,12 @@ htmlcov/
 # Skill sources live in skills/ (local) or are pinned by SHA in Skillfile.lock
 # (remote). Every tool's deploy target and the downloaded CLI binary are
 # regenerated on demand by `make skills-install`, so none of them are committed.
+# `.skillfile/` is the CLI's per-developer working state: the fetch cache, the
+# `skillfile pin` patches, and conflict markers from `skillfile resolve`.
 .claude/skills/
 .codex/skills/
 .github/skills/
-.skillfile/cache/
-.skillfile/conflict
+.skillfile/
 bin/skillfile
 
 # Transient control files written by scripts/deploy/check-build-reproducible.sh.

@@ -774,8 +774,8 @@ func scanCandidateRow(rows pgx.Rows) (candidateRow, error) {
 // isAaveFamily reports whether a protocol issues aTokens, which are 1:1 with
 // their underlying by construction and so need no conversion read.
 //
-// Aave registers one protocol row per market -- "Aave V3 Lido", "Aave V3 Base",
-// "Aave V3 RWA" and so on -- so this matches the family prefix rather than an
+// Aave registers one protocol row per market -- "Aave V3 Lido", "Aave V3 RWA"
+// and so on -- so this matches the family prefix rather than an
 // exact list, which would silently classify an unlisted market as erc4626 and
 // skip rows that need no on-chain call at all.
 func isAaveFamily(protocolName string) bool {

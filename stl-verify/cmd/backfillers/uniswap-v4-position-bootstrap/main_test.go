@@ -2,21 +2,35 @@ package main
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 )
 
 // Every name is spelled out rather than compared to its constant, which would
 // rename together and pin nothing. The alert regexes in
 // alerts/vector-cronjobs.yaml, the Deployment and the runbook carry the same
-// strings, and an operator types the workflow types by hand.
+// strings, and an operator types the workflow types by hand. The queue goes
+// through the helper that builds it, as block-republisher's equivalent does;
+// every chain's queue name is pinned with chainutil.TaskQueueName.
 func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
+	t.Setenv("CHAIN_ID", "1")
+
+	queue, err := chainutil.TaskQueueName(queueBaseName)
+	if err != nil {
+		t.Fatalf("TaskQueueName error = %v", err)
+	}
+
 	names := map[string]string{
-		taskQueueName:            "uniswap-v4-position-bootstrap",
+		queue:                    "uniswap-v4-position-bootstrap",
 		positionWorkflowTypeName: "UniswapV4PositionBootstrap",
 		transferWorkflowTypeName: "UniswapV4PosmTransferBackfill",
+		// The archive source is chain-independent and lands on every archive record,
+		// so it is pinned here rather than left to follow whatever the queue is named.
+		archiveSource: "uniswap-v4-position-bootstrap",
 		// uniswapV4Factory.MetricPrefix()'s value: the backfill's rows have to land
 		// on the counter VectorUniswapV4NFTTransferGrowthHigh reads, the live
 		// indexer's, or they grow the table on a series no rule looks at.
@@ -31,17 +45,47 @@ func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
 
 // RunWorker hands WorkerConfig.Name to InitOTEL as the OTel service name, so the
 // nft-transfer selectors in alerts/vector-indexers.yaml have to match that name.
-func TestWorkerConfig_NamesTheServiceTheAlertSelectorsMatch(t *testing.T) {
+// Driven through the function run() itself wires, so what is asserted is the
+// deployed name and not a string the test supplied: passing the unresolved base
+// name, or the archive source, leaves chain 8453 on mainnet's queue.
+func TestWorkerConfigFromEnv_NamesTheServiceTheAlertSelectorsMatch(t *testing.T) {
 	// Spelled out as the rules spell it, and anchored both ends the way Prometheus
 	// anchors =~ and !~, so the chain-prefix form is what is being checked.
 	const selector = `(^|.*-)uniswap-v4-position-bootstrap`
 	matcher := regexp.MustCompile(`^(?:` + selector + `)$`)
 
-	cfg := (&bootstrapWorker{}).workerConfig("postgres://unused/unused")
+	for chainID, want := range map[string]string{
+		"1":    "uniswap-v4-position-bootstrap",
+		"8453": "base-uniswap-v4-position-bootstrap",
+	} {
+		t.Run(chainID, func(t *testing.T) {
+			t.Setenv("CHAIN_ID", chainID)
 
-	if !matcher.MatchString(cfg.Name) {
-		t.Errorf("WorkerConfig.Name = %q: the nft-transfer rules select this worker with service_name=~%q, which does not match it",
-			cfg.Name, selector)
+			cfg, err := (&bootstrapWorker{}).workerConfigFromEnv("postgres://unused/unused")
+
+			if err != nil {
+				t.Fatalf("workerConfigFromEnv: %v", err)
+			}
+			if cfg.Name != want {
+				t.Errorf("WorkerConfig.Name = %q, want %q: this is the queue the worker polls and the service name it exports", cfg.Name, want)
+			}
+			if !matcher.MatchString(cfg.Name) {
+				t.Errorf("WorkerConfig.Name = %q: the nft-transfer rules select this worker with service_name=~%q, which does not match it",
+					cfg.Name, selector)
+			}
+		})
+	}
+}
+
+// A chain with no slug must fail startup rather than poll a queue no operator
+// can find.
+func TestWorkerConfigFromEnv_RefusesAChainWithNoSlug(t *testing.T) {
+	t.Setenv("CHAIN_ID", "999999")
+
+	_, err := (&bootstrapWorker{}).workerConfigFromEnv("postgres://unused/unused")
+
+	if err == nil || !strings.Contains(err.Error(), "999999") {
+		t.Fatalf("error = %v, want one naming the chain", err)
 	}
 }
 

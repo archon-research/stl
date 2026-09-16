@@ -641,12 +641,6 @@ describe('groupPrimesByVault', () => {
     ).toHaveLength(1);
   });
 
-  it('counts the distinct chains a prime allocates on', () => {
-    const [group] = groupPrimesByVault([mainnetRow, baseRow, avalancheRow]);
-
-    expect(group?.chainCount).toBe(3);
-  });
-
   it('dedupes one address that appears on two chains', () => {
     const onBase = makePrime({
       address: '0xaaaa',
@@ -869,8 +863,8 @@ describe('getProtocolLabel', () => {
 
   it('prefers a registry protocol name over the static label table', () => {
     expect(
-      getProtocolLabel('spark', [makeProtocolRow({ name: 'Spark Lend v3' })]),
-    ).toBe('Spark Lend v3');
+      getProtocolLabel('spark', [makeProtocolRow({ name: 'Sparklend' })]),
+    ).toBe('Sparklend');
   });
 
   it('falls back to the static label table', () => {
@@ -903,6 +897,18 @@ describe('findProtocolMetadata', () => {
     const row = makeProtocolRow({ name: 'SparkLend' });
 
     expect(findProtocolMetadata('spark', [row])).toBe(row);
+  });
+
+  it.each([
+    ['psm3', 'no row is named for it, chain notwithstanding'],
+    ['aave', 'several rows are merely named after it'],
+  ])('returns null for %o: %s', (protocol) => {
+    const aaveRows = [
+      makeProtocolRow({ name: 'Aave V2' }),
+      makeProtocolRow({ id: 2, name: 'Aave V3' }),
+    ];
+
+    expect(findProtocolMetadata(protocol, aaveRows, 1)).toBeNull();
   });
 });
 

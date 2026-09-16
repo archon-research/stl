@@ -190,10 +190,9 @@ class AllocationResponse(BaseModel):
         default=None,
         description=(
             "The ALM proxy holding this position, as upstream reports it. Populated on reference "
-            "rows only — the same (`network`, `receipt_token_address`/`held_token_address`) can "
-            "legitimately recur under a prime's different proxy wallets, and this is what "
-            "distinguishes those rows. `null` on an indexed row, which is already scoped to a "
-            "single queried proxy."
+            "rows only, and `null` there where several of a prime's proxies hold the position: "
+            "upstream reports those per wallet and they are served as one summed row. Also `null` "
+            "on an indexed row, which is already scoped to a single queried proxy."
         ),
         examples=["0x1234567890abcdef1234567890abcdef12345678"],
     )
@@ -653,12 +652,9 @@ async def _merged_allocations(
     merged: list[AllocationResponse] = []
     matched: set[int] = set()
     for row in reference:
-        # `wallet_address` narrows a reference row's identity but not
-        # `PositionFacts` (indexed rows carry no wallet to narrow against), so
-        # grove's two proxy rows for one token answer to the same key. Skipping
-        # an already-matched counterpart keeps the first wallet bound to it and
-        # falls the rest through to a plain reference row, instead of copying
-        # the same indexed `amount_usd` into the merged list twice.
+        # `PositionFacts` identity ignores the protocol the reference rows are
+        # collapsed on, so two can still key alike; binding both would copy one
+        # indexed `amount_usd` into the merged list twice.
         counterpart = next(
             (
                 by_identity[key]
@@ -742,11 +738,35 @@ async def _reference_allocations(
 
     category_service = AllocationCategoryService()
     return [
-        _reference_allocation_row(row, snapshot.synced_at, category_service).model_copy(
-            update={"source": Provenance.REFERENCE}
+        _reference_allocation_row(group[0], snapshot.synced_at, category_service).model_copy(
+            update={
+                "source": Provenance.REFERENCE,
+                "amount_usd": sum(row.assets_usd for row in group),
+                "wallet_address": _sole_wallet(group),
+            }
         )
-        for row in snapshot.positions
+        for group in _positions_per_holding(snapshot.positions)
     ]
+
+
+def _positions_per_holding(positions: tuple[ReferencePosition, ...]) -> list[list[ReferencePosition]]:
+    """Group upstream's per-wallet rows into the holdings they add up to.
+
+    Upstream reports one row per wallet, so a token a prime holds under two of
+    its proxies arrives as two rows a page reading no wallet cannot tell apart.
+    Case-folded because upstream's own casing is not trustworthy.
+    """
+    groups: dict[tuple[str, str, str], list[ReferencePosition]] = {}
+    for row in positions:
+        key = (row.network.lower(), row.token_address.lower(), row.protocol_name.lower())
+        groups.setdefault(key, []).append(row)
+    return list(groups.values())
+
+
+def _sole_wallet(group: list[ReferencePosition]) -> str | None:
+    """The wallet holding the position, or ``None`` when several share it."""
+    wallets = {row.wallet_address for row in group}
+    return wallets.pop() if len(wallets) == 1 else None
 
 
 def _reference_allocation_row(
