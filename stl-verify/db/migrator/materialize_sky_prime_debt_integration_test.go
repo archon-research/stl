@@ -196,10 +196,9 @@ func TestSkyPrimeDebtCarriesTheProtocolStampedOnTheRow(t *testing.T) {
 	}
 }
 
-// A snapshot the projection cannot key refuses the whole run, by name, writing nothing. Three ways in:
-// an unresolvable protocol_id (the Vat row is hashed into position_id); a padded ilk_name, which
-// position_key() accepts and would silently fork into a second identity; and a vault_address that is not
-// 20 bytes, which passes position_key() and fails the spine's hex CHECK with a 23514 naming no row.
+// A snapshot the projection cannot key refuses the whole run, by name, writing nothing: an unresolvable
+// protocol_id and a vault_address that is not 20 bytes both break position_id, and an ilk_name that is
+// blank, whitespace-only, padded or carries ';' would silently fork one position into two.
 func TestSkyPrimeDebtRefusesASnapshotItCannotKey(t *testing.T) {
 	const goodVault = "ffffffffffffffffffffffffffffffffffffffff"
 	for _, c := range []struct{ name, protocolExpr, ilk, vaultHex, want string }{
@@ -209,6 +208,7 @@ func TestSkyPrimeDebtRefusesASnapshotItCannotKey(t *testing.T) {
 		{"trailing space in ilk_name", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "ILK-X ", goodVault, "ilk 'ILK-X '"},
 		{"blank ilk_name", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "", goodVault, "ilk ''"},
 		{"tab-only ilk_name", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "\t", goodVault, "ilk '"},
+		{"newline-only ilk_name", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "\n", goodVault, "ilk '"},
 		{"ilk_name carrying the key delimiter", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "ILK;X", goodVault, "ilk 'ILK;X'"},
 		{"empty vault_address", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "ILK-X", "", "vault_address ''"},
 		{"19-byte vault_address", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "ILK-X", goodVault[:38], "vault_address '" + goodVault[:38] + "'"},
