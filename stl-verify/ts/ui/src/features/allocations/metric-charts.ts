@@ -168,6 +168,7 @@ export function buildMetricCharts({
       errorMessage: series.activityErrorMessage,
       stroke: 'chart.series.primary',
       formatValue: formatCompactUsd,
+      coverage: series.allocationCoverage,
     },
     {
       // Exposure trend from priced receipt-token balances over time; falls
