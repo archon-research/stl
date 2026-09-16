@@ -212,6 +212,8 @@ func TestSkyPrimeDebtRefusesASnapshotItCannotKey(t *testing.T) {
 		{"ilk_name carrying the key delimiter", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "ILK;X", goodVault, "ilk 'ILK;X'"},
 		{"empty vault_address", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "ILK-X", "", "vault_address ''"},
 		{"19-byte vault_address", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "ILK-X", goodVault[:38], "vault_address '" + goodVault[:38] + "'"},
+		// Every other width case is short, so <> 20 weakened to < 20 would pass them all.
+		{"21-byte vault_address", "(SELECT id FROM protocol WHERE chain_id = 1 AND address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))", "ILK-X", goodVault + "ff", "vault_address '" + goodVault + "ff'"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ctx := context.Background()
