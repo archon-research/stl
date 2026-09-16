@@ -76,12 +76,12 @@ func init() {
 	buildinfo.Populate(&GitCommit, &GitBranch, &BuildTime)
 }
 
+// queueBaseName is this component's deployed name, and the base of its per-chain task queue.
+const queueBaseName = "block-meta-loader"
+
 // workflowTypeName is what an operator types into the Temporal UI's "Workflow
 // Type" field, so it is registered explicitly rather than derived from the Go
 // function name — a rename must not invalidate the runbook or muscle memory.
-// queueBaseName is this component's deployed name.
-const queueBaseName = "block-meta-loader"
-
 const workflowTypeName = "BlockMetaLoad"
 
 func run(ctx context.Context) error {
