@@ -42,10 +42,8 @@ class ReferencePosition:
     symbol: str
     name: str
     token_address: str
-    # The ALM proxy holding the position. Part of `prime_reference_position`'s
-    # row identity in storage (VEC-NA: the same (network, token_address)
-    # legitimately recurs under a prime's different proxies) and what lets a
-    # consumer tell those rows apart.
+    # The ALM proxy holding the position, and part of the stored row identity:
+    # one (network, token_address) recurs under a prime's different proxies.
     wallet_address: str
     # The full holding. `allocated` and `idle` decompose it — a position can be
     # deployed into a protocol or sitting in the proxy, and upstream reports
