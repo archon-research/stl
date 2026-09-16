@@ -2,11 +2,6 @@
 
 # Build UI on the native builder architecture — the output is static JS/HTML/CSS,
 # so there's no reason to run npm under QEMU arm64 emulation (which crashes node).
-#
-# The tag is a full patch version because
-# scripts/deploy/check-base-image-version-consistency.sh compares it to
-# .node-version; a major-only tag such as node:24-alpine carries nothing to
-# compare.
 FROM --platform=$BUILDPLATFORM node:24.20.0-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf AS ui-builder
 
 WORKDIR /ui
@@ -23,8 +18,8 @@ RUN npm run prepare --workspace=@stl-verify/ui
 
 RUN npm run build --workspace=@stl-verify/ui
 
-# The single pinned Python base. Every stage below builds from this name, so the
-# tag+digest is written once and the stages cannot drift apart.
+# The one pinned Python base. Every stage below builds from this name, so the
+# tag+digest is written once.
 FROM python:3.12.14-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS py-base
 
 # Build Python dependencies

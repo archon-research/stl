@@ -1,26 +1,16 @@
 #!/usr/bin/env bash
 #
-# check-base-image-version-consistency.sh — fail if a Dockerfile's pinned
-# golang/python/node base-image tag disagrees with the matching version file,
-# or if two Dockerfiles pin the same base image differently.
+# check-base-image-version-consistency.sh — hold each base image to one pin,
+# and that pin's tag to the matching version file.
 #
-# VEC-783 pinned stl-verify/Dockerfile.common, Dockerfile.migrate and
-# python/Dockerfile to a hardcoded tag+digest (FROM golang:X-alpine@sha256:...,
-# FROM python:X-slim@sha256:...) instead of interpolating the tag from an ARG,
-# because an ARG-driven tag next to a fixed digest drifts from it silently:
-# Docker pulls by digest and never re-checks that the tag still names it. That
-# closed one drift path but opened another -- .go-version and .python-version
-# still drive setup-go/setup-python in CI and mise/uv locally, so nothing
-# stopped a version-file bump from silently building a different toolchain than
-# the one CI compiles and tests against. This check is that stop.
+# VEC-783 pinned the Dockerfiles to a hardcoded tag+digest
+# (FROM golang:X-alpine@sha256:...) rather than interpolating the tag from an
+# ARG, because Docker pulls by digest and never re-checks that the tag still
+# names it. The version files remain what setup-go/setup-python/setup-node and
+# mise read, so this is what keeps the two in step.
 #
-# node is guarded on the same terms, which is why python/Dockerfile pins a full
-# patch tag: a major-only tag such as node:24-alpine carries nothing for this
-# check to compare .node-version against.
-#
-# Paths are resolved against the working directory, not the script's location,
-# so check-base-image-version-consistency.test.sh can drive it over fixture
-# trees.
+# Paths resolve against the working directory, which is what lets
+# check-base-image-version-consistency.test.sh drive this over fixture trees.
 #
 # Usage:
 #   check-base-image-version-consistency.sh
@@ -30,9 +20,7 @@ GO_VERSION="$(cat .go-version)"
 PYTHON_VERSION="$(cat .python-version)"
 NODE_VERSION="$(cat .node-version)"
 
-# The Go images share a base; they are listed once here so the checks below and
-# the agreement check cannot fall out of step with each other.
-GO_DOCKERFILES=(stl-verify/Dockerfile.common stl-verify/Dockerfile.migrate)
+GO_DOCKERFILE=stl-verify/Dockerfile.common
 PYTHON_DOCKERFILE=stl-verify/python/Dockerfile
 
 FAILED=0
@@ -64,15 +52,12 @@ check_tag() {
 }
 
 # check_pins_agree <image> <file>...: assert every file pins <image> on a FROM
-# line, and that all of them name the same tag and the same digest. alpine has
-# no version file, so this is the whole of its guard; for golang it is what
-# catches two files agreeing on a tag while naming different images, which
-# check_tag cannot see because it compares the tag and discards the digest.
+# line, and that every such line names the same tag and the same digest. alpine
+# has no version file, so this is the whole of its guard, and it is what holds
+# each of the others to a single pin -- check_tag compares the tag and discards
+# the digest, so it cannot see two pins of one image diverge.
 #
-# Per file rather than over the set: one grep across every file cannot tell
-# "all of them pin it" from "one of them does", and the file that stopped
-# pinning is the one worth knowing about. Anchored on FROM so a digest left
-# behind in a comment cannot stand in for the instruction.
+# Each file is read on its own, and the pattern is anchored on FROM.
 check_pins_agree() {
   local image="$1"
   shift
@@ -102,7 +87,7 @@ check_pins_agree() {
   distinct="$(printf '%s' "$refs" | sort -u)"
   count="$(printf '%s\n' "$distinct" | wc -l | tr -d ' ')"
   if [ "$count" -eq 1 ]; then
-    echo "  ok   ${image} pinned identically in all $# file(s): ${distinct}"
+    echo "  ok   ${image}: one pin — ${distinct}"
   else
     echo "  BAD  ${image} is pinned ${count} different ways across: $*"
     printf '%s\n' "$distinct" | sed 's/^/         /'
@@ -110,9 +95,8 @@ check_pins_agree() {
   fi
 }
 
-# check_go_directive <file> <expected>: go.mod states the toolchain version a
-# fourth time, and neither bot manages it -- the Renovate group covers
-# .go-version and the two Dockerfiles only.
+# check_go_directive <file> <expected>: go.mod states the toolchain version too,
+# outside the set renovate.json's go toolchain group moves.
 check_go_directive() {
   local file="$1" expected="$2" found status=0
   if [ ! -f "$file" ]; then
@@ -137,15 +121,13 @@ check_go_directive() {
   fi
 }
 
-for f in "${GO_DOCKERFILES[@]}"; do
-  check_tag "$f" golang "${GO_VERSION}-alpine"
-done
+check_tag "$GO_DOCKERFILE" golang "${GO_VERSION}-alpine"
 check_tag "$PYTHON_DOCKERFILE" python "${PYTHON_VERSION}-slim"
 check_tag "$PYTHON_DOCKERFILE" node "${NODE_VERSION}-alpine"
 check_go_directive stl-verify/go.mod "$GO_VERSION"
 
-check_pins_agree golang "${GO_DOCKERFILES[@]}"
-check_pins_agree alpine "${GO_DOCKERFILES[@]}"
+check_pins_agree golang "$GO_DOCKERFILE"
+check_pins_agree alpine "$GO_DOCKERFILE"
 check_pins_agree python "$PYTHON_DOCKERFILE"
 check_pins_agree node "$PYTHON_DOCKERFILE"
 
@@ -162,4 +144,4 @@ MSG
   exit 1
 fi
 
-echo "Base-image pins agree with .go-version (${GO_VERSION}) / .python-version (${PYTHON_VERSION}) / .node-version (${NODE_VERSION}), and are identical across Dockerfiles."
+echo "Each base image carries one pin, matching .go-version (${GO_VERSION}) / .python-version (${PYTHON_VERSION}) / .node-version (${NODE_VERSION})."

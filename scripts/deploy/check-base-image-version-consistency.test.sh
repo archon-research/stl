@@ -33,10 +33,8 @@ tree() {
   printf '1.26.6\n' > "$d/.go-version"
   printf '3.12.14\n' > "$d/.python-version"
   printf '24.20.0\n' > "$d/.node-version"
-  printf 'FROM --platform=$BUILDPLATFORM %s AS builder\nFROM %s\n' "$GO_PIN" "$ALPINE_PIN" \
+  printf 'FROM --platform=$BUILDPLATFORM %s AS builder\nFROM %s AS runtime-base\n' "$GO_PIN" "$ALPINE_PIN" \
     > "$d/stl-verify/Dockerfile.common"
-  printf 'FROM --platform=$BUILDPLATFORM %s AS builder\nFROM %s\n' "$GO_PIN" "$ALPINE_PIN" \
-    > "$d/stl-verify/Dockerfile.migrate"
   printf 'FROM --platform=$BUILDPLATFORM %s AS ui-builder\nFROM %s AS py-base\n' "$NODE_PIN" "$PY_PIN" \
     > "$d/stl-verify/python/Dockerfile"
   printf 'module github.com/archon-research/stl/stl-verify\n\ngo 1.26.6\n' > "$d/stl-verify/go.mod"
@@ -67,34 +65,33 @@ check() {
 }
 
 D="${WORK}/clean"; tree "$D"
-check "a fully pinned tree passes" 0 "are identical across Dockerfiles" "$D"
+check "a fully pinned tree passes" 0 "Each base image carries one pin" "$D"
 
-# The arm that matters most: one file stops pinning while the other still does.
-# A single grep across both files sees the survivor and calls the pair agreed.
-D="${WORK}/partial"; tree "$D"
-printf 'FROM --platform=$BUILDPLATFORM %s AS builder\nFROM alpine:3.24\n' "$GO_PIN" \
-  > "$D/stl-verify/Dockerfile.migrate"
-check "one file dropping its alpine digest is caught" 1 "no pinned 'alpine' FROM line found" "$D"
+# alpine has no version file, so losing its digest is invisible to check_tag.
+D="${WORK}/unpinned"; tree "$D"
+printf 'FROM --platform=$BUILDPLATFORM %s AS builder\nFROM alpine:3.24 AS runtime-base\n' "$GO_PIN" \
+  > "$D/stl-verify/Dockerfile.common"
+check "an alpine FROM that lost its digest is caught" 1 "no pinned 'alpine' FROM line found" "$D"
 
 # An old digest left behind in a comment must not stand in for the instruction.
 D="${WORK}/comment"; tree "$D"
-printf 'FROM --platform=$BUILDPLATFORM %s AS builder\n# previously: %s\nFROM alpine:3.24\n' \
-  "$GO_PIN" "$ALPINE_PIN" > "$D/stl-verify/Dockerfile.migrate"
+printf 'FROM --platform=$BUILDPLATFORM %s AS builder\n# previously: %s\nFROM alpine:3.24 AS runtime-base\n' \
+  "$GO_PIN" "$ALPINE_PIN" > "$D/stl-verify/Dockerfile.common"
 check "a digest quoted in a comment does not satisfy the guard" 1 "no pinned 'alpine' FROM line found" "$D"
 
-# Same tag either side, different image. check_tag cannot see this: it compares
-# the tag and discards the digest.
+# A second alpine pin on a different digest: same tag, so check_tag is blind to
+# it. This is the shape the payload stages could reintroduce.
 D="${WORK}/digest-split"; tree "$D"
-printf 'FROM --platform=$BUILDPLATFORM %s AS builder\nFROM alpine:3.24@sha256:%s\n' \
-  "$GO_PIN" "0000000000000000000000000000000000000000000000000000000000000000" \
-  > "$D/stl-verify/Dockerfile.migrate"
-check "same tag against different digests is caught" 1 "alpine is pinned 2 different ways" "$D"
+printf 'FROM --platform=$BUILDPLATFORM %s AS builder\nFROM %s AS runtime-base\nFROM alpine:3.24@sha256:%s AS other\n' \
+  "$GO_PIN" "$ALPINE_PIN" "0000000000000000000000000000000000000000000000000000000000000000" \
+  > "$D/stl-verify/Dockerfile.common"
+check "a second alpine pin on another digest is caught" 1 "alpine is pinned 2 different ways" "$D"
 
 D="${WORK}/tag-split"; tree "$D"
-printf 'FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine@sha256:%s AS builder\nFROM %s\n' \
+printf 'FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine@sha256:%s AS builder\nFROM %s AS runtime-base\n' \
   "3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83" "$ALPINE_PIN" \
-  > "$D/stl-verify/Dockerfile.migrate"
-check "a golang tag divergence is caught" 1 "does not match expected" "$D"
+  > "$D/stl-verify/Dockerfile.common"
+check "a golang tag disagreeing with .go-version is caught" 1 "does not match expected" "$D"
 
 D="${WORK}/node-drift"; tree "$D"
 printf '24.21.0\n' > "$D/.node-version"
@@ -111,12 +108,11 @@ printf '1.27.1\n' > "$D/.go-version"
 check "go disagreeing with .go-version is caught" 1 "does not match expected" "$D"
 
 D="${WORK}/missing"; tree "$D"
-rm "$D/stl-verify/Dockerfile.migrate"
-check "a guarded Dockerfile that is gone is caught" 1 "Dockerfile.migrate" "$D"
+rm "$D/stl-verify/Dockerfile.common"
+check "a guarded Dockerfile that is gone is caught" 1 "Dockerfile.common" "$D"
 
-# python/Dockerfile carries one pin because the py-base stage collapsed two.
-# Re-inlining a second FROM is the way that property gets lost, so it is the
-# arm that has to bite -- check_tag cannot see it, both tags being equal.
+# Both python stages build from py-base. Re-inlining a second FROM is how that
+# property gets lost, and check_tag cannot see it: the tags are equal.
 D="${WORK}/py-second-pin"; tree "$D"
 printf 'FROM --platform=$BUILDPLATFORM %s AS ui-builder\nFROM %s AS py-base\nFROM python:3.12.14-slim@sha256:%s AS builder\n' \
   "$NODE_PIN" "$PY_PIN" "1111111111111111111111111111111111111111111111111111111111111111" \

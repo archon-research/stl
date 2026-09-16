@@ -1837,7 +1837,9 @@ _docker-release-migrate-internal:
 	@$(MAKE) _docker-release-image \
 		IMG_NAME="Migrate" \
 		IMG_REPO="$(ECR_REPO_MIGRATE)" \
-		IMG_DOCKERFILE=Dockerfile.migrate \
+		IMG_DOCKERFILE=Dockerfile.common \
+		IMG_EXTRA_ARGS="--build-arg CMD_PATH=cmd/util/migrate --build-arg BIN=migrate --build-arg RUNTIME_PAYLOAD=migrations" \
+		IMG_GIT_ARGS=full \
 		IMG_CACHE_KEY=migrate
 
 # Sentinelstaging Migrate Docker Shortcuts
@@ -2227,7 +2229,7 @@ kind-secrets:
 	  --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 
 docker-build-migrate:
-	docker build -t stl-migrate:$(LOCAL_TAG) -f Dockerfile.migrate .
+	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/util/migrate --build-arg BIN=migrate --build-arg RUNTIME_PAYLOAD=migrations -t stl-migrate:$(LOCAL_TAG) -f Dockerfile.common .
 
 kind-load-images:
 	@test -n "$(IMAGES)" || { echo "ERROR: IMAGES is required."; exit 1; }
@@ -2677,7 +2679,7 @@ kind-build-mock-blockchain-server:
 kind-load-mock-blockchain-server: kind-build-mock-blockchain-server
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-mock-blockchain-server:$(LOCAL_TAG)"
 
-# Serves the CoinGecko API on 8080; local dev only, so it has no ECR repo.
+# Serves the CoinGecko API on 8080; local dev only.
 kind-build-mock-coingecko-server:
 	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/util/mock-coingecko-server --build-arg BIN=mock-coingecko-server -t stl-mock-coingecko-server:$(LOCAL_TAG) -f Dockerfile.common .
 
