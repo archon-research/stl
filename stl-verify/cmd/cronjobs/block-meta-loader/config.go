@@ -24,34 +24,14 @@ type config struct {
 }
 
 const (
-	// ethereumQueueName is what an Ethereum deployment polls; every other chain
-	// prefixes it with its own name, the way its Deployment is named.
-	ethereumQueueName = "block-meta-loader"
-	ethereumChain     = "ethereum"
+	// queueBaseName is this component's deployed name.
+	queueBaseName = "block-meta-loader"
 
 	// defaultHeadMargin keeps the newest blocks out of a run, because the archive trails the
 	// indexers at the head. A starting value covering ordinary lag, not a measured one;
 	// HEAD_MARGIN tunes it per chain and 0 disables it.
 	defaultHeadMargin = int64(300)
 )
-
-// taskQueueName is the Temporal task queue this deployment polls, which is also
-// its OTel service name and its Deployment name — the alerts and the runbook
-// select on all three. A run is per chain, so each chain has its own queue.
-func taskQueueName() (string, error) {
-	chainID, err := chainutil.RequireChainID()
-	if err != nil {
-		return "", err
-	}
-	chain, err := chainutil.ChainSlug(int64(chainID))
-	if err != nil {
-		return "", err
-	}
-	if chain == ethereumChain {
-		return ethereumQueueName, nil
-	}
-	return chain + "-" + ethereumQueueName, nil
-}
 
 // loadConfig reads the deployment's environment. It runs at registration rather
 // than per run, so a misconfigured deployment is a worker that will not start

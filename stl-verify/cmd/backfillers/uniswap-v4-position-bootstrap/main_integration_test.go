@@ -370,6 +370,14 @@ func archiveTransferBlock(t *testing.T, ctx context.Context, client *awss3.Clien
 	}
 }
 
+// setBaseWorkerEnv moves the worker to chain 8453 with the depth mainnet would
+// have defaulted, so the refusal under test is the one that fails.
+func setBaseWorkerEnv(t *testing.T, rpcURL string) {
+	t.Helper()
+	setWorkerEnv(t, 8453, rpcURL)
+	t.Setenv("FINALITY_DEPTH", "64")
+}
+
 // deployment is one registered worker against one database and one mock chain,
 // the way register wires it in production.
 type deployment struct {
@@ -549,7 +557,7 @@ func TestRegisterIntegration_RefusesAChainIDMismatch(t *testing.T) {
 	db, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 	server := startMockChain(t, mockChainOptions{})
-	setWorkerEnv(t, 8453, server.URL)
+	setBaseWorkerEnv(t, server.URL)
 
 	_, err := registerWorker(t, db)
 
@@ -575,7 +583,7 @@ func TestRegisterIntegration_RefusesAChainWithNoRegisteredPools(t *testing.T) {
 	db, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 	server := startMockChain(t, mockChainOptions{chainID: "0x2105"})
-	setWorkerEnv(t, 8453, server.URL)
+	setBaseWorkerEnv(t, server.URL)
 
 	_, err := registerWorker(t, db)
 
@@ -617,6 +625,7 @@ func TestRunIntegration_StopsCleanlyWhenTheContextIsCancelled(t *testing.T) {
 	_, dsn, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 	t.Setenv("DATABASE_URL", dsn)
+	t.Setenv("CHAIN_ID", "1")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 

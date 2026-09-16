@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 )
 
 const (
@@ -32,7 +34,7 @@ func TestTaskQueueName(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("CHAIN_ID", c.chainID)
-			got, err := taskQueueName()
+			got, err := chainutil.TaskQueueName(queueBaseName)
 			if c.wantErr {
 				if err == nil {
 					t.Fatalf("want an error for CHAIN_ID %q, got %q", c.chainID, got)

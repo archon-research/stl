@@ -53,6 +53,10 @@
 //	  --task-queue uniswap-v4-position-bootstrap --type UniswapV4PositionBootstrap \
 //	  --workflow-id uniswap-v4-position-bootstrap-<date>
 //
+// The queue above is mainnet's. Every other chain's worker polls
+// <chain>-uniswap-v4-position-bootstrap, built from its CHAIN_ID by
+// chainutil.TaskQueueName, which is also its Deployment name.
+//
 // The workflow ID is the concurrency guard: Temporal rejects a duplicate while a
 // run with that ID is in flight. It is per ID, not per queue, so the two workflow
 // types can run at once — they write different tables.
@@ -129,11 +133,6 @@ func init() {
 }
 
 const (
-	// taskQueueName is the Temporal task queue an operator starts a run on, and
-	// also the OTel service name and the Deployment name the vector-cronjobs
-	// alerts select by.
-	taskQueueName = "uniswap-v4-position-bootstrap"
-
 	// The workflow type names are what an operator types into the Temporal UI's
 	// "Workflow Type" field, so they are registered explicitly rather than derived
 	// from Go names — a rename must not invalidate the runbook or muscle memory.
@@ -166,9 +165,14 @@ func run(ctx context.Context) error {
 	bootstrap := &bootstrapWorker{}
 	defer bootstrap.close()
 
+	workerConfig, err := bootstrap.workerConfigFromEnv(dbURL)
+	if err != nil {
+		return err
+	}
+
 	return temporal.RunWorker(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
-	}, bootstrap.workerConfig(dbURL))
+	}, workerConfig)
 }
 
 // bootstrapWorker owns process-scoped resources because WorkerConfig cannot
@@ -177,12 +181,19 @@ type bootstrapWorker struct {
 	cleanup func()
 }
 
-func (b *bootstrapWorker) workerConfig(dbURL string) temporal.WorkerConfig {
+// workerConfigFromEnv resolves this deployment's queue and is what run() wires
+// into RunWorker, so a test can assert the deployed name without a Temporal
+// server: WorkerConfig.Name is the OTel service name the alert selectors match.
+func (b *bootstrapWorker) workerConfigFromEnv(dbURL string) (temporal.WorkerConfig, error) {
+	taskQueue, err := chainutil.TaskQueueName(queueBaseName)
+	if err != nil {
+		return temporal.WorkerConfig{}, fmt.Errorf("resolving the task queue: %w", err)
+	}
 	return temporal.WorkerConfig{
-		Name:         taskQueueName,
+		Name:         taskQueue,
 		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
 		Register:     b.register,
-	}
+	}, nil
 }
 
 func (b *bootstrapWorker) close() {
@@ -422,7 +433,7 @@ func newMulticaller(
 		return nil, nil, fmt.Errorf("creating the multicall client: %w", err)
 	}
 
-	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.bootstrap.ChainID, int64(buildID), taskQueueName)
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.bootstrap.ChainID, int64(buildID), archiveSource)
 	if err != nil {
 		ethClient.Close()
 		return nil, nil, err
