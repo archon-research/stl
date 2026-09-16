@@ -55,10 +55,10 @@ func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID bui
 // resolves NULL, and the conformance check still passes because the declaration alone satisfies it.
 //
 // Chain resolution comes from the same register, in the three shapes a chain_id fill can take: through
-// a config parent (borrower -> protocol.chain_id), as a literal for a table whose chain is fixed
-// (prime_debt is Sky on chain 1 and has no chain column to join), or natively when there is no fill at
-// all. The partition column is read from the live catalogue rather than declared, so a window can never
-// be expressed on a column the table is no longer partitioned by.
+// a config parent (borrower -> protocol.chain_id, prime_debt -> prime.chain_id), as a literal for a
+// table whose chain is fixed, or natively when there is no fill at all. The partition column is read
+// from the live catalogue rather than declared, so a window can never be expressed on a column the
+// table is no longer partitioned by.
 type workListArm struct {
 	table   string // the referencing table, and the hypertable whose chunks give the windows
 	partCol string // its partition column, read from the catalogue; the window is expressed on it alone
