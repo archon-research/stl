@@ -18,8 +18,12 @@ RUN npm run prepare --workspace=@stl-verify/ui
 
 RUN npm run build --workspace=@stl-verify/ui
 
+# The single pinned Python base. Both stages below build from this name, so the
+# tag+digest is written once and the two stages cannot drift apart (VEC-818).
+FROM python:3.12.14-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS py-base
+
 # Build Python dependencies
-FROM python:3.12.14-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS builder
+FROM py-base AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.5 /uv /uvx /bin/
 
@@ -38,7 +42,7 @@ COPY python/app/ app/
 COPY python/suraf/ suraf/
 RUN uv sync --frozen --no-dev
 
-FROM python:3.12.14-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+FROM py-base
 
 # groupadd/useradd live in the passwd package, which the hardening step below
 # removes — user creation must stay above it.
