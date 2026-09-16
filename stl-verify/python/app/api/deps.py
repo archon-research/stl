@@ -15,6 +15,7 @@ from app.auth.jwt import JwksUnavailable, Principal, TokenError
 from app.config import Settings, get_settings
 from app.domain.entities.allocation import EthAddress, as_address
 from app.logging import get_logger
+from app.ports.prime_resolver import PrimeResolver
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.ports.reference_capital_repository import ReferenceCapitalRepository
 from app.risk_engine.suraf.result import SurafResult
@@ -183,17 +184,32 @@ async def _vault_for(request: Request, address: EthAddress) -> str | None:
     return await repo.get_prime_vault_address(address)
 
 
-async def check_prime_view(request: Request, principal: Principal | None, prime_id: str | None) -> None:
+async def check_prime_view(
+    request: Request,
+    principal: Principal | None,
+    prime_id: str | None,
+    *,
+    not_found_reason: str = "prime_not_found",
+) -> None:
     """The per-resource ``prime:can_view`` check (ADR-011 Plane 2, layer 2).
 
     One implementation behind every caller — the prime id reaches us as a path
     segment, a query parameter, a body field, or the wallet a pool-level risk
-    read resolves to. The object id is always the VAULT address: the identity
-    shared by all of a prime's proxies, and what the reconciler writes.
+    read resolves to. When the input resolves, the object id is the VAULT
+    address: the identity shared by all of a prime's proxies, and what the
+    reconciler writes. When it does not, the event carries the unresolved input
+    as ``requested_prime`` and ``resource`` stays the request path, so
+    ``resource`` is always an OpenFGA object id or a path, never a proxy.
 
     An unknown prime and one the caller may not view answer the same 404. A
     distinct code tells an unauthorized caller which primes exist, the fact the
     list filtering hides; the decision event keeps the two apart.
+
+    ``not_found_reason`` is for the caller that RESOLVED the prime itself
+    rather than receiving it from the request (the pool-level risk reads): an
+    untracked largest holder denies every caller indefinitely and would
+    otherwise read as an outage, so its decision event carries its own reason
+    (ORB-402). Only the event changes — the response body stays byte-identical.
     """
     if principal is None:  # auth off
         return
@@ -226,8 +242,16 @@ async def check_prime_view(request: Request, principal: Principal | None, prime_
         )
         raise HTTPException(status_code=503, detail="prime lookup unavailable") from exc
     if vault is None:
+        # The address that resolved to nothing, so triage need not re-run the
+        # resolution. Not `resource`: that field is an FGA object id or a path.
         log_auth_event(
-            request, gate="prime", decision="deny", reason="prime_not_found", status=404, principal=principal
+            request,
+            gate="prime",
+            decision="deny",
+            reason=not_found_reason,
+            status=404,
+            principal=principal,
+            fields={"requested_prime": address.lower()},
         )
         raise HTTPException(status_code=404, detail=PRIME_DENIED_DETAIL)
     resource = f"prime:{vault.lower()}"
@@ -405,6 +429,15 @@ def get_model_registry(request: Request) -> ModelRegistry:
 def get_receipt_token_lookup(request: Request) -> ReceiptTokenLookup:
     """Extract the receipt-token lookup built at startup."""
     return request.app.state.receipt_token_lookup
+
+
+def get_prime_resolver(request: Request) -> PrimeResolver:
+    """Extract the prime resolver built at startup.
+
+    Routes take the port from here rather than constructing the adapter, so a
+    prime-scoped route never names a concrete infrastructure class.
+    """
+    return request.app.state.prime_resolver
 
 
 def get_reference_risk_capital_service_factory(

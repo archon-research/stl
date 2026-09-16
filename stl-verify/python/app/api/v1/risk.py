@@ -18,6 +18,7 @@ from app.api.deps import (
     get_model_registry,
     get_principal,
     get_receipt_token_lookup,
+    log_auth_event,
     require_prime_view_body,
     require_prime_view_query,
 )
@@ -168,7 +169,13 @@ async def _authorized_pool_prime(
     """
     pool_prime = await service.resolve_pool_prime(receipt_token_id)
     if pool_prime is not None:
-        await check_prime_view(request, principal, str(pool_prime))
+        # WE resolved this address, the caller never named it; the reason says
+        # so in the event (see check_prime_view). Body unchanged.
+        await check_prime_view(request, principal, str(pool_prime), not_found_reason="holder_untracked")
+    elif principal is not None:
+        # A read that ran no check still gets a decision event. No status: the
+        # gate cannot know it, and None here also covers an unknown asset.
+        log_auth_event(request, gate="prime", decision="allow", reason="no_prime_resolved", principal=principal)
     return pool_prime
 
 

@@ -170,6 +170,11 @@ class Settings(BaseSettings):
     # SQLAlchemy dialect's own cache. 0 disables both; raise it only for a
     # direct connection or a session-mode pooler.
     db_statement_cache_size: int = Field(default=0, ge=0)
+    # How long startup keeps retrying a database that is unreachable below the
+    # protocol (see wait_for_database). Sized against the python-api startup
+    # probe's budget, which is what kills a pod whose database never answers, so
+    # the two move together. 0 restores the single-attempt behaviour.
+    db_connect_retry_deadline_seconds: float = Field(default=120.0, ge=0)
 
     @property
     def async_database_url(self) -> str:
