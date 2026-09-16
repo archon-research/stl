@@ -69,7 +69,7 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 
 ### Environment
 
-- Go 1.26+
+- Go 1.27+
 - Docker for local development (PostgreSQL, Redis, Jaeger, LocalStack)
 - AWS for production (EKS on Graviton arm64 — migrating from ECS Fargate. RDS Aurora (TimescaleDB via TigerData), ElastiCache Redis, SNS/SQS, S3)
 - Alchemy API key required for Ethereum mainnet access

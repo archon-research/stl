@@ -9,10 +9,10 @@ import (
 )
 
 // CheckGoroutineLeaks triggers garbage collection and inspects the
-// goroutineleak pprof profile (available with GOEXPERIMENT=goroutineleakprofile
-// in Go 1.26+). If the experiment is not enabled the profile is nil and
-// exitCode is returned unchanged. When leaked goroutines are detected, their
-// stacks are printed to stderr and exit code 1 is returned.
+// goroutineleak pprof profile (generally available in Go 1.27+).
+// If the profile is unavailable exitCode is returned unchanged. When leaked
+// goroutines are detected, their stacks are printed to stderr and exit code
+// 1 is returned.
 func CheckGoroutineLeaks(exitCode int) int {
 	profile := pprof.Lookup("goroutineleak")
 	if profile == nil {
