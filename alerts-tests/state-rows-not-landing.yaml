@@ -1,0 +1,227 @@
+# Unit tests for the state-row "attempted but not landing" guards.
+#
+# State rows attempted for an hour with nothing written is the VEC-615
+# signature: the write path fails without raising an error anywhere else. The
+# rules read a 1h rate window and hold for 30m, so the cases run 90m of samples
+# and assert at the end, where 5 rows/min is exactly 0.083 rows/s.
+rule_files:
+  - ../alerts/vector-indexers.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # --- VectorCurveIndexerStateRowsNotLanding ---
+  - name: "curve: rows attempted for an hour with the written counter frozen"
+    interval: 1m
+    input_series:
+      - series: 'curve_state_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+5x90'
+      - series: 'curve_state_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '100x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: VectorCurveIndexerStateRowsNotLanding
+        exp_alerts:
+          - exp_labels:
+              chain: "mainnet"
+              cluster: "c1"
+              component: "curve-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: &curve_not_landing
+              description: |
+                `curve-indexer` on chain `mainnet` has queued state
+                rows for over an hour and none of them was inserted. Either every
+                row is conflicting away — a same-build replay of an already-indexed
+                range, which is benign and ends when the replay does — or rows are
+                being dropped silently, which is the VEC-615 compressed-chunk drop
+                or a regression in the same place. Check the pod logs for a replay
+                (redelivered block numbers below the head) before treating it as a
+                drop.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcurveindexerstaterowsnotlanding"
+              summary: "Vector curve-indexer state rows not landing on mainnet"
+
+  - name: "curve: rows attempted and the written series never created at all"
+    interval: 1m
+    input_series:
+      - series: 'curve_state_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+5x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: VectorCurveIndexerStateRowsNotLanding
+        exp_alerts:
+          - exp_labels:
+              chain: "mainnet"
+              cluster: "c1"
+              component: "curve-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: *curve_not_landing
+
+  - name: "curve: both counters advancing"
+    interval: 1m
+    input_series:
+      - series: 'curve_state_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+5x90'
+      - series: 'curve_state_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+5x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: VectorCurveIndexerStateRowsNotLanding
+        exp_alerts: []
+
+  - name: "curve: nothing attempted, so nothing is owed"
+    interval: 1m
+    input_series:
+      - series: 'curve_state_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '100x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: VectorCurveIndexerStateRowsNotLanding
+        exp_alerts: []
+
+  # --- VectorUniswapV3IndexerStateRowsNotLanding ---
+  - name: "uniswap_v3: rows attempted for an hour with the written counter frozen"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v3_state_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+5x90'
+      - series: 'uniswap_v3_state_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '100x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: VectorUniswapV3IndexerStateRowsNotLanding
+        exp_alerts:
+          - exp_labels:
+              chain: "mainnet"
+              cluster: "c1"
+              component: "uniswap-v3-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: &uniswap_v3_not_landing
+              description: |
+                `uniswap-v3-indexer` on chain `mainnet` has queued state
+                rows for over an hour and none of them was inserted. Either every
+                row is conflicting away — a same-build replay of an already-indexed
+                range, which is benign and ends when the replay does — or rows are
+                being dropped silently, which is the VEC-615 compressed-chunk drop
+                or a regression in the same place. Check the pod logs for a replay
+                (redelivered block numbers below the head) before treating it as a
+                drop.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexerstaterowsnotlanding"
+              summary: "Vector uniswap-v3-indexer state rows not landing on mainnet"
+
+  - name: "uniswap_v3: rows attempted and the written series never created at all"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v3_state_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+5x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: VectorUniswapV3IndexerStateRowsNotLanding
+        exp_alerts:
+          - exp_labels:
+              chain: "mainnet"
+              cluster: "c1"
+              component: "uniswap-v3-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: *uniswap_v3_not_landing
+
+  - name: "uniswap_v3: both counters advancing"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v3_state_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+5x90'
+      - series: 'uniswap_v3_state_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+5x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: VectorUniswapV3IndexerStateRowsNotLanding
+        exp_alerts: []
+
+  - name: "uniswap_v3: nothing attempted, so nothing is owed"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v3_state_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '100x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: VectorUniswapV3IndexerStateRowsNotLanding
+        exp_alerts: []
+
+  # --- VectorUniswapV4IndexerStateRowsNotLanding ---
+  - name: "uniswap_v4: rows attempted for an hour with the written counter frozen"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_state_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+5x90'
+      - series: 'uniswap_v4_state_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '100x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: VectorUniswapV4IndexerStateRowsNotLanding
+        exp_alerts:
+          - exp_labels:
+              chain: "mainnet"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: &uniswap_v4_not_landing
+              description: |
+                `uniswap-v4-indexer` on chain `mainnet` has queued state
+                rows for over an hour and none of them was inserted. Either every
+                row is conflicting away — a same-build replay of an already-indexed
+                range, which is benign and ends when the replay does — or rows are
+                being dropped silently, which is the VEC-615 compressed-chunk drop
+                or a regression in the same place. Check the pod logs for a replay
+                (redelivered block numbers below the head) before treating it as a
+                drop.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerstaterowsnotlanding"
+              summary: "Vector uniswap-v4-indexer state rows not landing on mainnet"
+
+  - name: "uniswap_v4: rows attempted and the written series never created at all"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_state_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+5x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: VectorUniswapV4IndexerStateRowsNotLanding
+        exp_alerts:
+          - exp_labels:
+              chain: "mainnet"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: *uniswap_v4_not_landing
+
+  - name: "uniswap_v4: both counters advancing"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_state_rows_attempted_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+5x90'
+      - series: 'uniswap_v4_state_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+5x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: VectorUniswapV4IndexerStateRowsNotLanding
+        exp_alerts: []
+
+  - name: "uniswap_v4: nothing attempted, so nothing is owed"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_state_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '100x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: VectorUniswapV4IndexerStateRowsNotLanding
+        exp_alerts: []

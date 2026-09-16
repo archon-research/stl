@@ -2949,9 +2949,17 @@ groups:
         # blocks-processed terms above are satisfied by the old build throughout
         # that window, so `unless` fired on every rollout (observed on staging
         # 2026-09-14, ~10 min after #854 merged). `== 0` needs the series to
-        # exist, and dextelemetry seeds it at construction, so it exists exactly
-        # when a build that can decode transfers is running. A pod that dies
-        # before it exports is VectorUniswapV4IndexerDown's case, not this one.
+        # exist, and the indexer's dextelemetry set seeds it at construction, so it
+        # exists exactly when a build that can decode transfers is running. A pod
+        # that dies before it exports is VectorUniswapV4IndexerDown's case, not
+        # this one.
+        #
+        # The selector excludes uniswap-v4-position-bootstrap, whose posm transfer
+        # backfill (VEC-790) moves this same counter under the same `chain`. A run
+        # would lift the sum off zero on the live indexer's behalf and hold this
+        # quiet for the run plus the 6h the window remembers it, exactly while a
+        # wrong PositionManager address in the LIVE path went unnoticed. The
+        # exclusion keeps the existence requirement above the live indexer's own.
         expr: |
           sum by (chain, cluster) (
             rate(uniswap_v4_blocks_processed_total{status="success", k8s_namespace_name="vector"}[6h])
@@ -2962,7 +2970,10 @@ groups:
           ) > 0
           and
           sum by (chain, cluster) (
-            rate(uniswap_v4_nft_transfer_rows_attempted_total{k8s_namespace_name="vector"}[6h])
+            rate(uniswap_v4_nft_transfer_rows_attempted_total{
+              k8s_namespace_name="vector",
+              service_name!~"(^|.*-)uniswap-v4-position-bootstrap"
+            }[6h])
           ) == 0
         for: 10m
         labels:
@@ -3000,18 +3011,30 @@ groups:
         # traffic regime change. The 6h rate window AND `for: 6h` are there
         # because the signal is a sustained regime change, never a burst.
         #
-        # The counter counts rows the LIVE INDEXER persisted (conflicts
-        # excluded), so the rate is real table growth from that path, and today
-        # that path is the only writer. The ARCT-385 transfer-log backfill has
-        # to record through the same dextelemetry counter when it ships, or the
-        # rows it writes grow the table without moving this rule.
+        # Two writers move this counter, and the rule reads only one of them.
+        # uniswap-v4-position-bootstrap is excluded because it hosts the VEC-790
+        # posm transfer backfill: a hand-started run bulk-loads one chain's whole
+        # posm history (487,908 rows on mainnet, 2026-09) over ~7.5h, which is
+        # ~18 rows/s — six times this budget, sustained past `for: 6h`, for a load
+        # that is bounded, known and not a growth REGIME. Counting it would fire a
+        # warning nobody can act on, twice over: once while the run writes and
+        # again for the 6h the window remembers it. The backfill still records
+        # through the counter, so its rows stay visible on the series and in the
+        # runbook's row-count check; they just do not decide the hypertable
+        # question. Every live indexer stays in scope — the selector excludes the
+        # one-shot loader rather than allow-listing today's indexer, and matches it
+        # through the `(^|.*-)` prefix every chain deployment carries, so a second
+        # chain's worker needs no edit here.
         #
         # `sum by (cluster)` without `chain`: the budget belongs to the table,
         # and one table holds every chain's rows. One term, so no zero-fill is
         # needed: an absent series and a zero rate both stay quiet.
         expr: |
           sum by (cluster) (
-            rate(uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector"}[6h])
+            rate(uniswap_v4_nft_transfer_rows_written_total{
+              k8s_namespace_name="vector",
+              service_name!~"(^|.*-)uniswap-v4-position-bootstrap"
+            }[6h])
           ) > 2.9
         for: 6h
         labels:
@@ -3026,10 +3049,57 @@ groups:
             250k/day (2.9 rows/s) sustained for 6h — about 90M rows/year against
             the ~100M-row budget an un-partitioned table is comfortable with.
             Nothing is broken: the table was created plain and this is the
-            measurement the hypertable decision was deferred to. Check the real
-            row count and whether the transfer-log backfill is running; if the
-            rate is the new normal, plan the conversion described in the runbook.
+            measurement the hypertable decision was deferred to. This counts the
+            live indexers only — the posm transfer backfill is excluded, so its
+            bulk load cannot be the cause. Check the real row count, then decide
+            whether the rate is the new normal; if it is, plan the conversion
+            described in the runbook.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4nfttransfergrowthhigh
+
+      - alert: VectorUniswapV4NFTTransferBackfillGrowthHigh
+        # The companion to the rule above, covering the writer that one excludes:
+        # uniswap-v4-position-bootstrap's posm transfer backfill. Without it that
+        # writer would grow a PLAIN table with nothing watching, which
+        # alerts/AGENTS.md does not allow.
+        #
+        # Different question, so a different shape. The backfill's legitimate
+        # signature is a BOUNDED burst that ends: one chain's whole posm history is
+        # ~490k rows (487,908 on mainnet, 2026-09) over ~7.5h, which is 5.7 rows/s
+        # across a 24h window. A rerun on the same build conflicts away entirely,
+        # and one from a different build_id — every deploy is one — re-records that
+        # history as fresh processing_version rows and so costs another 5.7 rows/s.
+        # What reaches this threshold is genuine volume: many chains backfilled at
+        # once, or one chain with far more history than mainnet.
+        #
+        # 3M rows/day = 34.7 rows/s trips at ~6 mainnet histories in a day, six
+        # times the largest run anyone has cause to start and still two orders under
+        # the 100M-row plain-table budget, so there is room to react. The 24h window
+        # is what keeps a single legitimate burst under it; `for: 2h` then wants the
+        # rate sustained rather than sampled once.
+        expr: |
+          sum by (cluster) (
+            rate(uniswap_v4_nft_transfer_rows_written_total{
+              k8s_namespace_name="vector",
+              service_name=~"(^|.*-)uniswap-v4-position-bootstrap"
+            }[24h])
+          ) > 34.7
+        for: 2h
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v4-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector posm transfer backfill writing more than 3M rows/day into uniswap_v4_position_nft_transfer"
+          description: |
+            The `UniswapV4PosmTransferBackfill` runs on
+            `uniswap-v4-position-bootstrap` have written above 3M rows/day into
+            `uniswap_v4_position_nft_transfer` for 2h — several times a whole
+            mainnet posm history (~490k rows), which is the most one run has cause
+            to write. Nothing is broken, but this is a plain table: check which
+            chains are being backfilled and the real row count, then decide whether
+            the total now argues for the hypertable conversion the runbook carries.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4nfttransferbackfillgrowthhigh
 
       # =====================================================================
       # VEC-572 — design-decision watchdog. Self-contained; keep it last in
