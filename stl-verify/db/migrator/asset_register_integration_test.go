@@ -5,8 +5,10 @@ package migrator_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -58,6 +60,7 @@ func TestAssetRegisterRejectsMutationViaTheImmutabilityTrigger(t *testing.T) {
 	cases := []struct{ name, stmt string }{
 		{"update", `UPDATE asset SET source_system = 'mutated' WHERE security_id = 'sec-t-immutable'`},
 		{"delete", `DELETE FROM asset WHERE security_id = 'sec-t-immutable'`},
+		{"truncate", `TRUNCATE asset`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -79,6 +82,7 @@ func TestAssetRegisterRefusesRowsOutsideItsContract(t *testing.T) {
 		wantState                      string
 	}{
 		{"entity_node_id", "em-t-not-a-security", "test", nil, "23514"},
+		{"bare_prefix", "sec-", "test", nil, "23514"},
 		{"empty_source_system", "sec-t-blank", "", nil, "23514"},
 		{"second_row_for_one_security", "sec-t-taken", "test", nil, "23505"},
 		{"unknown_writer_run", "sec-t-orphan-run", "test", int64(999999), "23503"},
@@ -104,7 +108,7 @@ func TestAssetRegisterLoginRoleCanAppendButNotUpdate(t *testing.T) {
 	}
 	defer appPool.Close()
 
-	// A real run_id makes the INSERT probe writer_run's owner ACL, the path a tracked writer takes.
+	// A real run_id makes the INSERT resolve the writer_run FK, the path a tracked writer takes.
 	if _, err := appPool.Exec(ctx, `INSERT INTO asset (security_id, source_system, run_id) VALUES ('sec-t-login', 'test', $1)`, runID); err != nil {
 		t.Fatalf("the login role must be able to append a register row naming its writer run: %v", err)
 	}
@@ -128,26 +132,13 @@ func TestAssetRegisterHoldsNothingButTheTwoKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read asset columns: %v", err)
 	}
-	defer rows.Close()
-	var got []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		got = append(got, name)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate asset columns: %v", err)
+	got, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("collect asset columns: %v", err)
 	}
 	want := []string{"id", "security_id", "source_system", "run_id", "created_at"}
-	if len(got) != len(want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("asset columns = %v, want exactly %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("asset columns = %v, want exactly %v", got, want)
-		}
 	}
 }
 

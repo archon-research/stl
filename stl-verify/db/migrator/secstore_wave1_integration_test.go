@@ -470,13 +470,6 @@ func TestSecStoreWave1IsAppendOnlyUnderTheRealRoles(t *testing.T) {
 	// owner here is the harness superuser and privilege checks report true for a superuser
 	// whatever the ACL says. aclexplode() is what the migration actually changed, and it is
 	// what production (a non-superuser stl_migrator) will enforce.
-	//
-	// coalesce(relacl, acldefault(...)) is load-bearing: relacl is NULL on a table whose
-	// privileges were never touched, the owner implicitly holds everything, and
-	// aclexplode(NULL) returns no rows — so reading relacl directly would report "the owner
-	// holds nothing" for a table where the REVOKE never ran, which is precisely the failure
-	// these subtests exist to catch. acldefault('r', relowner) materialises the implicit
-	// default so a missing revoke reads as the privilege still being held.
 	t.Run("owner_holds_no_update_delete_or_truncate_on_the_stores", func(t *testing.T) {
 		for _, table := range stores {
 			if ownerACLHolds(ctx, t, pool, table, "UPDATE") {

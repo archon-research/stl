@@ -14,11 +14,11 @@ CREATE TABLE asset (
     run_id        BIGINT      REFERENCES writer_run (id),
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT asset_security_id_key        UNIQUE (security_id),
-    CONSTRAINT asset_security_id_prefix_chk CHECK (security_id LIKE 'sec-%'),
+    CONSTRAINT asset_security_id_prefix_chk CHECK (security_id LIKE 'sec-_%'),
     CONSTRAINT asset_source_system_chk      CHECK (source_system <> '')
 );
 
-COMMENT ON TABLE asset IS '[Dimension] The asset register: one row per SECURITY node (sec_node, ADR-0007) that has a price, minting the bigint key the price layer references. Identity only, written once, never re-pointed: a superseded security keeps its row, its successor gets a new one and the price bindings move. Carries no attribute of the security — class, issuer, names and currency live on the node and its edges (VEC-808 rule 2). Append-only through reference_table_immutable(); the owner keeps UPDATE for the FK integrity probe (20260714_160000). Plain table: one row per priced security at governance rate — the sparse-table exception, so no growth alert and no conversion path. Seeded by migration once the sec-* ids are agreed (VEC-808 gate 0).';
+COMMENT ON TABLE asset IS '[Dimension] The asset register: one row per SECURITY node (sec_node, ADR-0007) that has a price, minting the bigint key the price layer references. Identity only, written once, never re-pointed: a superseded security keeps its row, its successor gets a new one and the price bindings move. Carries no attribute of the security — class, issuer, names and currency live on the node and its edges (VEC-808 rule 2). Append-only through reference_table_immutable() on UPDATE, DELETE and TRUNCATE; the owner keeps UPDATE for the FK integrity probe (20260714_160000). Plain table: one row per priced security at governance rate — the sparse-table exception, so no growth alert and no conversion path. Seeded by migration once the sec-* ids are agreed (VEC-808 gate 0).';
 COMMENT ON COLUMN asset.id IS 'Roles: PK. The key the price layer will reference (VEC-808). A surrogate by design: an integer compresses and indexes far better than the node id in per-block hypertables.';
 COMMENT ON COLUMN asset.security_id IS 'Roles: FK→sec_node.id (soft; SECURITY only — the sec- prefix is the governed half of sec_node_id_prefix_chk, enforced here by asset_security_id_prefix_chk). UNIQUE: one register row per security. The node store is versioned, so its id repeats across rows: resolve through sec_node_current or sec_node_as_of(). May be written before the node exists where the priced universe leads the register.';
 COMMENT ON COLUMN asset.source_system IS 'Roles: Audit. The migration or process that minted the row.';
@@ -58,6 +58,10 @@ END $$;
 CREATE TRIGGER asset_immutable
     BEFORE UPDATE OR DELETE ON asset
     FOR EACH ROW EXECUTE FUNCTION reference_table_immutable();
+-- TRUNCATE fires no row trigger, so it gets its own statement-level one (the writer_run form).
+CREATE TRIGGER asset_truncate_immutable
+    BEFORE TRUNCATE ON asset
+    FOR EACH STATEMENT EXECUTE FUNCTION reference_table_immutable();
 
 INSERT INTO migrations (filename)
 VALUES ('20260916_120000_create_asset_register.sql')
