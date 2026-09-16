@@ -130,7 +130,7 @@ func TestSecStoreEveryEngineRuleRejectsItsInput(t *testing.T) {
 		_, err := pool.Exec(ctx, `
 			INSERT INTO sec_node (id, record_type, status, valid_from, `+secstoreSpine+`)
 			VALUES ('em-t-badkind', 'INVENTED', 'ACTIVE', '2026-01-01', 'test', 'SEED_LOAD', 'unknown record_type', 'test')`)
-		assertSQLState(t, err, "23514", "unknown record_type")
+		assertSQLStateAndConstraint(t, err, "23514", "sec_node_id_prefix_chk", "unknown record_type + mismatched prefix")
 	})
 
 	t.Run("processing_version_check_rejects_negative", func(t *testing.T) {
@@ -211,11 +211,18 @@ func TestSecStoreEveryEngineRuleRejectsItsInput(t *testing.T) {
 	})
 
 	t.Run("sec_edge_edge_disc_shape_chk", func(t *testing.T) {
-		_, err := pool.Exec(ctx, `
-			INSERT INTO sec_edge (edge_disc, src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, `+secstoreSpine+`)
-			OVERRIDING SYSTEM VALUE
-			VALUES ('not-valid-disc', 'sec-t-disc-chk', 'SECURITY', 'sec-t-disc-dst', 'SECURITY', 'HAS_UNDERLYING', '2026-01-01', 'test', 'SEED_LOAD', 'bad disc shape', 'test')`)
-		assertSQLState(t, err, "P0001", "sec_edge guard rejects invalid edge_disc shape")
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, "ALTER TABLE sec_edge DISABLE TRIGGER sec_edge_append_guard"); err != nil {
+			t.Fatal(err)
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO sec_edge (edge_disc, content_hash, src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, `+secstoreSpine+`)
+			VALUES ('not-valid-disc', '\x00', 'sec-t-disc-chk', 'SECURITY', 'sec-t-disc-dst', 'SECURITY', 'HAS_UNDERLYING', '2026-01-01', 'test', 'SEED_LOAD', 'bad disc shape', 'test')`)
+		assertSQLStateAndConstraint(t, err, "23514", "sec_edge_edge_disc_shape_chk", "edge_disc must be 'base' or 16 hex chars")
 	})
 
 	t.Run("sec_edge_valid_from_finite_chk", func(t *testing.T) {
@@ -521,7 +528,12 @@ func TestSecStoreACLIncludesTruncateRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("admin connect: %v", err)
 	}
-	adminPool.Exec(ctx, "CREATE ROLE stl_readwrite NOLOGIN")
+	if _, err := adminPool.Exec(ctx, "CREATE ROLE stl_readwrite NOLOGIN"); err != nil {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42710" {
+			t.Fatalf("CREATE ROLE stl_readwrite: %v", err)
+		}
+	}
 	adminPool.Close()
 
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -543,29 +555,54 @@ func TestSecStoreACLIncludesTruncateRevoke(t *testing.T) {
 		return held
 	}
 
-	// Check that stl_readwrite also lacks TRUNCATE — this catches M190/M195 if
-	// ALTER DEFAULT PRIVILEGES granted it.
-	t.Run("stl_readwrite_lacks_truncate_on_all_secstore_tables", func(t *testing.T) {
+	readwriteHas := func(t *testing.T, table, priv string) bool {
+		t.Helper()
+		var held bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_class c,
+				     aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+				WHERE c.oid = $1::regclass
+				  AND a.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'stl_readwrite')
+				  AND a.privilege_type = $2
+			)`, table, priv).Scan(&held); err != nil {
+			t.Fatalf("check %s on %s: %v", priv, table, err)
+		}
+		return held
+	}
+
+	t.Run("stl_readwrite_has_select_on_all_secstore_tables", func(t *testing.T) {
 		tables := []string{
 			"sec_node", "sec_edge",
 			"rel_type_vocabulary", "weight_basis_vocabulary", "change_reason_vocabulary",
 			"concept_class_vocabulary", "node_status_vocabulary",
 		}
 		for _, table := range tables {
-			var hasTruncate bool
-			if err := pool.QueryRow(ctx, `
-				SELECT EXISTS (
-					SELECT 1
-					FROM pg_class c,
-					     aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
-					WHERE c.oid = $1::regclass
-					  AND a.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'stl_readwrite')
-					  AND a.privilege_type = 'TRUNCATE'
-				)`, table).Scan(&hasTruncate); err != nil {
-				t.Fatalf("check TRUNCATE on %s: %v", table, err)
+			if !readwriteHas(t, table, "SELECT") {
+				t.Errorf("%s: stl_readwrite lacks SELECT", table)
 			}
-			if hasTruncate {
-				t.Errorf("%s: stl_readwrite holds TRUNCATE in the ACL", table)
+		}
+	})
+
+	t.Run("stl_readwrite_lacks_truncate_update_delete_on_vocabularies", func(t *testing.T) {
+		vocabs := []string{
+			"rel_type_vocabulary", "weight_basis_vocabulary", "change_reason_vocabulary",
+			"concept_class_vocabulary", "node_status_vocabulary",
+		}
+		for _, table := range vocabs {
+			for _, priv := range []string{"TRUNCATE", "UPDATE", "DELETE"} {
+				if readwriteHas(t, table, priv) {
+					t.Errorf("%s: stl_readwrite holds %s", table, priv)
+				}
+			}
+		}
+	})
+
+	t.Run("stl_readwrite_lacks_truncate_on_stores", func(t *testing.T) {
+		for _, table := range []string{"sec_node", "sec_edge"} {
+			if readwriteHas(t, table, "TRUNCATE") {
+				t.Errorf("%s: stl_readwrite holds TRUNCATE", table)
 			}
 		}
 	})
@@ -601,6 +638,23 @@ func assertSQLState(t *testing.T, err error, wantCode, desc string) {
 	}
 	if pgErr.Code != wantCode {
 		t.Fatalf("%s: got SQLSTATE %s (%s), want %s", desc, pgErr.Code, pgErr.Message, wantCode)
+	}
+}
+
+func assertSQLStateAndConstraint(t *testing.T, err error, wantCode, wantConstraint, desc string) {
+	t.Helper()
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		if err == nil {
+			t.Fatalf("%s: insert succeeded, want SQLSTATE %s on %s", desc, wantCode, wantConstraint)
+		}
+		t.Fatalf("%s: non-PG error %v, want SQLSTATE %s on %s", desc, err, wantCode, wantConstraint)
+	}
+	if pgErr.Code != wantCode {
+		t.Fatalf("%s: got SQLSTATE %s (%s), want %s", desc, pgErr.Code, pgErr.Message, wantCode)
+	}
+	if pgErr.ConstraintName != wantConstraint {
+		t.Fatalf("%s: got constraint %q, want %q", desc, pgErr.ConstraintName, wantConstraint)
 	}
 }
 

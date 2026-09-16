@@ -167,9 +167,13 @@ classify_result() {
 
     if [[ $exit_code -eq 0 ]]; then
         echo "SURVIVED"
-    elif [[ "$test_output" == *"--- FAIL:"* ]]; then
+    elif [[ "$test_output" == *"apply migrations"* ]]; then
+        echo "HARNESS_ERROR"
+    elif [[ "$test_output" == *"build failed"* || "$test_output" == *"cannot load package"* ]]; then
+        echo "HARNESS_ERROR"
+    elif [[ "$test_output" == *"--- FAIL:"* && "$test_output" == *"--- PASS:"* ]]; then
         echo "KILLED"
-    elif [[ "$test_output" == *FAIL* || "$test_output" == *FATAL* || "$test_output" == *panic* ]]; then
+    elif [[ "$test_output" == *"--- FAIL:"* ]]; then
         echo "HARNESS_ERROR"
     else
         echo "HARNESS_ERROR"
@@ -241,6 +245,10 @@ main() {
     if [[ $ctrl_exit -ne 0 ]]; then
         echo "FATAL: unmutated tree is red (exit $ctrl_exit). Fix the suite before running mutations." >&2
         echo "$ctrl_output" | grep -E '(FAIL|FATAL|panic)' | head -10 >&2
+        exit 1
+    fi
+    if ! grep -q -- '--- PASS:' <<< "$ctrl_output"; then
+        echo "FATAL: control run produced no passing tests — -run pattern '$TEST_PATTERN' matched nothing." >&2
         exit 1
     fi
     echo "Control: green"

@@ -289,18 +289,22 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 	// WI-3: _current never reads processing_version > 0
 	// -----------------------------------------------------------------------
 
-	t.Run("pv0_append_after_correction_does_not_win", func(t *testing.T) {
-		// A pv-0 append with a newer ingest_xid must not beat the pv-N restatement.
-		// valid_from stays '2026-06-01' so it competes in the same (id, valid_from) group.
-		// valid_to '9999-12-31' avoids PK collision with the existing pv-0 Jun-open row
-		// (which has valid_to 'infinity') while staying in the same resolution group.
-		_, err := pool.Exec(ctx, `
-			INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, processing_version, `+secstoreSpine+`)
-			VALUES ('em-t-reads', 'ENTITY', 'ACTIVE', '2026-06-01', '9999-12-31', 0, 'test', 'SEED_LOAD', 'late pv-0 append', 'test')`)
-		if err != nil {
-			t.Fatalf("late pv-0 append: %v", err)
-		}
+	// Late pv-0 appends: these inserts live in the parent body so every pv-0
+	// subtest below has its fixture regardless of -run filtering.
+	_, err = pool.Exec(ctx, `
+		INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, processing_version, `+secstoreSpine+`)
+		VALUES ('em-t-reads', 'ENTITY', 'ACTIVE', '2026-06-01', '9999-12-31', 0, 'test', 'SEED_LOAD', 'late pv-0 append', 'test')`)
+	if err != nil {
+		t.Fatalf("late pv-0 append: %v", err)
+	}
+	_, err = pool.Exec(ctx, `
+		INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to, processing_version, `+secstoreSpine+`)
+		VALUES ('sec-t-reads-src', 'SECURITY', 'em-t-reads-edst', 'ENTITY', 'ISSUED_BY', '2026-06-01', '9999-12-31', 0, 'test', 'SEED_LOAD', 'late pv-0 edge', 'test')`)
+	if err != nil {
+		t.Fatalf("late pv-0 edge append: %v", err)
+	}
 
+	t.Run("pv0_append_after_correction_does_not_win", func(t *testing.T) {
 		var pv int
 		if err := pool.QueryRow(ctx, `
 			SELECT processing_version FROM sec_node_current WHERE id = $1`, nodeID).Scan(&pv); err != nil {
@@ -334,13 +338,6 @@ func TestSecStoreResolvedReadsHonourSupersessionWindowsAndTiebreaks(t *testing.T
 	})
 
 	t.Run("edge_current_pv0_does_not_beat_correction", func(t *testing.T) {
-		_, err := pool.Exec(ctx, `
-			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to, processing_version, `+secstoreSpine+`)
-			VALUES ('sec-t-reads-src', 'SECURITY', 'em-t-reads-edst', 'ENTITY', 'ISSUED_BY', '2026-06-01', '9999-12-31', 0, 'test', 'SEED_LOAD', 'late pv-0 edge', 'test')`)
-		if err != nil {
-			t.Fatalf("late pv-0 edge append: %v", err)
-		}
-
 		var pv int
 		if err := pool.QueryRow(ctx, `
 			SELECT processing_version FROM sec_edge_current
@@ -886,16 +883,19 @@ func TestSecStoreCurrentViewBoundaries(t *testing.T) {
 	defer cleanup()
 
 	t.Run("node_valid_from_equals_today_appears", func(t *testing.T) {
-		// valid_from = the view's own "today" expression. The filter is
-		// valid_from <= (now() AT TIME ZONE 'utc')::date; if M050 flips to <, this row drops out.
-		_, err := pool.Exec(ctx, `
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		_, err = tx.Exec(ctx, `
 			INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, `+secstoreSpine+`)
 			VALUES ('em-t-curr-lb', 'ENTITY', 'ACTIVE', (now() AT TIME ZONE 'utc')::date, 'infinity', 'test', 'SEED_LOAD', 'valid_from = today', 'test')`)
 		if err != nil {
 			t.Fatalf("insert: %v", err)
 		}
 		var count int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM sec_node_current WHERE id = 'em-t-curr-lb'`).Scan(&count); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM sec_node_current WHERE id = 'em-t-curr-lb'`).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		if count != 1 {
@@ -904,16 +904,19 @@ func TestSecStoreCurrentViewBoundaries(t *testing.T) {
 	})
 
 	t.Run("node_valid_to_equals_today_absent", func(t *testing.T) {
-		// valid_to = the view's "today". The filter is (now() AT TIME ZONE 'utc')::date < valid_to,
-		// so today < today is false. If M051 flips to <=, the row appears.
-		_, err := pool.Exec(ctx, `
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		_, err = tx.Exec(ctx, `
 			INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, `+secstoreSpine+`)
 			VALUES ('em-t-curr-ub', 'ENTITY', 'ACTIVE', '2020-01-01', (now() AT TIME ZONE 'utc')::date, 'test', 'SEED_LOAD', 'valid_to = today', 'test')`)
 		if err != nil {
 			t.Fatalf("insert: %v", err)
 		}
 		var count int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM sec_node_current WHERE id = 'em-t-curr-ub'`).Scan(&count); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM sec_node_current WHERE id = 'em-t-curr-ub'`).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		if count != 0 {
@@ -922,14 +925,19 @@ func TestSecStoreCurrentViewBoundaries(t *testing.T) {
 	})
 
 	t.Run("edge_valid_from_equals_today_appears", func(t *testing.T) {
-		_, err := pool.Exec(ctx, `
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		_, err = tx.Exec(ctx, `
 			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to, `+secstoreSpine+`)
 			VALUES ('sec-t-curr-lb', 'SECURITY', 'em-t-curr-elb', 'ENTITY', 'ISSUED_BY', (now() AT TIME ZONE 'utc')::date, 'infinity', 'test', 'SEED_LOAD', 'valid_from = today', 'test')`)
 		if err != nil {
 			t.Fatalf("insert: %v", err)
 		}
 		var count int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM sec_edge_current WHERE src_id = 'sec-t-curr-lb'`).Scan(&count); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM sec_edge_current WHERE src_id = 'sec-t-curr-lb'`).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		if count != 1 {
@@ -938,14 +946,19 @@ func TestSecStoreCurrentViewBoundaries(t *testing.T) {
 	})
 
 	t.Run("edge_valid_to_equals_today_absent", func(t *testing.T) {
-		_, err := pool.Exec(ctx, `
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		_, err = tx.Exec(ctx, `
 			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to, `+secstoreSpine+`)
 			VALUES ('sec-t-curr-ub', 'SECURITY', 'em-t-curr-eub', 'ENTITY', 'ISSUED_BY', '2020-01-01', (now() AT TIME ZONE 'utc')::date, 'test', 'SEED_LOAD', 'valid_to = today', 'test')`)
 		if err != nil {
 			t.Fatalf("insert: %v", err)
 		}
 		var count int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM sec_edge_current WHERE src_id = 'sec-t-curr-ub'`).Scan(&count); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM sec_edge_current WHERE src_id = 'sec-t-curr-ub'`).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		if count != 0 {

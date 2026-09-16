@@ -392,6 +392,7 @@ func assertNodeHashesRecompute(t *testing.T, ctx context.Context, pool *pgxpool.
 	}
 	defer rows.Close()
 
+	var checked int
 	var mismatches int
 	for rows.Next() {
 		var recordID int64
@@ -399,6 +400,7 @@ func assertNodeHashesRecompute(t *testing.T, ctx context.Context, pool *pgxpool.
 		if err := rows.Scan(&recordID, &stored, &recomputed); err != nil {
 			t.Fatal(err)
 		}
+		checked++
 		if hex.EncodeToString(stored) != hex.EncodeToString(recomputed) {
 			mismatches++
 			if mismatches <= 3 {
@@ -410,8 +412,11 @@ func assertNodeHashesRecompute(t *testing.T, ctx context.Context, pool *pgxpool.
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
+	if checked == 0 {
+		t.Fatal("zero seed node rows matched — fixture missing or predicate wrong")
+	}
 	if mismatches > 0 {
-		t.Fatalf("%d of 352 seed node hashes do not recompute", mismatches)
+		t.Fatalf("%d of %d seed node hashes do not recompute", mismatches, checked)
 	}
 }
 
@@ -432,6 +437,7 @@ func assertEdgeHashesRecompute(t *testing.T, ctx context.Context, pool *pgxpool.
 	}
 	defer rows.Close()
 
+	var checked int
 	var mismatches int
 	for rows.Next() {
 		var recordID int64
@@ -439,6 +445,7 @@ func assertEdgeHashesRecompute(t *testing.T, ctx context.Context, pool *pgxpool.
 		if err := rows.Scan(&recordID, &stored, &recomputed); err != nil {
 			t.Fatal(err)
 		}
+		checked++
 		if hex.EncodeToString(stored) != hex.EncodeToString(recomputed) {
 			mismatches++
 			if mismatches <= 3 {
@@ -450,7 +457,10 @@ func assertEdgeHashesRecompute(t *testing.T, ctx context.Context, pool *pgxpool.
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
+	if checked == 0 {
+		t.Fatal("zero seed edge rows matched — fixture missing or predicate wrong")
+	}
 	if mismatches > 0 {
-		t.Fatalf("%d of 149 seed edge hashes do not recompute", mismatches)
+		t.Fatalf("%d of %d seed edge hashes do not recompute", mismatches, checked)
 	}
 }
