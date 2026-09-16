@@ -537,7 +537,7 @@ func (h *heartbeatStub) SaveProgress(_ context.Context, beat republishHeartbeat)
 
 func (h *heartbeatStub) Beat(context.Context) { h.beats++ }
 
-func (h *heartbeatStub) Reset() { h.saved, h.beats = nil, 0 }
+func (h *heartbeatStub) Reset(context.Context) { h.saved, h.beats = nil, 0 }
 
 // The details are what tells an operator whether a slow block is fetching,
 // caching or publishing, rather than only that its worker is alive.

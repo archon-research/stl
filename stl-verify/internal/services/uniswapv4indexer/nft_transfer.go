@@ -2,7 +2,6 @@ package uniswapv4indexer
 
 import (
 	"fmt"
-	"sync"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -10,20 +9,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
-
-const erc721TransferEventName = "Transfer"
-
-var positionManagerTransferEvent = sync.OnceValues(func() (*abi.Event, error) {
-	positionManagerABI, err := PositionManagerABI()
-	if err != nil {
-		return nil, err
-	}
-	ev, ok := positionManagerABI.Events[erc721TransferEventName]
-	if !ok {
-		return nil, fmt.Errorf("the PositionManager ABI does not define %s", erc721TransferEventName)
-	}
-	return &ev, nil
-})
 
 // ERC-20's Transfer has the same topic0 with three topics, so arity is the only
 // discriminator left once a log has passed the address filter.
@@ -35,9 +20,9 @@ func (d *receiptDecoder) decodePositionManagerLog(log shared.Log) error {
 	if err := assertHexWords(log); err != nil {
 		return err
 	}
-	ev, err := positionManagerTransferEvent()
+	ev, err := PositionManagerTransferEvent()
 	if err != nil {
-		return fmt.Errorf("loading PositionManager ABI: %w", err)
+		return fmt.Errorf("loading the PositionManager Transfer fragment: %w", err)
 	}
 	if len(log.Topics) == 0 || common.HexToHash(log.Topics[0]) != ev.ID {
 		return nil
@@ -60,6 +45,23 @@ func (d *receiptDecoder) decodePositionManagerLog(log shared.Log) error {
 }
 
 func (d *receiptDecoder) buildNFTTransfer(ev abi.Event, log shared.Log, logIndex int) (*entity.UniswapV4PositionNFTTransfer, error) {
+	return newNFTTransferRow(ev, log, d.positionManager.ID, blockCoords{
+		number: d.blockNumber, version: d.version, ts: d.ts,
+	}, logIndex)
+}
+
+// newNFTTransferRow turns one Transfer log into a row. Shared by the live
+// indexer and the historical scan so a change to the field names, the entity or
+// the validation cannot reach one path without the other; coords is the only
+// thing they disagree about, the live path taking it from the receipt's block and
+// the scan from the log itself.
+func newNFTTransferRow(
+	ev abi.Event,
+	log shared.Log,
+	positionManagerID int64,
+	coords blockCoords,
+	logIndex int,
+) (*entity.UniswapV4PositionNFTTransfer, error) {
 	data, err := shared.DecodeLog(ev, log)
 	if err != nil {
 		return nil, fmt.Errorf("decoding PositionManager Transfer log (index %s): %w", log.LogIndex, err)
@@ -78,11 +80,11 @@ func (d *receiptDecoder) buildNFTTransfer(ev abi.Event, log shared.Log, logIndex
 	}
 
 	transfer := &entity.UniswapV4PositionNFTTransfer{
-		PositionManagerID: d.positionManager.ID,
+		PositionManagerID: positionManagerID,
 		TokenID:           tokenID,
-		BlockNumber:       d.blockNumber,
-		BlockVersion:      d.version,
-		BlockTimestamp:    d.ts,
+		BlockNumber:       coords.number,
+		BlockVersion:      coords.version,
+		BlockTimestamp:    coords.ts,
 		TxHash:            common.HexToHash(log.TransactionHash),
 		LogIndex:          logIndex,
 		From:              from,

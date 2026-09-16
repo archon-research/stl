@@ -1,0 +1,115 @@
+# Unit tests for the uniswap-v4-indexer liveness pair.
+#
+# Both rules are pinned to mainnet and to the exact `uniswap-v4-indexer`
+# Deployment, so these are the mainnet cases. The chain-generic pair — per-chain
+# labelling, the per-chain replica gate, and the avalanche-/avalanche-c prefix
+# mapping — lands with its own cases in archon-research/stl#862.
+rule_files:
+  - ../alerts/vector-indexers.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: "stalled: an indexer consuming blocks with a replica up is silent"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
+        values: '0+5x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerStalled
+        exp_alerts: []
+
+  # Exported and not advancing: the counter is there, the consume loop is not.
+  - name: "stalled: a replica up with the block counter wedged pages for mainnet"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
+        values: '100x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerStalled
+        exp_alerts:
+          - exp_labels:
+              chain: "mainnet"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "critical"
+              team: "vector"
+            exp_annotations:
+              description: |
+                `uniswap-v4-indexer` is up but has consumed no block for >15m (or its
+                uniswap_v4_blocks_processed_total series vanished). The SQS consume
+                loop is wedged or the OTLP metric export broke; Uniswap V4 pool state
+                in TimescaleDB is going stale. Check the pod logs and SQS backlog.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerstalled"
+              summary: "Vector uniswap-v4-indexer stalled on mainnet (no block consumed >15m)"
+
+  - name: "down: no available replica pages for mainnet"
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerDown
+        exp_alerts:
+          - exp_labels:
+              chain: "mainnet"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "critical"
+              team: "vector"
+            exp_annotations: &v4_down
+              description: |
+                `uniswap-v4-indexer` Deployment has <1 available replica for >10m.
+                The worker is not running; no Uniswap V4 swaps, liquidity events,
+                pool state or ticks are being written and the SQS backlog is
+                growing. A boot-time registry rejection looks exactly like this —
+                check the previous container's logs first.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerdown"
+              summary: "Vector uniswap-v4-indexer has no available replica on mainnet"
+
+  # A canary or bootstrap Deployment carries the indexer's name and does not
+  # serve its traffic, so neither may page for the indexer being down.
+  - name: "down: deployments that merely contain the indexer's name are ignored"
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer-canary", namespace="vector", cluster="c1"}'
+        values: '0x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer-bootstrap", namespace="vector", cluster="c1"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerDown
+        exp_alerts: []
+
+  # The indexer's own Deployment is the only replica count the rule reads, so a
+  # healthy look-alike beside a dead indexer still pages.
+  - name: "down: a healthy canary does not mask the indexer being down"
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '0x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer-canary", namespace="vector", cluster="c1"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerDown
+        exp_alerts:
+          - exp_labels:
+              chain: "mainnet"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "critical"
+              team: "vector"
+            exp_annotations: *v4_down

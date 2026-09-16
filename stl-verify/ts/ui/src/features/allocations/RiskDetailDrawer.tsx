@@ -236,7 +236,8 @@ export function RiskDetailDrawer({
               top: '0',
               bottom: '0',
               left: '0',
-              // Hairline divider; the scale has no 1px step.
+              // A thickness, not a border width: `borderWidths` doesn't apply,
+              // and the sizes scale's smallest step is 2px.
               width: '[1px]',
               bg: 'border.subtle',
               opacity: 0.7,
@@ -249,7 +250,7 @@ export function RiskDetailDrawer({
             pl: { base: '5', md: '6' },
             pr: { base: '4', md: '5' },
             py: '4',
-            borderBottomWidth: '1px',
+            borderBottomWidth: 'hairline',
             borderBottomStyle: 'solid',
             borderBottomColor: 'border.subtle',
           })}
@@ -322,7 +323,7 @@ export function RiskDetailDrawer({
                 width: '9',
                 height: '9',
                 borderRadius: 'md',
-                borderWidth: '1px',
+                borderWidth: 'hairline',
                 borderStyle: 'solid',
                 borderColor: 'border.subtle',
                 bg: 'surface.default',

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -24,8 +25,62 @@ func testScanner(t *testing.T, client outbound.LogScanClient, policy windowPolic
 			Topic0:  common.HexToHash("0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec"),
 			Topic1:  []common.Hash{common.HexToHash(poolAIDHash)},
 		},
-		policy: policy,
-		logger: testLogger(),
+		policy:  policy,
+		logger:  testLogger(),
+		subject: testScanSubject,
+	}
+}
+
+// testScanSubject stands in for the real scan subjects, so a refusal that failed to
+// name which backfill refused shows up as a missing substring rather than as an
+// empty %s nobody reads.
+const testScanSubject = "test scan subject"
+
+// Two backfills share this scanner, so every refusal has to say which one refused.
+func TestLogWindowScan_EveryRefusalNamesItsSubject(t *testing.T) {
+	tests := map[string]struct {
+		client outbound.LogScanClient
+		policy windowPolicy
+		handle func(logWindow) error
+	}{
+		"a range the provider refuses down to one block": {
+			client: &fakeLogScanClient{GetLogsFn: func(outbound.LogFilter) ([]outbound.FilteredLog, error) {
+				return nil, fmt.Errorf("query returned more than 10000 results: %w", outbound.ErrLogRangeTooLarge)
+			}},
+			policy: windowPolicy{initial: 4, min: 1, max: 4},
+		},
+		"a provider error that is not a range refusal": {
+			client: &fakeLogScanClient{GetLogsFn: func(outbound.LogFilter) ([]outbound.FilteredLog, error) {
+				return nil, errors.New("provider unavailable")
+			}},
+			policy: windowPolicy{initial: 4, min: 1, max: 4},
+		},
+		"a handler that refuses the window it was given": {
+			client: &fakeLogScanClient{GetLogsFn: func(outbound.LogFilter) ([]outbound.FilteredLog, error) {
+				return nil, nil
+			}},
+			policy: windowPolicy{initial: 4, min: 1, max: 4},
+			handle: func(logWindow) error { return errors.New("decoding refused the window") },
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			scanner := testScanner(t, tc.client, tc.policy)
+
+			handle := tc.handle
+			if handle == nil {
+				handle = func(logWindow) error { return nil }
+			}
+
+			_, err := scanner.scan(context.Background(), 100, 103, handle)
+
+			if err == nil {
+				t.Fatal("scan succeeded, want a refusal")
+			}
+			if !strings.Contains(err.Error(), testScanSubject) {
+				t.Errorf("refusal %q does not name its subject %q", err, testScanSubject)
+			}
+		})
 	}
 }
 

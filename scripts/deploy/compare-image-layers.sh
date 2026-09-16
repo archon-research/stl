@@ -89,6 +89,10 @@
 # Deliberately bash 3.2 + BSD awk compatible, like the other scripts here.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib/overlay-tag-parser.sh
+source "${SCRIPT_DIR}/lib/overlay-tag-parser.sh"
+
 KUSTOMIZATION=""
 TAG=""
 JSON_OUT=""
@@ -116,21 +120,18 @@ command -v aws >/dev/null || die "the aws CLI is required to read ECR image mani
 # newName pairs with the newTag that follows it, and several bases can share one
 # image so the list is deduped.
 #
-# Does not strip a trailing `# comment` where render-overlay-images.sh (the
-# authoritative parser, per k8s/AGENTS.md) does; fails safe, tracked as VEC-754.
+# Parsed with the shared scalar helper (lib/overlay-tag-parser.sh), the same
+# one render-overlay-images.sh uses, so this cannot drift from it again (VEC-754).
 PAIRS_FILE="$(mktemp)"
 ROWS_FILE="$(mktemp)"
 trap 'rm -f "$PAIRS_FILE" "$ROWS_FILE"' EXIT
-awk '
-    function scalar(line) {
-      sub(/^[^:]*:[[:space:]]*/, "", line); gsub(/^"|"$/, "", line); return line
-    }
+awk "$OVERLAY_SCALAR_AWK_FN"'
     /^images:/            { in_images = 1; next }
     in_images && /^[^[:space:]-]/ { in_images = 0 }
     !in_images            { next }
-    /^[[:space:]]*-?[[:space:]]*newName:/ { name = scalar($0); next }
+    /^[[:space:]]*-?[[:space:]]*newName:/ { name = overlay_scalar_value($0); next }
     /^[[:space:]]*newTag:/ {
-      v = scalar($0)
+      v = overlay_scalar_value($0)
       if (name != "") { print name "\t" v; name = "" }
     }
   ' "$KUSTOMIZATION" | sort -u > "$PAIRS_FILE"
