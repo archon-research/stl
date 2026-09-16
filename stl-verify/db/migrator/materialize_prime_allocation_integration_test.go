@@ -678,25 +678,31 @@ func TestMaterializePrimeAllocationRefusesAMalformedAddress(t *testing.T) {
 		name, want string
 		setup      func(*testing.T, context.Context, *pgxpool.Pool)
 	}{
-		{"19-byte token address", "is 19 bytes", func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+		{"19-byte token address", "token " + allocTokenX[:38] + " is 19 bytes", func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 			if _, err := pool.Exec(ctx, `UPDATE token SET address = decode($1, 'hex') WHERE chain_id = 1 AND address = decode($2, 'hex')`,
 				allocTokenX[:38], allocTokenX); err != nil {
 				t.Fatalf("shorten the token address: %v", err)
 			}
 		}},
-		{"zero-length token address", "is 0 bytes", func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+		{"zero-length token address", "token  is 0 bytes", func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 			if _, err := pool.Exec(ctx, `UPDATE token SET address = '\x'::bytea WHERE chain_id = 1 AND address = decode($1, 'hex')`,
 				allocTokenX); err != nil {
 				t.Fatalf("blank the token address: %v", err)
 			}
 		}},
-		{"19-byte proxy address", "is 19 bytes", func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+		{"19-byte proxy address", "proxy " + allocProxyA[:38] + " is 19 bytes", func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 			if _, err := pool.Exec(ctx, `UPDATE allocation_position SET proxy_address = decode($1, 'hex') WHERE proxy_address = decode($2, 'hex')`,
 				allocProxyA[:38], allocProxyA); err != nil {
 				t.Fatalf("shorten the proxy address: %v", err)
 			}
 		}},
-		{"zero-length proxy address", "is 0 bytes", func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+		{"21-byte token address", "token " + allocTokenX + "ff is 21 bytes", func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+			if _, err := pool.Exec(ctx, `UPDATE token SET address = decode($1, 'hex') WHERE chain_id = 1 AND address = decode($2, 'hex')`,
+				allocTokenX+"ff", allocTokenX); err != nil {
+				t.Fatalf("lengthen the token address: %v", err)
+			}
+		}},
+		{"zero-length proxy address", "proxy  is 0 bytes", func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 			if _, err := pool.Exec(ctx, `UPDATE allocation_position SET proxy_address = '\x'::bytea WHERE proxy_address = decode($1, 'hex')`,
 				allocProxyA); err != nil {
 				t.Fatalf("blank the proxy address: %v", err)
@@ -772,8 +778,17 @@ func TestMaterializePrimeAllocationOnAProxyHandedBetweenPrimes(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT materialize_prime_allocation()`).Scan(&written); err != nil {
 		t.Fatalf("a proxy handed between primes across blocks must not refuse: %v", err)
 	}
-	if written == 0 {
-		t.Error("the run appended nothing, so the hand-over produced no positions")
+	if written != 2 {
+		t.Errorf("the hand-over appended %d rows, want one per prime", written)
+	}
+	var holders int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(DISTINCT holder_id) FROM position_state
+		 WHERE projection = 'public.position_prime_allocation'`).Scan(&holders); err != nil {
+		t.Fatalf("count holders: %v", err)
+	}
+	if holders != 2 {
+		t.Errorf("the hand-over produced %d holders, want both primes", holders)
 	}
 }
 
