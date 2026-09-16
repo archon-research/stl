@@ -4,6 +4,7 @@ package migrator_test
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -17,7 +18,11 @@ import (
 // pledged, so deal_type is CUSTODY_COLLATERAL. One behaviour per function, own database each.
 
 const (
+	anchoragePrime      = "itest-anchorage"
 	anchorageHolder     = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	anchoragePrime2     = "itest-anchorage-2"
+	anchorageCustody2   = "SecondCustody"
+	anchorageHolder2    = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	anchorageProjection = "public.position_anchorage_custody"
 	// Hand-computed from the fixture's instants, so the epoch encoding has an oracle the SQL does not
 	// supply: 2026-04-07T00:00:00Z and the day after.
@@ -27,26 +32,46 @@ const (
 
 func anchorageKey(pkg, asset string) string { return "anchorage:" + pkg + ":" + asset }
 
+// admitSecondCustodian widens anchorage_known_custody_type the way a later migration would. The shipped
+// view carries one custodian, which is what makes every two-custodian collision unreachable today.
+func admitSecondCustodian(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW anchorage_known_custody_type AS
+		SELECT * FROM (VALUES ('AnchorageCustody'), ('`+anchorageCustody2+`')) AS m(custody_type)`); err != nil {
+		t.Fatalf("admit a second custodian: %v", err)
+	}
+}
+
 // seedAnchorageBase gives a test its own migrated database with one prime and nothing else.
 func seedAnchorageBase(t *testing.T) (context.Context, *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	t.Cleanup(cleanup)
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'itest-anchorage', decode($1, 'hex'))`, anchorageHolder); err != nil {
-		t.Fatalf("seed prime: %v", err)
-	}
+	addPrime(t, ctx, pool, anchoragePrime, anchorageHolder)
 	return ctx, pool
 }
 
-// anchorageSnap is one custody snapshot. asset, custody, the LTV instant and the snapshot instant are
-// all parameters, because each one changes the projection's identity, grain or observation time.
+func addPrime(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, vaultHex string) {
+	t.Helper()
+	tag, err := pool.Exec(ctx,
+		`INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), $1, decode($2, 'hex'))`,
+		name, vaultHex)
+	if err != nil {
+		t.Fatalf("seed prime %s: %v", name, err)
+	}
+	if tag.RowsAffected() != 1 {
+		t.Fatalf("seeding prime %s inserted %d rows, want 1", name, tag.RowsAffected())
+	}
+}
+
+// anchorageSnap is one custody snapshot. prime, asset, custody, the LTV instant and the snapshot
+// instant are all parameters, because each changes the projection's identity, grain or observation time.
 type anchorageSnap struct {
-	pkg, asset, custody string
-	qty                 float64
-	snapTS, ltvTS       string
-	build               int
+	pkg, asset, custody, prime string
+	qty                        float64
+	snapTS, ltvTS              string
+	build                      int
 }
 
 func addSnap(t *testing.T, ctx context.Context, pool *pgxpool.Pool, s anchorageSnap) {
@@ -57,11 +82,14 @@ func addSnap(t *testing.T, ctx context.Context, pool *pgxpool.Pool, s anchorageS
 	if s.custody == "" {
 		s.custody = "AnchorageCustody"
 	}
+	if s.prime == "" {
+		s.prime = anchoragePrime
+	}
 	if s.ltvTS == "" {
 		// Deliberately NOT the snapshot instant: the projection must observe at snapshot_time.
 		s.ltvTS = "2026-01-01T00:00:00Z"
 	}
-	if _, err := pool.Exec(ctx, `
+	tag, err := pool.Exec(ctx, `
 		INSERT INTO anchorage_package_snapshot
 		    (prime_id, package_id, pledgor_id, secured_party_id, active, state, current_ltv,
 		     exposure_value, package_value, margin_call_ltv, critical_ltv, margin_return_ltv,
@@ -71,9 +99,13 @@ func addSnap(t *testing.T, ctx context.Context, pool *pgxpool.Pool, s anchorageS
 		       1, 1, 0.7, 0.8, 0.6,
 		       $2, $3, 1, $4, 1,
 		       $5::timestamptz, $6::timestamptz, $7
-		FROM prime p WHERE p.name = 'itest-anchorage'`,
-		s.pkg, s.asset, s.custody, s.qty, s.ltvTS, s.snapTS, s.build); err != nil {
+		FROM prime p WHERE p.name = $8`,
+		s.pkg, s.asset, s.custody, s.qty, s.ltvTS, s.snapTS, s.build, s.prime)
+	if err != nil {
 		t.Fatalf("snapshot %s/%s at %s: %v", s.pkg, s.asset, s.snapTS, err)
+	}
+	if tag.RowsAffected() != 1 {
+		t.Fatalf("snapshot %s/%s resolved prime %q to %d rows, want 1", s.pkg, s.asset, s.prime, tag.RowsAffected())
 	}
 }
 
@@ -239,7 +271,6 @@ func TestMaterializeAnchorageCustodyKeysTheAssetIntoTheInstrument(t *testing.T) 
 	}
 }
 
-// The holder is the prime's vault address and there is exactly one of them.
 func TestMaterializeAnchorageCustodyHolderIsTheVaultAddress(t *testing.T) {
 	ctx, pool, _ := seedAnchorage(t)
 	var distinct int
@@ -284,27 +315,46 @@ func TestMaterializeAnchorageCustodySurvivesARefill(t *testing.T) {
 func TestMaterializeAnchorageCustodyRefusesWhatItCannotPlace(t *testing.T) {
 	for _, c := range []struct {
 		name  string
+		setup func(*testing.T, context.Context, *pgxpool.Pool)
 		snaps []anchorageSnap
 		want  string
 	}{
-		{"an unknown custodian, which the view would drop",
+		{"an unknown custodian, which the view would drop", nil,
 			[]anchorageSnap{{pkg: "PKG-X", qty: 7, snapTS: "2026-04-07T00:00:00Z", custody: "SomeOtherCustodian"}},
 			`custody_type 'SomeOtherCustodian' on 1 snapshot(s) is not a known custodian`},
-		{"two snapshots inside one second, which collapse onto one block",
+		{"two snapshots inside one second, which collapse onto one block", nil,
 			[]anchorageSnap{
 				{pkg: "PKG-S", qty: 1, snapTS: "2026-04-07T00:00:00.100Z"},
 				{pkg: "PKG-S", qty: 2, snapTS: "2026-04-07T00:00:00.900Z"}},
 			"has 2 snapshots within one second"},
-		{"a blank asset id, which position_key would reject without naming the row",
+		// custody_type is not on the observation key, so a second-sharing pair collides however the rows
+		// differ. Both cases need a second custodian admitted before the view will carry them.
+		{"two custody types apart inside one second", admitSecondCustodian,
+			[]anchorageSnap{
+				{pkg: "PKG-C", qty: 1, snapTS: "2026-04-07T00:00:00.100Z"},
+				{pkg: "PKG-C", qty: 2, snapTS: "2026-04-07T00:00:00.900Z", custody: anchorageCustody2}},
+			"has 2 snapshots within one second"},
+		{"two custody types on the same instant", admitSecondCustodian,
+			[]anchorageSnap{
+				{pkg: "PKG-C", qty: 1, snapTS: "2026-04-07T00:00:00Z"},
+				{pkg: "PKG-C", qty: 2, snapTS: "2026-04-07T00:00:00Z", custody: anchorageCustody2}},
+			"has 2 snapshots within one second"},
+		{"a blank asset id", nil,
 			[]anchorageSnap{{pkg: "PKG-B", asset: " ", qty: 1, snapTS: "2026-04-07T00:00:00Z"}},
 			"blank or delimiter-bearing identity"},
-		{"a package id carrying the key delimiter",
+		{"a blank package id", nil,
+			[]anchorageSnap{{pkg: " ", qty: 1, snapTS: "2026-04-07T00:00:00Z"}},
+			"blank or delimiter-bearing identity"},
+		{"a package id carrying the key delimiter", nil,
 			[]anchorageSnap{{pkg: "PKG;B", qty: 1, snapTS: "2026-04-07T00:00:00Z"}},
+			"blank or delimiter-bearing identity"},
+		{"an asset id carrying the key delimiter", nil,
+			[]anchorageSnap{{pkg: "PKG-D", asset: "BT;C", qty: 1, snapTS: "2026-04-07T00:00:00Z"}},
 			"blank or delimiter-bearing identity"},
 		// ':' is legal in a native instrument_key (VEC-400 names Sky's registry:ilk), so a lone colon
 		// must PROJECT. Only a genuine collision refuses: 'A:B'+'C' and 'A'+'B:C' both render
 		// 'anchorage:A:B:C', which would give two assets one position_id.
-		{"two identities that render one instrument_key",
+		{"two identities that render one instrument_key", nil,
 			[]anchorageSnap{
 				{pkg: "A:B", asset: "C", qty: 1, snapTS: "2026-04-07T00:00:00Z"},
 				{pkg: "A", asset: "B:C", qty: 2, snapTS: "2026-04-08T00:00:00Z"}},
@@ -312,6 +362,9 @@ func TestMaterializeAnchorageCustodyRefusesWhatItCannotPlace(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ctx, pool := seedAnchorageBase(t)
+			if c.setup != nil {
+				c.setup(t, ctx, pool)
+			}
 			for _, s := range c.snaps {
 				addSnap(t, ctx, pool, s)
 			}
@@ -420,7 +473,6 @@ func TestMaterializeAnchorageCustodyKeepsEachProcessingVersion(t *testing.T) {
 	}
 }
 
-// A second run appends nothing but still records that a sweep completed.
 func TestMaterializeAnchorageCustodyIsIdempotent(t *testing.T) {
 	ctx, pool, _ := seedAnchorage(t)
 	var second int64
@@ -532,5 +584,74 @@ func TestMaterializeAnchorageCustodyForwardsTheWriterRun(t *testing.T) {
 		if !found {
 			t.Errorf("materialize_anchorage_custody declares %v, missing %s -- the runner calls it by name", args, want)
 		}
+	}
+}
+
+func TestMaterializeAnchorageCustodySeparatesTwoPrimesOnOnePackage(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+	addPrime(t, ctx, pool, anchoragePrime2, anchorageHolder2)
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-J", qty: 3, snapTS: "2026-04-07T00:00:00Z"})
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-J", qty: 8, snapTS: "2026-04-07T00:00:00Z", prime: anchoragePrime2})
+	var written int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_anchorage_custody()`).Scan(&written); err != nil {
+		t.Fatalf("one package held by two primes must project as two positions, not collide: %v", err)
+	}
+	var positions int
+	var held []string
+	if err := pool.QueryRow(ctx, `
+		SELECT count(DISTINCT position_id),
+		       coalesce(array_agg(holder_id || '=' || quantity::text ORDER BY holder_id), '{}')
+		FROM position_state WHERE instrument_key = $1`, anchorageKey("PKG-J", "BTC")).Scan(&positions, &held); err != nil {
+		t.Fatal(err)
+	}
+	want := anchorageHolder + "=3," + anchorageHolder2 + "=8"
+	if written != 2 || positions != 2 || strings.Join(held, ",") != want {
+		t.Errorf("written=%d positions=%d holders=%v; want 2, 2 distinct position_ids and %s", written, positions, held, want)
+	}
+}
+
+// Two custody types one second apart are two observations of ONE position, so the refusal above must
+// key on the second rather than on the presence of two custody types.
+func TestMaterializeAnchorageCustodyAllowsTwoCustodyTypesAtDifferentSeconds(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+	admitSecondCustodian(t, ctx, pool)
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-E", qty: 1, snapTS: "2026-04-07T00:00:00Z"})
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-E", qty: 2, snapTS: "2026-04-07T00:00:01Z", custody: anchorageCustody2})
+	var written int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_anchorage_custody()`).Scan(&written); err != nil {
+		t.Fatalf("two custody types a second apart are two observations, not a collision: %v", err)
+	}
+	var positions int
+	var series []string
+	if err := pool.QueryRow(ctx, `
+		SELECT count(DISTINCT position_id),
+		       coalesce(array_agg(block_number::text || '=' || quantity::text ORDER BY block_number), '{}')
+		FROM position_state WHERE instrument_key = $1`, anchorageKey("PKG-E", "BTC")).Scan(&positions, &series); err != nil {
+		t.Fatal(err)
+	}
+	want := strconv.FormatInt(anchorageEpochDay1, 10) + "=1," + strconv.FormatInt(anchorageEpochDay1+1, 10) + "=2"
+	if written != 2 || positions != 1 || strings.Join(series, ",") != want {
+		t.Errorf("written=%d positions=%d series=%v; want 2 observations of 1 position, %s", written, positions, series, want)
+	}
+}
+
+// The cap names the five alphabetically-first offenders, so an operator paging through a broken feed
+// sees a stable prefix rather than an arbitrary sample.
+func TestMaterializeAnchorageCustodyNamesTheFirstFiveOffenders(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+	for _, c := range []string{"FCustodian", "BCustodian", "DCustodian", "ACustodian", "ECustodian", "CCustodian"} {
+		addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-" + c, qty: 1, snapTS: "2026-04-07T00:00:00Z", custody: c})
+	}
+	err := pool.QueryRow(ctx, `SELECT materialize_anchorage_custody()`).Scan(new(int64))
+	if err == nil {
+		t.Fatal("expected a refusal")
+	}
+	for _, named := range []string{"ACustodian", "BCustodian", "CCustodian", "DCustodian", "ECustodian"} {
+		if !strings.Contains(err.Error(), named) {
+			t.Errorf("%s is among the first five offenders but was not named: %s", named, err.Error())
+		}
+	}
+	if strings.Contains(err.Error(), "FCustodian") {
+		t.Errorf("FCustodian is the sixth offender and must fall outside the cap: %s", err.Error())
 	}
 }
