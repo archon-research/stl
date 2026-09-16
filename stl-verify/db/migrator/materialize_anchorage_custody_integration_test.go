@@ -698,3 +698,37 @@ func TestMaterializeAnchorageCustodyForwardsTheWindow(t *testing.T) {
 		t.Errorf("the run recorded window %q; want the 36 hours the wrapper was called with", *window)
 	}
 }
+
+// The guard reads only the primes the batch actually references, so a prime with a malformed vault
+// and no snapshots must not stop the run. Dropping that scoping passes every other test here.
+func TestMaterializeAnchorageCustodyIgnoresAnIdlePrimeWithABadVault(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+	addPrime(t, ctx, pool, "itest-anchorage-idle", anchorageHolder2[:38])
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-OK", qty: 4, snapTS: "2026-04-07T00:00:00Z"})
+
+	var written int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_anchorage_custody()`).Scan(&written); err != nil {
+		t.Fatalf("an idle prime with a 19-byte vault must not refuse the run: %v", err)
+	}
+	if written == 0 {
+		t.Error("the run appended nothing, so it cannot show the good prime still projected")
+	}
+}
+
+// Every width case is short, so <> 20 weakened to < 20 would survive. This is the case above it.
+func TestMaterializeAnchorageCustodyRefusesAnOversizeVault(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+	if _, err := pool.Exec(ctx, `UPDATE prime SET vault_address = decode($1, 'hex') WHERE name = $2`,
+		anchorageHolder+"ff", anchoragePrime); err != nil {
+		t.Fatalf("lengthen the vault address: %v", err)
+	}
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-W", qty: 2, snapTS: "2026-04-07T00:00:00Z"})
+
+	err := pool.QueryRow(ctx, `SELECT materialize_anchorage_custody()`).Scan(new(int64))
+	if err == nil {
+		t.Fatal("a 21-byte vault address must refuse by name")
+	}
+	if !strings.Contains(err.Error(), "has a vault address of 21 bytes") {
+		t.Errorf("error %q does not name the oversize vault", err.Error())
+	}
+}

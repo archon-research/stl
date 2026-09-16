@@ -53,8 +53,7 @@ BEGIN
             GROUP BY s.package_id, s.asset_type
             UNION ALL
             -- prime.vault_address carries no length CHECK, and holder_id is its hex: a short one fails
-            -- the spine's 40-hex CHECK with a 23514 naming no row. Sky (20260819_140000) guards the
-            -- same column the same way.
+            -- the spine's 40-hex CHECK with a 23514 naming no row.
             SELECT format('prime %L has a vault address of %s bytes, which cannot render the 40-hex holder_id', pr.name, octet_length(pr.vault_address))
             FROM (SELECT DISTINCT s.prime_id FROM src s) d
             JOIN public.prime pr ON pr.id = d.prime_id
