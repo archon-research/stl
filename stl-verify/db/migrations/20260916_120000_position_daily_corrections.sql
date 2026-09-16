@@ -159,6 +159,16 @@ SELECT DISTINCT 'resurrected'::text, d.position_id, d.as_of_date,
 
 UNION ALL
 
+-- A date the reading holds and the spine has no row for at all. Nothing the writer does can clear
+-- it, because the crystallizer only appends: withdrawing it is a decision, not a repair.
+SELECT 'orphaned_day'::text, d.position_id, d.as_of_date,
+       'the spine holds no observation on this date'
+  FROM public.position_daily d
+ WHERE NOT EXISTS (SELECT 1 FROM spine s
+                    WHERE s.position_id = d.position_id AND s.as_of_date = d.as_of_date)
+
+UNION ALL
+
 -- A spine row re-stamped in place by the superuser recovery path in 20260818_130000. The copy here
 -- keeps the old projection and no writer can repair it.
 SELECT 'projection_drift'::text, d.position_id, d.as_of_date,
@@ -169,7 +179,7 @@ SELECT 'projection_drift'::text, d.position_id, d.as_of_date,
        IS NOT DISTINCT FROM (s.block_number, s.block_version, s.processing_version)
    AND d.projection IS DISTINCT FROM s.projection;
 
-COMMENT ON VIEW position_daily_anomaly IS '[Operational] Every (position, UTC date) where position_daily does not match the position_state argmax, with a reason (VEC-636). stale_day: the spine has moved past the reading, which the next crystallization fixes -- only a row that SURVIVES a tick is a finding. moved_day: a correction crossed UTC midnight, so the reading''s block now belongs to another date and no ordering rule can withdraw it; retract_position_daily is the instrument. resurrected: a live row outranks a retraction on that key, which is correct when the day gained a real observation and is the signature of a mis-keyed projection still emitting. projection_drift: the spine row was re-stamped in place by the 20260818_130000 recovery path and this copy cannot be repaired. Scans the whole spine, so it is a data-quality read, not a hot path. Empty is the steady state.';
+COMMENT ON VIEW position_daily_anomaly IS '[Operational] Every (position, UTC date) where position_daily does not match the position_state argmax, with a reason (VEC-636). stale_day: the spine has moved past the reading, which the next crystallization fixes -- only a row that SURVIVES a tick is a finding. moved_day: a correction crossed UTC midnight, so the reading''s block now belongs to another date and no ordering rule can withdraw it; retract_position_daily is the instrument. resurrected: a live row outranks a retraction on that key, which is correct when the day gained a real observation and is the signature of a mis-keyed projection still emitting. orphaned_day: the spine has no observation on that date at all, so no tick can clear it and only retract_position_daily can. projection_drift: the spine row was re-stamped in place by the 20260818_130000 recovery path and this copy cannot be repaired. Scans the whole spine, so it is a data-quality read, not a hot path. Empty is the steady state.';
 
 GRANT SELECT ON position_daily_anomaly TO stl_readonly;
 GRANT SELECT ON position_daily_anomaly TO stl_readwrite;

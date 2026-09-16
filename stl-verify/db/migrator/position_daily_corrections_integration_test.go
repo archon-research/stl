@@ -216,6 +216,32 @@ func TestPositionDailyAnomaly(t *testing.T) {
 		}
 	})
 
+	// A date the spine no longer has any observation on. The crystallizer only appends, so no tick
+	// can clear it; only a decision can. Reached here by deleting the spine row, which is what the
+	// superuser recovery path in 20260818_130000 can do.
+	t.Run("orphaned_day fires when the spine has nothing on that date", func(t *testing.T) {
+		const id = "anom-orphan"
+		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		if got := f.anomalies(id); len(got) != 0 {
+			t.Fatalf("the day reports %v before the spine row goes; this case starts from the wrong state", got)
+		}
+		if _, err := f.pool.Exec(f.ctx,
+			`DELETE FROM position_state WHERE position_id = sha256($1::bytea)`, id); err != nil {
+			t.Fatalf("remove the spine row: %v", err)
+		}
+		if got := reasonsOf(f.anomalies(id)); len(got) != 1 || got[0] != "orphaned_day" {
+			t.Errorf("the view reports %v, want exactly [orphaned_day]", got)
+		}
+		// And the only instrument that clears it is a decision to withdraw the day.
+		if _, err := f.callRetract(id, date, "VEC-636", "the spine no longer holds this date"); err != nil {
+			t.Fatalf("retract the orphaned day: %v", err)
+		}
+		if got := f.anomalies(id); len(got) != 0 {
+			t.Errorf("after withdrawing it the view still reports %v", got)
+		}
+	})
+
 	// A key that came back after being withdrawn -- correct when the day gained a real observation,
 	// and the signature of a mis-keyed projection that is still emitting.
 	t.Run("resurrected fires when a live row outranks a tombstone", func(t *testing.T) {
