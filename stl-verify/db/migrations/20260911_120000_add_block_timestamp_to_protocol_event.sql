@@ -18,7 +18,7 @@ SET LOCAL lock_timeout = '10s';
 ALTER TABLE protocol_event ADD COLUMN IF NOT EXISTS block_timestamp TIMESTAMPTZ;
 
 COMMENT ON COLUMN protocol_event.block_timestamp IS
-  'Derived (copy of the block-header timestamp the indexer decoded this event from). On-chain time the event happened, UTC. Equal to created_at for every row a writer set explicitly; NULL for a row the backfill could not date, which reads treat as undated. Not the partition key -- created_at is.';
+  'Derived (copy of the block-header timestamp the indexer decoded this event from). On-chain time the event happened, UTC. Equal to created_at for every row a writer set explicitly; NULL for a row the backfill could not date, which reads treat as undated.';
 
 COMMENT ON COLUMN protocol_event.created_at IS
   'Partition key. Set to the block-header timestamp by every writer (deterministic, so a replay dedups against the PK). DEFAULT NOW() is a safety net that, before 2026-04-14, let some rows record ingest time instead; read block_timestamp, not this column, for event time.';
