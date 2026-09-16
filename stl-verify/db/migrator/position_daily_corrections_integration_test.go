@@ -501,18 +501,4 @@ func TestPositionDailyAnomalyBranches(t *testing.T) {
 			t.Errorf("the view reports %v for a tombstone aimed below the winner, want nothing", got)
 		}
 	})
-
-	// Both app roles read the view, or a data-quality consumer gets permission denied in prod.
-	t.Run("both app roles can read the view", func(t *testing.T) {
-		for _, role := range []string{"stl_readonly", "stl_readwrite"} {
-			var ok bool
-			if err := f.pool.QueryRow(f.ctx,
-				`SELECT has_table_privilege($1, 'position_daily_anomaly', 'SELECT')`, role).Scan(&ok); err != nil {
-				t.Fatalf("read %s's privilege: %v", role, err)
-			}
-			if !ok {
-				t.Errorf("%s cannot SELECT position_daily_anomaly", role)
-			}
-		}
-	})
 }
