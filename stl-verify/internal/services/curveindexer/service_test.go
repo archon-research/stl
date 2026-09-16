@@ -195,12 +195,14 @@ const testChainID = int64(1)
 // snapshot issues the gated A_precise call and the canned results stay aligned.
 func newTestPool() RegisteredPool {
 	return RegisteredPool{
-		ID:           42,
-		Address:      common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
-		Kind:         KindStableswapPreNG,
-		NCoins:       2,
-		CoinDecimals: []int{18, 18},
-		HasAPrecise:  true,
+		ID:                      42,
+		Address:                 common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
+		Kind:                    KindStableswapPreNG,
+		NCoins:                  2,
+		CoinDecimals:            []int{18, 18},
+		HasAPrecise:             true,
+		CalcTokenAmountDynArray: fixedCalcTokenAmount(),
+		HasFutureFee:            true,
 	}
 }
 

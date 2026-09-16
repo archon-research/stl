@@ -199,9 +199,9 @@ func seedCurveCoordPreNGPool(t *testing.T, ctx context.Context) (int64, common.A
 
 	var poolID int64
 	if err := curveTestPool.QueryRow(ctx,
-		`INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, deploy_block, lp_token_address, has_a_precise)
-		 VALUES ($1, $2, $3, 'plain_pre_ng', 2, 100, $4, TRUE)
-		 ON CONFLICT (chain_id, pool_address) DO UPDATE SET lp_token_address = EXCLUDED.lp_token_address, pool_kind = EXCLUDED.pool_kind, has_a_precise = EXCLUDED.has_a_precise
+		`INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, deploy_block, lp_token_address, has_a_precise, calc_token_amount_dyn_array, has_future_fee)
+		 VALUES ($1, $2, $3, 'plain_pre_ng', 2, 100, $4, TRUE, FALSE, TRUE)
+		 ON CONFLICT (chain_id, pool_address) DO UPDATE SET lp_token_address = EXCLUDED.lp_token_address, pool_kind = EXCLUDED.pool_kind, has_a_precise = EXCLUDED.has_a_precise, calc_token_amount_dyn_array = EXCLUDED.calc_token_amount_dyn_array, has_future_fee = EXCLUDED.has_future_fee
 		 RETURNING id`,
 		curveCoordChainID, protoID, poolAddr.Bytes(), lpAddr.Bytes(),
 	).Scan(&poolID); err != nil {
@@ -213,6 +213,8 @@ func seedCurveCoordPreNGPool(t *testing.T, ctx context.Context) (int64, common.A
 
 // seedCurveCoordNGPool inserts a 2-coin NG pool (its own LP token, NULL
 // lp_token_address) on chain 998 and returns (poolID, poolAddr). Idempotent.
+// Curated as exposing the no-arg oracle getters, like stETH-ng, so the snapshot
+// issues the full NG read set that coordNGResults answers.
 func seedCurveCoordNGPool(t *testing.T, ctx context.Context) (int64, common.Address) {
 	t.Helper()
 	poolAddr := common.HexToAddress("0xC0FFEE0000000000000000000000000000000002")
@@ -223,9 +225,9 @@ func seedCurveCoordNGPool(t *testing.T, ctx context.Context) (int64, common.Addr
 
 	var poolID int64
 	if err := curveTestPool.QueryRow(ctx,
-		`INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, deploy_block, has_a_precise)
-		 VALUES ($1, $2, $3, 'plain_ng', 2, 100, TRUE)
-		 ON CONFLICT (chain_id, pool_address) DO UPDATE SET pool_kind = EXCLUDED.pool_kind, lp_token_address = NULL, has_a_precise = EXCLUDED.has_a_precise
+		`INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, deploy_block, has_a_precise, has_no_arg_oracle_getters, calc_token_amount_dyn_array, has_future_fee)
+		 VALUES ($1, $2, $3, 'plain_ng', 2, 100, TRUE, TRUE, FALSE, TRUE)
+		 ON CONFLICT (chain_id, pool_address) DO UPDATE SET pool_kind = EXCLUDED.pool_kind, lp_token_address = NULL, has_a_precise = EXCLUDED.has_a_precise, has_no_arg_oracle_getters = EXCLUDED.has_no_arg_oracle_getters, calc_token_amount_dyn_array = EXCLUDED.calc_token_amount_dyn_array, has_future_fee = EXCLUDED.has_future_fee
 		 RETURNING id`,
 		curveCoordChainID, protoID, poolAddr.Bytes(),
 	).Scan(&poolID); err != nil {
@@ -304,9 +306,9 @@ func newCurveCurveService(t *testing.T, ctx context.Context) (*curveindexer.Curv
 		t.Fatalf("loading stableswap ABI: %v", err)
 	}
 
-	// The seeded stableswap pools carry has_a_precise=TRUE (see seedCurveCoord*Pool),
-	// so LoadPools reports HasAPrecise=true and the snapshot issues the gated
-	// A_precise call, keeping the 21/27 canned result counts.
+	// The seeded stableswap pools carry every curated capability (see
+	// seedCurveCoord*Pool), so LoadPools reports them and the snapshot issues every
+	// gated call, keeping the 21/27 canned result counts.
 	cryptoABI, err := abis.CurveCryptoswapABI()
 	if err != nil {
 		t.Fatalf("loading cryptoswap ABI: %v", err)

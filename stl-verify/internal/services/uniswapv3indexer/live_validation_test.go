@@ -48,7 +48,7 @@ func alchemyURL(t *testing.T) string {
 var multicall3Address = common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11")
 
 // busyPoolAddress is the wstETH/WETH 0.01% pool used for the event-decode and
-// baseline-tick assertions: the deepest/most active of the 18 seeded pools.
+// baseline-tick assertions: the deepest/most active of the 19 seeded pools.
 var busyPoolAddress = common.HexToAddress("0x109830a1AAaD605BbF02a9dFA7B0B92EC2FB7dAa")
 
 // liveValidationReportPath is where the human-readable data report (the B13
@@ -123,7 +123,7 @@ func TestLiveValidation(t *testing.T) {
 	rep.blockHash = blockHash.Hex()
 	rep.blockTimestamp = blockTS
 
-	// --- Step 3: state snapshot for all 18 pools ------------------------------
+	// --- Step 3: state snapshot for all 19 pools ------------------------------
 	states := snapshotAllPools(t, ctx, mc, regPools, blockHash, targetBlockNum, blockTS, rep)
 
 	txMgr, err := postgres.NewTxManager(pool, nil)

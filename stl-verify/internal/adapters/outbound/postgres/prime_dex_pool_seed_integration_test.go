@@ -113,29 +113,36 @@ func TestPrimeDexSeedUniswapV3Pool(t *testing.T) {
 
 // TestPrimeDexSeedCurvePools asserts each of the five seeded Curve pools is a
 // plain_ng 2-coin pool of the stableswap-NG factory, is its own LP token
-// (lp_token_address NULL), exposes A_precise(), and carries its exact deploy
-// block.
+// (lp_token_address NULL), exposes A_precise(), lacks the no-arg oracle getters,
+// takes the dynamic-array calc_token_amount, carries offpeg_fee_multiplier()
+// rather than future_fee(), and carries its exact deploy block.
 func TestPrimeDexSeedCurvePools(t *testing.T) {
 	ctx := context.Background()
 
 	for _, want := range primeDexCurvePools {
 		t.Run(want.name, func(t *testing.T) {
 			var (
-				protocolHex string
-				poolKind    string
-				nCoins      int
-				lpToken     *[]byte
-				hasAPrecise bool
-				deployBlock int64
+				protocolHex           string
+				poolKind              string
+				nCoins                int
+				lpToken               []byte
+				hasAPrecise           bool
+				hasNoArgOracleGetters bool
+				calcTokenAmountDyn    *bool
+				hasFutureFee          bool
+				hasOffpegFee          bool
+				deployBlock           int64
 			)
 			err := primeDexSeedPool.QueryRow(ctx, `
 				SELECT '\x' || encode(pr.address, 'hex'),
-				       p.pool_kind, p.n_coins, p.lp_token_address, p.has_a_precise, p.deploy_block
+				       p.pool_kind, p.n_coins, p.lp_token_address, p.has_a_precise,
+				       p.has_no_arg_oracle_getters, p.calc_token_amount_dyn_array,
+				       p.has_future_fee, p.has_offpeg_fee_multiplier, p.deploy_block
 				FROM curve_pool p
 				JOIN protocol pr ON pr.id = p.protocol_id
 				WHERE p.chain_id = 1 AND p.pool_address = $1::bytea`,
 				want.addrHex,
-			).Scan(&protocolHex, &poolKind, &nCoins, &lpToken, &hasAPrecise, &deployBlock)
+			).Scan(&protocolHex, &poolKind, &nCoins, &lpToken, &hasAPrecise, &hasNoArgOracleGetters, &calcTokenAmountDyn, &hasFutureFee, &hasOffpegFee, &deployBlock)
 			if err != nil {
 				t.Fatalf("querying curve pool %s: %v", want.addrHex, err)
 			}
@@ -150,10 +157,22 @@ func TestPrimeDexSeedCurvePools(t *testing.T) {
 				t.Errorf("n_coins = %d, want 2", nCoins)
 			}
 			if lpToken != nil {
-				t.Errorf("lp_token_address = %x, want NULL (an NG pool is its own LP token)", *lpToken)
+				t.Errorf("lp_token_address = %x, want NULL (an NG pool is its own LP token)", lpToken)
 			}
 			if !hasAPrecise {
 				t.Error("has_a_precise = false, want true (A_precise() answers on-chain)")
+			}
+			if hasNoArgOracleGetters {
+				t.Error("has_no_arg_oracle_getters = true, want false: all five no-arg oracle getters revert on this pool, and issuing one stalls every Curve block")
+			}
+			if calcTokenAmountDyn == nil || !*calcTokenAmountDyn {
+				t.Errorf("calc_token_amount_dyn_array = %v, want true: these pools revert on the fixed calc_token_amount(uint256[N],bool)", calcTokenAmountDyn)
+			}
+			if hasFutureFee {
+				t.Error("has_future_fee = true, want false: future_fee() reverts on these pools")
+			}
+			if !hasOffpegFee {
+				t.Error("has_offpeg_fee_multiplier = false, want true: it is the fee knob these pools expose instead of future_fee()")
 			}
 			if deployBlock != want.deployBlock {
 				t.Errorf("deploy_block = %d, want %d", deployBlock, want.deployBlock)

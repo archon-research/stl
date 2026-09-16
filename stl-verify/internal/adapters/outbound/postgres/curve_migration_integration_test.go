@@ -476,12 +476,16 @@ func TestCurveMigration(t *testing.T) {
 		var kind string
 		var nCoins int
 		var lpToken *[]byte
+		var hasNoArgOracleGetters bool
+		var calcTokenAmountDyn *bool
+		var hasFutureFee, hasOffpegFee bool
 		if err := curveTestPool.QueryRow(ctx, `
-			SELECT pool_kind, n_coins, lp_token_address
+			SELECT pool_kind, n_coins, lp_token_address, has_no_arg_oracle_getters, calc_token_amount_dyn_array,
+			       has_future_fee, has_offpeg_fee_multiplier
 			FROM curve_pool
 			WHERE chain_id = 1
 			  AND pool_address = '\x21E27a5E5513D6e65C4f830167390997aA84843a'::bytea`,
-		).Scan(&kind, &nCoins, &lpToken); err != nil {
+		).Scan(&kind, &nCoins, &lpToken, &hasNoArgOracleGetters, &calcTokenAmountDyn, &hasFutureFee, &hasOffpegFee); err != nil {
 			t.Fatalf("querying stETH-ng pool: %v", err)
 		}
 		if kind != "plain_ng" {
@@ -492,6 +496,20 @@ func TestCurveMigration(t *testing.T) {
 		}
 		if lpToken != nil {
 			t.Error("stETH-ng lp_token_address should be NULL for NG pool")
+		}
+		// 20260831_110000 backfills this pool; a FALSE here silently drops the
+		// five oracle reads it has always issued.
+		if !hasNoArgOracleGetters {
+			t.Error("stETH-ng has_no_arg_oracle_getters = false, want true (all five no-arg getters answer on chain)")
+		}
+		if !hasFutureFee {
+			t.Error("stETH-ng has_future_fee = false, want true (future_fee() answers on chain)")
+		}
+		if hasOffpegFee {
+			t.Error("stETH-ng has_offpeg_fee_multiplier = true, want false (it reverts on chain)")
+		}
+		if calcTokenAmountDyn == nil || *calcTokenAmountDyn {
+			t.Errorf("stETH-ng calc_token_amount_dyn_array = %v, want false (it answers the fixed uint256[N] form and reverts on the dynamic one)", calcTokenAmountDyn)
 		}
 	})
 

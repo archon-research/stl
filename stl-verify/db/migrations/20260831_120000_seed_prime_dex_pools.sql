@@ -17,12 +17,31 @@
 --               keeps is_meta's default false from passing by accident
 --               ("plain"). Read factory->pool because these pools expose no
 --               factory() getter. BASE_POOL() also reverts on all five.
+--   no-arg      price_oracle(), last_price(), ema_price(), get_p() and
+--   oracle      oracle_method() all REVERT on all five pools (probed
+--   getters     2026-09-16); they serve only the indexed price_oracle(uint256)
+--               form. Each row therefore carries has_no_arg_oracle_getters=FALSE
+--               and the snapshot issues none of the five (20260831_110000).
+--               Seeding them TRUE -- or at all before that column existed --
+--               stalls Curve indexing for every pool on the chain, because a
+--               reverted read errors and one pool's error aborts the block.
+--               Probe all five before adding a plain_ng pool here.
+--   calc_token  calc_token_amount(uint256[],bool) ANSWERS on all five and the
+--   _amount     fixed calc_token_amount(uint256[2],bool) reverts (the reverse of
+--               every pool seeded so far), hence
+--               calc_token_amount_dyn_array=TRUE. Probe both forms before adding
+--               a pool here: the two are different selectors and the snapshot
+--               must pick one before it calls.
+--   fee         future_fee() REVERTS on all five and offpeg_fee_multiplier()
+--   schedule    ANSWERS (2e11 / 1e11), the reverse of every pool seeded so far,
+--               hence has_future_fee=FALSE and has_offpeg_fee_multiplier=TRUE.
+--               future_fee is a structural NULL on these pools' config rows.
 --   deploy_block  eth_getCode non-empty at the block, empty at block-1, so each
 --               value is the exact deploy height -- and therefore the lower
 --               bound both registries' deploy_block COMMENTs demand.
 --
 -- No token rows are inserted. All eight referenced tokens already exist on
--- chain 1 with exactly the symbol/decimals measured on-chain -- sUSDS, USDT,
+-- chain 1 with the decimals measured on-chain -- sUSDS, USDT,
 -- PYUSD, USDS, USDC, WETH, weETH via 20260204_110000_seed_sparklend_tokens.sql
 -- and AUSD via 20260709_120000_add_er_missing_price_feeds.sql, both of which
 -- sort before this file. They are asserted, not re-seeded: a missing token row
@@ -33,8 +52,11 @@
 -- token0/token1 are the live token0()/token1() orientation, not alphabetized.
 -- ============================================================================
 
+-- The protocol FK resolves on the factory address, the table's only unique key;
+-- protocol.name is a display label with no unique constraint.
 WITH proto AS (
-    SELECT id FROM protocol WHERE chain_id = 1 AND name = 'UniswapV3' LIMIT 1
+    SELECT id FROM protocol
+    WHERE chain_id = 1 AND address = '\x1F98431c8aD98523631AE4a59f267346ea31F984'::bytea
 ),
 t0 AS (
     SELECT id FROM token WHERE chain_id = 1 AND address = '\x00000000eFE302BEAA2b3e6e1b18d08D69a9012a'::bytea  -- AUSD
@@ -49,11 +71,13 @@ ON CONFLICT (chain_id, pool_address) DO NOTHING;
 
 -- ============================================================================
 -- 2. Curve stableswap-NG plain pools. All five: plain_ng, 2 coins, their own
--- LP token (lp_token_address NULL), A_precise() present.
+-- LP token (lp_token_address NULL), A_precise() present, no-arg oracle getters
+-- absent, calc_token_amount taking a dynamic array, and offpeg_fee_multiplier()
+-- in place of future_fee().
 -- ============================================================================
 
-INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, lp_token_address, deploy_block, has_a_precise)
-SELECT 1, pr.id, v.pool_address, 'plain_ng', 2, NULL, v.deploy_block, TRUE
+INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, lp_token_address, deploy_block, has_a_precise, has_no_arg_oracle_getters, calc_token_amount_dyn_array, has_future_fee, has_offpeg_fee_multiplier)
+SELECT 1, pr.id, v.pool_address, 'plain_ng', 2, NULL, v.deploy_block, TRUE, FALSE, TRUE, FALSE, TRUE
 FROM protocol pr
 CROSS JOIN (VALUES
     ('\x00836fe54625be242bcfa286207795405ca4fd10'::bytea, 22219093::bigint),  -- sUSDS/USDT  symbol() "sUSDSUSDT", A_precise() 2000000
@@ -99,21 +123,23 @@ DECLARE
     pool_count  INT;
     bad         TEXT;
 BEGIN
+    -- decimals only: the INSERTs resolve tokens by (chain_id, address), so symbol
+    -- gates nothing, and symbol drift on a live row would abort the migration.
     SELECT count(*) INTO token_count
     FROM (VALUES
-        ('\x00000000eFE302BEAA2b3e6e1b18d08D69a9012a'::bytea, 'AUSD',  6),
-        ('\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea, 'USDC',  6),
-        ('\xdAC17F958D2ee523a2206206994597C13D831ec7'::bytea, 'USDT',  6),
-        ('\x6c3ea9036406852006290770BEdFcAbA0e23A0e8'::bytea, 'PYUSD', 6),
-        ('\xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD'::bytea, 'sUSDS', 18),
-        ('\xdC035D45d973E3EC169d2276DDab16f1e407384F'::bytea, 'USDS',  18),
-        ('\xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'::bytea, 'WETH',  18),
-        ('\xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee'::bytea, 'weETH', 18)
-    ) AS x(address, symbol, decimals)
+        ('\x00000000eFE302BEAA2b3e6e1b18d08D69a9012a'::bytea, 6),   -- AUSD
+        ('\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea, 6),   -- USDC
+        ('\xdAC17F958D2ee523a2206206994597C13D831ec7'::bytea, 6),   -- USDT
+        ('\x6c3ea9036406852006290770BEdFcAbA0e23A0e8'::bytea, 6),   -- PYUSD
+        ('\xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD'::bytea, 18),  -- sUSDS
+        ('\xdC035D45d973E3EC169d2276DDab16f1e407384F'::bytea, 18),  -- USDS
+        ('\xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'::bytea, 18),  -- WETH
+        ('\xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee'::bytea, 18)   -- weETH
+    ) AS x(address, decimals)
     JOIN token t ON t.chain_id = 1 AND t.address = x.address
-                AND t.symbol = x.symbol AND t.decimals = x.decimals;
+                AND t.decimals = x.decimals;
     IF token_count <> 8 THEN
-        RAISE EXCEPTION 'expected all 8 ARCT-384 counterparty tokens on chain 1 with the on-chain symbol/decimals, got %', token_count;
+        RAISE EXCEPTION 'expected all 8 ARCT-384 counterparty tokens on chain 1 with the on-chain decimals, got %', token_count;
     END IF;
 
     SELECT count(*) INTO pool_count
@@ -123,7 +149,7 @@ BEGIN
     JOIN token t1 ON t1.id = p.token1_id
     WHERE p.chain_id = 1
       AND p.pool_address = '\xbAFeAd7c60Ea473758ED6c6021505E8BBd7e8E5d'::bytea
-      AND pr.chain_id = 1 AND pr.name = 'UniswapV3'
+      AND pr.chain_id = 1 AND pr.address = '\x1F98431c8aD98523631AE4a59f267346ea31F984'::bytea
       AND t0.address = '\x00000000eFE302BEAA2b3e6e1b18d08D69a9012a'::bytea
       AND t1.address = '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea
       AND p.fee = 100
@@ -153,6 +179,10 @@ BEGIN
           AND p.n_coins = 2
           AND p.lp_token_address IS NULL
           AND p.has_a_precise
+          AND NOT p.has_no_arg_oracle_getters
+          AND p.calc_token_amount_dyn_array
+          AND NOT p.has_future_fee
+          AND p.has_offpeg_fee_multiplier
           AND p.deploy_block = x.deploy_block
     );
     IF bad IS NOT NULL THEN

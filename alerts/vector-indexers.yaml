@@ -1704,9 +1704,11 @@ groups:
         # runs SnapshotTracker(0) — no sweep — so state rows are written only for
         # pools an event touched in that block. Gating on blocks processed made
         # every quiet market window look identical to a bug: the seeded registry
-        # is 18 wstETH/LST/LRT pools whose real cadence is 3-28 state rows/hour,
-        # so 30m stretches with zero touches occur nightly and the rule fired on
-        # a healthy indexer (VEC-329 rollout, 2026-07-13). No touches now means
+        # is 19 pools -- the 18 wstETH/LST/LRT pools these windows were
+        # calibrated against (VEC-261) plus the ARCT-384 AUSD/USDC 0.01% pool --
+        # whose real cadence is 3-28 state rows/hour, so 30m stretches with zero
+        # touches occur nightly and the rule fired on a healthy indexer
+        # (VEC-329 rollout, 2026-07-13). No touches now means
         # no expectation of rows, and the alert stays silent.
         #
         # pools.touched is recorded from handleBlock's decode-stage touchedIDs,
@@ -1757,8 +1759,9 @@ groups:
         # happily — so nothing else in this group would ever page.
         #
         # 6h window, NOT 30m. This is the window that has to absorb a quiet
-        # market, and the 18 wstETH/LST/LRT pools genuinely produce 30m stretches
-        # with zero touches (that is what made the old blocks-processed gate on
+        # market, and the 18 wstETH/LST/LRT pools these windows were calibrated
+        # against genuinely produce 30m stretches with zero touches (that is what
+        # made the old blocks-processed gate on
         # NotWritingState a false positive; see its comment). Measured cadence in
         # staging is 3-28 state rows/hour, every hour — so 6h with zero touches
         # is ~30x the worst observed quiet gap and cannot be a lull. Detection is

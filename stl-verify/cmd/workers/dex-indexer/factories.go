@@ -48,9 +48,10 @@ func (curveFactory) BuildHandler(ctx context.Context, deps *dexbootstrap.Deps, c
 	if len(poolRows) == 0 {
 		return nil, fmt.Errorf("no curve pools registered for chain %d", cfg.ChainID)
 	}
-	// Per-pool A_precise availability comes from curated DB metadata
-	// (curve_pool.has_a_precise, carried through LoadPools), so the snapshot issues
-	// that call only where it exists — no startup capability probe.
+	// Per-pool getter availability comes from curated DB metadata
+	// (curve_pool.has_a_precise and has_no_arg_oracle_getters, carried through
+	// LoadPools), so the snapshot issues those calls only where they exist — no
+	// startup capability probe.
 	pools := curveindexer.IndexPoolsByAddress(poolRows)
 
 	stableABI, err := abis.CurveStableswapABI()
