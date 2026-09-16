@@ -29,6 +29,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/services/block_republish"
 )
 
@@ -59,7 +60,7 @@ func init() {
 const workflowTypeName = "BlockRepublish"
 
 func run(ctx context.Context) error {
-	taskQueue, err := taskQueueName()
+	taskQueue, err := chainutil.TaskQueueName(ethereumQueueName)
 	if err != nil {
 		return fmt.Errorf("resolving the task queue: %w", err)
 	}

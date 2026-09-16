@@ -6,15 +6,25 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 )
 
 // Every name is spelled out rather than compared to its constant, which would
 // rename together and pin nothing. The alert regexes in
 // alerts/vector-cronjobs.yaml, the Deployment and the runbook carry the same
-// strings, and an operator types the workflow types by hand.
+// strings, and an operator types the workflow types by hand. The queue goes
+// through the helper that builds it, as block-republisher's equivalent does;
+// every chain's queue name is pinned with chainutil.TaskQueueName.
 func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
+	t.Setenv("CHAIN_ID", "1")
+
+	queue, err := chainutil.TaskQueueName(ethereumQueueName)
+	if err != nil {
+		t.Fatalf("TaskQueueName error = %v", err)
+	}
+
 	names := map[string]string{
-		ethereumQueueName:        "uniswap-v4-position-bootstrap",
+		queue:                    "uniswap-v4-position-bootstrap",
 		positionWorkflowTypeName: "UniswapV4PositionBootstrap",
 		transferWorkflowTypeName: "UniswapV4PosmTransferBackfill",
 		// uniswapV4Factory.MetricPrefix()'s value: the backfill's rows have to land
@@ -41,9 +51,9 @@ func TestWorkerConfig_NamesTheServiceTheAlertSelectorsMatch(t *testing.T) {
 	for _, chainID := range []string{"1", "8453"} {
 		t.Run(chainID, func(t *testing.T) {
 			t.Setenv("CHAIN_ID", chainID)
-			taskQueue, err := taskQueueName()
+			taskQueue, err := chainutil.TaskQueueName(ethereumQueueName)
 			if err != nil {
-				t.Fatalf("taskQueueName(): %v", err)
+				t.Fatalf("TaskQueueName: %v", err)
 			}
 
 			cfg := (&bootstrapWorker{}).workerConfig(taskQueue, "postgres://unused/unused")

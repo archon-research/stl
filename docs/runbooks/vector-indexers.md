@@ -1887,12 +1887,16 @@ registry from the database, and pins its own finalized head. The equivalent CLI
 call for the positions:
 
 ```bash
+# --task-queue is mainnet's; off mainnet it is <chain>-uniswap-v4-position-bootstrap,
+# the chain's own Deployment name. Starting a run on mainnet's queue snapshots
+# mainnet, whichever chain you meant.
 temporal workflow start --namespace vector \
   --task-queue uniswap-v4-position-bootstrap --type UniswapV4PositionBootstrap \
   --workflow-id uniswap-v4-position-bootstrap-2026-09-14
 ```
 
-And for the posm transfers — same queue, its own type, its own ID:
+And for the posm transfers — same queue as the positions on that chain, its own
+type, its own ID:
 
 ```bash
 temporal workflow start --namespace vector \
@@ -2124,12 +2128,13 @@ natural key is `(chain_id, pool_id)` and never `pool_id` alone).
    value.
 3. **Kubernetes** — copy `k8s/base/uniswap-v4-indexer/` to
    `k8s/base/<chain>-uniswap-v4-indexer/`, changing only the names, where
-   `<chain>` is the `entity.ChainName` value verbatim (`base`, `avalanche-c`):
-   that name is what the Down and Stalled rules derive their `chain` label
-   from, and the `app` label must equal the Deployment name. 43114 is the one
-   chain whose `entity.ChainName` (`avalanche-c`) differs from its k8s prefix
-   (`avalanche-`); the rules map `avalanche-` onto `avalanche-c`, so either name
-   works there. Keep `image:
+   `<chain>` is the `chainutil.ChainSlug` value (`base`, `avalanche`) — the
+   name every deployed resource in the fleet is built from, and the one the
+   Down and Stalled rules derive their `chain` label from. The `app` label must
+   equal the Deployment name. Do not use `entity.ChainName` here: that is the
+   `chain` *metric label* the worker emits, and for 43114 it is `avalanche-c`
+   while every Deployment is `avalanche-*`. The rules bridge the two, so the
+   indexer tolerates either name — the bootstrap worker in step 5 does not. Keep `image:
    dex-indexer`: the roster already aliases it for the three DEX bases, so
    there is no `k8s/image-roster.txt` change (rename the image key and it is a
    new alias on that line, never a new line). Add its ConfigMap with the same
@@ -2141,8 +2146,12 @@ natural key is `(chain_id, pool_id)` and never `pool_id` alone).
 4. **Alerts** — nothing to copy: every rule in the group is chain-generic. On
    the first deploy confirm that
    `kube_deployment_status_replicas_available{deployment="<chain>-uniswap-v4-indexer"}`
-   exists and that `uniswap_v4_blocks_processed_total{chain="<chain>"}` carries
-   the same chain value; if they differ, the naming rule was not followed and
+   exists and that the alerts' derived `chain` label equals the one
+   `uniswap_v4_blocks_processed_total` carries. The Deployment prefix and that
+   label are the same string for every chain but 43114, where the Deployment is
+   `avalanche-*` and the label is `avalanche-c` by design — which is what the
+   third `label_replace` exists for. A mismatch the rules do not bridge means
+   the naming rule was not followed, and
    `VectorUniswapV4IndexerStalled` will fire on a phantom chain.
 5. **Bootstrap** — a second chain needs its own worker Deployment, the
    `block-republisher` shape: copy `k8s/base/uniswap-v4-position-bootstrap/` to
@@ -2331,9 +2340,12 @@ crash-loop a routine failure mode here, not an exotic one.
 
 kube-state knows nothing about chains and exports no Deployment labels, so
 `chain` is derived from the Deployment name: the bare `uniswap-v4-indexer` is
-mainnet and every other chain's Deployment is `<chain>-uniswap-v4-indexer` with
-the `entity.ChainName` value verbatim (`base-uniswap-v4-indexer`,
-`avalanche-c-uniswap-v4-indexer`), so the derived label equals the `chain` the
+mainnet and every other chain's Deployment is `<chain>-uniswap-v4-indexer`,
+where `<chain>` is the `chainutil.ChainSlug` value every deployed resource is
+named from (`base-uniswap-v4-indexer`, `avalanche-uniswap-v4-indexer`). The
+worker labels its own series with `entity.ChainName` instead, and the two agree
+on every chain but 43114 (`avalanche` against `avalanche-c`), which the rule's
+third `label_replace` bridges — so the derived label equals the `chain` the
 worker emits on its own series. One rule covers every chain; a new chain gets a
 Deployment that follows the naming rule, never a copy of this rule
 ([Adding a chain](#adding-a-chain)).
@@ -2380,7 +2392,9 @@ it.
 
 ### Verify recovery
 
-`kube_deployment_status_replicas_available{deployment="$DEPLOY"} >= 1`, and the
+`kube_deployment_status_replicas_available{deployment=~"([a-z0-9-]+-)?uniswap-v4-indexer"} >= 1`
+(a PromQL matcher, so the chain's Deployment is named or matched — nothing
+expands `$DEPLOY` in Mimir), and the
 pod logs show the `uniswap-v4-indexer started` line with a non-zero `pools`
 count.
 
@@ -2410,7 +2424,8 @@ never a quiet market.
 The zero-fill comes from kube-state-metrics, which knows nothing about chains,
 so the rule derives `chain` from the Deployment name exactly as
 [`VectorUniswapV4IndexerDown`](#vectoruniswapv4indexerdown) does (bare name =
-mainnet, otherwise the `entity.ChainName` prefix) and joins both the zero-fill
+mainnet, otherwise the `ChainSlug` prefix, mapped onto the worker's
+`entity.ChainName` for 43114) and joins both the zero-fill
 and the replica gate `on (chain, cluster)` against the worker's own `chain`
 label. That is what lets one chain reach zero on its own series while another
 chain's Deployment keeps running, and what keeps a dead second-chain pod in

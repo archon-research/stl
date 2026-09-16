@@ -37,29 +37,11 @@ const (
 	// worker's RPC fallback covers a consumer that arrives after it expires.
 	cacheTTL = 2 * time.Hour
 
-	// ethereumQueueName is what an Ethereum deployment polls; every other chain
-	// prefixes it with its own name, the way its Deployment is named.
+	// ethereumQueueName is the base chainutil.TaskQueueName builds this
+	// deployment's queue from: Ethereum polls it bare, every other chain prefixes
+	// it with the chain's slug, the way its Deployment is named.
 	ethereumQueueName = "block-republisher"
-	ethereumChain     = "ethereum"
 )
-
-// taskQueueName is the Temporal task queue this deployment polls, which is also
-// its OTel service name and its Deployment name — the alerts and the runbook
-// select on all three. A run is per chain, so each chain has its own queue.
-func taskQueueName() (string, error) {
-	chainID, err := chainutil.RequireChainID()
-	if err != nil {
-		return "", err
-	}
-	chain, err := chainutil.ChainSlug(int64(chainID))
-	if err != nil {
-		return "", err
-	}
-	if chain == ethereumChain {
-		return ethereumQueueName, nil
-	}
-	return chain + "-" + ethereumQueueName, nil
-}
 
 func loadConfig() (config, error) {
 	chainID, err := chainutil.RequireChainID()

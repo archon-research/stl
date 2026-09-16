@@ -61,6 +61,33 @@ func ChainSlug(chainID int64) (string, error) {
 	return chainName, nil
 }
 
+// ethereumChainSlug is the one slug that is not prefixed onto a resource name:
+// Ethereum's deployments carry the bare name every single-chain service had
+// before the fleet became per-chain.
+const ethereumChainSlug = "ethereum"
+
+// TaskQueueName is the Temporal task queue a deployment of base polls, which is
+// also its Deployment name and its OTel service name — alerts and runbooks
+// select on all three. Ethereum polls the bare name and every other chain
+// prefixes it with the chain's slug, so a run started for one chain can land on
+// no other chain's worker. The slug is resolved for every chain, including
+// Ethereum, so an unwatched chain fails here rather than polling a queue no
+// operator can find.
+func TaskQueueName(base string) (string, error) {
+	chainID, err := RequireChainID()
+	if err != nil {
+		return "", err
+	}
+	chain, err := ChainSlug(int64(chainID))
+	if err != nil {
+		return "", err
+	}
+	if chain == ethereumChainSlug {
+		return base, nil
+	}
+	return chain + "-" + base, nil
+}
+
 // ValidateS3BucketForChain checks that the S3 bucket name has the expected prefix
 // for the given chain ID and deployment environment. This prevents accidentally
 // reading from or writing to the wrong chain's bucket.

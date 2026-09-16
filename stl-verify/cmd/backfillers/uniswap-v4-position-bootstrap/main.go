@@ -53,6 +53,10 @@
 //	  --task-queue uniswap-v4-position-bootstrap --type UniswapV4PositionBootstrap \
 //	  --workflow-id uniswap-v4-position-bootstrap-<date>
 //
+// The queue above is mainnet's. Every other chain's worker polls
+// <chain>-uniswap-v4-position-bootstrap, built from its CHAIN_ID by
+// chainutil.TaskQueueName, which is also its Deployment name.
+//
 // The workflow ID is the concurrency guard: Temporal rejects a duplicate while a
 // run with that ID is in flight. It is per ID, not per queue, so the two workflow
 // types can run at once — they write different tables.
@@ -158,7 +162,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("startup configuration: %w", err)
 	}
 
-	taskQueue, err := taskQueueName()
+	taskQueue, err := chainutil.TaskQueueName(ethereumQueueName)
 	if err != nil {
 		return fmt.Errorf("resolving the task queue: %w", err)
 	}
@@ -422,7 +426,7 @@ func newMulticaller(
 		return nil, nil, fmt.Errorf("creating the multicall client: %w", err)
 	}
 
-	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.bootstrap.ChainID, int64(buildID), ethereumQueueName)
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.bootstrap.ChainID, int64(buildID), archiveSource)
 	if err != nil {
 		ethClient.Close()
 		return nil, nil, err
