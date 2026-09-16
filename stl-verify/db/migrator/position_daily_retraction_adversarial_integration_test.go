@@ -24,10 +24,11 @@ func (f *positionDailyFixture) retractKeyed(id, srcDate, stampDate string, block
 		INSERT INTO position_daily_observation
 		    (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
 		     block_number, block_version, processing_version, block_timestamp, projection, build_id,
-		     run_id, deal_type, is_retracted, correction_seq)
+		     run_id, deal_type, is_retracted, correction_seq, retraction_ticket, retraction_reason)
 		SELECT d.position_id, $3::date, d.chain_id, d.protocol_id, d.instrument_key, d.holder_id,
 		       d.quantity, $4::bigint, $5::int, $6::int, $7::timestamptz,
-		       d.projection, d.build_id, d.run_id, d.deal_type, TRUE, $8::int
+		       d.projection, d.build_id, d.run_id, d.deal_type, TRUE, $8::int,
+		       'VEC-636', 'test: an explicitly aimed retraction'
 		  FROM position_daily_observation d
 		 WHERE d.position_id = sha256($1::bytea) AND d.as_of_date = $2
 		 ORDER BY d.block_number DESC, d.block_version DESC, d.processing_version DESC,
@@ -281,10 +282,11 @@ func TestPositionDailyRetractionClosesTheMovedDayGap(t *testing.T) {
 		INSERT INTO position_daily_observation
 		    (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
 		     block_number, block_version, processing_version, block_timestamp, projection, build_id,
-		     run_id, deal_type, is_retracted, correction_seq)
+		     run_id, deal_type, is_retracted, correction_seq, retraction_ticket, retraction_reason)
 		SELECT d.position_id, d.as_of_date, d.chain_id, d.protocol_id, d.instrument_key, d.holder_id,
 		       d.quantity, d.block_number, d.block_version, d.processing_version, d.block_timestamp,
-		       d.projection, d.build_id, d.run_id, d.deal_type, TRUE, d.correction_seq + 1
+		       d.projection, d.build_id, d.run_id, d.deal_type, TRUE, d.correction_seq + 1,
+		       'VEC-636', 'test: the day the correction moved away from'
 		  FROM position_daily_observation d
 		 WHERE d.instrument_key = $1 AND d.as_of_date = '2026-06-02'
 		 ORDER BY d.block_number DESC, d.block_version DESC, d.processing_version DESC,
@@ -356,5 +358,37 @@ func retractionSquatCase(t *testing.T, f *positionDailyFixture) {
 	}
 	if got := f.dayQty(id, date); got != 33 {
 		t.Errorf("the day reads %d, want 33 -- a genuine correction above the retraction must win", got)
+	}
+}
+
+// Every position_daily object carries a COMMENT. A migration that DROPs and re-creates a view takes
+// its COMMENT with it, and nothing else in this package notices -- which is exactly what happened
+// when the retraction columns forced position_daily to be rebuilt.
+func TestPositionDailyObjectsAreDocumented(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	for _, o := range []struct{ kind, name string }{
+		{"table", "position_daily_observation"},
+		{"view", "position_daily"},
+		{"view", "position_daily_anomaly"},
+		{"function", "position_daily_as_of"},
+		{"function", "position_daily_as_of_bound"},
+		{"procedure", "crystallize_position_daily"},
+		{"procedure", "retract_position_daily"},
+	} {
+		t.Run(o.name, func(t *testing.T) {
+			var comment *string
+			q := `SELECT obj_description(($1 || '')::regclass, 'pg_class')`
+			if o.kind == "function" || o.kind == "procedure" {
+				q = `SELECT obj_description(p.oid, 'pg_proc') FROM pg_proc p
+				      JOIN pg_namespace n ON n.oid = p.pronamespace
+				     WHERE n.nspname = 'public' AND p.proname = $1`
+			}
+			if err := f.pool.QueryRow(f.ctx, q, o.name).Scan(&comment); err != nil {
+				t.Fatalf("read the comment on %s %s: %v", o.kind, o.name, err)
+			}
+			if comment == nil || *comment == "" {
+				t.Errorf("%s %s carries no COMMENT; a DROP or a re-create dropped it", o.kind, o.name)
+			}
+		})
 	}
 }

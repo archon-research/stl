@@ -13,7 +13,15 @@ import (
 // next correction crystallizes to, and the writer's ON CONFLICT DO NOTHING would drop it.
 func (f *positionDailyFixture) retract(id, date string) {
 	f.t.Helper()
-	f.retractAt(id, date, "DESC")
+	var appended int64
+	if err := f.pool.QueryRow(f.ctx,
+		`CALL retract_position_daily(sha256($1::bytea), $2, 'VEC-636', 'test: the key should never have existed', NULL)`,
+		id, date).Scan(&appended); err != nil {
+		f.t.Fatalf("retract %s on %s: %v", id, date, err)
+	}
+	if appended != 1 {
+		f.t.Fatalf("retract %s on %s appended %d, want 1", id, date, appended)
+	}
 }
 
 // retractLoser retracts the day's OLDEST row instead of its winner: the control for a retraction
@@ -30,10 +38,11 @@ func (f *positionDailyFixture) retractAt(id, date, dir string) {
 		INSERT INTO position_daily_observation
 		    (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
 		     block_number, block_version, processing_version, block_timestamp, projection, build_id,
-		     run_id, deal_type, is_retracted, correction_seq)
+		     run_id, deal_type, is_retracted, correction_seq, retraction_ticket, retraction_reason)
 		SELECT d.position_id, d.as_of_date, d.chain_id, d.protocol_id, d.instrument_key, d.holder_id,
 		       d.quantity, d.block_number, d.block_version, d.processing_version, d.block_timestamp,
-		       d.projection, d.build_id, d.run_id, d.deal_type, TRUE, d.correction_seq + 1
+		       d.projection, d.build_id, d.run_id, d.deal_type, TRUE, d.correction_seq + 1,
+		       'VEC-636', 'test: aimed below the winner on purpose'
 		  FROM position_daily_observation d
 		 WHERE d.position_id = sha256($1::bytea) AND d.as_of_date = $2
 		 ORDER BY d.block_number ` + dir + `, d.block_version ` + dir + `, d.processing_version ` + dir + `,

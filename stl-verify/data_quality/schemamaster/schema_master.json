@@ -1142,6 +1142,14 @@
       "type": "numeric",
       "class": "S"
     },
+    "retraction_reason": {
+      "type": "text",
+      "class": "A"
+    },
+    "retraction_ticket": {
+      "type": "text",
+      "class": "A"
+    },
     "rewind_count": {
       "type": "int8",
       "class": "S",
