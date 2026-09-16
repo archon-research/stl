@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -107,15 +108,21 @@ func TestRetractPositionDaily(t *testing.T) {
 
 	for _, tc := range []struct{ name, ticket, reason string }{
 		{"a blank ticket", "  ", "why"},
-		{"a null ticket", "", "why"},
+		{"an empty ticket", "", "why"},
 		{"a blank reason", "VEC-636", " "},
 	} {
 		t.Run("refuses "+tc.name, func(t *testing.T) {
 			id := "corr-attr-" + strings.ReplaceAll(tc.name, " ", "-")
 			f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
 			f.crystallize()
-			if _, err := f.callRetract(id, date, tc.ticket, tc.reason); err == nil {
+			// P0001 is the procedure's own raise. Any other error would mean the table caught it
+			// instead, which is a different guarantee.
+			_, err := f.callRetract(id, date, tc.ticket, tc.reason)
+			var pgErr *pgconn.PgError
+			if err == nil {
 				t.Errorf("accepted %s; an unattributed withdrawal is not auditable", tc.name)
+			} else if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
+				t.Errorf("%s failed with %v, want the procedure's own raise (P0001)", tc.name, err)
 			}
 			if !f.dayPresent(id, date) {
 				t.Errorf("the day was withdrawn by a call that should have been refused")
@@ -148,8 +155,8 @@ func TestRetractPositionDaily(t *testing.T) {
 			var pgErr *pgconn.PgError
 			if err == nil {
 				t.Errorf("%s was accepted", tc.name)
-			} else if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
-				t.Errorf("%s failed with %v, want a check_violation (23514)", tc.name, err)
+			} else if !errors.As(err, &pgErr) || pgErr.ConstraintName != "position_daily_observation_retraction_attribution_chk" {
+				t.Errorf("%s failed with %v (constraint %q), want the attribution check", tc.name, err, pgErr.ConstraintName)
 			}
 		}
 	})
@@ -291,9 +298,37 @@ func TestPositionDailyCorrectionEdges(t *testing.T) {
 		}
 	})
 
-	// The CHECK has to hold the same line as the procedure, or a migration can write a tombstone
-	// whose attribution is whitespace.
-	t.Run("the table refuses blank attribution", func(t *testing.T) {
+	// Each blank leg on its own: covering them only together makes either one redundant.
+	for _, tc := range []struct{ name, ticket, reason string }{
+		{"a blank ticket", "'  '", "'why'"},
+		{"a blank reason", "'VEC-636'", "'  '"},
+	} {
+		t.Run("the table refuses "+tc.name, func(t *testing.T) {
+			id := "edge-" + strings.ReplaceAll(tc.name, " ", "-")
+			f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+			f.crystallize()
+			_, err := f.pool.Exec(f.ctx, `
+				INSERT INTO position_daily_observation
+				    (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
+				     block_number, block_version, processing_version, block_timestamp, projection, build_id,
+				     run_id, deal_type, is_retracted, correction_seq, retraction_ticket, retraction_reason)
+				SELECT d.position_id, d.as_of_date, d.chain_id, d.protocol_id, d.instrument_key, d.holder_id,
+				       d.quantity, d.block_number, d.block_version, d.processing_version, d.block_timestamp,
+				       d.projection, d.build_id, d.run_id, d.deal_type, TRUE, d.correction_seq + 1,
+				       `+tc.ticket+`, `+tc.reason+`
+				  FROM position_daily_observation d
+				 WHERE d.position_id = sha256($1::bytea) AND d.as_of_date = $2
+				 ORDER BY d.correction_seq DESC LIMIT 1`, id, date)
+			var pgErr *pgconn.PgError
+			if err == nil {
+				t.Errorf("a tombstone with %s was accepted", tc.name)
+			} else if !errors.As(err, &pgErr) || pgErr.ConstraintName != "position_daily_observation_retraction_attribution_chk" {
+				t.Errorf("failed with %v (constraint %q), want the attribution check", err, pgErr.ConstraintName)
+			}
+		})
+	}
+
+	t.Run("the table refuses blank attribution on both legs", func(t *testing.T) {
 		const id = "edge-blank"
 		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
 		f.crystallize()
@@ -311,8 +346,8 @@ func TestPositionDailyCorrectionEdges(t *testing.T) {
 		var pgErr *pgconn.PgError
 		if err == nil {
 			t.Errorf("a tombstone with whitespace attribution was accepted")
-		} else if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
-			t.Errorf("failed with %v, want a check_violation (23514)", err)
+		} else if !errors.As(err, &pgErr) || pgErr.ConstraintName != "position_daily_observation_retraction_attribution_chk" {
+			t.Errorf("failed with %v (constraint %q), want the attribution check", err, pgErr.ConstraintName)
 		}
 	})
 
@@ -342,6 +377,142 @@ func TestPositionDailyCorrectionEdges(t *testing.T) {
 		if got := reasonsOf(f.anomalies(id)); len(got) != 1 || got[0] != "stale_day" {
 			t.Errorf("the view reports %v, want exactly [stale_day]: the spine's winner differs only "+
 				"in block_timestamp", got)
+		}
+	})
+}
+
+// The lock the procedure takes before it reads the day's winner. Without it, two callers can both
+// read a live winner and each copy the other's tombstone.
+func TestRetractPositionDailyTakesTheKeyLock(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	const id, date = "lock-key", "2026-01-01"
+	f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+	f.crystallize()
+
+	// A second connection holds the same lock the procedure will ask for.
+	holder, err := f.pool.Acquire(f.ctx)
+	if err != nil {
+		t.Fatalf("acquire a second connection: %v", err)
+	}
+	defer holder.Release()
+	if _, err := holder.Exec(f.ctx, `BEGIN`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Exec(f.ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('position_daily:' || encode(sha256($1::bytea), 'hex') || ':' || $2::date::text))`,
+		id, date); err != nil {
+		t.Fatalf("take the key lock: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		var n int64
+		done <- f.pool.QueryRow(f.ctx,
+			`CALL retract_position_daily(sha256($1::bytea), $2, 'VEC-636', 'blocked on the key lock', NULL)`,
+			id, date).Scan(&n)
+	}()
+
+	// It must be waiting, not finished.
+	select {
+	case err := <-done:
+		t.Fatalf("the retraction finished while another session held the key lock (err=%v); it does not take the lock", err)
+	case <-time.After(2 * time.Second):
+	}
+
+	var waiting bool
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+		                WHERE query LIKE '%retract_position_daily%' AND wait_event_type = 'Lock')`).Scan(&waiting); err != nil {
+		t.Fatal(err)
+	}
+	if !waiting {
+		t.Errorf("no session is waiting on a lock; the retraction is blocked on something else")
+	}
+
+	if _, err := holder.Exec(f.ctx, `ROLLBACK`); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("the retraction failed once the lock was free: %v", err)
+	}
+	if f.dayPresent(id, date) {
+		t.Errorf("the day survived a retraction that reported success")
+	}
+}
+
+// The cases the anomaly view emits that nothing else reaches.
+func TestPositionDailyAnomalyBranches(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	const date = "2026-01-01"
+
+	// A spine row re-stamped in place. No writer here can repair it, so the view has to say so.
+	t.Run("projection_drift when the spine row is re-stamped", func(t *testing.T) {
+		const id = "br-drift"
+		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		if got := f.anomalies(id); len(got) != 0 {
+			t.Fatalf("the day reports %v before the re-stamp", got)
+		}
+		if _, err := f.pool.Exec(f.ctx,
+			`UPDATE position_state SET projection = 'public.proj-restamped' WHERE position_id = sha256($1::bytea)`,
+			id); err != nil {
+			t.Fatalf("re-stamp the spine row: %v", err)
+		}
+		if got := reasonsOf(f.anomalies(id)); len(got) != 1 || got[0] != "projection_drift" {
+			t.Errorf("the view reports %v, want exactly [projection_drift]", got)
+		}
+	})
+
+	// A correction on the same date is stale, not moved. moved_day must only fire when the block
+	// actually changed date.
+	t.Run("a same-date correction is stale, not moved", func(t *testing.T) {
+		const id = "br-samedate"
+		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		f.observe(id, dailyObs{qty: 20, block: 100, pv: 1, ts: "2026-01-01T02:00:00Z", dealType: "LOAN"})
+		if got := reasonsOf(f.anomalies(id)); len(got) != 1 || got[0] != "stale_day" {
+			t.Errorf("the view reports %v, want exactly [stale_day]", got)
+		}
+	})
+
+	// A reorg is a different block_version, so moved_day must not claim it.
+	t.Run("a reorg onto another date is not moved_day", func(t *testing.T) {
+		const id = "br-reorg"
+		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-02T00:00:05Z", dealType: "LOAN"})
+		f.crystallize()
+		f.observe(id, dailyObs{qty: 20, block: 100, bv: 1, ts: "2026-01-01T23:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		for _, a := range f.anomalies(id) {
+			if strings.HasPrefix(a, "moved_day") {
+				t.Errorf("the view reports %q; moved_day is for a processing_version correction at the same block_version", a)
+			}
+		}
+	})
+
+	// A tombstone written later but aimed lower never withdrew the day, so it is not a resurrection.
+	t.Run("a later but lower tombstone is not a resurrection", func(t *testing.T) {
+		const id = "br-lower"
+		f.observe(id, dailyObs{qty: 10, block: 100, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		f.observe(id, dailyObs{qty: 20, block: 200, ts: "2026-01-01T05:00:00Z", dealType: "LOAN"})
+		f.crystallize()
+		f.retractLoser(id, date)
+		if got := reasonsOf(f.anomalies(id)); len(got) != 0 {
+			t.Errorf("the view reports %v for a tombstone aimed below the winner, want nothing", got)
+		}
+	})
+
+	// Both app roles read the view, or a data-quality consumer gets permission denied in prod.
+	t.Run("both app roles can read the view", func(t *testing.T) {
+		for _, role := range []string{"stl_readonly", "stl_readwrite"} {
+			var ok bool
+			if err := f.pool.QueryRow(f.ctx,
+				`SELECT has_table_privilege($1, 'position_daily_anomaly', 'SELECT')`, role).Scan(&ok); err != nil {
+				t.Fatalf("read %s's privilege: %v", role, err)
+			}
+			if !ok {
+				t.Errorf("%s cannot SELECT position_daily_anomaly", role)
+			}
 		}
 	})
 }
