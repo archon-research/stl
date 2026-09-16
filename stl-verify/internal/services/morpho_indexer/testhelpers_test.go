@@ -953,6 +953,26 @@ func (h *serviceTestHarness) setupPositionEventMulticall() {
 	}
 }
 
+// stubUnregisteredAdapterAllocation makes an Allocate for testAdapterAddr look unanswered:
+// the type probe classifies, realAssets answers, the membership read finds nothing.
+func (h *serviceTestHarness) stubUnregisteredAdapterAllocation(adapterType entity.MorphoAdapterType, realAssets *big.Int) {
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
+			return h.adapterProbeResults(adapterType), nil
+		}
+		return nil, errTestUnexpectedCall(calls)
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(realAssets)}}, nil
+		}
+		return nil, errTestUnexpectedCall(calls)
+	}
+	h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
+		return nil, nil
+	}
+}
+
 // setupMarketExistsInDB configures morphoRepo to return a market with the given ID.
 func (h *serviceTestHarness) setupMarketExistsInDB(marketID [32]byte, dbID int64) {
 	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ int64, id common.Hash) (*entity.MorphoMarket, error) {
