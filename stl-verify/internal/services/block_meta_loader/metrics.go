@@ -1,0 +1,52 @@
+package block_meta_loader
+
+import (
+	"context"
+	"fmt"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+)
+
+const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/block_meta_loader"
+
+// loaderMetrics records how much work one run found. block_meta_worklist is an UNLOGGED table a
+// completed run clears, so its size is never observable from outside a run: what a run pages off it
+// is the pending set, and that is the series the growth tripwire reads.
+//
+// recordPaged is nil-receiver-safe, so the service runs unchanged where telemetry is not wired.
+type loaderMetrics struct {
+	worklistRowsPaged metric.Int64Counter
+}
+
+func newLoaderMetrics(chainID int64) (*loaderMetrics, error) {
+	meter := otel.GetMeterProvider().Meter(instrumentationName)
+
+	paged, err := meter.Int64Counter(
+		"block_meta.worklist.rows.paged",
+		metric.WithDescription("Rows taken off block_meta_worklist by a run, i.e. the pending set for that chain"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating block_meta.worklist.rows.paged counter: %w", err)
+	}
+
+	m := &loaderMetrics{worklistRowsPaged: paged}
+	// Seeded so the series exists from process start: the tripwire reads a rate, and an unseeded
+	// counter first appears at its first real increment (telemetry.SeedCounter carries the why).
+	telemetry.SeedCounter(context.Background(), paged, chainAttr(chainID))
+	return m, nil
+}
+
+func chainAttr(chainID int64) attribute.KeyValue {
+	return attribute.Int64("chain_id", chainID)
+}
+
+func (m *loaderMetrics) recordPaged(ctx context.Context, chainID int64, n int) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.worklistRowsPaged.Add(ctx, int64(n), metric.WithAttributes(chainAttr(chainID)))
+}
