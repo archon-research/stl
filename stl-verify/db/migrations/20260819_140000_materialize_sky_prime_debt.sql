@@ -51,9 +51,11 @@ COMMENT ON VIEW position_sky_prime_debt IS '[Operational] VEC-406 projection: Sk
 
 -- Names every snapshot the view cannot resolve, then delegates to the shared materializer.
 DROP FUNCTION IF EXISTS materialize_sky_prime_debt(integer);
+DROP FUNCTION IF EXISTS materialize_sky_prime_debt(integer, bigint);
 
 CREATE OR REPLACE FUNCTION materialize_sky_prime_debt(p_build_id integer DEFAULT 0,
-                                                      p_run_id bigint DEFAULT NULL) RETURNS bigint
+                                                      p_run_id bigint DEFAULT NULL,
+                                                      p_window interval DEFAULT NULL) RETURNS bigint
     LANGUAGE plpgsql
     SET search_path FROM CURRENT
     -- Pinned to the materializer's own setting, so the check cannot read fewer chunks than the run.
@@ -80,10 +82,10 @@ BEGIN
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'materialize_sky_prime_debt: unresolved inputs, refusing to run: %', v_bad;
     END IF;
-    RETURN public.materialize_position_projection('public.position_sky_prime_debt'::regclass, p_build_id, p_run_id);
+    RETURN public.materialize_position_projection('public.position_sky_prime_debt'::regclass, p_build_id, p_run_id, p_window);
 END
 $fn$;
 
-COMMENT ON FUNCTION materialize_sky_prime_debt(integer, bigint) IS '[Operational] VEC-406: materialize Sky prime debt into position_state via materialize_position_projection(position_sky_prime_debt), refusing by name a snapshot whose protocol_id has no protocol row, whose ilk_name is blank, padded or carries the '';'' key delimiter, or whose prime has a vault address that is not 20 bytes. Returns rows appended. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2).';
+COMMENT ON FUNCTION materialize_sky_prime_debt(integer, bigint, interval) IS '[Operational] VEC-406: materialize Sky prime debt into position_state via materialize_position_projection(position_sky_prime_debt), refusing by name a snapshot whose protocol_id has no protocol row, whose ilk_name is blank, padded or carries the '';'' key delimiter, or whose prime has a vault address that is not 20 bytes. Returns rows appended. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2). p_window is forwarded to the materializer, which bounds the batch it reads; against this view it filters rows without pruning chunks.';
 
 INSERT INTO migrations (filename) VALUES ('20260819_140000_materialize_sky_prime_debt.sql') ON CONFLICT (filename) DO NOTHING;
