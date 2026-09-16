@@ -2076,7 +2076,7 @@
     {
       "table": "prime_debt",
       "column": "synced_at",
-      "canonical": "block_timestamp",
+      "canonical": "snapshot_time",
       "action": "rename"
     },
     {
@@ -2290,6 +2290,11 @@
       "table": "prime_debt",
       "column": "chain_id",
       "const": 1
+    },
+    {
+      "table": "prime_debt",
+      "column": "block_timestamp",
+      "block_meta": true
     },
     {
       "table": "morpho_market_state",

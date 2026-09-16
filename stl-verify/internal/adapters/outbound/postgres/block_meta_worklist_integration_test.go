@@ -87,7 +87,9 @@ func TestWorkListWindowsCoverEveryReferencedBlock(t *testing.T) {
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM (
 		  SELECT sr.block_number FROM sparklend_reserve_data sr
-		    JOIN protocol p ON p.id = sr.protocol_id WHERE p.chain_id = 1) s`).Scan(&want); err != nil {
+		    JOIN protocol p ON p.id = sr.protocol_id WHERE p.chain_id = 1
+		  UNION
+		  SELECT pd.block_number FROM prime_debt pd) s`).Scan(&want); err != nil {
 		t.Fatalf("count referenced blocks: %v", err)
 	}
 	got := openList(t, ctx, pool, 1)
@@ -105,6 +107,38 @@ func TestWorkListWindowsCoverEveryReferencedBlock(t *testing.T) {
 	for _, b := range []int64{900000, 1000000, 1100000} {
 		if !seen[b] {
 			t.Errorf("block %d is missing; integer chunk ranges must order numerically, not as text", b)
+		}
+	}
+}
+
+// A table whose chain is a register constant is work like any other. prime_debt carries no chain
+// column and no config parent -- schema_master gives it chain 1 as a literal -- so its arm has to take
+// the chain from that constant. Before the const arm exists its blocks are simply absent from the list.
+func TestWorkListEnumeratesAConstChainArm(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	got := openList(t, ctx, pool, 1)
+	for _, b := range []int64{7000000, 7000005} {
+		if !slices.Contains(got, b) {
+			t.Errorf("block %d is referenced by prime_debt and is not in the work list; the const-chain arm is missing", b)
+		}
+	}
+}
+
+// The constant is a filter, not a label. A run for another chain must not sweep chain-1 rows into that
+// chain's work list, which would stamp block_meta rows against a chain whose archive never held them.
+func TestWorkListConstChainArmIsScopedToItsChain(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	for _, b := range openList(t, ctx, pool, 8453) {
+		if b >= 7000000 && b <= 7000005 {
+			t.Errorf("block %d is Sky's, on chain 1, and must not be work for chain 8453", b)
 		}
 	}
 }

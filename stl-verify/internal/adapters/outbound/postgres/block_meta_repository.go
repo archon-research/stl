@@ -54,31 +54,38 @@ func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID bui
 // from it silently: a table gaining a fill and no arm is never enumerated, every one of its values
 // resolves NULL, and the conformance check still passes because the declaration alone satisfies it.
 //
-// Chain resolution comes from the same register. A table with a chain_id fill reaches chain through its
-// parent (borrower -> protocol.chain_id); one without carries chain_id natively. The partition column
-// is read from the live catalogue rather than declared, so a window can never be expressed on a column
-// the table is no longer partitioned by.
+// Chain resolution comes from the same register, in the three shapes a chain_id fill can take: through
+// a config parent (borrower -> protocol.chain_id), as a literal for a table whose chain is fixed
+// (prime_debt is Sky on chain 1 and has no chain column to join), or natively when there is no fill at
+// all. The partition column is read from the live catalogue rather than declared, so a window can never
+// be expressed on a column the table is no longer partitioned by.
 type workListArm struct {
 	table   string // the referencing table, and the hypertable whose chunks give the windows
 	partCol string // its partition column, read from the catalogue; the window is expressed on it alone
 	sql     string // $1 = chain id; %s = the window predicate on partCol
 }
 
-// armSQL builds one arm. parent is empty for a table carrying chain_id natively; otherwise the arm
-// joins parent on parentRef = table.parentKey and takes chain from there.
-func armSQL(table, parent, parentKey, parentRef string) string {
+// armSQL builds one arm, taking chain from the table's chain_id fill: a join to the config parent, the
+// fill's literal, or the table's own column when it declares no fill.
+//
+// The same expression is both selected and compared to $1, so a constant arm reads "1 = $1" and
+// contributes nothing to another chain's run rather than labelling Sky's blocks with that chain.
+func armSQL(table string, chain schemamaster.Fill) string {
 	const shape = `
 		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
-		SELECT %s.chain_id, t.block_number, t.block_version
+		SELECT %s, t.block_number, t.block_version
 		  FROM %s t%s
-		 WHERE %s.chain_id = $1 AND %%s
+		 WHERE %s = $1 AND %%s
 		ON CONFLICT DO NOTHING`
-	src, join := "t", ""
-	if parent != "" {
-		src = "p"
-		join = fmt.Sprintf(" JOIN %s p ON p.%s = t.%s", quoteIdent(parent), quoteIdent(parentRef), quoteIdent(parentKey))
+	chainExpr, join := "t.chain_id", ""
+	switch {
+	case chain.Parent != "":
+		chainExpr = "p.chain_id"
+		join = fmt.Sprintf(" JOIN %s p ON p.%s = t.%s", quoteIdent(chain.Parent), quoteIdent(chain.Ref), quoteIdent(chain.Key))
+	case chain.Const != nil:
+		chainExpr = strconv.Itoa(*chain.Const)
 	}
-	return fmt.Sprintf(shape, src, quoteIdent(table), join, src)
+	return fmt.Sprintf(shape, chainExpr, quoteIdent(table), join, chainExpr)
 }
 
 // quoteIdent quotes a catalogue identifier. Every value reaching it comes from schema_master.json or
@@ -96,7 +103,7 @@ func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, 
 	if err != nil {
 		return nil, fmt.Errorf("loading the column register: %w", err)
 	}
-	chainParent := map[string]schemamaster.Fill{}
+	chainFill := map[string]schemamaster.Fill{}
 	var tables []string
 	for _, f := range register.Fills {
 		if f.BlockMeta {
@@ -104,8 +111,8 @@ func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, 
 		}
 	}
 	for _, f := range register.Fills {
-		if f.Column == "chain_id" && f.Parent != "" {
-			chainParent[f.Table] = f
+		if f.Column == "chain_id" {
+			chainFill[f.Table] = f
 		}
 	}
 	if len(tables) == 0 {
@@ -120,11 +127,10 @@ func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, 
 		if err != nil {
 			return nil, err
 		}
-		f := chainParent[table]
 		arms = append(arms, workListArm{
 			table:   table,
 			partCol: "t." + quoteIdent(partCol),
-			sql:     armSQL(table, f.Parent, f.Key, f.Ref),
+			sql:     armSQL(table, chainFill[table]),
 		})
 	}
 	return arms, nil
