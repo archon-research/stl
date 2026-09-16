@@ -24,6 +24,10 @@ linters:
       lines: 80
       statements: 60
       ignore-comments: false
+    modernize:
+      disable:
+        - errorsastype
+        - reflecttypeassert
     # Hexagonal layering from AGENTS.md ("dependencies flow inward"), enforced
     # on direct imports: domain -> nothing internal; ports -> domain;
     # services -> ports + domain. Adapters are wired in cmd/, so only cmd/ and
