@@ -8,7 +8,6 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse
-from sqlalchemy import text
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLikeLiquidationParamsRepository
@@ -17,9 +16,10 @@ from app.adapters.postgres.backed_breakdown_repository_maple import MapleBackedB
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.core_model_results_reader import PostgresCoreModelResultsReader
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
-from app.adapters.postgres.engine import create_db_engine
+from app.adapters.postgres.engine import create_db_engine, wait_for_database
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.morpho_vault_allocations_reader import PostgresMorphoVaultAllocationsReader
+from app.adapters.postgres.prime_resolver_repository import PrimeResolverRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
 from app.adapters.postgres.reference_as_of import pinned_to
 from app.api.deps import require_analyst, require_viewer
@@ -219,8 +219,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             statement_cache_size=settings.db_statement_cache_size,
         )
         try:
-            async with engine.connect() as conn:
-                await conn.execute(text("SELECT 1"))
+            await wait_for_database(engine, deadline_seconds=settings.db_connect_retry_deadline_seconds)
 
             asset_to_rating = await resolve_receipt_token_mapping(raw_mapping, engine)
             # Published on app.state so every route resolves the same provider via
@@ -276,6 +275,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             app.state.crypto_lending_risk_service = crypto_lending_risk_service
             app.state.model_registry = model_registry
             app.state.receipt_token_lookup = receipt_token_repo
+            app.state.prime_resolver = PrimeResolverRepository(engine)
 
             # Beside the engine so it is disposed in the same finally. Absent
             # from app.state when auth is off, which the gates read as anonymous.

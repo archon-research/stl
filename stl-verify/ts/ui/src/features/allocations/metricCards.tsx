@@ -45,6 +45,10 @@ export type MetricChartSpec = {
   // Why the card has nothing to draw, for a card that cannot stand itself up
   // from a current value: without it a failed read plots as the empty state.
   errorMessage?: string | null;
+  // The latest bucket's own pricing coverage. Null once its total prices
+  // every position it knows about, so a caption only names counts when the
+  // total is partial (VEC-760).
+  coverage?: { pricedEntityCount: number; entityCount: number } | null;
   // Each draws a dashed limit line with a labelled edge. `showInTooltip` also
   // reports it at the cursor, in its own stroke — for a limit the series is
   // read directly against. Off by default: a limit the reader is not comparing

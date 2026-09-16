@@ -13,8 +13,18 @@ spec:
     metadata:
       labels:
         app: avalanche-watcher
+        archon.io/spread-group: chain-ingest
     spec:
       serviceAccountName: avalanche-watcher
+      # Soft spread across every chain-ingest pod (watchers + block republishers) so one
+      # node replacement cannot re-pack all chains onto a single new node. ORB-439.
+      topologySpreadConstraints:
+        - topologyKey: kubernetes.io/hostname
+          maxSkew: 1
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              archon.io/spread-group: chain-ingest
       containers:
         - name: avalanche-watcher
           # Image name used as the Kustomize images transformer key.

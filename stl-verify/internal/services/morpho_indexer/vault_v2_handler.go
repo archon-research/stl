@@ -92,8 +92,9 @@ func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaul
 // membershipObservation is one appended observation awaiting its counter, held
 // until the transaction that appended it commits.
 type membershipObservation struct {
-	adapterType *entity.MorphoAdapterType
-	observedVia entity.MembershipSource
+	adapterType      *entity.MorphoAdapterType
+	observedVia      entity.MembershipSource
+	atDiscoveryBlock *bool
 }
 
 // observeAdapterMembership records one observation about (vault, adapter), creating the
@@ -103,8 +104,10 @@ type membershipObservation struct {
 // An append is accumulated into recorded rather than counted, because this runs inside
 // the caller's transaction; the caller flushes with recordMembershipObservations once
 // that transaction has committed. An assertion that changes nothing accumulates nothing —
-// it is not an observation the log gained.
-func (s *Service) observeAdapterMembership(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, adapter common.Address, membership entity.MorphoAdapterMembership, recorded *[]membershipObservation) (int64, bool, error) {
+// it is not an observation the log gained, and the returned observation is nil.
+//
+// The returned pointer aliases the slice, so annotate it before accumulating another.
+func (s *Service) observeAdapterMembership(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, adapter common.Address, membership entity.MorphoAdapterMembership, recorded *[]membershipObservation) (int64, *membershipObservation, error) {
 	adapterID, appended, err := s.morphoRepo.ObserveAdapterMembership(ctx, tx, &entity.MorphoAdapterObservation{
 		Identity: entity.MorphoAdapterIdentity{
 			MorphoVaultID: vault.ID,
@@ -114,19 +117,20 @@ func (s *Service) observeAdapterMembership(ctx context.Context, tx pgx.Tx, vault
 		Membership: membership,
 	})
 	if err != nil {
-		return 0, false, fmt.Errorf("recording adapter %s membership at block %d: %w", adapter.Hex(), membership.BlockNumber, err)
+		return 0, nil, fmt.Errorf("recording adapter %s membership at block %d: %w", adapter.Hex(), membership.BlockNumber, err)
 	}
-	if appended {
-		*recorded = append(*recorded, membershipObservation{adapterType: membership.AdapterType, observedVia: membership.ObservedVia})
+	if !appended {
+		return adapterID, nil, nil
 	}
-	return adapterID, appended, nil
+	*recorded = append(*recorded, membershipObservation{adapterType: membership.AdapterType, observedVia: membership.ObservedVia})
+	return adapterID, &(*recorded)[len(*recorded)-1], nil
 }
 
 // recordMembershipObservations counts the observations a committed transaction
 // appended. Callers must not call it on a path that returned an error.
 func (s *Service) recordMembershipObservations(ctx context.Context, recorded []membershipObservation) {
 	for _, obs := range recorded {
-		s.telemetry.RecordAdapterMembershipObservation(ctx, obs.adapterType, obs.observedVia)
+		s.telemetry.RecordAdapterMembershipObservation(ctx, obs.adapterType, obs.observedVia, obs.atDiscoveryBlock)
 	}
 }
 
@@ -276,7 +280,7 @@ func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress co
 // ErrAdapterUnclassified — the event fails hard rather than defaulting a type; SQS
 // redelivers and the pre-transaction read re-probes.
 func (s *Service) assertAllocatedAdapterIsMember(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, at entity.BlockPosition, blockTimestamp time.Time, probedType *entity.MorphoAdapterType, recorded *[]membershipObservation) (int64, error) {
-	adapterID, appended, err := s.observeAdapterMembership(ctx, tx, vault, adapter, entity.MorphoAdapterMembership{
+	adapterID, observation, err := s.observeAdapterMembership(ctx, tx, vault, adapter, entity.MorphoAdapterMembership{
 		BlockNumber:  at.BlockNumber,
 		BlockVersion: at.BlockVersion,
 		LogIndex:     at.LogIndex,
@@ -292,12 +296,21 @@ func (s *Service) assertAllocatedAdapterIsMember(ctx context.Context, tx pgx.Tx,
 	if err != nil {
 		return 0, err
 	}
-	if appended {
-		s.logger.Warn("adapter membership inferred from an Allocate; no AddAdapter observed",
-			"vault", vaultAddress.Hex(), "adapter", adapter.Hex(), "block", at.BlockNumber)
-		if probedType != nil {
-			s.warnIfUnknownAdapterType(vaultAddress, adapter, *probedType, at.BlockNumber)
-		}
+	if observation == nil {
+		return adapterID, nil
+	}
+
+	enumerated, err := s.morphoRepo.AdapterSetEnumeratedAt(ctx, tx, adapterID, at)
+	if err != nil {
+		return 0, fmt.Errorf("classifying lazy registration of adapter %s at block %d: %w", adapter.Hex(), at.BlockNumber, err)
+	}
+	observation.atDiscoveryBlock = &enumerated
+
+	s.logger.Warn("adapter membership inferred from an Allocate; no AddAdapter observed",
+		"vault", vaultAddress.Hex(), "adapter", adapter.Hex(), "block", at.BlockNumber,
+		"at_discovery_block", enumerated)
+	if probedType != nil {
+		s.warnIfUnknownAdapterType(vaultAddress, adapter, *probedType, at.BlockNumber)
 	}
 	return adapterID, nil
 }

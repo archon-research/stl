@@ -235,7 +235,8 @@ async def _seed_morpho_vault_scenarios(db_url: str) -> None:
         # supply snapshot, as the share lookup's LATERAL join requires.
         prime_id = await conn.fetchval(
             """
-            INSERT INTO prime (name, vault_address) VALUES ('core-degradation-prime', $1)
+            INSERT INTO prime (external_id, name, vault_address)
+            VALUES (gen_random_uuid(), 'core-degradation-prime', $1)
             ON CONFLICT (name) DO UPDATE SET vault_address = EXCLUDED.vault_address RETURNING id
             """,
             bytes.fromhex(_PRIME_ID[2:]),

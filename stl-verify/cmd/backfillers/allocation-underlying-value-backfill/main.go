@@ -643,6 +643,13 @@ const candidateQuery = `
 	  -- overriding the version the insert supplied AFTER TimescaleDB resolved
 	  -- the conflict against it — which appends a duplicate primary key rather
 	  -- than deduplicating, and no error or row count reveals it (VEC-759).
+	  --
+	  -- The column list mirrors that branch's own lookup exactly, created_at
+	  -- included. created_at is the hypertable partition key, so matching it
+	  -- lets the planner prune chunks and keep the ordered created_at scan the
+	  -- LIMIT stops early on; without it the join degrades to a hash anti join
+	  -- under a blocking sort, and a pass cannot return a first row inside its
+	  -- activity timeout.
 	  AND NOT EXISTS (
 	      SELECT 1 FROM allocation_position b
 	      WHERE b.chain_id       = ap.chain_id
@@ -654,6 +661,7 @@ const candidateQuery = `
 	        AND b.tx_hash        = ap.tx_hash
 	        AND b.log_index      = ap.log_index
 	        AND b.direction      = ap.direction
+	        AND b.created_at     = ap.created_at
 	        AND b.build_id       = $5
 	  )
 	-- block_number/log_index only break ties for a deterministic scan order;

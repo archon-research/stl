@@ -2205,6 +2205,53 @@ func TestObserveAdapterMembership_AddBlockConvergesInEitherArrivalOrder(t *testi
 	}
 }
 
+// TestAdapterSetEnumeratedAt_SeparatesTheDiscoveryBlockFromAGap pins the read
+// VectorMorphoV2LazyAdapterRegistrations rests on. A vault discovered in the block it
+// allocates in seeds its enumeration at EndOfBlockLogIndex, so the allocation's own
+// block carries one; an adapter the enumeration never covered carries none, at that
+// block or any other.
+func TestAdapterSetEnumeratedAt_SeparatesTheDiscoveryBlockFromAGap(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x4a))
+
+	enumerated := adapterAddr(0x4b)
+	id, _ := fixture.observe(t, ctx, vaultID, enumerated,
+		assertedAt(3000, 0, entity.EndOfBlockLogIndex, adapterTypePtr(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromDiscovery))
+
+	gap := adapterAddr(0x4c)
+	gapID, _ := fixture.observe(t, ctx, vaultID, gap, addedAt(3000, 0, 11, entity.MorphoAdapterTypeMarketV1))
+
+	tests := []struct {
+		name      string
+		adapterID int64
+		at        entity.BlockPosition
+		want      bool
+	}{
+		{"the block the set was enumerated in", id, entity.BlockPosition{BlockNumber: 3000, BlockVersion: 0, LogIndex: 4}, true},
+		{"a later block the enumeration did not touch", id, entity.BlockPosition{BlockNumber: 3001, BlockVersion: 0, LogIndex: 4}, false},
+		{"a reorged version of the enumerated block", id, entity.BlockPosition{BlockNumber: 3000, BlockVersion: 1, LogIndex: 4}, false},
+		{"an adapter carrying only a mid-block transition", gapID, entity.BlockPosition{BlockNumber: 3000, BlockVersion: 0, LogIndex: 12}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx, err := fixture.pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("Begin: %v", err)
+			}
+			defer func() { _ = tx.Rollback(ctx) }()
+
+			got, err := fixture.repo.AdapterSetEnumeratedAt(ctx, tx, tt.adapterID, tt.at)
+			if err != nil {
+				t.Fatalf("AdapterSetEnumeratedAt: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("AdapterSetEnumeratedAt = %v, want %v: %s", got, tt.want, fixture.describeMembership(t, ctx, tt.adapterID))
+			}
+		})
+	}
+}
+
 // TestObserveAdapterMembership_AssertionThatChangesNothingAppendsNothing pins the
 // conditional that keeps a governance-rate table governance-rate. An Allocate proves
 // membership but witnesses no change, so once the log already says "member" at that
