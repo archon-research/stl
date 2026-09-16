@@ -1015,3 +1015,130 @@ func TestMapleLoanForwardsTheWriterRun(t *testing.T) {
 		}
 	}
 }
+
+// Where the close LANDS is the whole of the close contract, and nothing pinned it: the zero must sit at
+// the first cycle the loan is missing from, carry pv=0, and follow the LAST sighting rather than the
+// first. Peers must still be reporting there, or a truncated fetch reads as a repayment.
+func TestMapleLoanClosePlacement(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	f := seedMaple(ctx, t, pool, map[string]int{"gone": 1, "peer1": 1, "peer2": 1})
+	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
+
+	// Five cycles ten minutes apart. `gone` is reported at the first THREE, then vanishes.
+	inst := []string{
+		"2026-06-16T08:05:00Z", "2026-06-16T08:15:00Z", "2026-06-16T08:25:00Z",
+		"2026-06-16T08:35:00Z", "2026-06-16T08:45:00Z",
+	}
+	for i, ts := range inst {
+		if i < 3 {
+			f.cycle(t, "gone", ts, "500", 1)
+		}
+		f.cycle(t, "peer1", ts, "100", 1)
+		f.cycle(t, "peer2", ts, "200", 1)
+	}
+	f.mustRun(t)
+
+	rows := f.rows(t, "gone")
+	if len(rows) == 0 {
+		t.Fatal("the loan stored nothing, so every assertion below would pass vacuously")
+	}
+	last := rows[len(rows)-1]
+	if last.qty != "0" {
+		t.Fatalf("the final row is %s, not a close; rows=%d", last.qty, len(rows))
+	}
+	if last.pv != 0 {
+		t.Errorf("the close carries processing_version %d; want 0, which is what lets a later positive at that block win the DISTINCT ON", last.pv)
+	}
+
+	// The close must sit at the FOURTH cycle — the first one the loan is missing from — not the fifth,
+	// and not anywhere derived from the loan's first sighting.
+	var wantBN int64
+	if err := pool.QueryRow(ctx, `
+		SELECT b.block_number FROM block_meta b
+		WHERE b.chain_id = 1 AND b.block_timestamp <= $1::timestamptz
+		ORDER BY b.block_timestamp DESC, b.block_number DESC LIMIT 1`, inst[3]).Scan(&wantBN); err != nil {
+		t.Fatal(err)
+	}
+	if last.bn != wantBN {
+		t.Errorf("the close landed at block %d; want %d, the block behind the first cycle the loan is missing from (%s)",
+			last.bn, wantBN, inst[3])
+	}
+
+	// And the positives must be the three sightings, so last_synced_at is the LAST of them.
+	var positives int
+	for _, r := range rows {
+		if r.qty != "0" {
+			positives++
+		}
+	}
+	if positives == 0 {
+		t.Fatal("no positive rows stored; the fixture is not exercising the close path")
+	}
+	if got := rows[positives-1].bn; got >= last.bn {
+		t.Errorf("the last positive is at block %d and the close at %d; the close must follow every sighting", got, last.bn)
+	}
+}
+
+// One cycle after the last sighting is not yet a close; two is. Both sides of that boundary, since a
+// premature zero is unrepairable in an append-only table.
+func TestMapleLoanCloseNeedsExactlyTwoFollowingCycles(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		following int
+		wantClose bool
+	}{
+		{"one following cycle does not close", 1, false},
+		{"two following cycles close", 2, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool, cleanup := setupMigratedPostgres(ctx, t)
+			defer cleanup()
+			f := seedMaple(ctx, t, pool, map[string]int{"gone": 1, "peer1": 1})
+			f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
+			inst := []string{"2026-06-16T08:05:00Z", "2026-06-16T08:15:00Z", "2026-06-16T08:25:00Z"}
+			f.cycle(t, "gone", inst[0], "500", 1)
+			for i := 0; i <= c.following; i++ {
+				f.cycle(t, "peer1", inst[i], "100", 1)
+			}
+			f.mustRun(t)
+			var closes int
+			for _, r := range f.rows(t, "gone") {
+				if r.qty == "0" {
+					closes++
+				}
+			}
+			if c.wantClose && closes != 1 {
+				t.Errorf("%d closing rows after %d following cycles; want exactly 1", closes, c.following)
+			}
+			if !c.wantClose && closes != 0 {
+				t.Errorf("%d closing rows after %d following cycle; want none — the cycle may still be arriving", closes, c.following)
+			}
+		})
+	}
+}
+
+// A peer that vanishes alongside the loan means the fetch truncated, not that the loan repaid. Absence
+// is only attributable when every peer it had is still reported at the cycle it is missing from.
+func TestMapleLoanATruncatedPeerSetDoesNotClose(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	f := seedMaple(ctx, t, pool, map[string]int{"gone": 1, "peer1": 1, "peer2": 1})
+	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
+	inst := []string{"2026-06-16T08:05:00Z", "2026-06-16T08:15:00Z", "2026-06-16T08:25:00Z"}
+	// All three reported at the first cycle; `gone` AND `peer2` vanish together afterwards.
+	f.cycle(t, "gone", inst[0], "500", 1)
+	f.cycle(t, "peer2", inst[0], "200", 1)
+	for _, ts := range inst {
+		f.cycle(t, "peer1", ts, "100", 1)
+	}
+	f.mustRun(t)
+	for _, r := range f.rows(t, "gone") {
+		if r.qty == "0" {
+			t.Errorf("a close was emitted at block %d even though peer2 vanished in the same cycle; that is a truncated fetch, not a repayment", r.bn)
+		}
+	}
+}
