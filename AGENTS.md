@@ -39,6 +39,9 @@ Infrastructure code (Terraform/OpenTofu) lives in a separate repository for secu
   (see `k8s/AGENTS.md`, ORB-362).
 - **Don't bypass git hooks** (lefthook). The CI workflows in `.github/workflows/` are the source of truth for linting and tests. The `stl-verify/Makefile` is the source of truth for workflows — grep it before inventing a command.
 - **Git**: branch `VEC-123-short-slug`; PR title `VEC-123: <what it does>`; GitHub squash-merges, don't squash locally. Run `make ci` (and `make test-integration` if data-adjacent) before pushing.
+- **PR body**: follow `.github/PULL_REQUEST_TEMPLATE.md`. `gh pr create --body` bypasses the
+  template, so pass its contents yourself. Fill the sections below the `---` from the diff; leave
+  `## Human Intent` empty with its comment intact — the author writes that in their own words.
 - **Skill naming**: canonical skill sources live in `skills/` and are deployed through the
   `Skillfile`; repo skills are prefixed `stl-` (e.g. `stl-review-phase`) so they're
   distinguishable from personal/global skills when both are in scope.
