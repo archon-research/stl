@@ -138,7 +138,7 @@ function ResultRow({
           gap: '4',
           p: '3',
           borderRadius: 'sm',
-          borderWidth: '1px',
+          borderWidth: 'hairline',
           borderStyle: 'solid',
         }),
         // Accent is what DESIGN.md spends on a selection; the transparent border
@@ -376,7 +376,7 @@ export function RrcTab({
           className={css({
             borderRadius: 'md',
             borderStyle: 'solid',
-            borderWidth: '1px',
+            borderWidth: 'hairline',
             borderColor: 'border.subtle',
             bg: 'surface.subtle',
             p: '4',
@@ -463,7 +463,7 @@ export function RrcTab({
           className={css({
             borderRadius: 'md',
             borderStyle: 'solid',
-            borderWidth: '1px',
+            borderWidth: 'hairline',
             borderColor: 'border.subtle',
             bg: 'surface.subtle',
             p: '4',

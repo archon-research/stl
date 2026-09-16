@@ -21,13 +21,14 @@ import (
 //
 // One instance per worker process, shared by the runner and the liveness
 // heartbeat: it is the store's copy of the last record that a liveness beat
-// re-sends (see Beat).
+// re-sends (see Beat). It keeps one copy PER ACTIVITY EXECUTION, because a worker
+// serves as many executions at once as an operator starts — Temporal's duplicate
+// guard is per Workflow ID — while heartbeat details belong to one of them.
 type ActivityProgress[T any] struct {
-	mu     sync.Mutex
-	latest []any
-	// absent records that LoadProgress saw the server holding no details for THIS
-	// attempt, which is what makes a bare liveness beat safe (see Beat).
-	absent bool
+	mu sync.Mutex
+	// executions holds the runs in flight; each activity drops its own entry as
+	// it ends (see Reset), so a worker's map does not grow with the runs it serves.
+	executions map[executionKey]*executionProgress
 	// record is activity.RecordHeartbeat, narrowed to a field so a test can read
 	// the details a heartbeat carries. The SDK batches heartbeats before they
 	// reach a test environment's listener, which is exactly where the details of
@@ -35,8 +36,26 @@ type ActivityProgress[T any] struct {
 	record func(ctx context.Context, details ...any)
 }
 
+// executionKey identifies ONE activity execution. Every attempt of an execution
+// shares it, which is what lets an attempt re-send what its predecessor recorded.
+type executionKey struct {
+	runID      string
+	activityID string
+}
+
+// executionProgress is one execution's copy of the details it last heartbeated.
+type executionProgress struct {
+	latest []any
+	// absent records that LoadProgress saw the server holding no details for THIS
+	// attempt, which is what makes a bare liveness beat safe (see Beat).
+	absent bool
+}
+
 func NewActivityProgress[T any]() *ActivityProgress[T] {
-	return &ActivityProgress[T]{record: activity.RecordHeartbeat}
+	return &ActivityProgress[T]{
+		executions: make(map[executionKey]*executionProgress),
+		record:     activity.RecordHeartbeat,
+	}
 }
 
 // SaveProgress records progress as the activity's heartbeat details, replacing
@@ -48,8 +67,9 @@ func NewActivityProgress[T any]() *ActivityProgress[T] {
 func (p *ActivityProgress[T]) SaveProgress(ctx context.Context, progress T) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.latest = []any{progress}
-	p.record(ctx, p.latest...)
+	execution := p.executionFor(ctx)
+	execution.latest = []any{progress}
+	p.record(ctx, execution.latest...)
 	return nil
 }
 
@@ -67,7 +87,7 @@ func (p *ActivityProgress[T]) LoadProgress(ctx context.Context) (T, bool, error)
 	var progress T
 	if !activity.HasHeartbeatDetails(ctx) {
 		p.mu.Lock()
-		p.absent = true
+		p.executionFor(ctx).absent = true
 		p.mu.Unlock()
 		return progress, false, nil
 	}
@@ -75,25 +95,24 @@ func (p *ActivityProgress[T]) LoadProgress(ctx context.Context) (T, bool, error)
 		return progress, false, fmt.Errorf("decoding activity heartbeat details: %w", err)
 	}
 	p.mu.Lock()
-	p.latest = []any{progress}
+	p.executionFor(ctx).latest = []any{progress}
 	p.mu.Unlock()
 	return progress, true, nil
 }
 
-// Reset drops the record this store carries, and with it what the store knows
-// about the server's details, so Beat falls silent until the next LoadProgress.
-// The store lives for the worker PROCESS while heartbeat details belong to one
-// activity execution, so without this a second run on the same pod would beat the
-// first run's position at the server and hand its own retry a resume point over
-// blocks it never covered.
-func (p *ActivityProgress[T]) Reset() {
+// Reset drops what this store holds for the CALLING execution, so its Beat falls
+// silent until the next LoadProgress. The activity calls it on the way in, where
+// the record an earlier attempt left must not ride this attempt's beats before it
+// has read the server's details, and on the way out, where the entry would
+// otherwise outlive the run that owns it.
+func (p *ActivityProgress[T]) Reset(ctx context.Context) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.latest = nil
-	p.absent = false
+	delete(p.executions, callingExecution(ctx))
 }
 
-// Beat sends the liveness heartbeat, carrying the latest recorded progress.
+// Beat sends the calling execution's liveness heartbeat, carrying the progress it
+// last recorded.
 //
 // Temporal keeps only the LAST heartbeat's details, so a bare liveness ping
 // after a progress heartbeat would erase the resume point and silently send the
@@ -111,11 +130,38 @@ func (p *ActivityProgress[T]) Reset() {
 func (p *ActivityProgress[T]) Beat(ctx context.Context) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.latest == nil {
-		if p.absent {
+	execution, running := p.executions[callingExecution(ctx)]
+	if !running {
+		return
+	}
+	if execution.latest == nil {
+		if execution.absent {
 			p.record(ctx)
 		}
 		return
 	}
-	p.record(ctx, p.latest...)
+	p.record(ctx, execution.latest...)
+}
+
+// executionFor returns the calling execution's entry, opening one on its first
+// record. p.mu is held.
+func (p *ActivityProgress[T]) executionFor(ctx context.Context) *executionProgress {
+	key := callingExecution(ctx)
+	execution, running := p.executions[key]
+	if !running {
+		execution = &executionProgress{}
+		p.executions[key] = execution
+	}
+	return execution
+}
+
+// callingExecution identifies the activity execution a call arrives on behalf of.
+// Off an activity context — a runner exercised without a worker — there is no
+// execution to tell apart, so every caller shares the zero key.
+func callingExecution(ctx context.Context) executionKey {
+	if !activity.IsActivity(ctx) {
+		return executionKey{}
+	}
+	info := activity.GetInfo(ctx)
+	return executionKey{runID: info.WorkflowExecution.RunID, activityID: info.ActivityID}
 }

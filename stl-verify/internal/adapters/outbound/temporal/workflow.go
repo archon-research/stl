@@ -46,9 +46,9 @@ func ContextWithScheduledAt(ctx context.Context, scheduledAt time.Time) context.
 type ProgressHeartbeater interface {
 	// Beat sends one heartbeat carrying the progress recorded so far.
 	Beat(ctx context.Context)
-	// Reset drops the progress carried so far, so one execution's record cannot
-	// ride the next execution's beats.
-	Reset()
+	// Reset drops the progress the calling activity execution recorded, so one
+	// execution's record cannot ride another's beats.
+	Reset(ctx context.Context)
 }
 
 // cronjobActivities wraps a Runner for Temporal activity execution.
@@ -78,7 +78,10 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 	logger.Info("starting cronjob execution", "scheduledAt", scheduledAt)
 
 	ctx = ContextWithScheduledAt(ctx, scheduledAt)
-	resetProgress(a.progress)
+	resetProgress(ctx, a.progress)
+	// The store outlives the execution, so the entry has to go when the execution
+	// does, or a worker accumulates one for every run it has ever served.
+	defer resetProgress(ctx, a.progress)
 	stopHeartbeat := StartHeartbeat(ctx, a.heartbeat, a.progress)
 	// Deferred as well as called inline: the inline call fixes the ORDER (no beat
 	// may land after the result is reported), the defer covers the paths that
@@ -148,13 +151,13 @@ func StartHeartbeat(ctx context.Context, interval time.Duration, progress Progre
 	})
 }
 
-// resetProgress clears whatever an earlier execution left in the store, before
-// the runner's own LoadProgress reseeds it from THIS execution's details.
-func resetProgress(progress ProgressHeartbeater) {
+// resetProgress drops the record the store holds for the execution ctx names, so
+// that the runner's own LoadProgress is what reseeds it from the server.
+func resetProgress(ctx context.Context, progress ProgressHeartbeater) {
 	if progress == nil {
 		return
 	}
-	progress.Reset()
+	progress.Reset(ctx)
 }
 
 // beat sends one liveness heartbeat, through the progress store when there is
@@ -187,10 +190,10 @@ const heartbeatTimeoutFactor = 3
 // On the scheduled path it travels as the cronjobWorkflow argument, because
 // ensureSchedule bakes it into the schedule's action at creation. Any zero field
 // falls back to the default above, which is also what a schedule created before
-// this argument existed decodes to. reconcileScheduleSpec deliberately touches
-// only the timing spec, so changing the values later requires deleting the
-// schedule in Temporal and restarting the worker — the same caveat that already
-// applies to a changed interval.
+// this argument existed decodes to. reconcileScheduleSpec rewrites only the
+// timing spec, so a changed interval or offset lands on the next redeploy, while
+// changing these values requires deleting the schedule in Temporal and
+// restarting the worker.
 //
 // An on-demand job has no action to carry them and binds them at registration
 // instead (RegisterRunner), so a redeploy is enough to change them.
@@ -219,9 +222,24 @@ func (t ActivityTimeouts) resolve() ActivityTimeouts {
 }
 
 // cronjobWorkflow orchestrates a single cronjob activity execution.
+// cronjobActivityMethod is the exported method name the SDK derives
+// cronjobActivities' activity name from, and so the name a SCHEDULED cronjob's
+// workflow history already carries.
+const cronjobActivityMethod = "Execute"
+
+// cronjobWorkflow runs a scheduled cronjob's single activity under the bare method
+// name its existing histories replay against.
 func cronjobWorkflow(ctx workflow.Context, timeouts ActivityTimeouts) error {
+	return runActivityWorkflow(ctx, timeouts, cronjobActivityMethod)
+}
+
+// runActivityWorkflow executes one named activity under the shared retry policy
+// and timeouts. The name goes on the wire either way — a method reference
+// resolves to exactly this string — so naming it changes nothing for a scheduled
+// cronjob and is what lets a worker host more than one runner.
+func runActivityWorkflow(ctx workflow.Context, timeouts ActivityTimeouts, activityName string) error {
 	logger := workflow.GetLogger(ctx)
-	logger.Info("starting cronjob workflow")
+	logger.Info("starting cronjob workflow", "activity", activityName)
 
 	timeouts = timeouts.resolve()
 	activityOptions := workflow.ActivityOptions{
@@ -241,9 +259,8 @@ func cronjobWorkflow(ctx workflow.Context, timeouts ActivityTimeouts) error {
 	// activity retries (the RetryPolicy above) all observe the same value.
 	scheduledAt := workflow.Now(ctx).UTC()
 
-	var activities *cronjobActivities
-	if err := workflow.ExecuteActivity(ctx, activities.Execute, scheduledAt).Get(ctx, nil); err != nil {
-		return fmt.Errorf("executing cronjob activity: %w", err)
+	if err := workflow.ExecuteActivity(ctx, activityName, scheduledAt).Get(ctx, nil); err != nil {
+		return fmt.Errorf("executing cronjob activity %s: %w", activityName, err)
 	}
 
 	logger.Info("cronjob workflow completed")

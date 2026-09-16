@@ -14,6 +14,14 @@ const (
 	// The getPositionInfo multicall cap, so the default batch is one round trip;
 	// a larger batch is one transaction over several multicalls.
 	DefaultPositionBatch = 500
+	// One transaction per 1,000 decoded transfers. The table's
+	// assign_processing_version trigger takes one advisory lock per inserted row
+	// and holds it to commit, out of a cluster-wide table a stock instance sizes
+	// for ~12,800 entries and staging's max_locks_per_transaction=256 for ~76,800.
+	DefaultTransferBatch = 1_000
+	// MaxTransferBatch keeps a mis-set knob inside that budget with room for
+	// concurrent writers.
+	MaxTransferBatch = 10_000
 )
 
 type Config struct {
@@ -25,6 +33,8 @@ type Config struct {
 	MinWindow     int64
 	MaxWindow     int64
 	PositionBatch int
+	// TransferBatch sizes the posm transfer backfill's transactions.
+	TransferBatch int
 }
 
 func (c Config) withDefaults() Config {
@@ -42,6 +52,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.PositionBatch == 0 {
 		c.PositionBatch = DefaultPositionBatch
+	}
+	if c.TransferBatch == 0 {
+		c.TransferBatch = DefaultTransferBatch
 	}
 	return c
 }
@@ -72,6 +85,10 @@ func (c Config) validate() error {
 		return fmt.Errorf("initialWindow %d is outside [minWindow %d, maxWindow %d]", c.InitialWindow, c.MinWindow, c.MaxWindow)
 	case c.PositionBatch <= 0:
 		return fmt.Errorf("positionBatch must be positive, got %d", c.PositionBatch)
+	case c.TransferBatch <= 0:
+		return fmt.Errorf("transferBatch must be positive, got %d", c.TransferBatch)
+	case c.TransferBatch > MaxTransferBatch:
+		return fmt.Errorf("transferBatch %d is above %d: each log site in a batch holds one advisory lock to commit, out of a cluster-wide table", c.TransferBatch, MaxTransferBatch)
 	}
 	return nil
 }

@@ -114,10 +114,28 @@ export function BottomPanel({
     ? getAllocationKey(focusedAllocation)
     : null;
 
-  useEffect(() => {
+  // Reset both search values the moment the tab enters "rrc" (which hides
+  // the search box) — adjusted during render, React's documented
+  // alternative to an Effect for resetting state when a value changes.
+  const [previousActiveTab, setPreviousActiveTab] = useState(activeTab);
+  if (activeTab !== previousActiveTab) {
+    setPreviousActiveTab(activeTab);
     if (activeTab === 'rrc') {
       setLocalRiskSearchValue('');
       setRiskSearchValue('');
+    }
+  }
+
+  const [previousFocusedAllocationKey, setPreviousFocusedAllocationKey] =
+    useState(focusedAllocationKey);
+  if (focusedAllocationKey !== previousFocusedAllocationKey) {
+    setPreviousFocusedAllocationKey(focusedAllocationKey);
+    setLocalRiskSearchValue('');
+    setRiskSearchValue('');
+  }
+
+  useEffect(() => {
+    if (activeTab === 'rrc') {
       return;
     }
 
@@ -127,11 +145,6 @@ export function BottomPanel({
 
     return () => window.clearTimeout(timeoutId);
   }, [activeTab, localRiskSearchValue]);
-
-  useEffect(() => {
-    setLocalRiskSearchValue('');
-    setRiskSearchValue('');
-  }, [focusedAllocationKey]);
 
   return (
     <div

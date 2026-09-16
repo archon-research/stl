@@ -1,15 +1,15 @@
 import { useQueries, type UseQueryResult } from '@tanstack/react-query';
 import { useMemo } from 'react';
 
-import type { PrimeGroup } from '../../shared/lib/dashboard';
-import { toQueryErrorMessage } from '../../shared/lib/errors';
+import type { PrimeGroup } from '../lib/dashboard';
+import { toQueryErrorMessage } from '../lib/errors';
 import {
   narrowAllocations,
   showsReference,
   useProvenanceView,
-} from '../../shared/lib/provenance';
-import { allocationsQuery } from '../../shared/lib/queries';
-import type { Allocation } from '../../shared/types/allocation';
+} from '../lib/provenance';
+import { allocationsQuery } from '../lib/queries';
+import type { Allocation } from '../types/allocation';
 
 export type AllocationRows = {
   allocations: Allocation[];
@@ -50,11 +50,13 @@ function combineAllocations(results: readonly UseQueryResult<Allocation[]>[]) {
 }
 
 /**
- * The selected prime's allocation rows, narrowed to the provenance on screen.
+ * A prime's allocation rows, narrowed to the provenance on screen.
  *
- * Called from both the allocation view and the shell's filter options. The
- * second call issues no request — react-query serves it from the cache — but it
- * is a second observer, so the fold and the narrowing below do run twice.
+ * Called for the selected prime by the allocation view and the shell's filter
+ * options, and for every prime by the sidebar's network count. A repeat call for
+ * a prime already fetched issues no request — react-query serves it from the
+ * cache — but it is another observer, so the fold and the narrowing below do run
+ * again.
  */
 export function useAllocationRows(
   primeGroup: PrimeGroup | null,

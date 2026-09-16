@@ -165,7 +165,7 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 	// Aave V3 Avalanche - Pool deployed via CREATE2 (same address across chains)
 	// Source: https://github.com/bgd-labs/aave-address-book (AaveV3Avalanche)
 	{43114, common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD")}: {
-		Name:                  "Aave V3 Avalanche",
+		Name:                  "Aave V3",
 		Slug:                  "aave_v3_avalanche",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD"), ActiveAtBlock: 11970506},
@@ -186,7 +186,7 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 	// 6 PoolDataProviderUpdated events (not AddressSet), one per history entry
 	// Source: https://github.com/bgd-labs/aave-address-book (AaveV3Arbitrum)
 	{42161, common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD")}: {
-		Name:                  "Aave V3 Arbitrum",
+		Name:                  "Aave V3",
 		Slug:                  "aave_v3_arbitrum",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD"), ActiveAtBlock: 7742429},
@@ -211,7 +211,7 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 	// 6 PoolDataProviderUpdated events (not AddressSet), one per history entry
 	// Source: https://github.com/bgd-labs/aave-address-book (AaveV3Optimism)
 	{10, common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD")}: {
-		Name:                  "Aave V3 Optimism",
+		Name:                  "Aave V3",
 		Slug:                  "aave_v3_optimism",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD"), ActiveAtBlock: 4365693},
@@ -239,7 +239,7 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 	// here; it reverts on getMarketId/getPool, so Base gets no SparkLend entry.
 	// Source: https://github.com/bgd-labs/aave-address-book (AaveV3Base)
 	{8453, common.HexToAddress("0xA238Dd80C259a72e81d7e4664a9801593F98d1c5")}: {
-		Name:                  "Aave V3 Base",
+		Name:                  "Aave V3",
 		Slug:                  "aave_v3_base",
 		ProtocolType:          "lending",
 		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0xA238Dd80C259a72e81d7e4664a9801593F98d1c5"), ActiveAtBlock: 2357134},

@@ -9,10 +9,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4bootstrap"
 )
 
-// config is the deployment's static configuration. The pin and the scan start
-// are deliberately absent: a run derives both for itself (head minus the
-// finality depth, and the lowest registered deploy block), and a resumed
-// attempt takes the pin from its own record rather than from anything static.
+// config is the deployment's static configuration, shared by both of this
+// worker's workflow types. A run derives its pin and scan start for itself (head
+// minus the finality depth, and the lowest registered deploy block, or the
+// PositionManager's), and a resumed attempt takes the pin from its own record.
 type config struct {
 	rpcURL    string
 	bootstrap uniswapv4bootstrap.Config
@@ -31,17 +31,19 @@ func loadConfig() (config, error) {
 	}
 
 	cfg := config{rpcURL: rpcURL, bootstrap: uniswapv4bootstrap.Config{ChainID: int64(chainID)}}
-	positionBatch := int64(0)
+	positionBatch, transferBatch := int64(0), int64(0)
 	if err := errors.Join(
 		fillInt64FromEnv(&cfg.bootstrap.FinalityDepth, "FINALITY_DEPTH"),
 		fillInt64FromEnv(&cfg.bootstrap.InitialWindow, "INITIAL_WINDOW"),
 		fillInt64FromEnv(&cfg.bootstrap.MinWindow, "MIN_WINDOW"),
 		fillInt64FromEnv(&cfg.bootstrap.MaxWindow, "MAX_WINDOW"),
 		fillInt64FromEnv(&positionBatch, "POSITION_BATCH"),
+		fillInt64FromEnv(&transferBatch, "TRANSFER_BATCH"),
 	); err != nil {
 		return config{}, err
 	}
 	cfg.bootstrap.PositionBatch = int(positionBatch)
+	cfg.bootstrap.TransferBatch = int(transferBatch)
 
 	if err := cfg.bootstrap.Validate(); err != nil {
 		return config{}, fmt.Errorf("validating the scan knobs: %w", err)

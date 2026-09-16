@@ -11,6 +11,14 @@ Before modifying either side, read both this file and
   the label, severity→routing, and window conventions; follow them.
 - Cover at minimum: liveness/stall, error rate, silent-empty / data-quality
   holes the error path won't catch, and latency.
+- Rule expressions are evaluated against synthetic series by `promtool test
+  rules` (`make test-alerts` from the repo root), which CI runs on any `alerts/`
+  change. Cases live in `alerts-tests/*.yaml` — a sibling of this directory
+  because `rules-dir: alerts` is synced to Mimir recursively, so a test file
+  under `alerts/` fails the sync's namespace lint. A shape a reviewer would
+  otherwise take on trust — an absence test, a zero-fill, a regex over
+  deployment names — goes there with the rule, and each case asserts which
+  alerts fire, so `for:` and the rule's labels are covered too.
 - A PR that creates a database table ships a **row-growth tripwire** for it:
   tables are created plain (`stl-verify/db/migrations/AGENTS.md`) and that
   alert is what notices one growing. Its runbook section carries the path;

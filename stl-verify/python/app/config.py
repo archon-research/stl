@@ -79,8 +79,12 @@ class Settings(BaseSettings):
     # derive from the issuer.
     oidc_jwks_url: str = ""
     openfga_url: str = ""  # e.g. http://openfga.auth.svc:8080
-    # Published by the openfga-store ConfigMap (store/model ids are created by
-    # the store-bootstrap Job; they cannot be known at deploy-authoring time).
+    # No reader YET — do not set expecting an effect. ADR-015 open question 7
+    # was settled 2026-09-09 (writer resolves, reader pins): ORB-430 wires
+    # these, publishing the store ConfigMap's ids into this namespace and
+    # sending an explicit authorization_model_id on every call. Until then the
+    # store is resolved by NAME at first use (see app/auth/fga.py) and the
+    # newest model applies.
     openfga_store_id: str = ""
     openfga_model_id: str = ""
     openfga_store_name: str = "auth"
@@ -166,6 +170,11 @@ class Settings(BaseSettings):
     # SQLAlchemy dialect's own cache. 0 disables both; raise it only for a
     # direct connection or a session-mode pooler.
     db_statement_cache_size: int = Field(default=0, ge=0)
+    # How long startup keeps retrying a database that is unreachable below the
+    # protocol (see wait_for_database). Sized against the python-api startup
+    # probe's budget, which is what kills a pod whose database never answers, so
+    # the two move together. 0 restores the single-attempt behaviour.
+    db_connect_retry_deadline_seconds: float = Field(default=120.0, ge=0)
 
     @property
     def async_database_url(self) -> str:

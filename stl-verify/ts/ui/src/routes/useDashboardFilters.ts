@@ -1,7 +1,7 @@
 import { useSearch } from '@tanstack/react-router';
 import { useEffect, useMemo } from 'react';
 
-import { useAllocationRows } from '../features/allocations/useAllocationRows';
+import { useAllocationRows } from '../shared/hooks/useAllocationRows';
 import {
   hasCompleteRows,
   useChainLabels,
