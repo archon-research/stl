@@ -223,3 +223,33 @@ func TestLoad_BlockMetaFillsUnmarshal(t *testing.T) {
 		t.Errorf("%d of %d parentless block_timestamp fills carry the block_meta flag; want all of them", flagged, blockTimestampFills)
 	}
 }
+
+// One canonical column, one producer per table. A table that both renames a raw column to a canonical
+// column and declares a fill for that same column says two different things are its value, and nothing
+// downstream resolves the tie: the conformance check is satisfied by either alone, so the collision is
+// invisible. prime_debt is why this exists -- it renamed the indexer's synced_at to block_timestamp
+// while block_timestamp is resolved from the block_meta dimension.
+func TestNoColumnHasBothATransformAndAFill(t *testing.T) {
+	r, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	filled := map[string]bool{}
+	for _, f := range r.Fills {
+		filled[f.Table+"."+f.Column] = true
+	}
+	var checked int
+	for _, tr := range r.Transforms {
+		if tr.Canonical == "" {
+			continue
+		}
+		checked++
+		if key := tr.Table + "." + tr.Canonical; filled[key] {
+			t.Errorf("%s is produced by a %s of %s AND by a fill; one column, one producer",
+				key, tr.Action, tr.Column)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no transform declares a canonical target; this test no longer guards anything")
+	}
+}

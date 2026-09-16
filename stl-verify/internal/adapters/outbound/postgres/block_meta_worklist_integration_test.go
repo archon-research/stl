@@ -38,6 +38,12 @@ func seedWorkListSources(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 		       (SELECT id FROM token WHERE address='\x9002'),
 		       900000 + g * 25000, 0
 		  FROM generate_series(0, 8) g;
+		-- One row on another chain, so a run for 8453 has work of its own and a test asserting what it
+		-- does NOT enumerate cannot pass on an empty list.
+		INSERT INTO protocol (chain_id, address, name) VALUES (8453, '\x9004', 'wl-base') ON CONFLICT DO NOTHING;
+		INSERT INTO sparklend_reserve_data (protocol_id, token_id, block_number, block_version)
+		VALUES ((SELECT id FROM protocol WHERE address='\x9004'),
+		        (SELECT id FROM token WHERE address='\x9002'), 1250000, 0);
 		-- Sky contributes only on chain 1, and carries no chain column of its own.
 		INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at)
 		SELECT (SELECT id FROM prime WHERE name='wl-prime'), 'WL-A', 1, 7000000 + g, 0,
@@ -128,18 +134,28 @@ func TestWorkListEnumeratesAConstChainArm(t *testing.T) {
 	}
 }
 
-// The constant is a filter, not a label. A run for another chain must not sweep chain-1 rows into that
-// chain's work list, which would stamp block_meta rows against a chain whose archive never held them.
+// The constant is a filter, not a label. A run for another chain must not write Sky's blocks into the
+// work list at all -- asserted on the table rather than on that run's cursor, because a row inserted
+// under chain 1 is invisible to a chain-8453 cursor and survives the next run's DELETE, which is scoped
+// to its own chain. Block 1250000 is that run's own work, so an empty list cannot pass this.
 func TestWorkListConstChainArmIsScopedToItsChain(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	seedWorkListSources(t, ctx, pool)
 
-	for _, b := range openList(t, ctx, pool, 8453) {
-		if b >= 7000000 && b <= 7000005 {
-			t.Errorf("block %d is Sky's, on chain 1, and must not be work for chain 8453", b)
-		}
+	got := openList(t, ctx, pool, 8453)
+	if !slices.Contains(got, int64(1250000)) {
+		t.Fatalf("chain 8453 enumerated %v, which does not include its own block 1250000; the run found nothing and the assertion below would be vacuous", got)
+	}
+
+	var sky int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM block_meta_worklist WHERE block_number BETWEEN 7000000 AND 7000005`).Scan(&sky); err != nil {
+		t.Fatalf("count Sky rows in the work list: %v", err)
+	}
+	if sky != 0 {
+		t.Errorf("a chain-8453 run left %d of Sky's chain-1 blocks in the work list; the constant must filter the run, not label the rows", sky)
 	}
 }
 

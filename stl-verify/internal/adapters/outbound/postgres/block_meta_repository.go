@@ -70,7 +70,12 @@ type workListArm struct {
 //
 // The same expression is both selected and compared to $1, so a constant arm reads "1 = $1" and
 // contributes nothing to another chain's run rather than labelling Sky's blocks with that chain.
-func armSQL(table string, chain schemamaster.Fill) string {
+//
+// A shape this does not build is an error, not a best effort. The register also carries two-hop fills
+// (morpho_adapter_state reaches chain through morpho_adapter and then morpho_vault); neither declares a
+// block_meta fill today, and rendering one as its first hop would join a table that has no chain_id and
+// fail as SQL inside a production run instead of here.
+func armSQL(table string, chain schemamaster.Fill, declared bool) (string, error) {
 	const shape = `
 		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
 		SELECT %s, t.block_number, t.block_version
@@ -79,13 +84,21 @@ func armSQL(table string, chain schemamaster.Fill) string {
 		ON CONFLICT DO NOTHING`
 	chainExpr, join := "t.chain_id", ""
 	switch {
+	case declared && chain.Parent == "" && chain.Const == nil:
+		return "", fmt.Errorf("%s declares a chain_id fill with neither a parent nor a constant; a fill exists because the column is not native, so t.chain_id would not resolve", table)
+	case chain.Const != nil && *chain.Const <= 0:
+		return "", fmt.Errorf("%s declares chain_id as the constant %d; no chain has that id, so the arm would match no run and enumerate nothing", table, *chain.Const)
+	case chain.ThenParent != "":
+		return "", fmt.Errorf("%s resolves chain_id through two hops (%s then %s), which the work list does not build", table, chain.Parent, chain.ThenParent)
+	case chain.Parent != "" && chain.Const != nil:
+		return "", fmt.Errorf("%s declares chain_id as both a %s join and a constant", table, chain.Parent)
 	case chain.Parent != "":
 		chainExpr = "p.chain_id"
 		join = fmt.Sprintf(" JOIN %s p ON p.%s = t.%s", quoteIdent(chain.Parent), quoteIdent(chain.Ref), quoteIdent(chain.Key))
 	case chain.Const != nil:
 		chainExpr = strconv.Itoa(*chain.Const)
 	}
-	return fmt.Sprintf(shape, chainExpr, quoteIdent(table), join, chainExpr)
+	return fmt.Sprintf(shape, chainExpr, quoteIdent(table), join, chainExpr), nil
 }
 
 // quoteIdent quotes a catalogue identifier. Every value reaching it comes from schema_master.json or
@@ -127,10 +140,15 @@ func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, 
 		if err != nil {
 			return nil, err
 		}
+		chain, declared := chainFill[table]
+		sql, err := armSQL(table, chain, declared)
+		if err != nil {
+			return nil, err
+		}
 		arms = append(arms, workListArm{
 			table:   table,
 			partCol: "t." + quoteIdent(partCol),
-			sql:     armSQL(table, chainFill[table]),
+			sql:     sql,
 		})
 	}
 	return arms, nil
@@ -141,7 +159,7 @@ func (r *BlockMetaRepository) partitionColumn(ctx context.Context, table string)
 	var col string
 	if err := r.pool.QueryRow(ctx, `
 		SELECT column_name FROM timescaledb_information.dimensions
-		 WHERE hypertable_name = $1 AND dimension_number = 1`, table).Scan(&col); err != nil {
+		 WHERE hypertable_schema = 'public' AND hypertable_name = $1 AND dimension_number = 1`, table).Scan(&col); err != nil {
 		return "", fmt.Errorf("reading %s's partition column: %w", table, err)
 	}
 	return col, nil
@@ -160,10 +178,15 @@ const chunksPerWindow = 16
 // The OSM view is absent wherever the tiering extension is not installed, including the local harness,
 // and a missing relation is a parse error rather than an empty result — hence the probe rather than a
 // LEFT JOIN or a to_regclass inside the query.
+//
+// The local catalogue is read as public only: the transformed layer names its hypertables after the raw
+// tables they canonicalise, so an unqualified lookup would union a table's chunks with its twin's and
+// group ranges that are not disjoint. The OSM side carries no schema column to filter on, so a tiered
+// transformed twin would still slip in; nothing is tiered and transformed today.
 const chunkRangeSQL = `
 		SELECT range_start_integer, range_end_integer, range_start, range_end
 		  FROM timescaledb_information.chunks
-		 WHERE hypertable_name = $1`
+		 WHERE hypertable_schema = 'public' AND hypertable_name = $1`
 
 const chunkRangeWithTieredSQL = chunkRangeSQL + `
 		 UNION ALL
