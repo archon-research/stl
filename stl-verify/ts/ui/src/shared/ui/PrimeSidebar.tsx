@@ -13,7 +13,7 @@ import { toggleSwitch } from '#styled-system/recipes';
 
 import { ProtocolLogo } from '.';
 import { useAllocationRows } from '../hooks/useAllocationRows';
-import { allocationNetworkKey, truncateMiddle } from '../lib/dashboard';
+import { buildNetworkOptions, truncateMiddle } from '../lib/dashboard';
 import type { PrimeGroup } from '../lib/dashboard';
 
 type PrimeSidebarProps = {
@@ -32,9 +32,10 @@ const switchStyles = toggleSwitch();
 /**
  * How many networks a prime holds positions on.
  *
- * Counted over the prime's allocation rows on `allocationNetworkKey`, the key
- * the top bar's network filter groups by, so this number and the "All networks"
- * list span the same set, in whichever provenance the view is showing.
+ * Counts the entries of the top bar's network filter, built from the prime's
+ * own rows in whichever provenance the view is showing, so the number and the
+ * "All networks" list are the same set by construction rather than by
+ * convention — a regrouping of the filter carries this along with it.
  *
  * A dash until every one of the prime's queries has answered: the fold is empty
  * both before a fetch settles and after one fails, and zero is a real count.
@@ -42,7 +43,7 @@ const switchStyles = toggleSwitch();
 function PrimeNetworkCount({ primeGroup }: { primeGroup: PrimeGroup }) {
   const { allocations, isLoaded } = useAllocationRows(primeGroup);
 
-  const count = new Set(allocations.map(allocationNetworkKey)).size;
+  const count = buildNetworkOptions(allocations).length;
 
   return (
     <span
