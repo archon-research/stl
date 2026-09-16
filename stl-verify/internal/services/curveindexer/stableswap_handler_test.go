@@ -662,6 +662,82 @@ func TestStableswapHandler_SnapshotNG(t *testing.T) {
 	}
 }
 
+// assertNotIssued fails if any captured call is one of the named no-arg methods.
+// A gated-out read must contribute no call at all, not a call whose revert is
+// tolerated.
+func assertNotIssued(t *testing.T, a *abi.ABI, captured []outbound.Call, methods ...string) {
+	t.Helper()
+	for _, m := range methods {
+		data, err := a.Pack(m)
+		if err != nil {
+			t.Fatalf("packing %s: %v", m, err)
+		}
+		for i, c := range captured {
+			if bytes.Equal(c.CallData, data) {
+				t.Errorf("call[%d] is %s, which must not be issued for this pool", i, m)
+			}
+		}
+	}
+}
+
+// issuedMethod reports whether any captured call is the named no-arg method.
+func issuedMethod(t *testing.T, a *abi.ABI, captured []outbound.Call, method string) bool {
+	t.Helper()
+	data, err := a.Pack(method)
+	if err != nil {
+		t.Fatalf("packing %s: %v", method, err)
+	}
+	for _, c := range captured {
+		if bytes.Equal(c.CallData, data) {
+			return true
+		}
+	}
+	return false
+}
+
+// assertNoCalcTokenAmountIssued checks both argument shapes, since an unprobed
+// pool must issue neither selector rather than guessing one.
+func assertNoCalcTokenAmountIssued(t *testing.T, captured []outbound.Call) {
+	t.Helper()
+	amounts := []*big.Int{big.NewInt(1), big.NewInt(1)}
+	for _, dynArray := range []bool{false, true} {
+		data, err := packCalcTokenAmount(amounts, true, dynArray)
+		if err != nil {
+			t.Fatalf("packing calc_token_amount (dynArray=%v): %v", dynArray, err)
+		}
+		for i, c := range captured {
+			if len(c.CallData) >= 4 && bytes.Equal(c.CallData[:4], data[:4]) {
+				t.Errorf("call[%d] is calc_token_amount (dynArray=%v), but an unprobed pool must issue neither shape", i, dynArray)
+			}
+		}
+	}
+}
+
+func assertStructuralNulls(t *testing.T, fields map[string]*big.Int) {
+	t.Helper()
+	for name, v := range fields {
+		if v != nil {
+			t.Errorf("%s = %v, want nil (structural NULL when gated off)", name, v)
+		}
+	}
+}
+
+// dropResults returns base without the entries at the given indices, so a canned
+// result list lines up with a call list that has reads gated out of it.
+func dropResults(base []outbound.Result, indices ...int) []outbound.Result {
+	drop := make(map[int]bool, len(indices))
+	for _, i := range indices {
+		drop[i] = true
+	}
+	out := make([]outbound.Result, 0, len(base)-len(drop))
+	for i, r := range base {
+		if !drop[i] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // capturingMulticaller records the calls it receives and returns preset results.
 // It is used to assert which Target address each call uses.
 type capturingMulticaller struct {
@@ -880,39 +956,19 @@ func TestStableswapHandler_SnapshotUnprobedCalcTokenAmountGatesCall(t *testing.T
 	pool := stableswapPoolPreNG()
 	pool.CalcTokenAmountDynArray = nil
 
-	base := stableswapPreNGResults(t, a)
-	results := make([]outbound.Result, 0, len(base)-1)
-	results = append(results, base[:preNG2CoinCalcTokenAmountIdx]...)
-	results = append(results, base[preNG2CoinCalcTokenAmountIdx+1:]...)
-
-	fixedData, err := packCalcTokenAmount([]*big.Int{big.NewInt(1), big.NewInt(1)}, true, false)
-	if err != nil {
-		t.Fatalf("packing fixed calc_token_amount: %v", err)
-	}
-	dynData, err := packCalcTokenAmount([]*big.Int{big.NewInt(1), big.NewInt(1)}, true, true)
-	if err != nil {
-		t.Fatalf("packing dynamic calc_token_amount: %v", err)
-	}
+	results := dropResults(stableswapPreNGResults(t, a), preNG2CoinCalcTokenAmountIdx)
 
 	mc := &capturingMulticaller{results: results}
 	st, _, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-
-	for i, c := range mc.captured {
-		if len(c.CallData) >= 4 &&
-			(bytes.Equal(c.CallData[:4], fixedData[:4]) || bytes.Equal(c.CallData[:4], dynData[:4])) {
-			t.Errorf("call[%d] is calc_token_amount, but an unprobed pool must issue neither shape", i)
-		}
-	}
-
 	if st == nil {
 		t.Fatal("want stableswap state")
 	}
-	if st.CalcTokenAmount != nil {
-		t.Errorf("calc_token_amount = %v, want nil (structural NULL when gated off)", st.CalcTokenAmount)
-	}
+
+	assertNoCalcTokenAmountIssued(t, mc.captured)
+	assertStructuralNulls(t, map[string]*big.Int{"calc_token_amount": st.CalcTokenAmount})
 	// Cursor stays aligned: fields after the gated-off read still decode.
 	if len(st.CalcWithdrawOneCoin) != 2 {
 		t.Errorf("calc_withdraw_one_coin len = %d, want 2", len(st.CalcWithdrawOneCoin))
@@ -939,53 +995,23 @@ func TestStableswapHandler_SnapshotLaterNGFeeSchedule(t *testing.T) {
 	const offpegValue = 200000000000
 	base := stableswapNGResults(t, a)
 	base[ng2CoinFutureFeeIdx] = packUint256Result(offpegValue) // same slot, different getter
-	dropped := map[int]bool{
-		ng2CoinPriceOracleIdx:  true,
-		ng2CoinLastPriceIdx:    true,
-		ng2CoinEmaPriceIdx:     true,
-		ng2CoinGetPIdx:         true,
-		ng2CoinOracleMethodIdx: true,
-	}
-	results := make([]outbound.Result, 0, len(base)-len(dropped))
-	for i, r := range base {
-		if !dropped[i] {
-			results = append(results, r)
-		}
-	}
-
-	futureFeeData, err := a.Pack("future_fee")
-	if err != nil {
-		t.Fatalf("packing future_fee: %v", err)
-	}
-	offpegData, err := a.Pack("offpeg_fee_multiplier")
-	if err != nil {
-		t.Fatalf("packing offpeg_fee_multiplier: %v", err)
-	}
+	results := dropResults(base,
+		ng2CoinPriceOracleIdx, ng2CoinLastPriceIdx,
+		ng2CoinEmaPriceIdx, ng2CoinGetPIdx, ng2CoinOracleMethodIdx)
 
 	mc := &capturingMulticaller{results: results}
 	_, cfg, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-
-	var sawOffpeg bool
-	for i, c := range mc.captured {
-		if bytes.Equal(c.CallData, futureFeeData) {
-			t.Errorf("call[%d] is future_fee, but a pool without it must issue none", i)
-		}
-		if bytes.Equal(c.CallData, offpegData) {
-			sawOffpeg = true
-		}
-	}
-	if !sawOffpeg {
-		t.Error("offpeg_fee_multiplier was not issued, but the pool exposes it")
-	}
-
 	if cfg == nil {
 		t.Fatal("want stableswap config")
 	}
-	if cfg.FutureFee != nil {
-		t.Errorf("future_fee = %v, want nil (structural NULL when the getter does not exist)", cfg.FutureFee)
+
+	assertNotIssued(t, a, mc.captured, "future_fee")
+	assertStructuralNulls(t, map[string]*big.Int{"future_fee": cfg.FutureFee})
+	if !issuedMethod(t, a, mc.captured, "offpeg_fee_multiplier") {
+		t.Error("offpeg_fee_multiplier was not issued, but the pool exposes it")
 	}
 	if cfg.OffpegFeeMultiplier == nil || cfg.OffpegFeeMultiplier.Int64() != offpegValue {
 		t.Errorf("offpeg_fee_multiplier = %v, want %d", cfg.OffpegFeeMultiplier, offpegValue)
@@ -1006,63 +1032,29 @@ func TestStableswapHandler_SnapshotNoArgOracleGettersGateCalls(t *testing.T) {
 	pool := stableswapPoolNG()
 	pool.HasNoArgOracleGetters = false
 
-	// The canned NG results carry the five gated entries; drop them so the result
-	// list matches the gated call list.
-	base := stableswapNGResults(t, a)
-	gated := map[int]bool{
-		ng2CoinPriceOracleIdx:  true,
-		ng2CoinLastPriceIdx:    true,
-		ng2CoinEmaPriceIdx:     true,
-		ng2CoinGetPIdx:         true,
-		ng2CoinOracleMethodIdx: true,
-	}
-	results := make([]outbound.Result, 0, len(base)-len(gated))
-	for i, r := range base {
-		if !gated[i] {
-			results = append(results, r)
-		}
-	}
+	results := dropResults(stableswapNGResults(t, a),
+		ng2CoinPriceOracleIdx, ng2CoinLastPriceIdx,
+		ng2CoinEmaPriceIdx, ng2CoinGetPIdx, ng2CoinOracleMethodIdx)
 
 	mc := &capturingMulticaller{results: results}
 	st, cfg, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-
-	for _, method := range []string{"price_oracle", "last_price", "ema_price", "get_p", "oracle_method"} {
-		data, err := a.Pack(method)
-		if err != nil {
-			t.Fatalf("packing %s: %v", method, err)
-		}
-		for i, c := range mc.captured {
-			if bytes.Equal(c.CallData, data) {
-				t.Errorf("call[%d] is %s, but HasNoArgOracleGetters=false must issue none of the five", i, method)
-			}
-		}
+	if st == nil || cfg == nil {
+		t.Fatal("want stableswap state and config")
 	}
 
-	if st == nil {
-		t.Fatal("want stableswap state")
-	}
-	for _, f := range []struct {
-		name string
-		got  *big.Int
-	}{
-		{"price_oracle", st.PriceOracle},
-		{"last_price", st.LastPrice},
-		{"ema_price", st.EmaPrice},
-		{"get_p", st.GetP},
-	} {
-		if f.got != nil {
-			t.Errorf("%s = %v, want nil (structural NULL when gated off)", f.name, f.got)
-		}
-	}
-	if cfg == nil {
-		t.Fatal("want stableswap config")
-	}
-	if cfg.OracleMethod != nil {
-		t.Errorf("oracle_method = %v, want nil (structural NULL when gated off)", cfg.OracleMethod)
-	}
+	assertNotIssued(t, a, mc.captured,
+		"price_oracle", "last_price", "ema_price", "get_p", "oracle_method")
+	assertStructuralNulls(t, map[string]*big.Int{
+		"price_oracle":  st.PriceOracle,
+		"last_price":    st.LastPrice,
+		"ema_price":     st.EmaPrice,
+		"get_p":         st.GetP,
+		"oracle_method": cfg.OracleMethod,
+	})
+
 	// The NG reads that do not depend on the no-arg selectors stay issued, and the
 	// decode cursor stays aligned across the five gaps.
 	if len(st.StoredRates) != 2 {
