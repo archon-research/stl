@@ -294,7 +294,7 @@ func TestMaterializeMorphoMarketNegativeSourceAmountAborts(t *testing.T) {
 			if err == nil {
 				t.Fatalf("the run appended %d rows; a negative source amount must abort", n)
 			}
-			if !strings.Contains(err.Error(), "negative source amount cannot be a position exposure") {
+			if !strings.Contains(err.Error(), "refusing to run") || !strings.Contains(err.Error(), "has a negative source amount") {
 				t.Errorf("error %q does not name the negative source amount", err.Error())
 			}
 			var rows int
@@ -372,5 +372,99 @@ func TestMaterializeMorphoMarketTakesChainAndProtocolFromTheMarket(t *testing.T)
 	}
 	if mismatched != 0 {
 		t.Errorf("%d of %d rows carry a chain_id/protocol_id pair that is not their own market's", mismatched, total)
+	}
+}
+
+// holder_id is the depositor's address alone while chain_id comes from the market, so two "user" rows
+// sharing an address render one position_id and interleave two holders' histories under closure.
+func TestMaterializeMorphoMarketRefusesOneAddressOnSeveralChains(t *testing.T) {
+	ctx, pool, _ := materializeMorphoMarketFixture(t)
+	if _, err := pool.Exec(ctx, `INSERT INTO chain (chain_id, name) VALUES (8453, 'base') ON CONFLICT (chain_id) DO NOTHING`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO "user" (chain_id, address) VALUES (8453, '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')`); err != nil {
+		t.Fatalf("seed the twin holder: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+		SELECT u.id, m.id, 950, 0, '2026-02-01T00:00:00Z', 0, 0, 0, 10, 0
+		FROM "user" u, morpho_market m
+		WHERE u.chain_id = 8453 AND u.address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND m.market_id = '\x1234'`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var written int64
+	err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(&written)
+	if err == nil {
+		t.Fatalf("the run stored %d rows; two holders on one address must refuse", written)
+	}
+	if !strings.Contains(err.Error(), "refusing to run") || !strings.Contains(err.Error(), `"user" rows sharing address`) {
+		t.Errorf("error %q does not name the shared holder address", err.Error())
+	}
+}
+
+// A holder address that is not 20 bytes aborts on position_state's 40-hex CHECK naming no row.
+func TestMaterializeMorphoMarketRefusesAMalformedHolder(t *testing.T) {
+	ctx, pool, _ := materializeMorphoMarketFixture(t)
+	if _, err := pool.Exec(ctx, `INSERT INTO "user" (chain_id, address) VALUES (1, '\xbeefcafe')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+		SELECT u.id, m.id, 960, 0, '2026-02-01T00:00:00Z', 0, 0, 0, 10, 0
+		FROM "user" u, morpho_market m
+		WHERE u.chain_id = 1 AND u.address = '\xbeefcafe' AND m.market_id = '\x1234'`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(new(int64))
+	if err == nil {
+		t.Fatal("a 4-byte holder address must refuse by name")
+	}
+	if !strings.Contains(err.Error(), "4-byte address") {
+		t.Errorf("error %q does not name the malformed holder", err.Error())
+	}
+}
+
+// The legs are split on the token ADDRESSES, not the token ids: two token rows on different chains can
+// share an address, and instrument_key is built from the address, so both legs would key one position.
+func TestMaterializeMorphoMarketSplitsLegsOnTheTokenAddress(t *testing.T) {
+	ctx, pool, _ := materializeMorphoMarketFixture(t)
+	if _, err := pool.Exec(ctx, `INSERT INTO chain (chain_id, name) VALUES (8453, 'base') ON CONFLICT (chain_id) DO NOTHING`); err != nil {
+		t.Fatal(err)
+	}
+	// A market whose collateral token is a DIFFERENT row carrying the SAME address as its loan token.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO token (chain_id, address, symbol, decimals) VALUES (8453, '\xdead', 'USDC', 6)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO morpho_market (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, lltv, oracle_address, irm_address, created_at_block)
+		SELECT 1, p.id, '\x9abc', lt.id, ct.id, 0, '\x00', '\x00', 1
+		FROM protocol p, token lt, token ct
+		WHERE p.chain_id = 1 AND p.address = '\xff' AND lt.chain_id = 1 AND lt.address = '\xdead' AND ct.chain_id = 8453 AND ct.address = '\xdead'`); err != nil {
+		t.Fatalf("seed the market: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+		SELECT u.id, m.id, 970, 0, '2026-02-01T00:00:00Z', 0, 0, 40, 100, 0
+		FROM "user" u, morpho_market m
+		WHERE u.chain_id = 1 AND u.address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND m.market_id = '\x9abc'`); err != nil {
+		t.Fatalf("seed the position: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `SELECT materialize_morpho_market()`); err != nil {
+		t.Fatalf("one address on both sides is a single instrument, so only the loan leg may emit: %v", err)
+	}
+	var legs int
+	var qty string
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*), coalesce(min(quantity)::text, '')
+		FROM position_state
+		WHERE projection = 'public.position_morpho_market' AND block_number = 970`).Scan(&legs, &qty); err != nil {
+		t.Fatal(err)
+	}
+	// One leg, and the collateral must NET into it: supply 100 - borrow 0 + collateral 40 = 140.
+	// Comparing token ids instead of addresses makes same_token false and leaves the quantity at 100.
+	if legs != 1 || qty != "140" {
+		t.Errorf("%d rows at block 970 with quantity %q; want 1 row at 140 — one address on both sides is a single instrument, so the collateral nets into the loan leg", legs, qty)
 	}
 }

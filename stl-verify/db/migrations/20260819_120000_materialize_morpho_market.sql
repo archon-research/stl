@@ -6,9 +6,11 @@ WITH obs AS (
            p.user_id, p.morpho_market_id,
            p.block_number, p.block_version, p.processing_version, p.timestamp AS block_timestamp,
            p.supply_assets, p.borrow_assets, p.collateral,
-           m.collateral_token_id = m.loan_token_id AS same_token
+           ct0.address = lt0.address AS same_token
     FROM morpho_market_position p
     JOIN morpho_market m ON m.id = p.morpho_market_id
+    JOIN token lt0 ON lt0.id = m.loan_token_id
+    JOIN token ct0 ON ct0.id = m.collateral_token_id
     ORDER BY p.user_id, p.morpho_market_id, p.block_number, p.block_version, p.processing_version, p.timestamp
 ),
 -- The loan leg's SIGNED exposure. Where the collateral token IS the loan token it is the same native
@@ -51,8 +53,9 @@ legs AS (
            s.collateral, 'COLLATERAL',
            s.block_number, s.block_version, s.processing_version, s.block_timestamp
     FROM series s
-    JOIN morpho_market m ON m.id = s.morpho_market_id AND m.collateral_token_id <> m.loan_token_id
+    JOIN morpho_market m ON m.id = s.morpho_market_id
     JOIN token ct ON ct.id = m.collateral_token_id
+    JOIN token lt2 ON lt2.id = m.loan_token_id AND lt2.address <> ct.address
 )
 SELECT m.chain_id, m.protocol_id, l.instrument_key, encode(u.address, 'hex') AS holder_id, l.quantity, l.deal_type,
        l.block_number, l.block_version, l.processing_version, l.block_timestamp
@@ -77,22 +80,45 @@ DECLARE
     v_bad text;
 BEGIN
     SELECT string_agg(msg, '; ' ORDER BY msg) INTO v_bad FROM (
-        SELECT format('market %s user %s at bn=%s bv=%s pv=%s: supply=%s borrow=%s collateral=%s',
-                      encode(m.market_id, 'hex'), encode(u.address, 'hex'), p.block_number,
-                      p.block_version, p.processing_version, p.supply_assets, p.borrow_assets, p.collateral) AS msg
-        FROM public.morpho_market_position p
-        JOIN public.morpho_market m ON m.id = p.morpho_market_id
-        JOIN public."user" u ON u.id = p.user_id
-        WHERE least(p.supply_assets, p.borrow_assets, p.collateral) < 0
-        ORDER BY p.block_number, p.block_version, p.processing_version
-        LIMIT 5) z;
+        SELECT msg FROM (
+            SELECT format('market %s user %s at bn=%s bv=%s pv=%s has a negative source amount: supply=%s borrow=%s collateral=%s',
+                          encode(m.market_id, 'hex'), encode(u.address, 'hex'), p.block_number,
+                          p.block_version, p.processing_version, p.supply_assets, p.borrow_assets, p.collateral) AS msg
+            FROM public.morpho_market_position p
+            JOIN public.morpho_market m ON m.id = p.morpho_market_id
+            JOIN public."user" u ON u.id = p.user_id
+            WHERE least(p.supply_assets, p.borrow_assets, p.collateral) < 0
+            UNION ALL
+            -- holder_id is the address alone while chain_id comes from the market, so two "user" rows
+            -- sharing an address render one position_id and interleave under closure.
+            SELECT format('market %s is held by %s "user" rows sharing address %s across chains %s',
+                          encode(m.market_id, 'hex'), count(DISTINCT u.id), encode(u.address, 'hex'),
+                          string_agg(DISTINCT u.chain_id::text, ',' ORDER BY u.chain_id::text))
+            FROM public.morpho_market_position p
+            JOIN public.morpho_market m ON m.id = p.morpho_market_id
+            JOIN public."user" u ON u.id = p.user_id
+            GROUP BY m.id, m.market_id, u.address
+            HAVING count(DISTINCT u.id) > 1
+            UNION ALL
+            -- Only holder_id carries position_state's 40-hex check; without this the run aborts on that
+            -- CHECK or inside position_key(), naming no row.
+            SELECT format('market %s holder %s is a %s-byte address, which cannot render the 40-hex holder_id',
+                          encode(m.market_id, 'hex'), encode(u.address, 'hex'), length(u.address))
+            FROM public.morpho_market_position p
+            JOIN public.morpho_market m ON m.id = p.morpho_market_id
+            JOIN public."user" u ON u.id = p.user_id
+            WHERE length(u.address) <> 20
+            GROUP BY m.market_id, u.address
+        ) all_msgs
+        ORDER BY msg
+        LIMIT 5) worst_five;
     IF v_bad IS NOT NULL THEN
-        RAISE EXCEPTION 'materialize_morpho_market: a negative source amount cannot be a position exposure, refusing to run: %', v_bad;
+        RAISE EXCEPTION 'materialize_morpho_market: unresolved inputs, refusing to run: %', v_bad;
     END IF;
     RETURN public.materialize_position_projection('public.position_morpho_market'::regclass, p_build_id, p_run_id);
 END
 $fn$;
 
-COMMENT ON FUNCTION materialize_morpho_market(integer, bigint) IS '[Operational] VEC-402: appends Morpho market position observations into position_state via materialize_position_projection(position_morpho_market). Refuses to run, naming up to five offenders, when a source supply, borrow or collateral amount is negative: the loan leg takes abs() of the net, so such a row would be laundered into a plausible exposure. See that function''s comment for the run contract. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2).';
+COMMENT ON FUNCTION materialize_morpho_market(integer, bigint) IS '[Operational] VEC-402: appends Morpho market position observations into position_state via materialize_position_projection(position_morpho_market). Refuses to run, naming up to five offenders: a negative source supply, borrow or collateral amount, which the loan leg''s abs() would launder into a plausible exposure; one address held by several "user" rows, which renders one position_id since holder_id carries the address alone; and a holder address that is not 20 bytes. The legs are split on the token ADDRESSES rather than the token ids, because the address is what instrument_key is built from. See that function''s comment for the run contract. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2).';
 
 INSERT INTO migrations (filename) VALUES ('20260819_120000_materialize_morpho_market.sql') ON CONFLICT (filename) DO NOTHING;
