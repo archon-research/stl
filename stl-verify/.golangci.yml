@@ -25,6 +25,9 @@ linters:
       statements: 60
       ignore-comments: false
     modernize:
+      # New in golangci-lint v2.13.x (required for Go 1.27); disabled
+      # because they flag ~20 pre-existing call sites. Modernizing those
+      # is a separate follow-up task.
       disable:
         - errorsastype
         - reflecttypeassert

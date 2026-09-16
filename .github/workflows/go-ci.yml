@@ -46,7 +46,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.13.2 # keep in sync with `tools` in stl-verify/Makefile
+          version: v2.13.2 # v2.12.x was built with Go 1.26 and panics on Go 1.27; keep in sync with `tools` in stl-verify/Makefile
           working-directory: stl-verify
 
       # Function-length / complexity linters, changed code only (VEC-465).

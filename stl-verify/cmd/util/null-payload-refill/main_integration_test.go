@@ -109,6 +109,10 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 	const key = "85149000-85149999/85149017_0_block.json.gz"
 	putGzippedObject(t, ctx, s3c, bucket, key, []byte("null"))
 	// Large sentinel object so the scan path must filter it out.
+	// Go 1.27 changed the compress/flate encoder, so repeating bytes
+	// (e.g. bytes.Repeat([]byte("x"), 4096)) now gzip-compress below
+	// the 40-byte MaxSize threshold. Use non-repeating content that
+	// stays above the threshold regardless of encoder version.
 	const sentinelKey = "85149000-85149999/85149018_0_block.json.gz"
 	sentinelData := make([]byte, 200)
 	for i := range sentinelData {

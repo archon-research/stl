@@ -230,6 +230,9 @@ test:
 
 test-integration: integration-shard-check
 	@echo "==> Running integration tests..."
+	# Go 1.27 stabilized the goroutineleak pprof profile, so the
+	# GOEXPERIMENT=goroutineleakprofile flag (required in Go 1.26) is
+	# no longer recognized and would cause: go: unknown GOEXPERIMENT.
 	go test -tags=integration -v -timeout=10m -p 4 ./...
 
 test-integration-shard: integration-shard-check
@@ -238,6 +241,7 @@ test-integration-shard: integration-shard-check
 		*) echo "ERROR: INTEGRATION_SHARD must be 1 or 2"; exit 1 ;; \
 	esac
 	@echo "==> Running integration test shard $(INTEGRATION_SHARD)/2..."
+	# See test-integration: GOEXPERIMENT=goroutineleakprofile was removed in Go 1.27.
 	@packages=$$(grep -hEv '^[[:space:]]*(#|$$)' ci/integration-shards/$(INTEGRATION_SHARD).txt | tr '\n' ' '); \
 		go test -tags=integration -v -timeout=10m -p 4 $$packages
 
@@ -403,6 +407,8 @@ e2e-real-reserve-facts:
 # Install development tools
 tools:
 	@echo "==> Installing development tools..."
+	# v2.13.0+ is built with Go 1.27; v2.12.x was built with Go 1.26 and
+	# panics on Go 1.27 stdlib type-checking.
 	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 # keep in sync with .github/workflows/go-ci.yml
 	go install golang.org/x/vuln/cmd/govulncheck@latest
 	go install golang.org/x/tools/cmd/goimports@v0.49.0 # keep in sync with .github/workflows/go-ci.yml

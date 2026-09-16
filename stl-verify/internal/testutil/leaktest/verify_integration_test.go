@@ -19,6 +19,11 @@ func TestMain(m *testing.M) {
 // TestLeakDetection_CatchesLeakyGoroutine proves the goroutine leak detector
 // works by running the intentionally-leaking TestLeakGoroutine as a subprocess
 // and asserting it exits non-zero (leak caught).
+//
+// Go 1.26 required GOEXPERIMENT=goroutineleakprofile to enable detection;
+// this test previously ran a second subprocess without the experiment to prove
+// detection was off by default. Go 1.27 stabilized the profile, so the
+// experiment flag no longer exists and the contrast test was removed.
 func TestLeakDetection_CatchesLeakyGoroutine(t *testing.T) {
 	root := moduleRoot(t)
 
