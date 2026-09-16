@@ -339,6 +339,20 @@ func TestMaterializeAnchorageCustodyRefusesWhatItCannotPlace(t *testing.T) {
 				{pkg: "PKG-C", qty: 1, snapTS: "2026-04-07T00:00:00Z"},
 				{pkg: "PKG-C", qty: 2, snapTS: "2026-04-07T00:00:00Z", custody: anchorageCustody2}},
 			"has 2 snapshots within one second"},
+		// holder_id is the vault address in hex, so a short one renders fewer than 40 characters and
+		// fails the spine's CHECK with a 23514 naming no row. Guarded here instead (VEC-819).
+		{"a 19-byte vault address", func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+			tag, err := pool.Exec(ctx, `UPDATE prime SET vault_address = decode($1, 'hex') WHERE name = $2`,
+				anchorageHolder[:38], anchoragePrime)
+			if err != nil {
+				t.Fatalf("shorten the vault address: %v", err)
+			}
+			if tag.RowsAffected() != 1 {
+				t.Fatalf("shortened %d prime rows, want 1", tag.RowsAffected())
+			}
+		},
+			[]anchorageSnap{{pkg: "PKG-V", qty: 3, snapTS: "2026-04-07T00:00:00Z"}},
+			"has a vault address of 19 bytes"},
 		{"a blank asset id", nil,
 			[]anchorageSnap{{pkg: "PKG-B", asset: " ", qty: 1, snapTS: "2026-04-07T00:00:00Z"}},
 			"blank or delimiter-bearing identity"},
@@ -659,5 +673,28 @@ func TestMaterializeAnchorageCustodyNamesTheFirstFiveOffenders(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "FCustodian") {
 		t.Errorf("FCustodian is the sixth offender and must fall outside the cap: %s", err.Error())
+	}
+}
+
+// The wrapper is the only path the runner calls, so a window it cannot forward is a window this
+// projection can never run with. The run record stamps what the spine actually received.
+func TestMaterializeAnchorageCustodyForwardsTheWindow(t *testing.T) {
+	ctx, pool, _ := seedAnchorage(t)
+
+	if _, err := pool.Exec(ctx, `SELECT materialize_anchorage_custody(0, NULL, interval '36 hours')`); err != nil {
+		t.Fatalf("calling with a window: %v", err)
+	}
+
+	var window *string
+	if err := pool.QueryRow(ctx, `
+		SELECT window_interval::text FROM position_projection_run
+		 WHERE projection = $1 ORDER BY created_at DESC LIMIT 1`, anchorageProjection).Scan(&window); err != nil {
+		t.Fatalf("reading the run record: %v", err)
+	}
+	if window == nil {
+		t.Fatal("the run recorded no window, so the wrapper dropped it")
+	}
+	if *window != "36:00:00" {
+		t.Errorf("the run recorded window %q; want the 36 hours the wrapper was called with", *window)
 	}
 }
