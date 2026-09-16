@@ -695,6 +695,69 @@ func TestMapleLoanViewContract(t *testing.T) {
 		}
 	})
 
+	t.Run("an inverted chain carrying no maple loans does not abort the run", func(t *testing.T) {
+		// The check is scoped to chains maple lends on. Without that scope any other indexer's
+		// mis-parsed block wedges maple materialization for good.
+		f.exec(t, `INSERT INTO chain (chain_id, name) VALUES (99, 'other') ON CONFLICT (chain_id) DO NOTHING`)
+		f.exec(t, `INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
+		           VALUES (99, 10, 0, '2026-06-16T10:00:00Z'), (99, 11, 0, '2026-06-16T09:00:00Z')
+		           ON CONFLICT DO NOTHING`)
+		if _, err := f.run(t); err != nil {
+			t.Fatalf("an inversion on a chain with no maple loans must not abort: %v", err)
+		}
+		f.exec(t, `INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
+		           VALUES (1, 100000, 0, '2026-01-01T00:00:00Z') ON CONFLICT DO NOTHING`)
+		if _, err := f.run(t); err == nil || !strings.Contains(err.Error(), "invert against height") {
+			t.Fatalf("the same shape on maple's own chain must abort, got %v", err)
+		}
+		f.exec(t, `DELETE FROM block_meta WHERE chain_id = 99 OR (chain_id = 1 AND block_number = 100000)`)
+	})
+
+	// The every-pair form of this check was quadratic and could not finish on a production block_meta.
+	// 40,000 blocks is ~1.6 billion pairs; the adjacent-pair form is one ordered pass.
+	t.Run("the inversion check stays linear in the number of blocks", func(t *testing.T) {
+		f.exec(t, `INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
+		           SELECT 1, 1000000 + g, 0, '2026-07-01T00:00:00Z'::timestamptz + (g * interval '12 seconds')
+		           FROM generate_series(1, 40000) g ON CONFLICT DO NOTHING`)
+		if _, err := pool.Exec(ctx, `SET statement_timeout = '30s'`); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := pool.Exec(ctx, `SET statement_timeout = 0`); err != nil {
+				t.Fatal(err)
+			}
+		}()
+		if _, err := f.run(t); err != nil {
+			t.Fatalf("the pre-check must finish well inside 30s on 40,000 blocks: %v", err)
+		}
+		f.exec(t, `DELETE FROM block_meta WHERE chain_id = 1 AND block_number > 1000000`)
+	})
+
+	t.Run("a loan address that is not 20 bytes is refused by name", func(t *testing.T) {
+		// instrument_key is the bare loan address. A blank one raises inside position_key() naming no
+		// row; an over-length one passes every check and silently mints a wider key.
+		f.exec(t, `INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
+		           SELECT 1, p.id, '\x0badc0de'::bytea, mp.id, l.borrower_user_id
+		           FROM protocol p JOIN maple_pool mp ON mp.chain_id = p.chain_id
+		           JOIN maple_loan l ON l.chain_id = 1
+		           WHERE p.chain_id = 1 AND p.name = 'Maple' LIMIT 1`)
+		var badID int64
+		if err := pool.QueryRow(ctx, `SELECT id FROM maple_loan WHERE loan_address = '\x0badc0de'::bytea`).Scan(&badID); err != nil {
+			t.Fatal(err)
+		}
+		_, err := f.run(t)
+		if err == nil || !strings.Contains(err.Error(), "not a 20-byte EVM address") {
+			t.Fatalf("want the loan-address refusal, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "4-byte loan address") {
+			t.Errorf("the refusal must name the loan address and its width: %v", err)
+		}
+		f.exec(t, `DELETE FROM maple_loan WHERE id = $1`, badID)
+		if _, err := f.run(t); err != nil {
+			t.Fatalf("removing the malformed loan must let the run proceed: %v", err)
+		}
+	})
+
 	t.Run("a borrower address that is not 20 bytes is refused by name", func(t *testing.T) {
 		// Without the guard this surfaces only as position_state_holder_hex_chk on a chunk, naming no
 		// loan, chain or user. "user" is written by every indexer, so one bad row poisons every run.

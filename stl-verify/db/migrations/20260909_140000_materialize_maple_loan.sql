@@ -131,19 +131,23 @@ BEGIN
 
     -- Block header times rise with height by consensus, so a pair that inverts is a mis-parsed
     -- block_meta row. Unrefused it silently wins the placement, or wedges the spine's gate later.
+    -- Adjacent pairs only: an out-of-order sequence always inverts somewhere adjacent, so this finds
+    -- the same rows as every-pair in one ordered pass instead of one per pair.
     SELECT string_agg(msg, '; ' ORDER BY msg) INTO v_bad FROM (
-        SELECT format('chain %s: block %s at %s precedes block %s at %s', a.chain_id,
-                      b.block_number, b.block_timestamp, a.block_number, a.block_timestamp) AS msg
-        FROM public.block_meta a
-        JOIN public.block_meta b ON b.chain_id = a.chain_id AND b.block_number > a.block_number
-                                AND b.block_timestamp < a.block_timestamp
-        WHERE EXISTS (SELECT 1 FROM public.maple_loan l WHERE l.chain_id = a.chain_id)
-          AND NOT EXISTS (SELECT 1 FROM public.block_meta o WHERE o.chain_id = a.chain_id
-                           AND o.block_number = a.block_number
-                           AND (o.block_version, o.processing_version) > (a.block_version, a.processing_version))
-          AND NOT EXISTS (SELECT 1 FROM public.block_meta o WHERE o.chain_id = b.chain_id
-                           AND o.block_number = b.block_number
-                           AND (o.block_version, o.processing_version) > (b.block_version, b.processing_version))
+        SELECT format('chain %s: block %s at %s precedes block %s at %s', p.chain_id,
+                      p.block_number, p.block_timestamp, p.prev_number, p.prev_timestamp) AS msg
+        FROM (SELECT s.chain_id, s.block_number, s.block_timestamp,
+                     lag(s.block_number)    OVER w AS prev_number,
+                     lag(s.block_timestamp) OVER w AS prev_timestamp
+              FROM (SELECT DISTINCT ON (m.chain_id, m.block_number)
+                           m.chain_id, m.block_number, m.block_timestamp
+                    FROM public.block_meta m
+                    WHERE EXISTS (SELECT 1 FROM public.maple_loan l WHERE l.chain_id = m.chain_id)
+                    ORDER BY m.chain_id, m.block_number,
+                             m.block_version DESC, m.processing_version DESC) s
+              WINDOW w AS (PARTITION BY s.chain_id ORDER BY s.block_number)) p
+        WHERE p.prev_timestamp IS NOT NULL AND p.block_timestamp < p.prev_timestamp
+        ORDER BY 1
         LIMIT 5) z;
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'materialize_maple_loan: block_meta header times invert against height, so a placement would be wrong; fix the mis-parsed rows first (first 5): %', v_bad;
@@ -181,17 +185,23 @@ BEGIN
         RAISE EXCEPTION 'materialize_maple_loan: block_meta is too sparse near the cycles of % chain(s) (tolerance %), so an observation would be back-dated by the whole gap: %', v_chains, p_max_skew, v_bad;
     END IF;
 
-    -- holder_id must be 40 hex chars for position_state's CHECK. "user" is written by every indexer
-    -- and its address is a bare BYTEA, so one bad row would raise on a chunk constraint by name only.
-    -- Every loan row is checked: scoping to loans with state planned all of maple_loan_state (191 MB).
+    -- holder_id must be 40 hex chars for position_state's CHECK, and instrument_key must be non-blank
+    -- for position_key(); maple_loan carries no CHECK on either address, and neither raise names a row.
     SELECT string_agg(msg, '; ' ORDER BY msg) INTO v_bad FROM (
-        SELECT format('loan %s (chain %s) has a %s-byte borrower address', l.id, l.chain_id, length(u.address)) AS msg
-        FROM public.maple_loan l
-        JOIN "user" u ON u.id = l.borrower_user_id
-        WHERE length(u.address) <> 20
+        SELECT msg FROM (
+            SELECT format('loan %s (chain %s) has a %s-byte borrower address', l.id, l.chain_id, length(u.address)) AS msg
+            FROM public.maple_loan l
+            JOIN "user" u ON u.id = l.borrower_user_id
+            WHERE length(u.address) <> 20
+            UNION ALL
+            SELECT format('loan %s (chain %s) has a %s-byte loan address', l.id, l.chain_id, length(l.loan_address))
+            FROM public.maple_loan l
+            WHERE length(l.loan_address) <> 20
+        ) all_msgs
+        ORDER BY msg
         LIMIT 5) z;
     IF v_bad IS NOT NULL THEN
-        RAISE EXCEPTION 'materialize_maple_loan: a borrower address is not a 20-byte EVM address, so holder_id would fail position_state''s format check: %', v_bad;
+        RAISE EXCEPTION 'materialize_maple_loan: an address is not a 20-byte EVM address, so the identity it keys would be malformed: %', v_bad;
     END IF;
 
     -- The projection reads principal_owed without reading state, which is safe only while every row
