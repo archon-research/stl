@@ -492,7 +492,7 @@ async def anchorage_conn(db_url: str, engine):
 
 async def _seed_anchorage_prime(conn, name: str, vault_byte: bytes) -> int:
     return await conn.fetchval(
-        "INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), $1, $2) "
+        "INSERT INTO prime (external_id, name, vault_address, chain_id) VALUES (gen_random_uuid(), $1, $2, 1) "
         "ON CONFLICT (name) DO UPDATE SET vault_address = EXCLUDED.vault_address RETURNING id",
         name,
         vault_byte * 20,

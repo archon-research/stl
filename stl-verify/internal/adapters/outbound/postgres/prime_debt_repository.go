@@ -51,13 +51,23 @@ func NewPrimeDebtRepository(
 // GetPrimes returns all rows from the prime table.
 // vault_address is stored as BYTEA and scanned directly into common.Address.
 func (r *PrimeDebtRepository) GetPrimes(ctx context.Context) ([]entity.Prime, error) {
-	const q = `
+	return r.primes(ctx, `
 		SELECT id, name, vault_address, created_at
 		FROM prime
-		ORDER BY id ASC
-	`
+		ORDER BY id ASC`)
+}
 
-	rows, err := r.pool.Query(ctx, q)
+// GetPrimesOnChain returns the vaults deployed on one chain.
+func (r *PrimeDebtRepository) GetPrimesOnChain(ctx context.Context, chainID int64) ([]entity.Prime, error) {
+	return r.primes(ctx, `
+		SELECT id, name, vault_address, created_at
+		FROM prime
+		WHERE chain_id = $1
+		ORDER BY id ASC`, chainID)
+}
+
+func (r *PrimeDebtRepository) primes(ctx context.Context, q string, args ...any) ([]entity.Prime, error) {
+	rows, err := r.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query primes: %w", err)
 	}

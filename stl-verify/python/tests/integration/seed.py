@@ -667,8 +667,8 @@ async def _ghost_seed_reference_rows(conn: asyncpg.Connection) -> tuple[int, int
     Returns (prime_id, asyrup_token_id, usds_token_id).
     """
     prime_id = await conn.fetchval(
-        "INSERT INTO prime (external_id, name, vault_address) "
-        "VALUES (gen_random_uuid(), 'ghost_balance', $1) RETURNING id",
+        "INSERT INTO prime (external_id, name, vault_address, chain_id) "
+        "VALUES (gen_random_uuid(), 'ghost_balance', $1, 1) RETURNING id",
         bytes.fromhex(_GHOST_VAULT_HEX),
     )
     # protocol.name is not unique across chains; chain_id pins mainnet.
@@ -991,8 +991,8 @@ async def seed_underlying_value_direct_holdings(db_url: str) -> None:
     try:
         async with conn.transaction():
             prime_id = await conn.fetchval(
-                "INSERT INTO prime (external_id, name, vault_address) "
-                "VALUES (gen_random_uuid(), 'uv_direct_holdings', $1) RETURNING id",
+                "INSERT INTO prime (external_id, name, vault_address, chain_id) "
+                "VALUES (gen_random_uuid(), 'uv_direct_holdings', $1, 1) RETURNING id",
                 bytes.fromhex(_UV_VAULT_HEX),
             )
             # A dedicated oracle whose mappings this seed enables freshly: reusing
@@ -1174,8 +1174,8 @@ async def seed_price_tiebreak_positions(db_url: str) -> None:
     try:
         async with conn.transaction():
             prime_id = await conn.fetchval(
-                "INSERT INTO prime (external_id, name, vault_address) "
-                "VALUES (gen_random_uuid(), 'price_tiebreak', $1) RETURNING id",
+                "INSERT INTO prime (external_id, name, vault_address, chain_id) "
+                "VALUES (gen_random_uuid(), 'price_tiebreak', $1, 1) RETURNING id",
                 bytes.fromhex(_TIE_VAULT_HEX),
             )
             protocol_id = await conn.fetchval(
@@ -1314,8 +1314,8 @@ async def seed_disabled_source_positions(db_url: str) -> None:
     try:
         async with conn.transaction():
             prime_id = await conn.fetchval(
-                "INSERT INTO prime (external_id, name, vault_address) "
-                "VALUES (gen_random_uuid(), 'disabled_source', $1) RETURNING id",
+                "INSERT INTO prime (external_id, name, vault_address, chain_id) "
+                "VALUES (gen_random_uuid(), 'disabled_source', $1, 1) RETURNING id",
                 bytes.fromhex(_DIS_VAULT_HEX),
             )
             protocol_id = await conn.fetchval(
@@ -1508,8 +1508,8 @@ async def seed_receipt_underlying_value_positions(db_url: str) -> None:
     try:
         async with conn.transaction():
             prime_id = await conn.fetchval(
-                "INSERT INTO prime (external_id, name, vault_address) "
-                "VALUES (gen_random_uuid(), 'receipt_uv', $1) RETURNING id",
+                "INSERT INTO prime (external_id, name, vault_address, chain_id) "
+                "VALUES (gen_random_uuid(), 'receipt_uv', $1, 1) RETURNING id",
                 bytes.fromhex(_RUV_VAULT_HEX),
             )
             protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE name = 'Aave V3' AND chain_id = 1")
@@ -1891,8 +1891,8 @@ async def seed_flow_share_ratio_activity(db_url: str) -> None:
     try:
         async with conn.transaction():
             prime_id = await conn.fetchval(
-                "INSERT INTO prime (external_id, name, vault_address) "
-                "VALUES (gen_random_uuid(), 'flow_ratio', $1) RETURNING id",
+                "INSERT INTO prime (external_id, name, vault_address, chain_id) "
+                "VALUES (gen_random_uuid(), 'flow_ratio', $1, 1) RETURNING id",
                 bytes.fromhex(_FR_VAULT_HEX),
             )
             protocol_id = await conn.fetchval(
@@ -2303,8 +2303,8 @@ async def seed_anchorage_custody(db_url: str) -> None:
     try:
         async with conn.transaction():
             prime_id = await conn.fetchval(
-                "INSERT INTO prime (external_id, name, vault_address) "
-                "VALUES (gen_random_uuid(), 'anchorage_custody', $1) RETURNING id",
+                "INSERT INTO prime (external_id, name, vault_address, chain_id) "
+                "VALUES (gen_random_uuid(), 'anchorage_custody', $1, 1) RETURNING id",
                 bytes.fromhex(_ANCHORAGE_VAULT_HEX),
             )
             token_id = await insert_token(conn, "ACUSTODY", 18, bytes.fromhex(_ANCHORAGE_DUMMY_TOKEN_HEX))
@@ -2404,8 +2404,8 @@ async def seed_anchorage_custody(db_url: str) -> None:
 
             # A second prime with an allocation_position but NO anchorage rows.
             empty_prime_id = await conn.fetchval(
-                "INSERT INTO prime (external_id, name, vault_address) "
-                "VALUES (gen_random_uuid(), 'anchorage_empty', $1) RETURNING id",
+                "INSERT INTO prime (external_id, name, vault_address, chain_id) "
+                "VALUES (gen_random_uuid(), 'anchorage_empty', $1, 1) RETURNING id",
                 bytes.fromhex(_ANCHORAGE_EMPTY_VAULT_HEX),
             )
             await declare_prime_proxy(conn, prime_id=empty_prime_id, proxy_hex=ANCHORAGE_EMPTY_PROXY_HEX)
@@ -2445,8 +2445,8 @@ async def _seed_anchorage_multi_asset_prime(conn: asyncpg.Connection, token_id: 
     asset); an unguarded GROUP BY would add it to ETH too (amount 70 / collateral 95).
     """
     prime_id = await conn.fetchval(
-        "INSERT INTO prime (external_id, name, vault_address) "
-        "VALUES (gen_random_uuid(), 'anchorage_multi', $1) RETURNING id",
+        "INSERT INTO prime (external_id, name, vault_address, chain_id) "
+        "VALUES (gen_random_uuid(), 'anchorage_multi', $1, 1) RETURNING id",
         bytes.fromhex(_ANCHORAGE_MULTI_VAULT_HEX),
     )
     await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=ANCHORAGE_MULTI_PROXY_HEX)
@@ -2517,8 +2517,8 @@ async def _seed_anchorage_other_prime(conn: asyncpg.Connection, token_id: int) -
     main prime's cohort.
     """
     prime_id = await conn.fetchval(
-        "INSERT INTO prime (external_id, name, vault_address) "
-        "VALUES (gen_random_uuid(), 'anchorage_other', $1) RETURNING id",
+        "INSERT INTO prime (external_id, name, vault_address, chain_id) "
+        "VALUES (gen_random_uuid(), 'anchorage_other', $1, 1) RETURNING id",
         bytes.fromhex(_ANCHORAGE_OTHER_VAULT_HEX),
     )
     await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=ANCHORAGE_OTHER_PROXY_HEX)
@@ -3308,8 +3308,8 @@ async def seed_processing_version_dedup_scenarios(db_url: str) -> None:
     try:
         async with conn.transaction():
             prime_id = await conn.fetchval(
-                "INSERT INTO prime (external_id, name, vault_address) "
-                "VALUES (gen_random_uuid(), 'pv_dedup', $1) RETURNING id",
+                "INSERT INTO prime (external_id, name, vault_address, chain_id) "
+                "VALUES (gen_random_uuid(), 'pv_dedup', $1, 1) RETURNING id",
                 bytes.fromhex(PVD_VAULT_HEX),
             )
             await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=PVD_ALM_PROXY_HEX)
@@ -3473,8 +3473,8 @@ async def seed_balance_series_positions(db_url: str) -> None:
     try:
         async with conn.transaction():
             prime_id = await conn.fetchval(
-                "INSERT INTO prime (external_id, name, vault_address) "
-                "VALUES (gen_random_uuid(), 'bs_balance', $1) RETURNING id",
+                "INSERT INTO prime (external_id, name, vault_address, chain_id) "
+                "VALUES (gen_random_uuid(), 'bs_balance', $1, 1) RETURNING id",
                 bytes.fromhex(BS_VAULT_HEX),
             )
             protocol_id = await conn.fetchval(

@@ -2,7 +2,7 @@
 // Vat contract and writes append-only snapshots to Postgres.
 //
 // Flow:
-//  1. At Start, load prime agents from the database via PrimeDebtRepository.GetPrimes.
+//  1. At Start, load this chain's prime agents via PrimeDebtRepository.GetPrimesOnChain.
 //  2. Resolve all vault ilks in a single multicall via VatCaller.ResolveIlks.
 //  3. Consume block events from SQS via sqsutil.RunLoop.
 //  4. Every SweepEveryNBlocks, batch-read all debts via VatCaller.ReadDebts.
@@ -147,12 +147,13 @@ func (s *VaultDebtService) Start(ctx context.Context) error {
 		return err
 	}
 
-	primes, err := s.repo.GetPrimes(ctx)
+	// Debt is read from the Vat on the vault's own chain, so a tracker takes only its chain's vaults.
+	primes, err := s.repo.GetPrimesOnChain(ctx, s.config.ChainID)
 	if err != nil {
 		return fmt.Errorf("load primes: %w", err)
 	}
 	if len(primes) == 0 {
-		return fmt.Errorf("no primes found in database")
+		return fmt.Errorf("no primes on chain %d", s.config.ChainID)
 	}
 
 	blockNum, err := s.latestBlock(ctx)

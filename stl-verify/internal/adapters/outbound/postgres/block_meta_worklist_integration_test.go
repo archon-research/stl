@@ -31,7 +31,7 @@ func seedWorkListSources(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 		INSERT INTO chain (chain_id, name) VALUES (1, 'ethereum'), (8453, 'base') ON CONFLICT DO NOTHING;
 		INSERT INTO protocol (chain_id, address, name) VALUES (1, '\x9001', 'wl-eth') ON CONFLICT DO NOTHING;
 		INSERT INTO token (chain_id, address) VALUES (1, '\x9002') ON CONFLICT DO NOTHING;
-		INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'wl-prime', '\x9003') ON CONFLICT DO NOTHING;
+		INSERT INTO prime (external_id, name, vault_address, chain_id) VALUES (gen_random_uuid(), 'wl-prime', '\x9003', 1) ON CONFLICT DO NOTHING;
 		-- 9 blocks spanning 900,000 to 1,100,000: eight chunks at interval 100000.
 		INSERT INTO sparklend_reserve_data (protocol_id, token_id, block_number, block_version)
 		SELECT (SELECT id FROM protocol WHERE address='\x9001'),
@@ -44,7 +44,15 @@ func seedWorkListSources(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 		INSERT INTO sparklend_reserve_data (protocol_id, token_id, block_number, block_version)
 		VALUES ((SELECT id FROM protocol WHERE address='\x9004'),
 		        (SELECT id FROM token WHERE address='\x9002'), 1250000, 0);
-		-- Sky contributes only on chain 1, and carries no chain column of its own.
+		-- A second prime, on the other chain: prime_debt carries no chain column and takes the chain of
+		-- the prime its rows hang off, so these two sets must never appear in the same run.
+		INSERT INTO prime (external_id, name, vault_address, chain_id)
+		VALUES (gen_random_uuid(), 'wl-prime-base', '\x9005', 8453) ON CONFLICT DO NOTHING;
+		INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at)
+		SELECT (SELECT id FROM prime WHERE name='wl-prime-base'), 'WL-B', 1, 7100000 + g, 0,
+		       TIMESTAMPTZ '2026-02-01' + (g * interval '3 days')
+		  FROM generate_series(0, 2) g;
+		-- Sky on chain 1, hanging off the chain-1 prime.
 		INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at)
 		SELECT (SELECT id FROM prime WHERE name='wl-prime'), 'WL-A', 1, 7000000 + g, 0,
 		       TIMESTAMPTZ '2026-01-01' + (g * interval '3 days')
@@ -95,7 +103,8 @@ func TestWorkListWindowsCoverEveryReferencedBlock(t *testing.T) {
 		  SELECT sr.block_number FROM sparklend_reserve_data sr
 		    JOIN protocol p ON p.id = sr.protocol_id WHERE p.chain_id = 1
 		  UNION
-		  SELECT pd.block_number FROM prime_debt pd) s`).Scan(&want); err != nil {
+		  SELECT pd.block_number FROM prime_debt pd
+		    JOIN prime pr ON pr.id = pd.prime_id WHERE pr.chain_id = 1) s`).Scan(&want); err != nil {
 		t.Fatalf("count referenced blocks: %v", err)
 	}
 	got := openList(t, ctx, pool, 1)
@@ -117,10 +126,9 @@ func TestWorkListWindowsCoverEveryReferencedBlock(t *testing.T) {
 	}
 }
 
-// A table whose chain is a register constant is work like any other. prime_debt carries no chain
-// column and no config parent -- schema_master gives it chain 1 as a literal -- so its arm has to take
-// the chain from that constant. Before the const arm exists its blocks are simply absent from the list.
-func TestWorkListEnumeratesAConstChainArm(t *testing.T) {
+// prime_debt carries no chain column: its rows take the chain of the prime they hang off, the way
+// borrower takes protocol's. Before it declared a block_meta fill its blocks were absent from the list.
+func TestWorkListEnumeratesPrimeDebtThroughItsPrime(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
@@ -129,33 +137,48 @@ func TestWorkListEnumeratesAConstChainArm(t *testing.T) {
 	got := openList(t, ctx, pool, 1)
 	for _, b := range []int64{7000000, 7000005} {
 		if !slices.Contains(got, b) {
-			t.Errorf("block %d is referenced by prime_debt and is not in the work list; the const-chain arm is missing", b)
+			t.Errorf("block %d is referenced by prime_debt on chain 1 and is not in the work list", b)
 		}
 	}
 }
 
-// The constant is a filter, not a label. A run for another chain must not write Sky's blocks into the
-// work list at all -- asserted on the table rather than on that run's cursor, because a row inserted
-// under chain 1 is invisible to a chain-8453 cursor and survives the next run's DELETE, which is scoped
-// to its own chain. Block 1250000 is that run's own work, so an empty list cannot pass this.
-func TestWorkListConstChainArmIsScopedToItsChain(t *testing.T) {
+// Each run gets its own prime's blocks and no other's. Two primes on two chains reference disjoint
+// heights, so a run that resolved prime_debt's chain wrongly -- from a constant, or not at all -- shows
+// up as one set appearing under the other's run. Asserted on the work list itself as well as the
+// cursor: a row written under the wrong chain is invisible to this run's cursor and survives the next
+// run's DELETE, which is scoped to its own chain.
+func TestWorkListScopesPrimeDebtToItsPrimesChain(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	seedWorkListSources(t, ctx, pool)
 
-	got := openList(t, ctx, pool, 8453)
-	if !slices.Contains(got, int64(1250000)) {
-		t.Fatalf("chain 8453 enumerated %v, which does not include its own block 1250000; the run found nothing and the assertion below would be vacuous", got)
+	base := openList(t, ctx, pool, 8453)
+	if !slices.Contains(base, int64(7100000)) {
+		t.Fatalf("chain 8453 enumerated %v, which is missing its own prime's block 7100000", base)
+	}
+	for _, b := range base {
+		if b >= 7000000 && b <= 7000005 {
+			t.Errorf("block %d belongs to the chain-1 prime and must not be work for chain 8453", b)
+		}
 	}
 
-	var sky int
+	var crossed int
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM block_meta_worklist WHERE block_number BETWEEN 7000000 AND 7000005`).Scan(&sky); err != nil {
-		t.Fatalf("count Sky rows in the work list: %v", err)
+		`SELECT count(*) FROM block_meta_worklist
+		  WHERE (chain_id = 8453 AND block_number BETWEEN 7000000 AND 7000005)
+		     OR (chain_id = 1 AND block_number BETWEEN 7100000 AND 7100002)`).Scan(&crossed); err != nil {
+		t.Fatalf("count cross-chain rows in the work list: %v", err)
 	}
-	if sky != 0 {
-		t.Errorf("a chain-8453 run left %d of Sky's chain-1 blocks in the work list; the constant must filter the run, not label the rows", sky)
+	if crossed != 0 {
+		t.Errorf("%d prime_debt rows sit under the wrong chain in the work list", crossed)
+	}
+
+	eth := openList(t, ctx, pool, 1)
+	for _, b := range eth {
+		if b >= 7100000 && b <= 7100002 {
+			t.Errorf("block %d belongs to the chain-8453 prime and must not be work for chain 1", b)
+		}
 	}
 }
 

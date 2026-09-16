@@ -128,7 +128,7 @@ func seedSparkPrime(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int64
 	t.Helper()
 	sparkVault := common.HexToAddress("0x691a6c29e9e96dd897718305427ad5d534db16ba").Bytes()
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'spark', $1) ON CONFLICT (name) DO NOTHING`,
+		`INSERT INTO prime (external_id, name, vault_address, chain_id) VALUES (gen_random_uuid(), 'spark', $1, 1) ON CONFLICT (name) DO NOTHING`,
 		sparkVault,
 	); err != nil {
 		t.Fatalf("seed spark prime: %v", err)

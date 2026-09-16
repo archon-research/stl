@@ -2289,7 +2289,9 @@
     {
       "table": "prime_debt",
       "column": "chain_id",
-      "const": 1
+      "parent": "prime",
+      "key": "prime_id",
+      "ref": "id"
     },
     {
       "table": "prime_debt",
