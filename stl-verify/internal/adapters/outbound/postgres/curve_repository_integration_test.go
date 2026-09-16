@@ -453,7 +453,10 @@ func TestCurveRepository_LoadPools_CuratedCapabilities(t *testing.T) {
 	tests := []struct {
 		name   string
 		column string
-		read   func(outbound.CurvePoolRow) bool
+		// kind, when set, is applied before the flag: curve_pool CHECKs restrict
+		// some flags to a pool class.
+		kind string
+		read func(outbound.CurvePoolRow) bool
 	}{
 		{
 			name:   "has_a_precise gates A_precise()",
@@ -463,7 +466,18 @@ func TestCurveRepository_LoadPools_CuratedCapabilities(t *testing.T) {
 		{
 			name:   "has_no_arg_oracle_getters gates the five no-arg oracle reads",
 			column: "has_no_arg_oracle_getters",
+			kind:   "plain_ng",
 			read:   func(r outbound.CurvePoolRow) bool { return r.HasNoArgOracleGetters },
+		},
+		{
+			name:   "has_future_fee gates future_fee()",
+			column: "has_future_fee",
+			read:   func(r outbound.CurvePoolRow) bool { return r.HasFutureFee },
+		},
+		{
+			name:   "has_offpeg_fee_multiplier gates offpeg_fee_multiplier()",
+			column: "has_offpeg_fee_multiplier",
+			read:   func(r outbound.CurvePoolRow) bool { return r.HasOffpegFeeMultiplier },
 		},
 	}
 
@@ -486,6 +500,14 @@ func TestCurveRepository_LoadPools_CuratedCapabilities(t *testing.T) {
 				}
 				t.Fatalf("seeded pool id=%d not found", poolID)
 				return outbound.CurvePoolRow{}
+			}
+
+			if tc.kind != "" {
+				if _, err := curveTestPool.Exec(ctx,
+					`UPDATE curve_pool SET pool_kind = $2 WHERE id = $1`, poolID, tc.kind,
+				); err != nil {
+					t.Fatalf("set pool_kind=%s: %v", tc.kind, err)
+				}
 			}
 
 			if tc.read(loadPool()) {
@@ -888,6 +910,86 @@ func TestCurveRepository_StableswapConfig_AppendOnChange(t *testing.T) {
 	})
 	if got := countRows(); got != 2 {
 		t.Fatalf("after second unchanged repeat: rows = %d, want 2", got)
+	}
+}
+
+// TestCurveRepository_StableswapConfig_OffpegFeeMultiplier verifies that the
+// later-NG fee-schedule shape round-trips: offpeg_fee_multiplier is written and
+// read back, and a change in it alone appends a row. Every other config test
+// leaves it NULL, which would let a swapped Scan position or a dropped
+// comparison term pass.
+func TestCurveRepository_StableswapConfig_OffpegFeeMultiplier(t *testing.T) {
+	ctx := context.Background()
+	truncateCurveFactTables(t, ctx)
+	repo := newCurveRepo(t)
+	poolID := seedCurvePool(t, ctx)
+
+	countRows := func() int {
+		var n int
+		if err := curveTestPool.QueryRow(ctx,
+			`SELECT count(*) FROM curve_stableswap_config WHERE curve_pool_id=$1`, poolID,
+		).Scan(&n); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		return n
+	}
+
+	// The later NG shape: no future_fee, offpeg_fee_multiplier instead.
+	makeConfig := func(block int64, offpeg *big.Int) *entity.CurveStableswapConfig {
+		cfg, err := entity.NewCurveStableswapConfig(entity.CurveStableswapConfigParams{
+			CurvePoolID:         poolID,
+			BlockNumber:         block,
+			BlockVersion:        0,
+			Timestamp:           time.Unix(1700030000+block, 0).UTC(),
+			InitialA:            big.NewInt(2000000),
+			InitialATime:        0,
+			FutureA:             big.NewInt(2000000),
+			FutureATime:         0,
+			AdminFee:            big.NewInt(5000000000),
+			FutureFee:           nil,
+			OffpegFeeMultiplier: offpeg,
+		})
+		if err != nil {
+			t.Fatalf("NewCurveStableswapConfig: %v", err)
+		}
+		return cfg
+	}
+
+	saveBlockCommitted(t, ctx, repo, outbound.BlockWrites{
+		StableswapConfigs: []*entity.CurveStableswapConfig{makeConfig(2000, big.NewInt(200000000000))},
+	})
+	if got := countRows(); got != 1 {
+		t.Fatalf("after first write: rows = %d, want 1", got)
+	}
+
+	var futureFee *string
+	var offpeg string
+	if err := curveTestPool.QueryRow(ctx,
+		`SELECT future_fee::text, offpeg_fee_multiplier::text
+		 FROM curve_stableswap_config WHERE curve_pool_id=$1`, poolID,
+	).Scan(&futureFee, &offpeg); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if futureFee != nil {
+		t.Errorf("future_fee = %s, want NULL for a pool with no future_fee()", *futureFee)
+	}
+	if offpeg != "200000000000" {
+		t.Errorf("offpeg_fee_multiplier = %s, want 200000000000", offpeg)
+	}
+
+	saveBlockCommitted(t, ctx, repo, outbound.BlockWrites{
+		StableswapConfigs: []*entity.CurveStableswapConfig{makeConfig(2001, big.NewInt(200000000000))},
+	})
+	if got := countRows(); got != 1 {
+		t.Fatalf("after unchanged repeat: rows = %d, want 1", got)
+	}
+
+	// Only offpeg_fee_multiplier changes: the dedupe must notice.
+	saveBlockCommitted(t, ctx, repo, outbound.BlockWrites{
+		StableswapConfigs: []*entity.CurveStableswapConfig{makeConfig(2002, big.NewInt(100000000000))},
+	})
+	if got := countRows(); got != 2 {
+		t.Fatalf("after offpeg_fee_multiplier change: rows = %d, want 2", got)
 	}
 }
 

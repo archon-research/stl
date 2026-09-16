@@ -23,29 +23,13 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
-
-// alchemyURL builds the real mainnet Alchemy endpoint this harness dials from
-// the ALCHEMY_API_KEY env var (same variable the workers use). Real network
-// access is the point of this build-tagged live-validation test (see task B13
-// brief): it is never compiled into normal `go test`/CI runs.
-func alchemyURL(t *testing.T) string {
-	t.Helper()
-	key := os.Getenv("ALCHEMY_API_KEY")
-	if key == "" {
-		t.Fatal("ALCHEMY_API_KEY must be set to run TestLiveValidation")
-	}
-	return "https://eth-mainnet.g.alchemy.com/v2/" + key
-}
-
-// multicall3Address is the canonical Multicall3 deployment address, identical
-// across every EVM chain including mainnet.
-var multicall3Address = common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11")
 
 // busyPoolAddress is the wstETH/WETH 0.01% pool used for the event-decode and
 // baseline-tick assertions: the deepest/most active of the 19 seeded pools.
@@ -94,14 +78,14 @@ func TestLiveValidation(t *testing.T) {
 	regPools := toRegisteredPools(poolRows)
 	rep.poolsLoaded = len(regPools)
 
-	rpcClient, err := rpc.DialContext(ctx, alchemyURL(t))
+	rpcClient, err := rpc.DialContext(ctx, testutil.AlchemyMainnetURL(t))
 	if err != nil {
 		t.Fatalf("BLOCKED: rpc.Dial(alchemy): %v", err)
 	}
 	defer rpcClient.Close()
 	ethClient := ethclient.NewClient(rpcClient)
 
-	mc, err := multicall.NewClient(ethClient, multicall3Address)
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
 		t.Fatalf("BLOCKED: multicall.NewClient: %v", err)
 	}

@@ -340,10 +340,8 @@ func TestUnpackUintArray(t *testing.T) {
 	})
 }
 
-// Both payloads are live mainnet stored_rates() returns, captured 2026-09-16:
-// the fixed one from stETH-ng 0x21E27a5E, the dynamic one from the ARCT-384
-// sUSDS/USDT pool 0x00836fe5. Reading the dynamic one as uint256[2] silently
-// yielded [32, 2] before the shape discrimination went in.
+// Live mainnet stored_rates() returns: the fixed one from stETH-ng 0x21E27a5E,
+// the dynamic one from the ARCT-384 sUSDS/USDT pool 0x00836fe5.
 func TestUnpackUintArrayReadsBothOnChainEncodings(t *testing.T) {
 	cases := []struct {
 		name string

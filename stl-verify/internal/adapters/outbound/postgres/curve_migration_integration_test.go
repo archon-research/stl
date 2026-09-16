@@ -18,11 +18,6 @@ func init() {
 	useFileDatabase(curveDBName, &curveTestPool)
 }
 
-// TestCurveExtendedDataMigration verifies that the extended-data schema folded
-// into 20260521_110000_create_curve_dex_tables.sql applies cleanly and produces
-// the expected columns, tables, and triggers.
-// It also asserts that curve_pool_coin.precision is seeded for all 10 existing
-// coins.
 // curveVec260CoinCounts maps each pool seeded by
 // 20260521_110000_create_curve_dex_tables.sql (VEC-260) to its coins(i) count.
 func curveVec260CoinCounts() map[string]int {
@@ -57,6 +52,10 @@ func curveArct384PoolAddrs() []string {
 	return addrs
 }
 
+// TestCurveExtendedDataMigration verifies that the extended-data schema folded
+// into 20260521_110000_create_curve_dex_tables.sql applies cleanly and produces
+// the expected columns, tables, and triggers, with curve_pool_coin.precision
+// seeded for every VEC-260 coin.
 func TestCurveExtendedDataMigration(t *testing.T) {
 	ctx := context.Background()
 
@@ -416,11 +415,8 @@ func TestCurveMigration(t *testing.T) {
 		}
 	})
 
-	// Scoped to the pools this test owns -- the 4 original VEC-260 pools and the
-	// 5 prime-held stableswap-NG pools seeded by
-	// 20260831_120000_seed_prime_dex_pools.sql (ARCT-384) -- rather than a
-	// COUNT(*) over chain 1, so a later seed migration adding an unrelated pool
-	// does not have to come back and edit this file.
+	// Per pool rather than COUNT(*) over chain 1, so an unrelated seed migration
+	// does not have to edit this file.
 	t.Run("seeded_pools_chain1_present", func(t *testing.T) {
 		for _, addr := range append(curveVec260PoolAddrs(), curveArct384PoolAddrs()...) {
 			var count int
@@ -555,10 +551,8 @@ func TestCurveMigration(t *testing.T) {
 		}
 	})
 
-	// Per pool, matching this subtest's name, instead of one COUNT(*) over the
-	// whole table: stETH classic 2, stETH-ng 2, 3pool 3, TricryptoUSDC 3, and 2
-	// for each of the 5 ARCT-384 stableswap-NG pools. A global total would make
-	// every future seed migration edit this assertion.
+	// Per pool rather than one COUNT(*) over the whole table, so an unrelated
+	// seed migration does not have to edit this assertion.
 	t.Run("coin_count_per_pool", func(t *testing.T) {
 		want := map[string]int{}
 		for addr, n := range curveVec260CoinCounts() {

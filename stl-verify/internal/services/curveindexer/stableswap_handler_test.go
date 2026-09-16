@@ -695,20 +695,31 @@ func issuedMethod(t *testing.T, a *abi.ABI, captured []outbound.Call, method str
 	return false
 }
 
-// assertNoCalcTokenAmountIssued checks both argument shapes, since an unprobed
-// pool must issue neither selector rather than guessing one.
-func assertNoCalcTokenAmountIssued(t *testing.T, captured []outbound.Call) {
+// calcTokenAmountIssued reports, per argument shape, whether that selector was
+// issued. The two shapes have different selectors and each reverts on a pool
+// implementing the other, so which one went out is the thing worth asserting.
+func calcTokenAmountIssued(t *testing.T, captured []outbound.Call, dynArray bool) bool {
 	t.Helper()
-	amounts := []*big.Int{big.NewInt(1), big.NewInt(1)}
-	for _, dynArray := range []bool{false, true} {
-		data, err := packCalcTokenAmount(amounts, true, dynArray)
-		if err != nil {
-			t.Fatalf("packing calc_token_amount (dynArray=%v): %v", dynArray, err)
+	data, err := packCalcTokenAmount([]*big.Int{big.NewInt(1), big.NewInt(1)}, true, dynArray)
+	if err != nil {
+		t.Fatalf("packing calc_token_amount (dynArray=%v): %v", dynArray, err)
+	}
+	for _, c := range captured {
+		if len(c.CallData) >= 4 && bytes.Equal(c.CallData[:4], data[:4]) {
+			return true
 		}
-		for i, c := range captured {
-			if len(c.CallData) >= 4 && bytes.Equal(c.CallData[:4], data[:4]) {
-				t.Errorf("call[%d] is calc_token_amount (dynArray=%v), but an unprobed pool must issue neither shape", i, dynArray)
-			}
+	}
+	return false
+}
+
+// assertCalcTokenAmountShape checks that exactly the curated selector went out.
+// wantDyn nil means the pool is unprobed and neither shape may be issued.
+func assertCalcTokenAmountShape(t *testing.T, captured []outbound.Call, wantDyn *bool) {
+	t.Helper()
+	for _, dynArray := range []bool{false, true} {
+		want := wantDyn != nil && *wantDyn == dynArray
+		if got := calcTokenAmountIssued(t, captured, dynArray); got != want {
+			t.Errorf("calc_token_amount(dynArray=%v) issued = %v, want %v", dynArray, got, want)
 		}
 	}
 }
@@ -967,7 +978,7 @@ func TestStableswapHandler_SnapshotUnprobedCalcTokenAmountGatesCall(t *testing.T
 		t.Fatal("want stableswap state")
 	}
 
-	assertNoCalcTokenAmountIssued(t, mc.captured)
+	assertCalcTokenAmountShape(t, mc.captured, nil)
 	assertStructuralNulls(t, map[string]*big.Int{"calc_token_amount": st.CalcTokenAmount})
 	// Cursor stays aligned: fields after the gated-off read still decode.
 	if len(st.CalcWithdrawOneCoin) != 2 {
@@ -1009,6 +1020,7 @@ func TestStableswapHandler_SnapshotLaterNGFeeSchedule(t *testing.T) {
 	}
 
 	assertNotIssued(t, a, mc.captured, "future_fee")
+	assertCalcTokenAmountShape(t, mc.captured, pool.CalcTokenAmountDynArray)
 	assertStructuralNulls(t, map[string]*big.Int{"future_fee": cfg.FutureFee})
 	if !issuedMethod(t, a, mc.captured, "offpeg_fee_multiplier") {
 		t.Error("offpeg_fee_multiplier was not issued, but the pool exposes it")

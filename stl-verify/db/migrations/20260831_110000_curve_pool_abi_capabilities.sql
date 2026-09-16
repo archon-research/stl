@@ -56,12 +56,20 @@ DO $$
 DECLARE
     ng_without_capability TEXT;
 BEGIN
-    -- Any other plain_ng pool that predates this column would silently lose its
-    -- five reads to the FALSE default; there is none today, and a future one
-    -- must be probed and curated rather than defaulted.
+    -- Scoped to the rows this migration curates. A row it does not know about
+    -- gets the safe defaults (no call issued, no stall) and is caught loudly at
+    -- worker startup by curveFactory.BuildHandler, so it must not abort the
+    -- whole deploy from here.
     SELECT string_agg(encode(pool_address, 'hex'), ', ') INTO ng_without_capability
     FROM curve_pool
-    WHERE pool_kind = 'plain_ng'
+    WHERE chain_id = 1
+      AND pool_address IN (
+      '\xDC24316b9AE028F1497c275EB9192a3Ea0f67022'::bytea,  -- stETH classic, plain_pre_ng
+      '\x21E27a5E5513D6e65C4f830167390997aA84843a'::bytea,  -- stETH-ng,      plain_ng
+      '\xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7'::bytea,  -- 3pool,         plain_pre_ng
+      '\x7F86Bf177Dd4F3494b841a37e810A34dD56c829B'::bytea   -- TricryptoUSDC, cryptoswap
+      )
+      AND pool_kind = 'plain_ng'
       AND NOT has_no_arg_oracle_getters;
     IF ng_without_capability IS NOT NULL THEN
         RAISE EXCEPTION 'plain_ng pools exist that this migration did not curate: %. Probe price_oracle()/last_price()/ema_price()/get_p()/oracle_method() on each and set has_no_arg_oracle_getters explicitly', ng_without_capability;
@@ -103,11 +111,19 @@ DO $$
 DECLARE
     unprobed TEXT;
 BEGIN
-    -- Every pool seeded before this column existed was issuing calc_token_amount
-    -- and must keep doing so; a NULL left here would silently drop the read.
+    -- Every pool this migration curates was issuing calc_token_amount and must
+    -- keep doing so; a NULL left here would silently drop the read. Scoped for
+    -- the same reason as the guard above.
     SELECT string_agg(encode(pool_address, 'hex'), ', ') INTO unprobed
     FROM curve_pool
-    WHERE calc_token_amount_dyn_array IS NULL;
+    WHERE chain_id = 1
+      AND pool_address IN (
+      '\xDC24316b9AE028F1497c275EB9192a3Ea0f67022'::bytea,  -- stETH classic, plain_pre_ng
+      '\x21E27a5E5513D6e65C4f830167390997aA84843a'::bytea,  -- stETH-ng,      plain_ng
+      '\xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7'::bytea,  -- 3pool,         plain_pre_ng
+      '\x7F86Bf177Dd4F3494b841a37e810A34dD56c829B'::bytea   -- TricryptoUSDC, cryptoswap
+      )
+      AND calc_token_amount_dyn_array IS NULL;
     IF unprobed IS NOT NULL THEN
         RAISE EXCEPTION 'curve pools exist whose calc_token_amount argument shape this migration did not curate: %. Call calc_token_amount(uint256[N],bool) and calc_token_amount(uint256[],bool) on each and set calc_token_amount_dyn_array explicitly', unprobed;
     END IF;
@@ -145,11 +161,19 @@ DO $$
 DECLARE
     missing TEXT;
 BEGIN
-    -- Every stableswap pool seeded before this column existed was issuing
-    -- future_fee() into a NOT NULL column, so all of them must keep it.
+    -- Every stableswap pool this migration curates was issuing future_fee() into
+    -- a NOT NULL column, so all of them must keep it. Scoped for the same reason
+    -- as the guards above.
     SELECT string_agg(encode(pool_address, 'hex'), ', ') INTO missing
     FROM curve_pool
-    WHERE pool_kind IN ('plain_pre_ng', 'plain_ng')
+    WHERE chain_id = 1
+      AND pool_address IN (
+      '\xDC24316b9AE028F1497c275EB9192a3Ea0f67022'::bytea,  -- stETH classic, plain_pre_ng
+      '\x21E27a5E5513D6e65C4f830167390997aA84843a'::bytea,  -- stETH-ng,      plain_ng
+      '\xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7'::bytea,  -- 3pool,         plain_pre_ng
+      '\x7F86Bf177Dd4F3494b841a37e810A34dD56c829B'::bytea   -- TricryptoUSDC, cryptoswap
+      )
+      AND pool_kind IN ('plain_pre_ng', 'plain_ng')
       AND NOT has_future_fee;
     IF missing IS NOT NULL THEN
         RAISE EXCEPTION 'stableswap pools exist that this migration did not curate for future_fee(): %. Call future_fee() and offpeg_fee_multiplier() on each and set the flags explicitly', missing;
@@ -173,6 +197,41 @@ COMMENT ON COLUMN curve_stableswap_config.future_fee IS
   'Queued swap fee from future_fee(), in Curve fee units where 1e10 = 100%. NULL on the later Stableswap-NG pools, which expose no future_fee() (see curve_pool.has_future_fee) and carry offpeg_fee_multiplier instead -- a NULL here is that structural absence, never a failed read.';
 COMMENT ON COLUMN curve_stableswap_config.offpeg_fee_multiplier IS
   'Off-peg fee multiplier from offpeg_fee_multiplier(), raw contract units (1e10 = 1x, so 2e11 = 20x), the later Stableswap-NG replacement for the queued-fee mechanism. NULL on every pool that exposes no such getter (see curve_pool.has_offpeg_fee_multiplier) -- a structural absence, never a failed read.';
+
+-- ---------------------------------------------------------------------------
+-- Constraints: make the dangerous combinations unrepresentable.
+--
+-- The flags gate their reads independently, so a row with both fee flags TRUE
+-- issues both getters; one of them reverts on every implementation that exists,
+-- which is the stall this migration is here to prevent. A copy-pasted column
+-- list on a future seed is all it takes, and nothing else would catch it before
+-- prod. Same for the no-arg oracle getters outside plain_ng: the flag is
+-- meaningless there, and setting it would issue five reads that revert.
+--
+-- Deliberately NOT "exactly one fee flag": a future implementation exposing
+-- neither is representable, and an under-curated row is caught loudly at worker
+-- startup rather than blocked here.
+ALTER TABLE curve_pool
+    ADD CONSTRAINT curve_pool_fee_schedule_not_both
+        CHECK (NOT (has_future_fee AND has_offpeg_fee_multiplier)),
+    ADD CONSTRAINT curve_pool_no_arg_oracle_getters_ng_only
+        CHECK (NOT has_no_arg_oracle_getters OR pool_kind = 'plain_ng');
+
+-- ---------------------------------------------------------------------------
+-- The five oracle COMMENTs are stale as of this migration: they promise a value
+-- on every plain_ng pool, which stopped being true the moment the getters became
+-- per-pool rather than per-class. AGENTS.md makes the COMMENT the catalogue's
+-- source of truth, so they are restated here rather than left to drift.
+COMMENT ON COLUMN curve_stableswap_state.last_price IS
+  'last_price(): latest spot price feeding the EMA, 1e18. Non-NULL only on plain_ng pools with curve_pool.has_no_arg_oracle_getters = TRUE; NULL on plain_pre_ng (no such getter) and on the later Stableswap-NG pools, which serve only the indexed last_price(uint256) form.';
+COMMENT ON COLUMN curve_stableswap_state.price_oracle IS
+  'price_oracle(): EMA oracle price, 1e18. Non-NULL only on plain_ng pools with curve_pool.has_no_arg_oracle_getters = TRUE; NULL on plain_pre_ng (no such getter) and on the later Stableswap-NG pools, which serve only the indexed price_oracle(uint256) form.';
+COMMENT ON COLUMN curve_stableswap_state.ema_price IS
+  'ema_price(), 1e18. Non-NULL only on plain_ng pools with curve_pool.has_no_arg_oracle_getters = TRUE; NULL on plain_pre_ng and on the later Stableswap-NG pools, which revert on the no-arg selector.';
+COMMENT ON COLUMN curve_stableswap_state.get_p IS
+  'Instantaneous price get_p(), 1e18. Non-NULL only on plain_ng pools with curve_pool.has_no_arg_oracle_getters = TRUE; NULL on plain_pre_ng and on the later Stableswap-NG pools, which revert on the no-arg selector.';
+COMMENT ON COLUMN curve_stableswap_config.oracle_method IS
+  'Oracle method selector from oracle_method(). Non-NULL only on plain_ng pools with curve_pool.has_no_arg_oracle_getters = TRUE; NULL on plain_pre_ng and on the later Stableswap-NG pools, which revert on the no-arg selector.';
 
 INSERT INTO migrations (filename)
 VALUES ('20260831_110000_curve_pool_abi_capabilities.sql')

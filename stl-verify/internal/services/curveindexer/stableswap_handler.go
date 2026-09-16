@@ -242,8 +242,8 @@ type stableswapSnapshotAcc struct {
 	fee          *big.Int
 	spotDy       []*big.Int
 
-	priceOracle *big.Int // NG only
-	lastPrice   *big.Int // NG only
+	priceOracle *big.Int // HasNoArgOracleGetters only
+	lastPrice   *big.Int // HasNoArgOracleGetters only
 
 	aPrecise        *big.Int // HasAPrecise only
 	adminBalances   []*big.Int
@@ -251,8 +251,8 @@ type stableswapSnapshotAcc struct {
 	calcWithdraw    []*big.Int
 
 	storedRates []*big.Int // NG only
-	emaPrice    *big.Int   // NG only
-	getP        *big.Int   // NG only
+	emaPrice    *big.Int   // HasNoArgOracleGetters only
+	getP        *big.Int   // HasNoArgOracleGetters only
 
 	initialA       *big.Int
 	initialATime   *big.Int
@@ -262,7 +262,7 @@ type stableswapSnapshotAcc struct {
 	futureFee      *big.Int // HasFutureFee only
 	futureAdminFee *big.Int // pre-NG only
 	maExpTime      *big.Int // NG only
-	oracleMethod   *big.Int // NG only
+	oracleMethod   *big.Int // HasNoArgOracleGetters only
 
 	offpegFeeMultiplier *big.Int // HasOffpegFeeMultiplier only
 }
@@ -335,8 +335,7 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 	reads = append(reads, h.stableSwapCalcTokenAmountReads(pool, acc)...)
 	reads = append(reads, h.stableSwapCalcWithdrawReads(blockNumber, acc)...)
 	reads = append(reads, h.stableSwapNGStateReads(pool, blockNumber, acc)...)
-	reads = append(reads, h.stableSwapConfigGetterReads(blockNumber, acc)...)
-	reads = append(reads, h.stableSwapFeeScheduleReads(pool, blockNumber, acc)...)
+	reads = append(reads, h.stableSwapConfigGetterReads(pool, blockNumber, acc)...)
 	reads = append(reads, h.stableSwapFutureAdminFeeReads(pool, blockNumber, acc)...)
 	reads = append(reads, h.stableSwapNGConfigReads(pool, blockNumber, acc)...)
 	return reads
@@ -575,46 +574,6 @@ func (h *StableswapHandler) stableSwapOracleReads(pool RegisteredPool, blockNumb
 	return reads
 }
 
-// Fee-schedule getters, each gated on its own curated capability: future_fee()
-// on the pre-NG and original NG pools, offpeg_fee_multiplier() on the later NG
-// implementations that dropped future_fee for it. No pool exposes both, and a
-// pool exposing neither (cryptoswap) issues neither.
-func (h *StableswapHandler) stableSwapFeeScheduleReads(pool RegisteredPool, blockNumber int64, acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
-	var reads []shared.SnapshotRead[RegisteredPool]
-	gated := []struct {
-		name   string
-		enable bool
-		dst    **big.Int
-	}{
-		{"future_fee", pool.HasFutureFee, &acc.futureFee},
-		{"offpeg_fee_multiplier", pool.HasOffpegFeeMultiplier, &acc.offpegFeeMultiplier},
-	}
-	for _, g := range gated {
-		if !g.enable {
-			continue
-		}
-		reads = append(reads, shared.SnapshotRead[RegisteredPool]{
-			Name: g.name,
-			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
-				data, err := h.stableABI.Pack(g.name)
-				if err != nil {
-					return nil, fmt.Errorf("packing %s: %w", g.name, err)
-				}
-				return []outbound.Call{{Target: pool.Address, AllowFailure: true, CallData: data}}, nil
-			},
-			Decode: func(pool RegisteredPool, results []outbound.Result) error {
-				v, err := shared.OptionalUintResult(h.stableABI, g.name, results[0], pool.Address, blockNumber)
-				if err != nil {
-					return fmt.Errorf("%s: %w", g.name, err)
-				}
-				*g.dst = v
-				return nil
-			},
-		})
-	}
-	return reads
-}
-
 // A_precise(), gated by pool.HasAPrecise (see the field doc on RegisteredPool).
 func (h *StableswapHandler) stableSwapAPreciseReads(pool RegisteredPool, blockNumber int64, acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
 	var reads []shared.SnapshotRead[RegisteredPool]
@@ -807,20 +766,29 @@ func (h *StableswapHandler) stableSwapNGStateReads(pool RegisteredPool, blockNum
 }
 
 // config getters (both classes): initial_A, initial_A_time, future_A,
-// future_A_time, admin_fee.
-func (h *StableswapHandler) stableSwapConfigGetterReads(blockNumber int64, acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+// future_A_time, admin_fee, and whichever fee-schedule getter the pool has.
+func (h *StableswapHandler) stableSwapConfigGetterReads(pool RegisteredPool, blockNumber int64, acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
 	var reads []shared.SnapshotRead[RegisteredPool]
 	configGetters := []struct {
-		name string
-		dst  **big.Int
+		name   string
+		enable bool
+		dst    **big.Int
 	}{
-		{"initial_A", &acc.initialA},
-		{"initial_A_time", &acc.initialATime},
-		{"future_A", &acc.futureA},
-		{"future_A_time", &acc.futureATime},
-		{"admin_fee", &acc.adminFee},
+		{"initial_A", true, &acc.initialA},
+		{"initial_A_time", true, &acc.initialATime},
+		{"future_A", true, &acc.futureA},
+		{"future_A_time", true, &acc.futureATime},
+		{"admin_fee", true, &acc.adminFee},
+		// The fee schedule is one getter or the other, never both: the later NG
+		// implementations dropped future_fee() for offpeg_fee_multiplier() and
+		// revert on it. Cryptoswap pools expose neither, but never reach here.
+		{"future_fee", pool.HasFutureFee, &acc.futureFee},
+		{"offpeg_fee_multiplier", pool.HasOffpegFeeMultiplier, &acc.offpegFeeMultiplier},
 	}
 	for _, g := range configGetters {
+		if !g.enable {
+			continue
+		}
 		reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 			Name: g.name,
 			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -929,16 +897,16 @@ type stableswapConfigReads struct {
 	futureFee      *big.Int // HasFutureFee only
 	futureAdminFee *big.Int // pre-NG only
 	maExpTime      *big.Int // NG only
-	oracleMethod   *big.Int // NG only
+	oracleMethod   *big.Int // HasNoArgOracleGetters only
 
 	offpegFeeMultiplier *big.Int // HasOffpegFeeMultiplier only
 }
 
 // buildStableswapConfig assembles a CurveStableswapConfig from the config getter
-// reads. The four required NOT-NULL value fields (initial_a, future_a, admin_fee,
-// admin_fee) are always issued for both classes, so a nil here means an
-// upstream decode bug rather than a real revert (a revert errors in optUint); we
-// fail hard rather than persist a partial config row. The *_time fields are always
+// reads. initial_a, future_a and admin_fee are always issued for both classes,
+// and future_fee whenever the pool is curated as having it, so a nil in any of
+// them means an upstream decode bug rather than a real revert (a revert errors
+// in optUint); we fail hard rather than persist a partial config row. The *_time fields are always
 // issued; a successful read outside int64 is an error, not a coercion to 0.
 func buildStableswapConfig(
 	pool RegisteredPool,
@@ -949,6 +917,11 @@ func buildStableswapConfig(
 ) (*entity.CurveStableswapConfig, error) {
 	if r.initialA == nil || r.futureA == nil || r.adminFee == nil {
 		return nil, fmt.Errorf("stableswap config for pool %s missing a required getter (initial_a/future_a/admin_fee)", pool.Address)
+	}
+	// A pool curated as having future_fee() issued the read, so nil is a decode
+	// bug; only an uncurated pool may leave it absent.
+	if pool.HasFutureFee && r.futureFee == nil {
+		return nil, fmt.Errorf("stableswap config for pool %s: future_fee getter returned nil although the pool is curated as having it (decode bug)", pool.Address)
 	}
 	// timeOrError converts a non-nil *big.Int to int64. A nil value is only
 	// possible for a field that was structurally not issued (none of the time
