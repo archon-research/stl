@@ -1,19 +1,6 @@
 -- Corrections for position_daily (VEC-636): the writer that appends a retraction, and the view that
 -- says where the reading and the spine disagree. Separate from 20260824_120000 because that file
--- creates the table and this one is about operating it.
-
-ALTER TABLE position_daily_observation ADD COLUMN IF NOT EXISTS retraction_ticket text;
-ALTER TABLE position_daily_observation ADD COLUMN IF NOT EXISTS retraction_reason text;
-
-COMMENT ON COLUMN position_daily_observation.retraction_ticket IS 'Roles: Audit. The ticket a retraction was written under; NULL on every row that is not a retraction. Required by retract_position_daily, so no key is withdrawn without a record of who decided to.';
-COMMENT ON COLUMN position_daily_observation.retraction_reason IS 'Roles: Audit. Why a retraction was written; NULL on every row that is not a retraction.';
-
--- A retraction must carry its attribution and nothing else may: the pair is meaningless on a
--- crystallized row, and a tombstone without it cannot be audited.
-ALTER TABLE position_daily_observation
-    ADD CONSTRAINT position_daily_observation_retraction_attribution_chk
-    CHECK ((is_retracted IS TRUE) = (retraction_ticket IS NOT NULL)
-       AND (retraction_ticket IS NULL) = (retraction_reason IS NULL));
+-- creates the objects and this one is about operating them; it redefines none of them.
 
 -- The retraction writer. Callers name a (position, date) and a ticket; the procedure copies that
 -- day's winning row at its own spine coordinate and correction_seq + 1, with is_retracted TRUE.
@@ -80,35 +67,6 @@ END;
 $proc$;
 
 COMMENT ON PROCEDURE retract_position_daily(bytea, date, text, text, bigint) IS '[Operational] Withdraws one (position, UTC date) from position_daily by appending a retraction (VEC-636, ADR-0006 §3): CALL retract_position_daily(position_id, as_of_date, ticket, reason). Copies that day''s winning row at its own spine coordinate and correction_seq + 1 with is_retracted TRUE, so it outranks what it withdraws and never occupies a primary key the spine can reach. Idempotent: a day whose current answer is already retracted is left alone, returning 0. Raises if the day has no rows, or if ticket or reason is blank. Needs no version allocator, because correction_seq is this table''s own axis. Use it only for a key that should never have existed; a day whose VALUE is wrong is corrected upstream and supersedes on its own.';
-
--- position_daily_as_of RETURNS SETOF position_daily_observation, so its row type was fixed when the
--- table had fewer columns. Both reads are rebuilt here or a consumer of the view sees a narrower
--- shape than the table (TestPositionDailySchema/view_exposes_every_table_column).
-DROP VIEW IF EXISTS position_daily;
-
-CREATE OR REPLACE FUNCTION position_daily_as_of(seen_before timestamptz)
-    RETURNS SETOF position_daily_observation
-    LANGUAGE sql STABLE
-AS $fn$
-    SELECT w.* FROM (
-        SELECT DISTINCT ON (d.position_id, d.as_of_date, d.holder_id) d.*
-          FROM public.position_daily_observation d
-         WHERE d.created_at <= public.position_daily_as_of_bound(seen_before)
-         ORDER BY d.position_id, d.as_of_date, d.holder_id,
-                  d.block_number DESC, d.block_version DESC, d.processing_version DESC,
-                  d.block_timestamp DESC, d.correction_seq DESC
-    ) w
-    WHERE w.is_retracted IS NOT TRUE;
-$fn$;
-
-CREATE VIEW position_daily AS
-    SELECT * FROM public.position_daily_as_of('infinity'::timestamptz);
-
--- DROP took the COMMENT with it, so it is restated rather than inherited.
-COMMENT ON VIEW position_daily IS '[Operational] What each position held on each observed UTC date: one row per (position, UTC date), that day''s winning observation (VEC-636). Equal to the newest position_state observation per (position, UTC date) across settled days, except where a retraction withdraws the key. Only OBSERVED dates get a row -- no carry-forward, so a query for one date may correctly return nothing, and the current UTC day is absent until it is crystallized. A retracted key is absent entirely. Not reproducible across corrections; pin a time with position_daily_as_of(T) for that. position_daily_anomaly lists where this disagrees with the spine, and why.';
-
-GRANT SELECT ON position_daily TO stl_readonly;
-GRANT SELECT ON position_daily TO stl_readwrite;
 
 -- Where the reading and the spine disagree, and why. Nothing here fires on its own: these are the
 -- cases a human or a data-quality job has to decide about, and before this view each of them was a

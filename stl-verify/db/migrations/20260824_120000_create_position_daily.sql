@@ -25,12 +25,19 @@ CREATE TABLE IF NOT EXISTS position_daily_observation (
     -- processing_version: that column is the spine's to allocate, and a tombstone placed in it
     -- squats on the coordinate the spine's next correction crystallizes to.
     correction_seq     integer     NOT NULL DEFAULT 0,
+    retraction_ticket  text,
+    retraction_reason  text,
     -- A day's version is the coordinate of the observation that won it, copied from the spine, and
     -- the winner is the maximum of a set that only grows. correction_seq breaks ties within one
     -- coordinate, so a local correction outranks the row it corrects and nothing else.
     CONSTRAINT position_daily_observation_pkey PRIMARY KEY
         (position_id, as_of_date, block_number, block_version, processing_version, block_timestamp,
          correction_seq),
+    -- A retraction carries its attribution and nothing else may, so a hand-written INSERT is held
+    -- to the same rule as the procedure.
+    CONSTRAINT position_daily_observation_retraction_attribution_chk
+        CHECK ((is_retracted IS TRUE) = (retraction_ticket IS NOT NULL)
+           AND (retraction_ticket IS NULL) = (retraction_reason IS NULL)),
     -- Pins the date derivation to one expression, so no row can land on a day its instant is not on.
     CONSTRAINT position_daily_observation_as_of_date_chk
         CHECK (as_of_date = (block_timestamp AT TIME ZONE 'utc')::date)
@@ -58,6 +65,8 @@ COMMENT ON COLUMN position_daily_observation.build_id IS 'Roles: Audit. Which bu
 COMMENT ON COLUMN position_daily_observation.run_id IS 'Roles: Audit (copy of position_state.run_id). Which writer run appended the observation (writer_run.id; NULL means it predates run tracking).';
 COMMENT ON COLUMN position_daily_observation.created_at IS 'Roles: Audit. When this row was crystallized; never rewritten. The as-of axis position_daily_as_of(T) filters on. It is TRANSACTION START time (now()) and a row becomes visible at COMMIT, so a T newer than the start of a still-running crystallization gains rows afterwards: a pinned T is stable once older than every run open at T. Processing time, not block time (see block_timestamp).';
 COMMENT ON COLUMN position_daily_observation.is_retracted IS 'Roles: Reference (steers reads). Retraction marker (ADR-0006 §3, ARCT-470): TRUE means this (position, date) key should never have existed, so position_daily and position_daily_as_of(T) treat the day as ABSENT rather than falling back to an older row. NULL and FALSE are live. Day-level: it withdraws the (position, date), and is NOT a copy of any spine retraction, which withdraws one observation and leaves the day to its next live one. Written only by a correction run, as a new row at the retracted row''s FULL spine coordinate -- processing_version included -- and correction_seq + 1; the crystallizer never sets it. A later spine observation at a higher coordinate revives the key, so a mis-keyed projection must be fixed upstream too. Raw reads of this table still return retracted rows, which is what keeps an earlier position_daily_as_of(T) reproducible.';
+COMMENT ON COLUMN position_daily_observation.retraction_ticket IS 'Roles: Audit. The ticket a retraction was written under; NULL on every row that is not a retraction. Required by retract_position_daily, so no key is withdrawn without a record of who decided to.';
+COMMENT ON COLUMN position_daily_observation.retraction_reason IS 'Roles: Audit. Why a retraction was written; NULL on every row that is not a retraction.';
 COMMENT ON COLUMN position_daily_observation.correction_seq IS 'Roles: PK. This table''s own correction counter within one spine coordinate; 0 is every crystallized row. It exists because processing_version here is a COPY of the source''s count and is the spine''s to allocate: a retraction written at processing_version + 1 would occupy the primary key the spine''s own next correction crystallizes to, and the writer''s ON CONFLICT DO NOTHING would then drop that correction silently. Last leg of the ordering, so it breaks ties within a coordinate and never outranks a genuinely newer observation.';
 
 -- The app role reads; only the owner writes, which is the crystallizer's caller. ALTER DEFAULT
