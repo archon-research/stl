@@ -30,6 +30,7 @@ CREATE TABLE id_scheme_vocabulary (
                      applies_to <> '{}'
                      AND applies_to <@ ARRAY['ENTITY','SECURITY','CONCEPT','SOURCE','ACCOUNT']),
     value_form     text NOT NULL,
+    value_pattern  text,
     unique_current boolean NOT NULL,
     description    text NOT NULL,
     change_reason  text NOT NULL DEFAULT 'SEED_LOAD',
@@ -38,7 +39,8 @@ CREATE TABLE id_scheme_vocabulary (
 COMMENT ON TABLE id_scheme_vocabulary IS '[Configuration] The identifier schemes alias_register can carry (ADR-0007 §1.3). Public identifiers are lookups, never node ids: every one of them is eventually reused, corrected or reassigned, and an id derived from one breaks with it. Plain table: seed-once, extended by reviewed migration.';
 COMMENT ON COLUMN id_scheme_vocabulary.id_scheme IS 'Roles: PK. Scheme name, UPPER_SNAKE.';
 COMMENT ON COLUMN id_scheme_vocabulary.applies_to IS 'Node kinds this scheme can alias (sec_node.record_type values). CHECKed non-empty and against the closed kind set, so a typo fails at seed time rather than yielding a scheme nothing can use.';
-COMMENT ON COLUMN id_scheme_vocabulary.value_form IS 'Human-readable check rule for id_value (length, alphabet, casing). Prose rather than a regex: the register holds one value column for every scheme, so per-scheme form is validator-enforced, not a column CHECK.';
+COMMENT ON COLUMN id_scheme_vocabulary.value_form IS 'Human-readable description of id_value''s form (length, alphabet, casing), for a reader. What is ENFORCED is value_pattern; keep the two saying the same thing.';
+COMMENT ON COLUMN id_scheme_vocabulary.value_pattern IS 'POSIX regex id_value must match, applied by alias_register_scheme_guard. NULL means the scheme has no checkable form — Kraken''s symbol is the venue''s wsname verbatim, a ticker is whatever the venue prints — and NULL is a statement that none exists, not a gap left for later. It lives here rather than in a CHECK because a CHECK cannot read this table, so a hardcoded scheme list would make every new address-shaped scheme a schema change and silently skip the check when someone forgot; a value that misses the form registers happily and then joins nothing, which reads as missing reference data rather than a malformed row.';
 COMMENT ON COLUMN id_scheme_vocabulary.unique_current IS 'true: one current node per value — a DQ check over alias_register_current, not a write constraint, because an open alias always time-overlaps its own re-point (the ADR-0007 §5 cardinality rule). false: many-to-many over time, as TICKER is.';
 COMMENT ON COLUMN id_scheme_vocabulary.description IS 'What the scheme identifies and who assigns it.';
 COMMENT ON COLUMN id_scheme_vocabulary.change_reason IS 'Roles: Audit. Why the row exists.';
@@ -153,12 +155,6 @@ CREATE TABLE alias_register (
     ),
     -- Addresses are stored in the same form position_state.holder_id uses, so seam 2 is a plain
     -- equality join: lowercase hex, no 0x. Any other casing forks the holder's identity.
-    -- 40 exactly, matching position_state_holder_hex_chk. A shorter value is well-formed hex
-    -- that seam 2 can never join, so it would register and silently resolve nothing.
-    CONSTRAINT alias_register_hex_chk CHECK (
-        id_scheme NOT IN ('CONTRACT_ADDRESS','BLOCKCHAIN_ADDRESS')
-        OR id_value ~ '^[0-9a-f]{40}$'
-    ),
     CONSTRAINT alias_register_value_nonblank_chk CHECK (id_value <> '' AND id_value = btrim(id_value)),
     CONSTRAINT alias_register_valid_chk CHECK (valid_from <= valid_to),
     CONSTRAINT alias_register_valid_from_finite_chk CHECK (valid_from <> 'infinity' AND valid_from <> '-infinity')
@@ -292,18 +288,22 @@ INSERT INTO key_namespace_vocabulary (key_namespace, description) VALUES
  ('provider_package','provider '':'' package_id, the source-native custody id (Anchorage)')
 ON CONFLICT (key_namespace) DO NOTHING;
 
-INSERT INTO id_scheme_vocabulary (id_scheme, applies_to, value_form, unique_current, description) VALUES
- ('LEI','{ENTITY}','20-char ISO 17442, uppercase alphanumeric', true,'Legal Entity Identifier, assigned by a GLEIF-accredited LOU'),
- ('ISIN','{SECURITY}','12-char ISO 6166', true,'International Securities Identification Number'),
- ('CUSIP','{SECURITY}','9-char', true,'CUSIP, North American securities'),
- ('SEDOL','{SECURITY}','7-char', true,'SEDOL, London Stock Exchange'),
- ('FIGI','{SECURITY}','12-char OpenFIGI', true,'Financial Instrument Global Identifier'),
- ('TICKER','{SECURITY}','venue ticker; many-to-many over time', false,'Exchange ticker symbol, and the ONE home for it: a ticker is an alias row, never a node attribute, so a rename is a new row rather than an overwrite and dim_security.ticker reads the current alias. Not unique_current: tickers are reassigned, and one security carries different tickers per venue'),
- ('CONTRACT_ADDRESS','{SECURITY,ENTITY}','hex lowercase, no 0x', true,'On-chain contract address'),
- ('BLOCKCHAIN_ADDRESS','{ENTITY,ACCOUNT}','hex lowercase, no 0x', true,'On-chain wallet / EOA address; the position holder-resolution path (seam 2)'),
- ('PIPELINE_PRIME_ID','{ENTITY,ACCOUNT}','prime.id, verbatim', true,'Our own prime registry id — the path the frozen holder_entity view took for PRIME holders'),
- ('PIPELINE_PROTOCOL_ID','{ENTITY}','protocol.id, verbatim', true,'Our own protocol registry id'),
- ('INTERNAL','{ENTITY,ACCOUNT,SOURCE}','house-internal code', true,'House-internal code with no external assigner')
+-- value_pattern is NULL where the scheme genuinely has no checkable form: a prime or protocol
+-- id is whatever our registry assigned, a ticker whatever the venue prints, an INTERNAL code
+-- whatever a human chose. The two address schemes take position_state_holder_hex_chk's regex
+-- character for character, so seam 2 stays a plain equality join.
+INSERT INTO id_scheme_vocabulary (id_scheme, applies_to, value_form, value_pattern, unique_current, description) VALUES
+ ('LEI','{ENTITY}','20-char ISO 17442, uppercase alphanumeric','^[0-9A-Z]{20}$', true,'Legal Entity Identifier, assigned by a GLEIF-accredited LOU'),
+ ('ISIN','{SECURITY}','12-char ISO 6166: 2-letter country, 9 alphanumeric, 1 check digit','^[A-Z]{2}[0-9A-Z]{9}[0-9]$', true,'International Securities Identification Number'),
+ ('CUSIP','{SECURITY}','9-char alphanumeric','^[0-9A-Z]{9}$', true,'CUSIP, North American securities'),
+ ('SEDOL','{SECURITY}','7-char alphanumeric','^[0-9A-Z]{7}$', true,'SEDOL, London Stock Exchange'),
+ ('FIGI','{SECURITY}','12-char OpenFIGI, uppercase alphanumeric','^[0-9A-Z]{12}$', true,'Financial Instrument Global Identifier'),
+ ('TICKER','{SECURITY}','venue ticker; many-to-many over time', NULL, false,'Exchange ticker symbol, and the ONE home for it: a ticker is an alias row, never a node attribute, so a rename is a new row rather than an overwrite and dim_security.ticker reads the current alias. Not unique_current: tickers are reassigned, and one security carries different tickers per venue'),
+ ('CONTRACT_ADDRESS','{SECURITY,ENTITY}','40 hex, lowercase, no 0x','^[0-9a-f]{40}$', true,'On-chain contract address'),
+ ('BLOCKCHAIN_ADDRESS','{ENTITY,ACCOUNT}','40 hex, lowercase, no 0x','^[0-9a-f]{40}$', true,'On-chain wallet / EOA address; the position holder-resolution path (seam 2)'),
+ ('PIPELINE_PRIME_ID','{ENTITY,ACCOUNT}','prime.id, verbatim', NULL, true,'Our own prime registry id — the path the frozen holder_entity view took for PRIME holders'),
+ ('PIPELINE_PROTOCOL_ID','{ENTITY}','protocol.id, verbatim', NULL, true,'Our own protocol registry id'),
+ ('INTERNAL','{ENTITY,ACCOUNT,SOURCE}','house-internal code', NULL, true,'House-internal code with no external assigner')
 ON CONFLICT (id_scheme) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
@@ -467,6 +467,8 @@ CREATE FUNCTION alias_register_scheme_guard() RETURNS trigger
 DECLARE
     node_kind text;
     legal     text[];
+    pattern   text;
+    found     boolean;
 BEGIN
     node_kind := CASE
         WHEN NEW.node_id LIKE 'em-%'      THEN 'ENTITY'
@@ -476,17 +478,23 @@ BEGIN
         WHEN NEW.node_id LIKE 'acct-%'    THEN 'ACCOUNT'
     END;
 
-    SELECT v.applies_to INTO legal FROM id_scheme_vocabulary v WHERE v.id_scheme = NEW.id_scheme;
+    SELECT v.applies_to, v.value_pattern, true INTO legal, pattern, found
+      FROM id_scheme_vocabulary v WHERE v.id_scheme = NEW.id_scheme;
 
     -- node_kind NULL: an unknown prefix, which alias_register_node_prefix_chk owns.
-    -- legal NULL: an unknown scheme, which the id_scheme foreign key owns (23503).
-    IF node_kind IS NOT NULL AND legal IS NOT NULL AND NOT (node_kind = ANY (legal)) THEN
+    -- found false: an unknown scheme, which the id_scheme foreign key owns (23503).
+    IF node_kind IS NOT NULL AND coalesce(found, false) AND NOT (node_kind = ANY (legal)) THEN
         RAISE EXCEPTION 'scheme % applies to %, so it cannot alias % (a % node) (ADR-0007 §1.3)',
             NEW.id_scheme, legal, NEW.node_id, node_kind;
     END IF;
+
+    IF pattern IS NOT NULL AND NEW.id_value !~ pattern THEN
+        RAISE EXCEPTION 'id_value % does not match the form % declares (%); a value that misses it registers and then joins nothing, which reads as missing reference data rather than a bad row',
+            NEW.id_value, NEW.id_scheme, pattern;
+    END IF;
     RETURN NEW;
 END $$;
-COMMENT ON FUNCTION alias_register_scheme_guard() IS 'BEFORE INSERT on alias_register: enforces id_scheme_vocabulary.applies_to against the node kind implied by node_id''s prefix. value_form stays prose and validator-owned — one value column serves every scheme, so its form is not a column CHECK.';
+COMMENT ON FUNCTION alias_register_scheme_guard() IS 'BEFORE INSERT on alias_register: enforces id_scheme_vocabulary.applies_to against the node kind implied by node_id''s prefix, and value_pattern against id_value. Both read one vocabulary row. The format lives there rather than in a CHECK because a CHECK cannot read the table: a hardcoded scheme list would make every new address-shaped scheme a schema change, against the vocabulary''s own claim that a scheme is one row.';
 
 -- A second row on a window that already exists must say which row it closes. Without this the
 -- two are indistinguishable from a race: they differ only in valid_to, so the key does not

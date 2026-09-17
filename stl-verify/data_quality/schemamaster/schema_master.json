@@ -1468,6 +1468,10 @@
       "class": "R",
       "not_null": true
     },
+    "value_pattern": {
+      "type": "text",
+      "class": "R"
+    },
     "variable_borrow_index": {
       "type": "numeric",
       "class": "S"

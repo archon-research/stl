@@ -725,6 +725,66 @@ func TestAliasRegisterClosesAWindowByAppending(t *testing.T) {
 	})
 }
 
+// TestAliasRegisterEnforcesTheSchemesValueForm covers value_pattern, which replaced a CHECK
+// that named CONTRACT_ADDRESS and BLOCKCHAIN_ADDRESS literally.
+//
+// A CHECK cannot read the vocabulary, so the literal list made every new address-shaped scheme a
+// schema change — against the vocabulary's own claim that a scheme is one row — and silently
+// skipped the check whenever someone forgot. The failure was quiet in the worst way: a value
+// that misses the form registers happily, then joins nothing at seam 2, and a LEFT JOIN turns
+// that into a NULL rather than an error. It reads as missing reference data, not a bad row.
+//
+// Moving it to the vocabulary also gave the schemes that never had a format check one: an
+// invalid LEI used to register as readily as an invalid address.
+func TestAliasRegisterEnforcesTheSchemesValueForm(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	insert := func(scheme, value, node string) error {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO alias_register (id_scheme, id_value, node_id, valid_from, `+registerSpine+`)
+			VALUES ($1, $2, $3, '2026-01-01', 'test', 'SEED_LOAD', 'value form', 'test')`,
+			scheme, value, node)
+		return err
+	}
+
+	for _, tc := range []struct {
+		name   string
+		scheme string
+		value  string
+		node   string
+		ok     bool
+	}{
+		{name: "an address with 0x is refused", scheme: "BLOCKCHAIN_ADDRESS", value: "0x7a2f1c9e4b8d6a05f3e2c1b0a9d8e7f6c5b4a3c1", node: "em-a"},
+		{name: "an uppercase address is refused", scheme: "BLOCKCHAIN_ADDRESS", value: "7A2F1C9E4B8D6A05F3E2C1B0A9D8E7F6C5B4A3C1", node: "em-b"},
+		{name: "a short address is refused", scheme: "BLOCKCHAIN_ADDRESS", value: "7a2f1c9e", node: "em-c"},
+		{name: "a 40-hex address lands", scheme: "BLOCKCHAIN_ADDRESS", value: "7a2f1c9e4b8d6a05f3e2c1b0a9d8e7f6c5b4a3c1", node: "em-d", ok: true},
+
+		// The schemes that had no check at all before this.
+		{name: "a 19-character LEI is refused", scheme: "LEI", value: "529900T8BM49AURSDO5", node: "em-e"},
+		{name: "a lowercase LEI is refused", scheme: "LEI", value: "529900t8bm49aursdo55", node: "em-f"},
+		{name: "a well-formed LEI lands", scheme: "LEI", value: "529900T8BM49AURSDO55", node: "em-g", ok: true},
+		{name: "an ISIN with a letter check digit is refused", scheme: "ISIN", value: "US037833100X", node: "sec-a"},
+
+		// NULL pattern means the scheme has no checkable form, not that the check is pending.
+		{name: "a scheme with no pattern accepts anything", scheme: "INTERNAL", value: "whatever the curator chose", node: "em-h", ok: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := insert(tc.scheme, tc.value, tc.node)
+			if tc.ok {
+				if err != nil {
+					t.Errorf("%s %q was refused: %v", tc.scheme, tc.value, err)
+				}
+				return
+			}
+			if !raisedWith(err, "does not match the form") {
+				t.Errorf("%s %q gave %v, want a form refusal", tc.scheme, tc.value, err)
+			}
+		})
+	}
+}
+
 // TestTheApprovalRuleAppliesToEveryGuardedTable covers CR-3.3 on all four tables
 // sec_store_append_guard is attached to, not just the one this ticket added it for.
 //
