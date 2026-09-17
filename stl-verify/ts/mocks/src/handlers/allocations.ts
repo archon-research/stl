@@ -98,6 +98,7 @@ function activityBuckets(
   intervalMs: number,
   usdPerUnit: ReadonlyMap<number, number>,
   series: 'flow' | 'balance',
+  currentTotalUsd: number,
 ): AllocationActivityBucket[] {
   // The callback's return annotation is what makes the literal fresh; the
   // function's own `AllocationActivityBucket[]` is not enough, because a
@@ -113,11 +114,12 @@ function activityBuckets(
     });
 
     if (series === 'balance') {
-      const coverage = coverageAt(rows, startMs + intervalMs, usdPerUnit);
+      const bucketEndMs = startMs + intervalMs;
+      const coverage = coverageAt(rows, bucketEndMs, usdPerUnit);
       return {
         bucket_start: iso(startMs),
         balance_usd: usdString(
-          balanceAt(rows, startMs + intervalMs, usdPerUnit),
+          balanceAt(rows, bucketEndMs, usdPerUnit, currentTotalUsd),
         ),
         entity_count: coverage.entityCount,
         priced_entity_count: coverage.pricedEntityCount,
@@ -137,24 +139,46 @@ function activityBuckets(
 
 /**
  * The bucket's closing position value, as `series=balance` reports it: the
- * cumulative signed flow of everything up to the bucket's end -- an
- * approximation of the endpoint's own recorded-state read, which the fixture
- * has no equivalent of.
+ * prime's current total, walked back by every signed USD flow recorded at or
+ * after the bucket's end -- an approximation of the endpoint's own
+ * recorded-state read, which the fixture has no equivalent of.
  *
- * Derived from the same rows the flow series uses, for the reason the comment
- * above `activityBuckets` gives: one source, so a screen toggling between the
- * two cannot show a chart and a table that disagree. It is monotonic in the
- * same direction as the real series and lands on the same final value, which
- * is what a consumer of the fixture can rely on.
+ * Walking forward from zero was the alternative, and it lands on a
+ * within-window net flow rather than a position: negative for most of this
+ * fixture's window, nothing like the `currentTotalUsd` anchor. Walking
+ * backward from the anchor is what keeps the newest bucket equal to the
+ * figure `usePrimeTotalAllocationUsd` sums for the card's own headline.
  */
 function balanceAt(
   rows: readonly AllocationActivity[],
   endMs: number,
   usdPerUnit: ReadonlyMap<number, number>,
+  currentTotalUsd: number,
 ): number {
-  return sumBy(
-    rows.filter((row) => Date.parse(row.created_at) < endMs),
+  const flowsSinceEnd = sumBy(
+    rows.filter((row) => Date.parse(row.created_at) >= endMs),
     (row) => signedFlowUsd(row, usdPerUnit),
+  );
+  return currentTotalUsd - flowsSinceEnd;
+}
+
+/**
+ * The figure the card's own headline reads: `usePrimeTotalAllocationUsd`
+ * summed over the same reference-mode rows the allocations endpoint serves
+ * for this prime, recomputed here rather than passed in so `balanceAt`'s
+ * anchor cannot drift from what the number above the chart shows.
+ */
+function headlineTotalUsd(nowMs: number, primeId: string | null): number {
+  const proxy =
+    primeId === null
+      ? undefined
+      : PRIMES.find((prime) => sameHex(prime.address, primeId));
+  if (proxy === undefined) return 0;
+
+  const referenceRows = seedReferenceAllocations(nowMs, proxy.name) ?? [];
+  return sumBy(
+    referenceRows.filter((row) => row.category === 'allocation'),
+    (row) => Number(row.amount_usd),
   );
 }
 
@@ -183,10 +207,7 @@ function coverageAt(
   return { entityCount: tokenIds.size, pricedEntityCount };
 }
 
-function sumBy(
-  rows: readonly AllocationActivity[],
-  amount: (row: AllocationActivity) => number,
-): number {
+function sumBy<T>(rows: readonly T[], amount: (row: T) => number): number {
   return rows.reduce((total, row) => total + amount(row), 0);
 }
 
@@ -305,20 +326,23 @@ export function allocationHandlers(): MockHandler[] {
         tokenSymbol: query.get('token_symbol'),
         txHash: query.get('tx_hash'),
       };
-      const matched = seedActivity(nowMs)
-        .filter((row) => matchesFilters(row, filters))
-        .filter((row) => withinWindow(row, fromMs, toMs));
+      // Unwindowed: `balance` walks back from `currentTotalUsd` using flows
+      // at or after each bucket's end, which reach past the window's own end.
+      const matching = seedActivity(nowMs).filter((row) =>
+        matchesFilters(row, filters),
+      );
 
       if (bucketed) {
         return response(200).json({
           mode: 'aggregated',
           window: resampledWindowEcho(resolved.value),
           data: activityBuckets(
-            matched,
+            matching,
             bucketStarts(fromMs, toMs, frequencyMs, limit.value),
             frequencyMs,
             receiptTokenUsdPerUnit(nowMs),
             series.value,
+            headlineTotalUsd(nowMs, filters.primeId),
           ),
         });
       }
@@ -340,7 +364,9 @@ export function allocationHandlers(): MockHandler[] {
       return response(200).json({
         mode: 'raw',
         window: rawWindowEcho(resolved.value),
-        data: matched.slice(0, limit.value),
+        data: matching
+          .filter((row) => withinWindow(row, fromMs, toMs))
+          .slice(0, limit.value),
       });
     }),
   ];

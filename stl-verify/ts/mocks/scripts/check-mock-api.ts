@@ -595,6 +595,57 @@ async function checkBalanceSeriesReportsCoverage() {
   }
 }
 
+/**
+ * `series=balance` reconstructs a position, not a within-window net flow: every
+ * bucket must be positive, and the newest one must equal the card's own
+ * headline (`usePrimeTotalAllocationUsd`, the reference-mode allocation rows).
+ */
+async function checkBalanceSeriesAnchorsOnCurrentTotal() {
+  const headline = await request(
+    '/v1/primes/{prime_id}/allocations',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { source: 'reference' },
+      },
+    },
+    'allocations (reference)',
+  );
+  const currentTotalUsd = headline
+    .filter((row) => row.category === 'allocation')
+    .reduce((total, row) => total + Number(row.amount_usd), 0);
+
+  const balance = await request(
+    '/v1/allocations/activity',
+    activity({
+      prime_id: SPARK_MAINNET_PROXY,
+      aggregation_method: 'end-period',
+      series: 'balance',
+      frequency: 'PT1H',
+      limit: 500,
+    }),
+    'activity (series=balance, anchored)',
+  );
+
+  const buckets = armWith(balance.data, 'balance_usd', 'balance buckets');
+  assert.ok(buckets.length > 0, 'no balance buckets to check');
+  for (const bucket of buckets) {
+    assert.ok(
+      Number(present(bucket.balance_usd, 'balance_usd')) >= 0,
+      `bucket ${bucket.bucket_start} is negative — a within-window net flow, not a balance`,
+    );
+  }
+
+  // `bucketStarts` walks backward from `to_timestamp`, so index 0 -- not the
+  // last element -- is the newest bucket.
+  const newest = present(buckets[0], 'newest balance bucket');
+  assert.equal(
+    Number(present(newest.balance_usd, 'balance_usd')),
+    currentTotalUsd,
+    "the newest bucket must equal the headline's current total",
+  );
+}
+
 async function checkRawActivityHonoursLimit() {
   const feed = await request(
     '/v1/allocations/activity',
@@ -1599,6 +1650,10 @@ const checks: [string, () => Promise<void>][] = [
   [
     'series=balance reports pricing coverage',
     checkBalanceSeriesReportsCoverage,
+  ],
+  [
+    'series=balance anchors on the current total',
+    checkBalanceSeriesAnchorsOnCurrentTotal,
   ],
   ['the raw feed honours limit', checkRawActivityHonoursLimit],
   ['debt raw snapshots', checkDebtRawSnapshots],
