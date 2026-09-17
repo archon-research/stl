@@ -239,10 +239,12 @@ def _prime_row(vault_hex: str) -> _FakeRow:
 class _FakeConnection:
     def __init__(self, rows):
         self._rows = rows
-        self.params: dict | None = None
+        # Every statement, not the last: the gate runs two, and asserting on one
+        # overwritten field silently moved the address assertion onto the second.
+        self.calls: list[dict] = []
 
     async def execute(self, _sql, params):
-        self.params = params
+        self.calls.append(params)
         # The resolver's second statement lists the prime's wallets; the gate
         # needs none of them, and returning prime rows there would not map.
         return _FakeResult(self._rows if "prime_id" not in params else [])
@@ -286,7 +288,10 @@ def test_real_resolver_passes_the_parsed_address_to_the_query():
     engine = _FakeEngine([_prime_row("a" * 40)])
     client = _app(fga=fga, principal=_principal({"org:viewer"}), resolver=_resolver_over(engine))
     client.get(f"/v1/primes/{PROXY}/debt")
-    assert engine.connection.params == {"prime_id": 1}
+    assert engine.connection.calls == [
+        {"name": None, "address_hex": "b" * 40},
+        {"prime_id": 1},
+    ]
 
 
 # --- decision events (ADR-015 gate 3) --------------------------------------
@@ -388,6 +393,23 @@ def test_a_database_outage_behind_the_prime_gate_is_503_not_500(caplog):
     """The resolver reports a failed query as ValueError. Unhandled, that is a
     500 on every prime-scoped route the moment the database blips."""
     c = _app(fga=AsyncMock(), principal=_principal({"org:viewer"}), resolver=_resolver(fails=True))
+
+    with caplog.at_level(logging.INFO, logger="app.api.deps"):
+        response = c.get(f"/v1/primes/{PROXY}/debt")
+
+    assert response.status_code == 503
+    assert [(e["gate"], e["decision"], e["reason"]) for e in _events(caplog)] == [
+        ("prime", "deny", "prime_lookup_unavailable")
+    ]
+
+
+def test_a_failed_wallet_listing_is_the_same_logged_503(caplog):
+    """The gate runs a second query to widen the prime to its wallets, and that
+    one can fail on its own. Unlogged, half the gate's 503s would be missing
+    from the stream the rollout watches."""
+    resolver = _resolver()
+    resolver.list_proxies.side_effect = ValueError("Database query failed")
+    c = _app(fga=AsyncMock(), principal=_principal({"org:viewer"}), resolver=resolver)
 
     with caplog.at_level(logging.INFO, logger="app.api.deps"):
         response = c.get(f"/v1/primes/{PROXY}/debt")

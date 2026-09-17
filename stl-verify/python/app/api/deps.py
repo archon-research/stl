@@ -356,6 +356,18 @@ async def resolve_prime_scope(
     try:
         wallets = await resolver.list_proxies(identity.id)
     except ValueError as exc:
+        # The gate's second query fails on its own, and the Loki alert reads one
+        # reason, so it emits the event a failed resolve does rather than none.
+        if request is not None and principal is not None:
+            log_auth_event(
+                request,
+                gate="prime",
+                decision="deny",
+                reason="prime_lookup_unavailable",
+                status=503,
+                principal=principal,
+                fields={"error": str(exc)},
+            )
         raise HTTPException(status_code=503, detail="prime lookup unavailable") from exc
     return PrimeScope.build(
         identity,
