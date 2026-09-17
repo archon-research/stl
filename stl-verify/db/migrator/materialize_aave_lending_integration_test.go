@@ -1273,3 +1273,47 @@ func TestMaterializeAaveLendingTwoReceiptRowsSharingOneAddressAreNotAmbiguous(t 
 		t.Fatalf("two receipt rows carrying one address key one instrument, so the run must not refuse: %v", err)
 	}
 }
+
+// The guard reads position_current alone, so a cache row whose position has no history left is judged as
+// live exposure: unmapped, it refuses; mapped, it passes. Checking history would bring back the spine sweep,
+// and history cannot be removed by the app or owner roles, so recovery is the owner deleting the cache row.
+func TestMaterializeAaveLendingJudgesACacheRowWithoutHistoryOnItsOwn(t *testing.T) {
+	ctx, pool, _ := seedAaveLending(t)
+
+	insertOrphan := func(positionID, instrumentKey string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO position_current (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
+			                              block_number, block_version, processing_version, block_timestamp,
+			                              projection, build_id, deal_type)
+			SELECT decode($1, 'hex'), chain_id, protocol_id, $2, holder_id, 5,
+			       block_number, block_version, processing_version, block_timestamp, projection, build_id, 'BORROW'
+			  FROM position_current
+			 WHERE projection = 'public.position_aave_lending' AND deal_type = 'BORROW'
+			 LIMIT 1`, positionID, instrumentKey); err != nil {
+			t.Fatalf("insert cache row %s: %v", positionID, err)
+		}
+		var history int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state WHERE position_id = decode($1, 'hex')`,
+			positionID).Scan(&history); err != nil || history != 0 {
+			t.Fatalf("cache row %s has %d history rows (err %v); want none", positionID, history, err)
+		}
+	}
+
+	var mapped string
+	if err := pool.QueryRow(ctx, `
+		SELECT instrument_key FROM position_current
+		 WHERE projection = 'public.position_aave_lending' AND deal_type = 'BORROW' LIMIT 1`).Scan(&mapped); err != nil {
+		t.Fatalf("finding a mapped debt instrument: %v", err)
+	}
+	insertOrphan("0e01", mapped)
+	if _, err := pool.Exec(ctx, `SELECT materialize_aave_lending()`); err != nil {
+		t.Fatalf("a mapped cache row without history refused the run: %v", err)
+	}
+
+	insertOrphan("0e02", "ffffffffffffffffffffffffffffffffffffffff")
+	_, err := pool.Exec(ctx, `SELECT materialize_aave_lending()`)
+	if err == nil || !strings.Contains(err.Error(), "no longer emits") || !strings.Contains(err.Error(), "ffffffffffffffffffffffffffffffffffffffff") {
+		t.Errorf("an unmapped cache row without history: got %v; want the stranded-exposure refusal naming it", err)
+	}
+}
