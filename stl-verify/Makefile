@@ -232,7 +232,7 @@ test:
 
 test-integration: integration-shard-check
 	@echo "==> Running integration tests..."
-	GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=20m -p 4 ./...
+	go test -tags=integration -v -timeout=20m -p 4 ./...
 
 test-integration-shard: integration-shard-check
 	@case "$(INTEGRATION_SHARD)" in \
@@ -241,7 +241,7 @@ test-integration-shard: integration-shard-check
 	esac
 	@echo "==> Running integration test shard $(INTEGRATION_SHARD)/2..."
 	@packages=$$(grep -hEv '^[[:space:]]*(#|$$)' ci/integration-shards/$(INTEGRATION_SHARD).txt | tr '\n' ' '); \
-		GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=20m -p 4 $$packages
+		go test -tags=integration -v -timeout=20m -p 4 $$packages
 
 integration-shard-check:
 	@bash ci/check-integration-shards.sh
