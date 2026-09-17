@@ -124,6 +124,7 @@ function activityBuckets(
       };
     }
 
+    const coverage = flowCoverage(inBucket, usdPerUnit);
     return {
       bucket_start: iso(startMs),
       event_count: inBucket.length,
@@ -131,6 +132,8 @@ function activityBuckets(
       net_flow_usd: usdString(
         sumBy(inBucket, (row) => signedFlowUsd(row, usdPerUnit)),
       ),
+      entity_count: coverage.entityCount,
+      priced_entity_count: coverage.pricedEntityCount,
     };
   });
 }
@@ -181,6 +184,23 @@ function coverageAt(
   ).length;
 
   return { entityCount: tokenIds.size, pricedEntityCount };
+}
+
+/**
+ * The flow series' own coverage pair (VEC-763): unlike `coverageAt`'s
+ * distinct positions as of a point in time, this counts EVENTS landing in
+ * the bucket itself -- the same granularity `event_count` reports, since the
+ * real endpoint prices each flow row independently rather than one state per
+ * position per bucket.
+ */
+function flowCoverage(
+  inBucket: readonly AllocationActivity[],
+  usdPerUnit: ReadonlyMap<number, number>,
+): { entityCount: number; pricedEntityCount: number } {
+  const pricedEntityCount = inBucket.filter((row) =>
+    usdPerUnit.has(row.token_id),
+  ).length;
+  return { entityCount: inBucket.length, pricedEntityCount };
 }
 
 function sumBy(

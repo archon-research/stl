@@ -547,10 +547,10 @@ async function checkAggregatedFlowsAreValued() {
 }
 
 /**
- * `series=balance` names how much of its own total it could price
- * (VEC-760): every bucket's count pair has to be internally consistent, at
- * least one has to be partial (tokens 9 and 12 carry no priced position in
- * the fixture), and `series=flow` must carry neither field.
+ * Both series name how much of their own total they could price (VEC-760,
+ * VEC-763): every bucket's count pair has to be internally consistent, and
+ * `series=balance` must have at least one partial bucket (tokens 9 and 12
+ * carry no priced position in the fixture).
  */
 async function checkBalanceSeriesReportsCoverage() {
   const balance = await request(
@@ -587,10 +587,12 @@ async function checkBalanceSeriesReportsCoverage() {
     activity({ aggregation_method: 'end-period', frequency: 'PT1H' }),
     'activity (series=flow)',
   );
-  for (const bucket of armWith(flow.data, 'event_count', 'flow buckets')) {
+  for (const bucket of armWith(flow.data, 'entity_count', 'flow buckets')) {
+    const priced = present(bucket.priced_entity_count, 'priced_entity_count');
+    const total = present(bucket.entity_count, 'entity_count');
     assert.ok(
-      !('entity_count' in bucket) && !('priced_entity_count' in bucket),
-      `flow bucket ${bucket.bucket_start} should carry neither coverage count`,
+      priced <= total,
+      `flow bucket ${bucket.bucket_start} prices more events (${priced}) than it knows about (${total})`,
     );
   }
 }
