@@ -18,6 +18,9 @@ import (
 
 const positionDailyMigration = "20260824_120000_create_position_daily.sql"
 
+// positionDailyEveryDate reads every date the fixtures use through the general read.
+const positionDailyEveryDate = `position_daily_between('2000-01-01', '2100-01-01')`
+
 // positionDailyFixture is one migrated database plus the seeding and reading each case needs.
 type positionDailyFixture struct {
 	ctx  context.Context
@@ -86,19 +89,19 @@ func (f *positionDailyFixture) column(q string, args ...any) []string {
 	return out
 }
 
-// daily returns one position's series as (as_of_date, quantity) pairs, oldest first, through the view.
+// daily returns one position's series as (as_of_date, quantity) pairs, oldest first, through position_daily_between.
 func (f *positionDailyFixture) daily(id string) []string {
 	f.t.Helper()
-	return f.column(`SELECT as_of_date::text || '=' || quantity::text FROM position_daily
+	return f.column(`SELECT as_of_date::text || '=' || quantity::text FROM `+positionDailyEveryDate+`
 	                   WHERE position_id = sha256($1::bytea) ORDER BY as_of_date`, id)
 }
 
-// dayRow is the day's answer through the view, dayOnRow through position_daily_on, and dayWinner the
+// dayRow is the day's answer through position_daily_between, dayOnRow through position_daily_on, and dayWinner the
 // same shape read from the spine by an ORDER BY ... LIMIT 1 the functions do not share.
 func (f *positionDailyFixture) dayRow(id, date string) map[string]string {
 	f.t.Helper()
-	return f.rowOf(`SELECT to_jsonb(d) - 'position_id' - 'as_of_date' FROM position_daily d
-	                 WHERE d.position_id = sha256($1::bytea) AND d.as_of_date = $2`, id, date)
+	return f.rowOf(`SELECT to_jsonb(d) - 'position_id' - 'as_of_date' FROM position_daily_between($2::date, $2::date) d
+	                 WHERE d.position_id = sha256($1::bytea)`, id, date)
 }
 
 func (f *positionDailyFixture) dayOnRow(id, date string) map[string]string {
@@ -133,33 +136,33 @@ func (f *positionDailyFixture) rowOf(q, id, date string) map[string]string {
 	return out
 }
 
-// dayQty is the day's answer through the view, cross-checked against position_daily_on so every case
-// in this file covers both reads.
+// dayQty is the day's answer through position_daily_between over every date, cross-checked against
+// position_daily_on so every case in this file covers both reads.
 func (f *positionDailyFixture) dayQty(id, date string) int {
 	f.t.Helper()
-	var viaView, viaOn int
+	var viaBetween, viaOn int
 	if err := f.pool.QueryRow(f.ctx, `
-		SELECT (SELECT quantity FROM position_daily WHERE position_id = sha256($1::bytea) AND as_of_date = $2),
+		SELECT (SELECT quantity FROM `+positionDailyEveryDate+` WHERE position_id = sha256($1::bytea) AND as_of_date = $2),
 		       (SELECT quantity FROM position_daily_on($2::date) WHERE position_id = sha256($1::bytea))`,
-		id, date).Scan(&viaView, &viaOn); err != nil {
+		id, date).Scan(&viaBetween, &viaOn); err != nil {
 		f.t.Fatalf("dayQty(%s, %s): %v", id, date, err)
 	}
-	if viaView != viaOn {
-		f.t.Errorf("%s on %s: position_daily reads %d, position_daily_on reads %d", id, date, viaView, viaOn)
+	if viaBetween != viaOn {
+		f.t.Errorf("%s on %s: position_daily_between reads %d, position_daily_on reads %d", id, date, viaBetween, viaOn)
 	}
-	return viaView
+	return viaBetween
 }
 
 // dayRows counts the readings one (position, date) has through each read; both must be 0 or 1.
-func (f *positionDailyFixture) dayRows(id, date string) (viaView, viaOn int) {
+func (f *positionDailyFixture) dayRows(id, date string) (viaBetween, viaOn int) {
 	f.t.Helper()
 	if err := f.pool.QueryRow(f.ctx, `
-		SELECT (SELECT count(*) FROM position_daily WHERE position_id = sha256($1::bytea) AND as_of_date = $2),
+		SELECT (SELECT count(*) FROM `+positionDailyEveryDate+` WHERE position_id = sha256($1::bytea) AND as_of_date = $2),
 		       (SELECT count(*) FROM position_daily_on($2::date) WHERE position_id = sha256($1::bytea))`,
-		id, date).Scan(&viaView, &viaOn); err != nil {
+		id, date).Scan(&viaBetween, &viaOn); err != nil {
 		f.t.Fatalf("dayRows(%s, %s): %v", id, date, err)
 	}
-	return viaView, viaOn
+	return viaBetween, viaOn
 }
 
 // dbNow is a marker from the database's own clock: the container's clock is its own, and a host
@@ -195,24 +198,24 @@ func TestPositionDailyAnswersAsOfATimeReproducibly(t *testing.T) {
 		{"at the report's run time", reportRanAt, []string{"10"}},
 		{"now", f.dbNow(), []string{"15"}},
 	} {
-		asOf := f.column(`SELECT quantity::text FROM position_daily_as_of($1)
-		                    WHERE position_id = sha256($2::bytea) AND as_of_date = $3`, tc.at, id, day)
+		asOf := f.column(`SELECT quantity::text FROM position_daily_between($3::date, $3::date, $1)
+		                    WHERE position_id = sha256($2::bytea)`, tc.at, id, day)
 		on := f.column(`SELECT quantity::text FROM position_daily_on($3::date, $1)
 		                  WHERE position_id = sha256($2::bytea)`, tc.at, id, day)
 		if !slices.Equal(asOf, tc.want) || !slices.Equal(on, tc.want) {
-			t.Errorf("%s: position_daily_as_of reads %v and position_daily_on reads %v; want %v", tc.name, asOf, on, tc.want)
+			t.Errorf("%s: position_daily_between reads %v and position_daily_on reads %v; want %v", tc.name, asOf, on, tc.want)
 		}
 	}
 }
 
 // Every read inlines. A Function Scan means it did not, and the read then materialises the whole
-// function result before the caller's WHERE applies -- or, for position_daily_on, loses chunk exclusion.
+// function result before the caller's WHERE applies and loses chunk exclusion.
 func TestPositionDailyReadsAreInlined(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	f.observe("d-inline", dailyObs{qty: 1, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
 	for _, q := range []string{
-		`EXPLAIN SELECT * FROM position_daily WHERE position_id = sha256('d-inline'::bytea)`,
-		`EXPLAIN SELECT * FROM position_daily_as_of(now()) WHERE position_id = sha256('d-inline'::bytea)`,
+		`EXPLAIN SELECT * FROM position_daily_between('2026-01-01', '2026-01-03') WHERE position_id = sha256('d-inline'::bytea)`,
+		`EXPLAIN SELECT * FROM position_daily_between('2026-01-01', '2026-01-03', now())`,
 		`EXPLAIN SELECT * FROM position_daily_on('2026-01-01') WHERE position_id = sha256('d-inline'::bytea)`,
 		`EXPLAIN SELECT * FROM position_daily_on('2026-01-01', now())`,
 	} {
@@ -226,7 +229,7 @@ func TestPositionDailyReadsAreInlined(t *testing.T) {
 	}
 }
 
-// The reason position_daily_on exists: one date reads one spine chunk, uncompressed or compressed, with
+// The windowed reads exist for this: one date reads one spine chunk, uncompressed or compressed, with
 // the date as a literal or as a bind parameter. A window on (block_timestamp AT TIME ZONE 'utc')::date
 // instead of on block_timestamp reads every chunk and fails every case here.
 func TestPositionDailyOnReadsOneChunk(t *testing.T) {
@@ -251,7 +254,7 @@ func TestPositionDailyOnReadsOneChunk(t *testing.T) {
 		t.Fatalf("prepare the bind-parameter read: %v", err)
 	}
 
-	check := func(t *testing.T, label string) {
+	check := func(t *testing.T, label string, genericChunks int) {
 		t.Helper()
 		for _, tc := range []struct {
 			name, mode, sql string
@@ -263,10 +266,10 @@ func TestPositionDailyOnReadsOneChunk(t *testing.T) {
 				sql: `EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM position_daily_on('2026-03-05', now())`},
 			{name: "custom plan over a bind parameter", mode: "force_custom_plan", wantChunks: 1,
 				sql: `EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE pd_on('2026-03-05')`},
-			// Pinned, not endorsed: a generic plan chooses a Merge Append over every chunk's primary key
-			// for the position_id order and excludes nothing. The COMMENT tells a binding caller to force
-			// custom plans; this fails the day the planner stops doing it, when that advice can go.
-			{name: "generic plan over a bind parameter reads every chunk", mode: "force_generic_plan", wantChunks: -1,
+			// Pinned, not endorsed: which plan a generic plan picks depends on the data. On these uncompressed
+			// chunks it is a Merge Append over every chunk; on compressed ones a ChunkAppend that excludes at
+			// startup. This fails when either changes, which is when the COMMENT's "can read every chunk" is revisited.
+			{name: "generic plan over a bind parameter", mode: "force_generic_plan", wantChunks: genericChunks,
 				sql: `EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE pd_on('2026-03-05')`},
 		} {
 			if _, err := conn.Exec(f.ctx, `SET plan_cache_mode = `+tc.mode); err != nil {
@@ -305,7 +308,7 @@ func TestPositionDailyOnReadsOneChunk(t *testing.T) {
 		}
 	}
 
-	t.Run("uncompressed", func(t *testing.T) { check(t, "uncompressed") })
+	t.Run("uncompressed", func(t *testing.T) { check(t, "uncompressed", -1) })
 	t.Run("compressed", func(t *testing.T) {
 		var compressed int
 		if err := f.pool.QueryRow(f.ctx,
@@ -315,8 +318,66 @@ func TestPositionDailyOnReadsOneChunk(t *testing.T) {
 		if compressed < days {
 			t.Fatalf("compressed %d chunk(s), want at least %d", compressed, days)
 		}
-		check(t, "compressed")
+		check(t, "compressed", 1)
 	})
+}
+
+// A range reads one chunk per day in it, d_to inclusive, and over each single day it is position_daily_on.
+// A window on the ::date expression reads every chunk; an exclusive d_to drops the last day.
+func TestPositionDailyBetweenReadsOneChunkPerDay(t *testing.T) {
+	f := newPositionDailyFixture(t)
+	const days = 12
+	for d := range days {
+		for p := range 3 {
+			f.observe(fmt.Sprintf("d-range-%d", p), dailyObs{qty: d*10 + p, block: 1000 + d*10 + p,
+				ts: fmt.Sprintf("2026-03-%02dT12:00:00Z", d+1), dealType: "LOAN"})
+		}
+	}
+	if n := chunkCount(t, f.ctx, f.pool, "position_state"); n < days {
+		t.Fatalf("the spine has %d chunk(s); want at least %d", n, days)
+	}
+	conn, err := f.pool.Acquire(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	for _, tc := range []struct {
+		from, to   string
+		wantChunks int
+		wantRows   int
+	}{
+		{"2026-03-03", "2026-03-07", 5, 15},
+		{"2026-03-05", "2026-03-05", 1, 3},
+		{"2026-03-11", "2026-03-20", 2, 6},
+	} {
+		plan := explainJSON(t, f.ctx, conn, fmt.Sprintf(
+			`EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM position_daily_between('%s', '%s')`, tc.from, tc.to))
+		if chunks := plan.chunkNames(); len(chunks) != tc.wantChunks {
+			t.Errorf("%s..%s read %d chunk(s) %v, want %d\nplan:\n%s", tc.from, tc.to, len(chunks), chunks, tc.wantChunks, plan.raw)
+		}
+		var rows int
+		if err := conn.QueryRow(f.ctx, `SELECT count(*) FROM position_daily_between($1::date, $2::date)`, tc.from, tc.to).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		if rows != tc.wantRows {
+			t.Errorf("%s..%s returned %d reading(s), want %d", tc.from, tc.to, rows, tc.wantRows)
+		}
+	}
+	var mismatched int
+	if err := conn.QueryRow(f.ctx, `
+		SELECT count(*) FROM (
+		    (SELECT o.* FROM generate_series('2026-03-01'::date, '2026-03-12'::date, '1 day') g(d)
+		      CROSS JOIN LATERAL position_daily_on(g.d::date) o
+		     EXCEPT ALL SELECT * FROM position_daily_between('2026-03-01', '2026-03-12'))
+		    UNION ALL
+		    (SELECT * FROM position_daily_between('2026-03-01', '2026-03-12')
+		     EXCEPT ALL SELECT o.* FROM generate_series('2026-03-01'::date, '2026-03-12'::date, '1 day') g(d)
+		      CROSS JOIN LATERAL position_daily_on(g.d::date) o)) x`).Scan(&mismatched); err != nil {
+		t.Fatal(err)
+	}
+	if mismatched != 0 {
+		t.Errorf("position_daily_on over each day and position_daily_between over the range differ on %d row(s)", mismatched)
+	}
 }
 
 // The window's edges are the UTC midnights: the last microsecond of a date is on it and midnight is
@@ -369,14 +430,14 @@ func TestPositionDailyOnWindowEdgesAreUTCMidnight(t *testing.T) {
 		date string
 		want []string
 	}{
-		{"2026-01-31", []string{"3"}},
-		{"2026-02-01", []string{"1"}},
-		{"2026-02-02", []string{"2"}},
+		{"2026-01-31", []string{"3@2026-01-31"}},
+		{"2026-02-01", []string{"1@2026-02-01"}},
+		{"2026-02-02", []string{"2@2026-02-02"}},
 	} {
-		on := read(`SELECT quantity::text FROM position_daily_on($1::date) ORDER BY 1`, tc.date)
-		view := read(`SELECT quantity::text FROM position_daily WHERE as_of_date = $1::date ORDER BY 1`, tc.date)
-		if !slices.Equal(on, tc.want) || !slices.Equal(view, tc.want) {
-			t.Errorf("%s: position_daily_on reads %v and position_daily reads %v; want %v", tc.date, on, view, tc.want)
+		on := read(`SELECT quantity::text || '@' || as_of_date::text FROM position_daily_on($1::date) ORDER BY 1`, tc.date)
+		between := read(`SELECT quantity::text || '@' || as_of_date::text FROM position_daily_between($1::date, $1::date) ORDER BY 1`, tc.date)
+		if !slices.Equal(on, tc.want) || !slices.Equal(between, tc.want) {
+			t.Errorf("%s: position_daily_on reads %v and position_daily_between reads %v; want %v", tc.date, on, between, tc.want)
 		}
 	}
 }
@@ -409,7 +470,9 @@ func TestPositionDailyRefusesNullArguments(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	f.observe("d-null-arg", dailyObs{qty: 9, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
 	for _, tc := range []struct{ q, want string }{
-		{`SELECT count(*) FROM position_daily_as_of(NULL::timestamptz)`, "as-of time is required"},
+		{`SELECT count(*) FROM position_daily_between('2026-01-01', '2026-01-01', NULL::timestamptz)`, "as-of time is required"},
+		{`SELECT count(*) FROM position_daily_between(NULL::date, '2026-01-01')`, "date is required"},
+		{`SELECT count(*) FROM position_daily_between('2026-01-01', NULL::date)`, "date is required"},
 		{`SELECT count(*) FROM position_daily_on('2026-01-01', NULL::timestamptz)`, "as-of time is required"},
 		{`SELECT count(*) FROM position_daily_on(NULL::date)`, "date is required"},
 	} {
@@ -426,7 +489,7 @@ func TestPositionDailyRefusesNullArguments(t *testing.T) {
 	// Negative control: real arguments still answer, so the guards reject NULL rather than everything.
 	var asOf, on int
 	if err := f.pool.QueryRow(f.ctx, `
-		SELECT (SELECT count(*) FROM position_daily_as_of('infinity')), (SELECT count(*) FROM position_daily_on('2026-01-01', 'infinity'))`).
+		SELECT (SELECT count(*) FROM position_daily_between('2026-01-01', '2026-01-01', 'infinity')), (SELECT count(*) FROM position_daily_on('2026-01-01', 'infinity'))`).
 		Scan(&asOf, &on); err != nil {
 		t.Fatalf("real arguments must still answer: %v", err)
 	}
@@ -435,41 +498,47 @@ func TestPositionDailyRefusesNullArguments(t *testing.T) {
 	}
 }
 
-// A holder filter on the view must be applied at the chunk scan, below the DISTINCT ON. holder_id is in
-// the DISTINCT ON key only for this; left out, the filter sits above the Unique and every position of
-// every day is sorted first. The ANSWER is identical either way, so only the plan can catch it.
-func TestPositionDailyHolderFilterIsPushedBelowTheDistinct(t *testing.T) {
+// The COMMENT's holder series path: position_ids from position_current, then position_id = ANY(...) over a
+// range. On compressed chunks that must reach each chunk's position_id segment index; the answer is the
+// same without it, so only the plan can catch it.
+func TestPositionDailyHolderSeriesUsesTheSegmentIndex(t *testing.T) {
 	f := newPositionDailyFixture(t)
-	for i := range 40 {
-		f.observe(fmt.Sprintf("d-push-%02d", i), dailyObs{qty: i + 1, block: 100 + i, ts: "2026-01-01T01:00:00Z", dealType: "LOAN"})
+	for d := range 3 {
+		for i := range 40 {
+			f.observe(fmt.Sprintf("d-holder-%02d", i), dailyObs{qty: d*100 + i, block: 1000 + d*100 + i,
+				ts: fmt.Sprintf("2026-04-%02dT01:00:00Z", d+1), dealType: "LOAN"})
+		}
 	}
-	holder := f.column(`SELECT holder_id FROM position_state ORDER BY holder_id LIMIT 1`)[0]
+	var compressed int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(compress_chunk(c)) FROM show_chunks('position_state') c`).Scan(&compressed); err != nil {
+		t.Fatalf("compress the spine: %v", err)
+	}
+	if compressed < 3 {
+		t.Fatalf("compressed %d chunk(s), want 3", compressed)
+	}
+	if _, err := f.pool.Exec(f.ctx, `ANALYZE position_state`); err != nil {
+		t.Fatal(err)
+	}
+	const series = `SELECT %s FROM position_daily_between('2026-04-01', '2026-04-03')
+	                 WHERE position_id = ANY (ARRAY(SELECT position_id FROM position_current WHERE holder_id = substr(md5('d-holder-07') || md5('d-holder-07'), 1, 40)))`
 
 	conn, err := f.pool.Acquire(f.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Release()
-	plan := explainJSON(t, f.ctx, conn, fmt.Sprintf(
-		`EXPLAIN (FORMAT JSON) SELECT * FROM position_daily WHERE holder_id = '%s'`, holder))
-	if strings.Contains(plan.raw, `"Subquery Scan"`) {
-		t.Errorf("a holder filter is applied above the DISTINCT ON (Subquery Scan), so every position is sorted first:\n%s", plan.raw)
-	}
-	var filteredAtScan bool
+	plan := explainJSON(t, f.ctx, conn, "EXPLAIN (ANALYZE, FORMAT JSON) "+fmt.Sprintf(series, "*"))
+	var segmentLookups int
 	plan.walk(func(n explainNode) {
-		if chunkRelationPattern.MatchString(n.RelationName) || n.RelationName == "position_state" {
-			filteredAtScan = true
+		if n.NodeType == "Index Scan" && strings.HasSuffix(n.RelationName, "_compressed") {
+			segmentLookups++
 		}
 	})
-	if !filteredAtScan || !strings.Contains(plan.raw, "holder_id") {
-		t.Errorf("the plan names no chunk scan carrying the holder filter:\n%s", plan.raw)
+	if segmentLookups != 3 {
+		t.Errorf("the holder series made %d index lookup(s) into compressed chunks, want 3, one per day:\n%s", segmentLookups, plan.raw)
 	}
-	var got int
-	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM position_daily WHERE holder_id = $1`, holder).Scan(&got); err != nil {
-		t.Fatal(err)
-	}
-	if got != 1 {
-		t.Errorf("the holder read returned %d row(s), want 1", got)
+	if got := f.column(fmt.Sprintf(series, "quantity::text") + " ORDER BY as_of_date"); !slices.Equal(got, []string{"7", "107", "207"}) {
+		t.Errorf("the holder series read %v, want [7 107 207]", got)
 	}
 }
 
@@ -538,8 +607,8 @@ func TestPositionDailyOneReadingPerPositionPerDateAtBulk(t *testing.T) {
 	seed(9, 200, "2026-03-02T06:00:00Z", "BORROW")
 	var viewNewest, viewTotal, onNewest, onTotal int
 	if err := f.pool.QueryRow(f.ctx, `
-		SELECT (SELECT count(*) FILTER (WHERE quantity = 9 AND deal_type = 'BORROW') FROM position_daily),
-		       (SELECT count(*) FROM position_daily),
+		SELECT (SELECT count(*) FILTER (WHERE quantity = 9 AND deal_type = 'BORROW') FROM position_daily_between('2026-03-02', '2026-03-02')),
+		       (SELECT count(*) FROM position_daily_between('2026-03-02', '2026-03-02')),
 		       (SELECT count(*) FILTER (WHERE quantity = 9 AND deal_type = 'BORROW') FROM position_daily_on('2026-03-02')),
 		       (SELECT count(*) FROM position_daily_on('2026-03-02'))`).
 		Scan(&viewNewest, &viewTotal, &onNewest, &onTotal); err != nil {
@@ -548,7 +617,7 @@ func TestPositionDailyOneReadingPerPositionPerDateAtBulk(t *testing.T) {
 	for _, r := range []struct {
 		name          string
 		newest, total int
-	}{{"position_daily", viewNewest, viewTotal}, {"position_daily_on", onNewest, onTotal}} {
+	}{{"position_daily_between", viewNewest, viewTotal}, {"position_daily_on", onNewest, onTotal}} {
 		if r.newest != positions || r.total != positions {
 			t.Errorf("%s: %d reading(s), %d carrying the later observation; want %d of each", r.name, r.total, r.newest, positions)
 		}
@@ -620,9 +689,9 @@ func TestPositionDailyEqualsTheSpineArgmaxOverRandomHistories(t *testing.T) {
 				t.Fatalf("materialize the same-day observations: %v", err)
 			}
 
-			cols := dailySharedSpineColumns(ctx, t, pool, "position_daily")
-			if d := diffDailyAgainstSpineArgmax(ctx, t, pool, "position_daily", cols); d != "" {
-				t.Errorf("position_daily: %s", d)
+			cols := dailySpineColumns(ctx, t, pool)
+			if d := diffDailyAgainstSpineArgmax(ctx, t, pool, positionDailyEveryDate, cols); d != "" {
+				t.Errorf("position_daily_between over every date: %s", d)
 			}
 			// position_daily_on over every observed date, unioned, is the same relation.
 			onEveryDate := `(SELECT o.* FROM (SELECT DISTINCT (block_timestamp AT TIME ZONE 'utc')::date AS d FROM position_state) dates
@@ -634,19 +703,16 @@ func TestPositionDailyEqualsTheSpineArgmaxOverRandomHistories(t *testing.T) {
 	}
 }
 
-// dailySharedSpineColumns lists the columns the reading and position_state both carry, so a comparison
-// over them covers deal_type without naming it and cannot silently narrow when a column is added.
-func dailySharedSpineColumns(ctx context.Context, t *testing.T, pool *pgxpool.Pool, rel string) []string {
+// dailySpineColumns lists position_state's columns from the catalogue, so the comparison covers every
+// column the reads return (TestPositionDailySchema pins that they return all of them) without naming one.
+func dailySpineColumns(ctx context.Context, t *testing.T, pool *pgxpool.Pool) []string {
 	t.Helper()
 	rows, err := pool.Query(ctx, `
-		SELECT a.attname FROM pg_attribute a
-		 WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped
-		   AND EXISTS (SELECT 1 FROM pg_attribute b
-		                WHERE b.attrelid = 'position_state'::regclass AND b.attname = a.attname
-		                  AND b.attnum > 0 AND NOT b.attisdropped)
-		 ORDER BY a.attname`, rel)
+		SELECT attname FROM pg_attribute
+		 WHERE attrelid = 'position_state'::regclass AND attnum > 0 AND NOT attisdropped
+		 ORDER BY attname`)
 	if err != nil {
-		t.Fatalf("shared columns for %s: %v", rel, err)
+		t.Fatalf("position_state columns: %v", err)
 	}
 	defer rows.Close()
 	var out []string
@@ -661,13 +727,13 @@ func dailySharedSpineColumns(ctx context.Context, t *testing.T, pool *pgxpool.Po
 		t.Fatal(err)
 	}
 	if !slices.Contains(out, "deal_type") || len(out) < 9 {
-		t.Fatalf("%s shares %d columns with position_state (deal_type present: %v); the comparison would be weak",
-			rel, len(out), slices.Contains(out, "deal_type"))
+		t.Fatalf("position_state has %d columns (deal_type present: %v); the comparison would be weak",
+			len(out), slices.Contains(out, "deal_type"))
 	}
 	return out
 }
 
-// diffDailyAgainstSpineArgmax compares a relation (a name or a parenthesised subquery with an alias)
+// diffDailyAgainstSpineArgmax compares a relation (a name, a function call, or a parenthesised subquery with an alias)
 // against the newest position_state row per (position, UTC date), over the given columns.
 func diffDailyAgainstSpineArgmax(ctx context.Context, t *testing.T, pool *pgxpool.Pool, rel string, cols []string) string {
 	t.Helper()
@@ -707,8 +773,8 @@ func TestPositionDailyAsOfBoundIsInclusive(t *testing.T) {
 	}
 	var atStamp, justBefore, onAtStamp, onJustBefore int
 	if err := f.pool.QueryRow(f.ctx, `
-		SELECT (SELECT count(*) FROM position_daily_as_of($1) WHERE as_of_date = $2 AND position_id = sha256($3::bytea)),
-		       (SELECT count(*) FROM position_daily_as_of($1 - interval '1 microsecond') WHERE as_of_date = $2 AND position_id = sha256($3::bytea)),
+		SELECT (SELECT count(*) FROM position_daily_between($2::date, $2::date, $1) WHERE position_id = sha256($3::bytea)),
+		       (SELECT count(*) FROM position_daily_between($2::date, $2::date, $1 - interval '1 microsecond') WHERE position_id = sha256($3::bytea)),
 		       (SELECT count(*) FROM position_daily_on($2::date, $1) WHERE position_id = sha256($3::bytea)),
 		       (SELECT count(*) FROM position_daily_on($2::date, $1 - interval '1 microsecond') WHERE position_id = sha256($3::bytea))`,
 		stamped, day, id).Scan(&atStamp, &justBefore, &onAtStamp, &onJustBefore); err != nil {
@@ -732,7 +798,7 @@ func TestPositionDailyReadsTheCurrentDay(t *testing.T) {
 	}
 	f.observe("d-today", dailyObs{qty: 7, block: 100, ts: today + "T00:00:01Z", dealType: "LOAN"})
 	if v, on := f.dayRows("d-today", today); v != 1 || on != 1 {
-		t.Errorf("today's observation has %d reading(s) through the view and %d through position_daily_on, want 1 each", v, on)
+		t.Errorf("today's observation has %d reading(s) through position_daily_between and %d through position_daily_on, want 1 each", v, on)
 	}
 }
 
@@ -769,12 +835,12 @@ func TestPositionDailyLaterInstantWinsAtEqualVersionsWhateverTheScanOrder(t *tes
 		var onWrong, viewWrong int
 		if err := conn.QueryRow(f.ctx, `
 			SELECT (SELECT count(*) FROM position_daily_on('2026-05-05') WHERE quantity <> 2),
-			       (SELECT count(*) FROM position_daily WHERE as_of_date = '2026-05-05' AND quantity <> 2)`).
+			       (SELECT count(*) FROM position_daily_between('2026-05-04', '2026-05-06') WHERE as_of_date = '2026-05-05' AND quantity <> 2)`).
 			Scan(&onWrong, &viewWrong); err != nil {
 			t.Fatalf("%s: %v", scan.name, err)
 		}
 		if onWrong != 0 || viewWrong != 0 {
-			t.Errorf("%s: %d position(s) through position_daily_on and %d through position_daily read the earlier instant; "+
+			t.Errorf("%s: %d position(s) through position_daily_on and %d through position_daily_between read the earlier instant; "+
 				"at equal versions the later one wins", scan.name, onWrong, viewWrong)
 		}
 		if _, err := conn.Exec(f.ctx, `RESET enable_indexscan; RESET enable_bitmapscan; RESET enable_seqscan`); err != nil {
@@ -783,52 +849,54 @@ func TestPositionDailyLaterInstantWinsAtEqualVersionsWhateverTheScanOrder(t *tes
 	}
 }
 
-// Catalogue-level guarantees, sharing one database.
+// These cases check catalogue-level guarantees and share one database.
 func TestPositionDailySchema(t *testing.T) {
 	f := newPositionDailyFixture(t)
 
-	t.Run("app roles can read the view and call the functions", func(t *testing.T) {
+	t.Run("app roles can call the reads", func(t *testing.T) {
 		for _, role := range []string{"stl_readonly", "stl_readwrite"} {
-			var view, on, asOf bool
+			var between, on bool
 			if err := f.pool.QueryRow(f.ctx, `
-				SELECT has_table_privilege($1, 'position_daily', 'SELECT'),
-				       has_function_privilege($1, 'position_daily_on(date, timestamptz)', 'EXECUTE'),
-				       has_function_privilege($1, 'position_daily_as_of(timestamptz)', 'EXECUTE')`, role).
-				Scan(&view, &on, &asOf); err != nil {
+				SELECT has_function_privilege($1, 'position_daily_between(date, date, timestamptz)', 'EXECUTE'),
+				       has_function_privilege($1, 'position_daily_on(date, timestamptz)', 'EXECUTE')`, role).
+				Scan(&between, &on); err != nil {
 				t.Fatal(err)
 			}
-			if !view || !on || !asOf {
-				t.Errorf("%s: SELECT position_daily=%v, EXECUTE position_daily_on=%v, EXECUTE position_daily_as_of=%v; want all true",
-					role, view, on, asOf)
+			if !between || !on {
+				t.Errorf("%s: EXECUTE position_daily_between=%v, EXECUTE position_daily_on=%v; want both true", role, between, on)
 			}
 		}
 	})
 
-	// No copy means no table: a migration that brings one back fails here.
-	t.Run("stores nothing", func(t *testing.T) {
-		var stored []string
+	// No copy and no unbounded read: a migration that brings back a table, a view or a windowless function
+	// fails here.
+	t.Run("stores nothing and has no unbounded read", func(t *testing.T) {
+		var relations, functions []string
 		if err := f.pool.QueryRow(f.ctx, `
-			SELECT COALESCE(array_agg(relname::text ORDER BY relname), '{}') FROM pg_class
-			 WHERE relnamespace = 'public'::regnamespace AND relname LIKE 'position_daily%' AND relkind <> 'v'`).
-			Scan(&stored); err != nil {
+			SELECT (SELECT COALESCE(array_agg(relname::text ORDER BY relname), '{}') FROM pg_class
+			         WHERE relnamespace = 'public'::regnamespace AND relname LIKE 'position_daily%'),
+			       (SELECT COALESCE(array_agg(p.oid::regprocedure::text ORDER BY 1), '{}') FROM pg_proc p
+			         WHERE p.pronamespace = 'public'::regnamespace AND p.proname LIKE 'position_daily%')`).
+			Scan(&relations, &functions); err != nil {
 			t.Fatal(err)
 		}
-		if len(stored) != 0 {
-			t.Errorf("relations %v store position_daily data; position_daily is a query over position_state", stored)
+		if len(relations) != 0 {
+			t.Errorf("relations %v exist; position_daily is read only through its bounded functions", relations)
 		}
-		var viewKind string
-		if err := f.pool.QueryRow(f.ctx, `SELECT relkind::text FROM pg_class WHERE oid = 'public.position_daily'::regclass`).
-			Scan(&viewKind); err != nil {
-			t.Fatalf("position_daily is missing, so the check above is vacuous: %v", err)
+		want := []string{
+			"position_daily_as_of_bound(timestamp with time zone)",
+			"position_daily_between(date,date,timestamp with time zone)",
+			"position_daily_date_required(date)",
+			"position_daily_on(date,timestamp with time zone)",
 		}
-		if viewKind != "v" {
-			t.Errorf("position_daily is relkind %q, want a plain view", viewKind)
+		if !slices.Equal(functions, want) {
+			t.Errorf("position_daily functions are %v, want exactly %v", functions, want)
 		}
 	})
 
-	// A SET clause or a non-SQL language stops inlining, and with it chunk exclusion.
+	// A SET clause or a non-SQL language on a read function stops it inlining, and with it chunk exclusion.
 	t.Run("reads are inlinable SQL", func(t *testing.T) {
-		for _, fn := range []string{"position_daily_on(date, timestamptz)", "position_daily_as_of(timestamptz)"} {
+		for _, fn := range []string{"position_daily_between(date, date, timestamptz)", "position_daily_on(date, timestamptz)"} {
 			var lang, volatility string
 			var config []string
 			var definer bool
@@ -856,12 +924,10 @@ func TestPositionDailySchema(t *testing.T) {
 		want := append(slices.Clone(spine), "as_of_date")
 		slices.Sort(want)
 		for name, q := range map[string]string{
-			"position_daily": `SELECT attname::text FROM pg_attribute WHERE attrelid = 'position_daily'::regclass
-			                    AND attnum > 0 AND NOT attisdropped ORDER BY attname`,
+			"position_daily_between": `SELECT n FROM unnest((SELECT proargnames[4:] FROM pg_proc
+			                            WHERE oid = 'position_daily_between(date, date, timestamptz)'::regprocedure)) n ORDER BY n`,
 			"position_daily_on": `SELECT n FROM unnest((SELECT proargnames[3:] FROM pg_proc
 			                       WHERE oid = 'position_daily_on(date, timestamptz)'::regprocedure)) n ORDER BY n`,
-			"position_daily_as_of": `SELECT n FROM unnest((SELECT proargnames[2:] FROM pg_proc
-			                          WHERE oid = 'position_daily_as_of(timestamptz)'::regprocedure)) n ORDER BY n`,
 		} {
 			if got := f.column(q); !slices.Equal(got, want) {
 				t.Errorf("%s exposes %v; want every position_state column plus as_of_date, %v", name, got, want)
@@ -870,7 +936,7 @@ func TestPositionDailySchema(t *testing.T) {
 	})
 }
 
-// The per-day semantics, sharing one database: every case owns its position.
+// These cases check the per-day semantics and share one database; every case owns its position.
 func TestPositionDailySemantics(t *testing.T) {
 	f := newPositionDailyFixture(t)
 
@@ -918,7 +984,7 @@ func TestPositionDailySemantics(t *testing.T) {
 					t.Errorf("the day reads %d; want %d. %s", got, want, tc.why)
 				}
 				if v, on := f.dayRows(tc.id, "2026-01-01"); v != 1 || on != 1 {
-					t.Errorf("the day has %d reading(s) through the view and %d through position_daily_on, want 1 each", v, on)
+					t.Errorf("the day has %d reading(s) through position_daily_between and %d through position_daily_on, want 1 each", v, on)
 				}
 			})
 		}

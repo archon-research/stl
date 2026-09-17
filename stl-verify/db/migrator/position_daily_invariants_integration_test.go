@@ -20,8 +20,8 @@ import (
 // One database hosts every seed: each seed's holders are namespaced, so the seeds share
 // a spine without sharing positions, and the reads run over other seeds' history too.
 //
-// POSITION_DAILY_SEEDS widens the committed set, which is what CI runs; this package
-// builds its own database per fixture and sits close to its per-package timeout.
+// POSITION_DAILY_SEEDS adds seeds beyond the committed set that CI runs. Keep the committed
+// set small, because this package builds a database per fixture and is near its timeout.
 func TestPositionDailyStackInvariants(t *testing.T) {
 	seeds := envInt(t, "POSITION_DAILY_SEEDS", 6)
 	multiplier := envInt(t, "POSITION_DAILY_SEED_MULTIPLIER", 7919)
@@ -34,8 +34,7 @@ func TestPositionDailyStackInvariants(t *testing.T) {
 
 	t.Run("a fresh database reads nothing", func(t *testing.T) {
 		for _, obj := range []struct{ kind, name string }{
-			{"view", "position_daily"},
-			{"function", "position_daily_as_of"},
+			{"function", "position_daily_between"},
 			{"function", "position_daily_on"},
 		} {
 			if !inv.objectExists(obj.kind, obj.name) {
@@ -69,26 +68,26 @@ func TestPositionDailyStackInvariants(t *testing.T) {
 		})
 	}
 
-	// TODAY. The generated histories are all in the past, so without this the current
+	// This covers today. The generated histories are all in the past, so without this the current
 	// date is never read. There is no settling step: both reads carry it at once.
-	t.Run("the open day reaches position_current and position_daily", func(t *testing.T) {
+	t.Run("the open day reaches position_current and position_daily_between", func(t *testing.T) {
 		today := inv.openDayObservation()
 		var inCurrent, inDaily, inOn int
 		if err := inv.pool.QueryRow(inv.ctx, `
 			SELECT (SELECT count(*) FROM position_current WHERE position_id = $1),
-			       (SELECT count(*) FROM position_daily WHERE position_id = $1),
+			       (SELECT count(*) FROM position_daily_between('2000-01-01', '2100-01-01') WHERE position_id = $1),
 			       (SELECT count(*) FROM position_daily_on((now() AT TIME ZONE 'utc')::date) WHERE position_id = $1)`, today).
 			Scan(&inCurrent, &inDaily, &inOn); err != nil {
 			t.Fatal(err)
 		}
 		if inCurrent != 1 || inDaily != 1 || inOn != 1 {
-			t.Errorf("a position observed today has %d row(s) in position_current, %d in position_daily and %d in "+
+			t.Errorf("a position observed today has %d row(s) in position_current, %d in position_daily_between and %d in "+
 				"position_daily_on(today); want 1 each", inCurrent, inDaily, inOn)
 		}
 		inv.assertAll(t, "after the open day")
 	})
 
-	// Everything the stack has said so far, pinned. The later feed below must not
+	// Pin every answer the stack has given so far. The later feed below must not
 	// change any of it.
 	pinnedAt := inv.dbNow()
 	pinned := inv.readAsOf(pinnedAt)
@@ -97,7 +96,7 @@ func TestPositionDailyStackInvariants(t *testing.T) {
 	}
 	latestBefore := inv.readAsOf(inv.dbNow())
 
-	// THE LATER FEED. Four shapes arrive into days that already have an answer: a
+	// The later feed: four shapes arrive into days that already have an answer: a
 	// correction to the winner, a reorg of its block, a higher block on the same day,
 	// and an older block that must lose. Each is a legal spine append.
 	t.Run("a later feed into answered days", func(t *testing.T) {
@@ -183,7 +182,7 @@ func (s *stackInvariants) feedLate(rng *rand.Rand) int {
 	rows, err := s.pool.Query(s.ctx, `
 		SELECT position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id,
 		       block_number, block_version, processing_version, block_timestamp
-		  FROM position_daily ORDER BY position_id, as_of_date`)
+		  FROM position_daily_between('2000-01-01', '2100-01-01') ORDER BY position_id, as_of_date`)
 	if err != nil {
 		s.t.Fatalf("read the answered days: %v", err)
 	}
@@ -267,11 +266,11 @@ func (s *stackInvariants) assertAll(t *testing.T, phase string) {
 		name string
 		run  func() string
 	}{
-		{"position_daily equals the spine argmax per (position, UTC date)", s.viewEqualsSpineArgmax},
-		{"position_daily_on over every observed date equals position_daily", s.onEqualsView},
+		{"position_daily_between equals the spine argmax per (position, UTC date)", s.betweenEqualsSpineArgmax},
+		{"position_daily_on over every observed date equals position_daily_between", s.onEqualsBetween},
 		{"position_current still equals the spine argmax per position", s.currentEqualsSpineArgmax},
-		{"position_current agrees with position_daily's newest settled day", s.cachesAgree},
-		{"as_of is monotone: an earlier bound returns a subset", s.asOfIsMonotone},
+		{"position_current agrees with the newest date position_daily_between reads", s.cachesAgree},
+		{"the as-of read is monotone: an earlier bound returns a subset", s.asOfIsMonotone},
 	} {
 		if bad := inv.run(); bad != "" {
 			t.Errorf("[%s] %s: %s", phase, inv.name, bad)
@@ -281,7 +280,7 @@ func (s *stackInvariants) assertAll(t *testing.T, phase string) {
 
 // The oracle is a window function over position_state, computed independently of the
 // reads' DISTINCT ON.
-func (s *stackInvariants) viewEqualsSpineArgmax() string {
+func (s *stackInvariants) betweenEqualsSpineArgmax() string {
 	return s.diff(`
 		WITH ranked AS (
 		  SELECT position_id, (block_timestamp AT TIME ZONE 'utc')::date AS as_of_date,
@@ -296,30 +295,30 @@ func (s *stackInvariants) viewEqualsSpineArgmax() string {
 		                  FROM ranked WHERE rn = 1),
 		     got AS (SELECT position_id, as_of_date, quantity, block_number, block_version,
 		                    processing_version, block_timestamp, deal_type, holder_id, instrument_key
-		               FROM position_daily)
+		               FROM position_daily_between('2000-01-01', '2100-01-01'))
 		SELECT (SELECT count(*) FROM (SELECT * FROM oracle EXCEPT ALL SELECT * FROM got) a),
 		       (SELECT count(*) FROM (SELECT * FROM got EXCEPT ALL SELECT * FROM oracle) b),
 		       COALESCE((SELECT a::text FROM (SELECT * FROM oracle EXCEPT ALL SELECT * FROM got) a LIMIT 1), '')`,
-		"the spine implies", "the view holds that the spine does not")
+		"the spine implies", "position_daily_between holds that the spine does not")
 }
 
-// The one-date read, applied to every observed date, is the all-dates view, row for row.
-func (s *stackInvariants) onEqualsView() string {
+// The one-date read, applied to every observed date, is the range read over every date, row for row.
+func (s *stackInvariants) onEqualsBetween() string {
 	const cols = `position_id, as_of_date, quantity, block_number, block_version, processing_version,
 	              block_timestamp, deal_type, holder_id, instrument_key, projection, build_id, run_id, created_at`
 	return s.diff(`
 		WITH on_every_date AS (
 		  SELECT `+cols+` FROM (SELECT DISTINCT (block_timestamp AT TIME ZONE 'utc')::date AS d FROM position_state) dates
 		   CROSS JOIN LATERAL position_daily_on(dates.d)),
-		     daily AS (SELECT `+cols+` FROM position_daily)
+		     daily AS (SELECT `+cols+` FROM position_daily_between('2000-01-01', '2100-01-01'))
 		SELECT (SELECT count(*) FROM (SELECT * FROM daily EXCEPT ALL SELECT * FROM on_every_date) a),
 		       (SELECT count(*) FROM (SELECT * FROM on_every_date EXCEPT ALL SELECT * FROM daily) b),
 		       COALESCE((SELECT a::text FROM (SELECT * FROM daily EXCEPT ALL SELECT * FROM on_every_date) a LIMIT 1), '')`,
-		"the view holds", "position_daily_on holds that the view does not")
+		"position_daily_between holds", "position_daily_on holds that position_daily_between does not")
 }
 
-// position_current is not this PR's table, but it reads the same spine through the
-// same ordering, so a change that broke one would likely break both.
+// position_current reads the same spine through the same ordering, so a change that
+// broke one would likely break both.
 func (s *stackInvariants) currentEqualsSpineArgmax() string {
 	return s.diff(`
 		WITH ranked AS (
@@ -339,13 +338,13 @@ func (s *stackInvariants) currentEqualsSpineArgmax() string {
 		"the spine implies", "position_current holds that the spine does not")
 }
 
-// position_current and position_daily's newest date must name the same winner.
+// position_current and the newest date position_daily_between reads must name the same winner.
 func (s *stackInvariants) cachesAgree() string {
 	return s.count(`
 		WITH newest_settled AS (
 		    SELECT DISTINCT ON (position_id) position_id, quantity, block_number, block_version,
 		           processing_version, block_timestamp, deal_type
-		      FROM position_daily ORDER BY position_id, as_of_date DESC)
+		      FROM position_daily_between('2000-01-01', '2100-01-01') ORDER BY position_id, as_of_date DESC)
 		SELECT count(*)
 		  FROM newest_settled d
 		  JOIN position_current c ON c.position_id = d.position_id
@@ -353,7 +352,7 @@ func (s *stackInvariants) cachesAgree() string {
 		        IS DISTINCT FROM
 		        (c.quantity, c.block_number, c.block_version, c.processing_version, c.block_timestamp)
 		        OR d.deal_type IS DISTINCT FROM c.deal_type)`,
-		"position(s) where position_current and position_daily's newest date disagree")
+		"position(s) where position_current and the newest date position_daily_between reads disagree")
 }
 
 // The spine is append-only, so the as-of read only ever grows: every row visible at the
@@ -367,7 +366,7 @@ func (s *stackInvariants) asOfIsMonotone() string {
 		                  FROM position_state)
 		SELECT count(*) FROM (
 		    SELECT position_id, as_of_date, block_number, block_version, processing_version, block_timestamp
-		      FROM position_daily_as_of((SELECT lo FROM bounds))
+		      FROM position_daily_between('2000-01-01', '2100-01-01', (SELECT lo FROM bounds))
 		    EXCEPT ALL
 		    SELECT position_id, (block_timestamp AT TIME ZONE 'utc')::date, block_number, block_version,
 		           processing_version, block_timestamp
@@ -422,7 +421,7 @@ func (s *stackInvariants) openDayObservation() []byte {
 func (s *stackInvariants) readingCount() int {
 	s.t.Helper()
 	var n int
-	if err := s.pool.QueryRow(s.ctx, `SELECT count(*) FROM position_daily`).Scan(&n); err != nil {
+	if err := s.pool.QueryRow(s.ctx, `SELECT count(*) FROM position_daily_between('2000-01-01', '2100-01-01')`).Scan(&n); err != nil {
 		s.t.Fatal(err)
 	}
 	return n
@@ -444,7 +443,7 @@ func (s *stackInvariants) readAsOf(at time.Time) map[string]string {
 		SELECT encode(position_id, 'hex') || '@' || as_of_date::text,
 		       quantity::text || '/' || block_number::text || '.' || block_version::text || '.' ||
 		       processing_version::text || '/' || COALESCE(deal_type, 'NULL')
-		  FROM position_daily_as_of($1)`, at)
+		  FROM position_daily_between('2000-01-01', '2100-01-01', $1)`, at)
 	if err != nil {
 		s.t.Fatalf("as-of read: %v", err)
 	}

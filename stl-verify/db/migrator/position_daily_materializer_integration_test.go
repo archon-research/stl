@@ -11,7 +11,7 @@ import (
 
 // The rest of the position_daily suite writes to the spine directly. These drive it through
 // materialize_position_projection, the write path production uses, where the batch is an
-// INSERT ... WHERE NOT EXISTS ... ON CONFLICT DO NOTHING. Reads go through the position_daily view.
+// INSERT ... WHERE NOT EXISTS ... ON CONFLICT DO NOTHING. Reads go through position_daily_between.
 
 // mppRow is one contract-shaped projection row with its own block_timestamp, which the package's
 // shared row() helper pins to a single date.
@@ -21,7 +21,7 @@ func mppRow(ik string, qty, bn, bv, pv int, ts, dealType string) string {
 		strconv.Itoa(bn) + "::bigint," + strconv.Itoa(bv) + "::int," + strconv.Itoa(pv) + "::int,'" + ts + "'::timestamptz)"
 }
 
-// readingDivergence reports every (position, date) where position_daily is not the spine's winning
+// readingDivergence reports every (position, date) where position_daily_between is not the spine's winning
 // observation -- missing, extra, or holding a losing row -- as one description per divergence.
 func readingDivergence(t *testing.T, f *psFixture) []string {
 	t.Helper()
@@ -41,7 +41,7 @@ func readingDivergence(t *testing.T, f *psFixture) []string {
 		              coalesce(to_jsonb(d) - 'position_id' - 'created_at', 'null'::jsonb)::text,
 		              coalesce(to_jsonb(w) - 'position_id', 'null'::jsonb)::text)
 		  FROM winner w
-		  FULL OUTER JOIN position_daily d ON d.position_id = w.position_id AND d.as_of_date = w.as_of_date
+		  FULL OUTER JOIN position_daily_between('2000-01-01', '2100-01-01') d ON d.position_id = w.position_id AND d.as_of_date = w.as_of_date
 		 WHERE w.position_id IS NULL OR d.position_id IS NULL
 		    OR (d.instrument_key, d.quantity, d.block_number, d.block_version, d.processing_version,
 		        d.block_timestamp, d.projection, d.build_id)
@@ -69,12 +69,12 @@ func readingDivergence(t *testing.T, f *psFixture) []string {
 	return out
 }
 
-// readDays returns one position's series through the latest view as (date, quantity) pairs, keyed by
+// readDays returns one position's series through position_daily_between as (date, quantity) pairs, keyed by
 // instrument_key because the materializer derives position_id itself.
 func readDays(t *testing.T, f *psFixture, ik string) []string {
 	t.Helper()
 	rows, err := f.pool.Query(f.ctx, `
-		SELECT as_of_date::text || '=' || quantity::text FROM position_daily
+		SELECT as_of_date::text || '=' || quantity::text FROM position_daily_between('2000-01-01', '2100-01-01')
 		 WHERE instrument_key = $1 ORDER BY as_of_date`, ik)
 	if err != nil {
 		t.Fatalf("readDays(%s): %v", ik, err)
@@ -94,7 +94,7 @@ func readDays(t *testing.T, f *psFixture, ik string) []string {
 	return out
 }
 
-// currentDisagreement reports every position where position_current is not the position_daily row on
+// currentDisagreement reports every position where position_current is not the position_daily_between row on
 // that position's latest observed date. Both derive from the same spine, and their agreement is what the
 // block_time_inverts_height refusal exists to protect: one orders by block and the other groups by date,
 // so an inverted pair makes them name different winners.
@@ -104,7 +104,7 @@ func currentDisagreement(t *testing.T, f *psFixture) []string {
 		WITH latest_day AS (
 		    SELECT DISTINCT ON (position_id) position_id, as_of_date, instrument_key, quantity, deal_type,
 		           block_number, block_version, processing_version, block_timestamp, projection, build_id, run_id
-		      FROM position_daily ORDER BY position_id, as_of_date DESC
+		      FROM position_daily_between('2000-01-01', '2100-01-01') ORDER BY position_id, as_of_date DESC
 		)
 		SELECT format('ik=%s daily(%s)=%s current=%s',
 		              coalesce(d.instrument_key, c.instrument_key), d.as_of_date::text,
@@ -290,7 +290,7 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 		var gotBuild int
 		var gotRun int64
 		if err := f.pool.QueryRow(f.ctx, `
-			SELECT build_id, run_id FROM position_daily WHERE instrument_key = $1`, ik).Scan(&gotBuild, &gotRun); err != nil {
+			SELECT build_id, run_id FROM position_daily_between('2000-01-01', '2100-01-01') WHERE instrument_key = $1`, ik).Scan(&gotBuild, &gotRun); err != nil {
 			t.Fatalf("read the audit columns: %v", err)
 		}
 		if gotBuild != buildID || gotRun != runID {
@@ -304,7 +304,7 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 }
 
 // Both derive from the same spine. position_current holds the newest observation outright;
-// position_daily's latest date must be that same observation, or one of them is telling a
+// position_daily_between's latest date must be that same observation, or one of them is telling a
 // consumer something the other denies.
 //
 // This holds while a position's newest observation also falls on its latest observed date, which the
@@ -337,15 +337,15 @@ func TestPositionCurrentAndPositionDailyNameTheSameWinner(t *testing.T) {
 	// Positive control: both are actually populated, so an empty-vs-empty comparison cannot pass.
 	var daily, current int
 	if err := f.pool.QueryRow(f.ctx, `
-		SELECT (SELECT count(*) FROM position_daily), (SELECT count(*) FROM position_current)`).
+		SELECT (SELECT count(*) FROM position_daily_between('2000-01-01', '2100-01-01')), (SELECT count(*) FROM position_current)`).
 		Scan(&daily, &current); err != nil {
 		t.Fatal(err)
 	}
 	if daily != 6 || current != 3 {
-		t.Fatalf("position_daily holds %d rows and position_current %d; want 6 observed days across 3 positions", daily, current)
+		t.Fatalf("position_daily_between reads %d rows and position_current %d; want 6 observed days across 3 positions", daily, current)
 	}
 	if d := currentDisagreement(t, f); len(d) != 0 {
-		t.Errorf("position_current and position_daily name different winners for %d position(s): %s", len(d), strings.Join(d, " | "))
+		t.Errorf("position_current and position_daily_between name different winners for %d position(s): %s", len(d), strings.Join(d, " | "))
 	}
 
 	// And after re-deriving position_current from the spine alone.
@@ -362,7 +362,7 @@ func (f *psFixture) dealTypeOf(t *testing.T, ik, date string) string {
 	t.Helper()
 	var dt *string
 	if err := f.pool.QueryRow(f.ctx,
-		`SELECT deal_type FROM position_daily WHERE instrument_key = $1 AND as_of_date = $2::date`, ik, date).Scan(&dt); err != nil {
+		`SELECT deal_type FROM position_daily_between('2000-01-01', '2100-01-01') WHERE instrument_key = $1 AND as_of_date = $2::date`, ik, date).Scan(&dt); err != nil {
 		t.Fatalf("dealTypeOf(%s, %s): %v", ik, date, err)
 	}
 	if dt == nil {
@@ -375,7 +375,7 @@ func (f *psFixture) dealTypeOf(t *testing.T, ik, date string) string {
 func (f *psFixture) dailyImagesFor(t *testing.T, ik string) []string {
 	t.Helper()
 	rows, err := f.pool.Query(f.ctx, `
-		SELECT to_jsonb(d)::text FROM position_daily d WHERE d.instrument_key = $1 ORDER BY 1`, ik)
+		SELECT to_jsonb(d)::text FROM position_daily_between('2000-01-01', '2100-01-01') d WHERE d.instrument_key = $1 ORDER BY 1`, ik)
 	if err != nil {
 		t.Fatalf("dailyImagesFor(%s): %v", ik, err)
 	}
@@ -426,9 +426,9 @@ func TestPositionDailyKeepsADayACorrectionMovedAway(t *testing.T) {
 
 	if got := readDays(t, f, ik); len(got) != 2 ||
 		got[0] != "2026-06-01=555" || got[1] != "2026-06-02=100" {
-		t.Errorf("position_daily holds %v; want the correction on 2026-06-01 and the superseded row still on 2026-06-02", got)
+		t.Errorf("position_daily_between reads %v; want the correction on 2026-06-01 and the superseded row still on 2026-06-02", got)
 	}
-	// The known consequence: position_daily's newest day is NOT the position's newest observation.
+	// The known consequence: position_daily_between's newest day is NOT the position's newest observation.
 	if d := currentDisagreement(t, f); len(d) != 1 {
 		t.Errorf("the readings disagree on %d position(s), want exactly 1 -- if this is now 0 the gap is fixed "+
 			"and the forward-only COMMENT plus this test must be updated; more than 1 means something else broke: %s",
