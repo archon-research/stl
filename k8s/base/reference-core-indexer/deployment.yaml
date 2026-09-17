@@ -1,0 +1,43 @@
+# Temporal cronjob worker. The schedule lives in Temporal state, not here: the
+# worker reconciles a changed REFERENCE_CORE_SYNC_INTERVAL into it on startup,
+# so a redeploy is enough (see stl-verify/AGENTS.md).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reference-core-indexer
+spec:
+  replicas: 1
+  # Explicit, matching the API-server default — ArgoCD must own spec.strategy or
+  # a later change to it cannot prune rollingUpdate. k8s/AGENTS.md, "Rollout strategy".
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  selector:
+    matchLabels:
+      app: reference-core-indexer
+  template:
+    metadata:
+      labels:
+        app: reference-core-indexer
+    spec:
+      serviceAccountName: reference-core-indexer
+      containers:
+        - name: reference-core-indexer
+          image: reference-core-indexer
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: reference-core-indexer
+            - secretRef:
+                name: reference-core-indexer
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      terminationGracePeriodSeconds: 90

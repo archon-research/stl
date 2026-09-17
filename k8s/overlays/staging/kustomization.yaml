@@ -56,6 +56,7 @@ resources:
   - ../../base/offchain-price-backfill
   - ../../base/allocation-underlying-value-backfill
   - ../../base/reference-capital-indexer
+  - ../../base/reference-core-indexer
   - ../../base/reference-capital-backfill
   # CORE model runner (VEC-272). Also deployed to prod (k8s/overlays/prod) since
   # the live readers landed (#706); both overlays run N_MC=10000.

@@ -1,0 +1,139 @@
+package postgres
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+)
+
+// Compile-time check that ReferenceCoreMarketResultRepository implements the port.
+var _ outbound.ReferenceCoreMarketResultRepository = (*ReferenceCoreMarketResultRepository)(nil)
+
+// ReferenceCoreMarketResultRepository persists per-cycle CORE market results.
+// It holds no pool: every write goes through the caller's transaction.
+type ReferenceCoreMarketResultRepository struct {
+	logger *slog.Logger
+	runID  buildregistry.RunID
+}
+
+// NewReferenceCoreMarketResultRepository creates a new ReferenceCoreMarketResultRepository.
+func NewReferenceCoreMarketResultRepository(
+	logger *slog.Logger,
+	runID buildregistry.RunID,
+) *ReferenceCoreMarketResultRepository {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &ReferenceCoreMarketResultRepository{
+		logger: logger.With("component", "reference-core-market-result-repo"),
+		runID:  runID,
+	}
+}
+
+// SaveMarketResults inserts a cycle's market rows within the caller's
+// transaction, so a failure here rolls back alongside the vault rows written
+// at the same synced_at.
+//
+// Insert-only: a row is immutable once written. The BEFORE INSERT trigger
+// assigns processing_version, so the same (identity, synced_at) written again
+// under the same build_id conflicts away, and under a new build_id appends a
+// correction. A Temporal retry never hits either path: a failed cycle rolled
+// back everything, and the retry stamps a fresh synced_at.
+func (r *ReferenceCoreMarketResultRepository) SaveMarketResults(
+	ctx context.Context,
+	tx pgx.Tx,
+	results []entity.ReferenceCoreMarketResult,
+) error {
+	if len(results) == 0 {
+		return nil
+	}
+
+	const q = `
+		INSERT INTO reference_core_market_result (
+			network,
+			chain_id,
+			protocol_name,
+			market_uid,
+			market_symbol,
+			loan_token_symbol,
+			loan_token_address,
+			model_date,
+			synced_at,
+			n_scenarios,
+			horizon_days,
+			effective_horizon_days,
+			total_supply_usd,
+			prob_no_bad_debt,
+			crr_el,
+			crr_var,
+			crr_es,
+			crr_el_se,
+			crr_var_se,
+			crr_es_se,
+			crr_floor,
+			external_flow_enabled,
+			source,
+			build_id,
+			run_id
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+		ON CONFLICT (network, protocol_name, market_uid, synced_at, processing_version) DO NOTHING
+	`
+
+	batch := &pgx.Batch{}
+	for _, m := range results {
+		batch.Queue(q, r.marketInsertArgs(m)...)
+	}
+
+	batchResults := tx.SendBatch(ctx, batch)
+	for i, m := range results {
+		if _, err := batchResults.Exec(); err != nil {
+			_ = batchResults.Close()
+			return fmt.Errorf("insert reference core market result %d (%s/%s/%s): %w",
+				i, m.Network, m.ProtocolName, m.MarketUID, err)
+		}
+	}
+	if err := batchResults.Close(); err != nil {
+		return fmt.Errorf("close batch: %w", err)
+	}
+
+	r.logger.Info("saved reference core market results", "count", len(results))
+	return nil
+}
+
+// marketInsertArgs orders one row's values to match the INSERT column list.
+func (r *ReferenceCoreMarketResultRepository) marketInsertArgs(m entity.ReferenceCoreMarketResult) []any {
+	return []any{
+		m.Network,
+		m.ChainID,
+		m.ProtocolName,
+		m.MarketUID,
+		m.MarketSymbol,
+		m.LoanTokenSymbol,
+		m.LoanTokenAddress,
+		m.ModelDate,
+		m.SyncedAt,
+		m.NScenarios,
+		m.HorizonDays,
+		m.EffectiveHorizonDays,
+		m.TotalSupplyUSD,
+		m.ProbNoBadDebt,
+		m.CRREL,
+		m.CRRVaR,
+		m.CRRES,
+		m.CRRELSE,
+		m.CRRVaRSE,
+		m.CRRESSE,
+		m.CRRFloor,
+		m.ExternalFlowEnabled,
+		m.Source,
+		m.BuildID,
+		r.runID,
+	}
+}

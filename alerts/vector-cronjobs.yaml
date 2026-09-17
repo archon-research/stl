@@ -219,7 +219,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|reference-capital-indexer|core-model-runner"
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|reference-capital-indexer|reference-core-indexer|core-model-runner"
               }
             ) < 1
           )
@@ -227,7 +227,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|reference-capital-indexer|core-model-runner"
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|reference-capital-indexer|reference-core-indexer|core-model-runner"
               }
             ) > 0
           )
@@ -710,3 +710,126 @@ groups:
             /debt and /total-capital series is now frozen on its last value via
             locf.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerbalancesheetstalled
+
+      # -----------------------------------------------------------------------
+      # WARNING — the CORE reference series stopped advancing (VEC-828)
+      # -----------------------------------------------------------------------
+      # reference-core-indexer is the only writer of reference_core_market_result
+      # and reference_core_vault_result. The upstream dashboard publishes one
+      # result per calendar day and no history route, so a day nobody observed
+      # is a permanent hole. Every failure below happens on a run that reports
+      # success, so the generic cronjob rules above stay quiet.
+      - alert: VectorReferenceCoreIndexerWritesZero
+        # Cycling but persisting nothing. The service fails a cycle whose
+        # overview has no markets or no vaults and writes both tables in one
+        # transaction, so a successful cycle always writes both and the market
+        # counter alone covers the vault table; zero rows means the write path
+        # or the counter broke.
+        # Gated on "cycling AND zero" so it does not duplicate the worker-down
+        # rules. The counters are seeded at 0 from process start, and `unless`
+        # (not `== 0`) also fires when the series is entirely absent.
+        # [3h] with `for: 1h`: the job ticks every 30m; a 1h window would
+        # straddle one late tick and false-positive on scheduling jitter alone.
+        expr: |
+          sum by (cluster) (
+            rate(cronjob_runs_total{service_name="reference-core-indexer", status="success", k8s_namespace_name="vector"}[3h])
+          ) > 0
+          unless
+          sum by (cluster) (
+            increase(reference_core_sync_markets_written_total{k8s_namespace_name="vector"}[3h])
+          ) > 0
+        for: 1h
+        labels:
+          team: vector
+          severity: warning
+          component: reference-core-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector reference-core-indexer wrote 0 CORE reference rows"
+          description: |
+            `reference_core_market_result` received 0 rows over 3h while cycles
+            succeeded. The CORE reference series has stopped advancing, and any
+            day that passes unobserved cannot be recovered afterwards — the
+            dashboard publishes no history route.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecoreindexerwriteszero
+
+      - alert: VectorReferenceCoreIndexerStaleUpstream
+        # The cycles succeed and rows land, but every row carries an old
+        # model_date: upstream's model stopped publishing. Nothing else notices
+        # — the write counters keep advancing with the old figures. Keyed on
+        # stale_cycles, NOT stale_rows: upstream does not re-run every small
+        # market daily, so a few rows always lag and a per-row signal would
+        # fire forever. A cycle counts as stale only when its FRESHEST row is
+        # more than one day behind the cycle's UTC day, so a run early in the
+        # day that still sees yesterday is not counted. One stale cycle can be
+        # a late upstream run and must not page: a [1h] window holds at most two
+        # 30m cycles, so a lone stale cycle keeps the expression true for under
+        # an hour and `for: 2h` never elapses; only back-to-back stale cycles
+        # for two hours do.
+        expr: |
+          sum by (cluster) (
+            increase(reference_core_sync_stale_cycles_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 2h
+        labels:
+          team: vector
+          severity: warning
+          component: reference-core-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector reference-core-indexer: upstream CORE results are stale"
+          description: |
+            For 2h+ every cycle's freshest row carried an upstream `model_date`
+            more than a day behind. Block Analitica's CORE model has stopped
+            publishing a new day; STL is recording the last one it did publish,
+            correctly labelled. Nothing to fix in the service — confirm against
+            the dashboard and flag it upstream.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecoreindexerstaleupstream
+
+      # =====================================================================
+      # VEC-828 — design-decision watchdog on the two plain reference tables.
+      # =====================================================================
+      - alert: VectorReferenceCoreResultGrowthHigh
+        # reference_core_market_result and reference_core_vault_result are
+        # PLAIN tables under the create-plain rule (db/migrations/AGENTS.md):
+        # ~42 rows per 30m cycle, ~2k rows/day, nowhere near where
+        # partitioning pays off. This rule is the tripwire on that premise —
+        # nothing is broken when it fires.
+        #
+        # Threshold derivation: same budget as VectorUniswapV4AppendOnChangeGrowthHigh.
+        #   - a plain PostgreSQL table gets uncomfortable past ~100M rows;
+        #   - today's rate is ~2k rows/day across both tables;
+        #   - trip at a combined 250k rows/day sustained = 2.9 rows/s
+        #     (250000 / 86400 = 2.894), ~90M rows/year — a year of runway.
+        # Reaching it means the upstream feed grew by two orders of magnitude
+        # or the interval was cut to seconds; either invalidates the premise.
+        #
+        # The counters are seeded at 0 from process start, so the series exist
+        # and `sum(rate(...))` is 0, not absent, while nothing is written.
+        expr: |
+          (
+            sum by (cluster) (
+              rate(reference_core_sync_markets_written_total{k8s_namespace_name="vector"}[6h])
+            )
+            +
+            sum by (cluster) (
+              rate(reference_core_sync_vaults_written_total{k8s_namespace_name="vector"}[6h])
+            )
+          ) > 2.9
+        for: 6h
+        labels:
+          team: vector
+          severity: warning
+          component: reference-core-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector reference_core_* tables outgrowing their plain-table budget"
+          description: |
+            Combined write rate into `reference_core_market_result` +
+            `reference_core_vault_result` has exceeded 250k rows/day (2.9 rows/s)
+            sustained for 6h — about 90M rows/year against the ~100M-row budget
+            those deliberately-plain (non-hypertable) tables were sized for.
+            Nothing is broken; this is the tripwire on that design choice. Check
+            the real row counts, and if the rate is the new normal plan the
+            hypertable conversion migration described in the runbook.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecoreresultgrowthhigh

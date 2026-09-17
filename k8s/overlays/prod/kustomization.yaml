@@ -50,6 +50,7 @@ resources:
   - ../../base/offchain-price-backfill
   - ../../base/allocation-underlying-value-backfill
   - ../../base/reference-capital-indexer
+  - ../../base/reference-core-indexer
   - ../../base/reference-capital-backfill
   - ../../base/core-model-runner
   - ../../base/maple-graphql-indexer

@@ -1533,6 +1533,94 @@
     "window_interval": {
       "type": "interval",
       "class": "A"
+    },
+    "market_uid": {
+      "type": "text",
+      "class": "S"
+    },
+    "market_symbol": {
+      "type": "text",
+      "class": "S"
+    },
+    "model_date": {
+      "type": "date",
+      "class": "S"
+    },
+    "n_scenarios": {
+      "type": "int4",
+      "class": "S"
+    },
+    "horizon_days": {
+      "type": "int4",
+      "class": "S"
+    },
+    "effective_horizon_days": {
+      "type": "int4",
+      "class": "S"
+    },
+    "total_supply_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "prob_no_bad_debt": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "crr_el": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "crr_var": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "crr_es": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "crr_el_se": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "crr_var_se": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "crr_es_se": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "crr_floor": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "external_flow_enabled": {
+      "type": "bool",
+      "class": "S"
+    },
+    "vault_symbol": {
+      "type": "text",
+      "class": "S"
+    },
+    "vault_name": {
+      "type": "text",
+      "class": "S"
+    },
+    "version_label": {
+      "type": "text",
+      "class": "S"
+    },
+    "method": {
+      "type": "text",
+      "class": "S"
+    },
+    "n_markets": {
+      "type": "int4",
+      "class": "S"
+    },
+    "total_assets_usd": {
+      "type": "numeric",
+      "class": "S"
     }
   },
   "tables": {
@@ -1880,6 +1968,16 @@
     "writer_run": {
       "type": "infrastructure",
       "owner": "infra"
+    },
+    "reference_core_market_result": {
+      "type": "raw_pipeline",
+      "owner": "risk",
+      "transform_defer": "VEC-828: native PK (network, protocol_name, market_uid, synced_at); reference feed, transform deferred pending the reference-data rollout"
+    },
+    "reference_core_vault_result": {
+      "type": "raw_pipeline",
+      "owner": "risk",
+      "transform_defer": "VEC-828: native PK (network, protocol_name, vault_address, synced_at); reference feed, transform deferred pending the reference-data rollout"
     }
   },
   "transforms": [
@@ -2100,6 +2198,18 @@
       "from": "int8",
       "guard_min": 1500000000,
       "guard_max": 4100000000
+    },
+    {
+      "table": "reference_core_market_result",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
+      "table": "reference_core_vault_result",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
     }
   ],
   "overrides": [
@@ -2130,6 +2240,13 @@
       "canonical": "valid_from",
       "accepted_type": "date",
       "reason": "VEC-617: as sec_node.valid_from — UTC calendar date per ADR-0007 §3."
+    },
+    {
+      "table": "reference_core_vault_result",
+      "column": "vault_address",
+      "canonical": "vault_address",
+      "accepted_type": "text",
+      "reason": "VEC-828: upstream's 0x-prefixed spelling recorded verbatim, like every identity field on the reference tables (prime_capital_stack_allocation.token_address is text for the same reason); the vault may sit on a network STL does not index, so it is not decoded into the canonical bytea."
     }
   ],
   "fills": [
@@ -2491,7 +2608,9 @@
         "prime_reference_position",
         "psm3_alm_shares",
         "psm3_reserves",
-        "token_total_supply"
+        "token_total_supply",
+        "reference_core_market_result",
+        "reference_core_vault_result"
       ]
     },
     {

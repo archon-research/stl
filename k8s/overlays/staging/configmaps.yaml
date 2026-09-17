@@ -1024,6 +1024,21 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: reference-core-indexer
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # The schedule lives in Temporal state; the worker reconciles a changed
+  # interval into it on startup, so a redeploy is enough (stl-verify/AGENTS.md).
+  # Why 30m: cmd/cronjobs/reference-core-indexer/main.go.
+  REFERENCE_CORE_SYNC_INTERVAL: "30m"
+  # CORE feed root, without the /overview route the client appends itself.
+  REFERENCE_CORE_URL: "https://core.data.blockanalitica.com/core"
+  ENVIRONMENT: "sentinelstaging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: core-model-runner
 data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
