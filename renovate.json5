@@ -12,6 +12,10 @@
 
   timezone: "Europe/Berlin",
 
+  // gomod edits go.mod through the Go tooling, so the directive bump arrives
+  // tidied; make tidy-check rejects a raw text edit.
+  postUpdateOptions: ["gomodTidy"],
+
   // Skip packages released less than 7 days ago
   minimumReleaseAge: "7 days",
 
@@ -21,7 +25,7 @@
   // Dependabot keeps github-actions and npm (.github/dependabot.yml). Anything
   // outside this list stays with it, or with nobody by choice: gomod's module
   // dependencies, and the images in k8s/dev-infra.
-  enabledManagers: ["dockerfile", "devcontainer", "nodenv", "pyenv", "custom.regex"],
+  enabledManagers: ["dockerfile", "devcontainer", "gomod", "nodenv", "pyenv", "custom.regex"],
 
   customManagers: [
     {
@@ -34,17 +38,6 @@
       depNameTemplate: "go",
       datasourceTemplate: "golang-version",
     },
-    {
-      // go.mod's `go` directive states the same toolchain version, and
-      // check-base-image-version-consistency.sh holds it to .go-version.
-      // Matched by regex so the directive alone is in scope; the gomod manager
-      // would bring every module dependency with it.
-      customType: "regex",
-      managerFilePatterns: ["/^stl-verify\\/go\\.mod$/"],
-      matchStrings: ["\\ngo (?<currentValue>\\d+\\.\\d+\\.\\d+)\\n"],
-      depNameTemplate: "go",
-      datasourceTemplate: "golang-version",
-    },
   ],
 
   // Renovate merges packageRules in array order and the LAST matching rule wins
@@ -52,6 +45,20 @@
   // rule below sets only dependencyDashboardApproval, so it layers over the
   // groups rather than replacing them.
   packageRules: [
+    {
+      // gomod is here only to move go.mod's `go` directive and tidy afterwards.
+      // Everything else it finds — 119 module dependencies — stays out of the
+      // bot's hands; the enable below re-opens just the directive, and a later
+      // rule wins over an earlier one.
+      matchManagers: ["gomod"],
+      enabled: false,
+    },
+    {
+      matchManagers: ["gomod"],
+      matchDepTypes: ["golang"],
+      enabled: true,
+      rangeStrategy: "bump",
+    },
     {
       // Base images are referenced as tag@digest (VEC-783); pinDigests keeps
       // new and unpinned references that way. Scoped to the dockerfile manager:
