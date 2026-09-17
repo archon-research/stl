@@ -71,7 +71,7 @@ BEGIN
                     AND p.address = '\x794a61358D6845594F94dc1DB02A252b5b4814aD'::bytea
     JOIN oracle o ON o.id = po.oracle_id AND o.name = 'aave_v3_arbitrum';
     IF cnt < 1 THEN
-        RAISE EXCEPTION 'Aave V3 Arbitrum -> aave_v3_arbitrum protocol_oracle binding missing';
+        RAISE EXCEPTION 'Aave V3 Arbitrum pool -> aave_v3_arbitrum protocol_oracle binding missing';
     END IF;
 
     SELECT COUNT(*) INTO cnt

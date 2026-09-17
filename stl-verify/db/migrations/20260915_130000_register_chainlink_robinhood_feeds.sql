@@ -59,10 +59,11 @@ BEGIN
     JOIN token t ON t.chain_id = 4663 AND t.address = '\x5fc5360d0400a0fd4f2af552add042d716f1d168'::bytea
     JOIN oracle_asset oa ON oa.oracle_id = o.id AND oa.token_id = t.id
     WHERE o.name = 'chainlink_robinhood' AND o.enabled AND o.chain_id = 4663
+      AND o.deployment_block = 33322
       AND oa.enabled AND oa.feed_decimals = 8 AND oa.quote_currency = 'USD'
       AND oa.feed_address = '\x61B7e5650328764B076A108EFF5fa7282a1B9aD2'::bytea;
     IF cnt <> 1 THEN
-        RAISE EXCEPTION 'expected 1 enabled chainlink_robinhood USDG oracle_asset row, found %', cnt;
+        RAISE EXCEPTION 'expected 1 enabled chainlink_robinhood USDG oracle_asset row with deployment_block 33322, found %', cnt;
     END IF;
 
     SELECT COUNT(*) INTO cnt

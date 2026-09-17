@@ -48,9 +48,10 @@ BEGIN
 
     SELECT COUNT(*) INTO cnt
     FROM oracle o
-    WHERE o.name = 'chainlink_arbitrum' AND o.chain_id = 42161 AND o.enabled;
+    WHERE o.name = 'chainlink_arbitrum' AND o.chain_id = 42161 AND o.enabled
+      AND o.deployment_block = 101256;
     IF cnt <> 1 THEN
-        RAISE EXCEPTION 'chainlink_arbitrum oracle not found or not on chain 42161';
+        RAISE EXCEPTION 'chainlink_arbitrum oracle not found, not on chain 42161, or deployment_block <> 101256';
     END IF;
 END $$;
 

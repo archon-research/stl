@@ -1,12 +1,10 @@
--- Register the Aave V3 Base AaveOracle (chain 8453) so aBasUSDC receipt tokens
--- are priced via the protocol's own oracle. The existing chainlink_base binding
--- (from 20260909_130000) stays as an extra row; the receipt lateral joins any
--- bound oracle and takes newest by block then oracle_id DESC, so aave_v3_base
--- wins at equal block heights. Both price USDC at ~$1.
--- An asset this AaveOracle cannot price fails the whole block in the live worker
--- (getAssetsPrices runs with AllowFailure false and the error reaches SQS, which
--- redelivers); the backfiller's per-asset path skips that asset alone and
--- chainlink_base carries the block.
+-- Register the Aave V3 Base AaveOracle (chain 8453) to price aBasUSDC receipt tokens.
+-- The chainlink_base binding (20260909_130000) stays as a second protocol_oracle row.
+-- The receipt path (allocation_position_repository.py, _RECEIPT_TOKEN_POSITIONS_SQL)
+-- takes the newest price by block then oracle_id DESC, so the higher-id aave_v3_base
+-- wins whenever both oracles priced the block. The live worker reads this unit in one
+-- all-or-nothing getAssetsPrices multicall, so a failure fails the whole block handler
+-- and SQS redelivers it; the backfiller prices assets individually.
 --
 -- AaveOracle 0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156, verified on-chain at block
 -- 51419879: PoolAddressesProvider(0xe20fcbdbffc4dd138ce8b2e6fbb6cb49777ad64d).getPriceOracle()
