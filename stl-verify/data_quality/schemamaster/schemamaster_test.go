@@ -224,11 +224,8 @@ func TestLoad_BlockMetaFillsUnmarshal(t *testing.T) {
 	}
 }
 
-// One canonical column, one producer per table. A table that both renames a raw column to a canonical
-// column and declares a fill for that same column says two different things are its value, and nothing
-// downstream resolves the tie: the conformance check is satisfied by either alone, so the collision is
-// invisible. prime_debt is why this exists -- it renamed the indexer's synced_at to block_timestamp
-// while block_timestamp is resolved from the block_meta dimension.
+// A column both renamed onto and filled has two producers, and the conformance check passes on either
+// alone, so the collision is otherwise invisible.
 func TestNoColumnHasBothATransformAndAFill(t *testing.T) {
 	r, err := Load()
 	if err != nil {

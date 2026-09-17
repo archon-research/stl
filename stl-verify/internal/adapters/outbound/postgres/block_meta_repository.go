@@ -54,25 +54,16 @@ func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID bui
 // from it silently: a table gaining a fill and no arm is never enumerated, every one of its values
 // resolves NULL, and the conformance check still passes because the declaration alone satisfies it.
 //
-// Chain resolution comes from the same register, in the three shapes a chain_id fill can take: through
-// a config parent (borrower -> protocol.chain_id), as a literal for a table whose chain is fixed
-// (prime_debt is Sky on chain 1 and has no chain column to join), or natively when there is no fill at
-// all. The partition column is read from the live catalogue rather than declared, so a window can never
-// be expressed on a column the table is no longer partitioned by.
+// Chain comes from the same register: a parent join, a fill constant, or the table's own column. The
+// partition column is read from the live catalogue, so a window is never expressed on a stale column.
 type workListArm struct {
 	table   string // the referencing table, and the hypertable whose chunks give the windows
 	partCol string // its partition column, read from the catalogue; the window is expressed on it alone
 	sql     string // $1 = chain id; %s = the window predicate on partCol
 }
 
-// armSQL builds one arm, taking chain from the table's chain_id fill: a join to the config parent, the
-// fill's literal, or the table's own column when it declares no fill.
-//
-// The same expression is both selected and compared to $1, so a constant arm reads "1 = $1" and
-// contributes nothing to another chain's run rather than labelling Sky's blocks with that chain.
-//
-// A shape this does not build is an error, not a best effort: rendering a two-hop fill as its first hop
-// joins a table that has no chain_id, which fails as SQL inside a run rather than here.
+// armSQL builds one arm. The chain expression is both selected and compared to $1, so a constant arm
+// filters out another chain's run rather than labelling its blocks; unbuildable shapes are errors.
 func armSQL(table string, chain schemamaster.Fill, declared bool) (string, error) {
 	const shape = `
 		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
@@ -114,17 +105,15 @@ func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, 
 	if err != nil {
 		return nil, fmt.Errorf("loading the column register: %w", err)
 	}
-	chainFill := map[string]schemamaster.Fill{}
 	var tables []string
 	for _, f := range register.Fills {
 		if f.BlockMeta {
 			tables = append(tables, f.Table)
 		}
 	}
-	for _, f := range register.Fills {
-		if f.Column == "chain_id" {
-			chainFill[f.Table] = f
-		}
+	chainFill, err := chainFillsByTable(register.Fills)
+	if err != nil {
+		return nil, err
 	}
 	if len(tables) == 0 {
 		return nil, fmt.Errorf("no table declares a block_meta fill; the register did not load as expected")
@@ -157,9 +146,24 @@ func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, 
 	return arms, nil
 }
 
-// requireNativeChainColumn refuses a table that resolves chain neither by fill nor by its own column.
-// The register exempts several tables from the chain key entirely, and a block_meta fill added to one
-// of those would otherwise build an arm on t.chain_id and fail as SQL part way through a run.
+// chainFillsByTable indexes the chain_id fills by table, refusing a second fill for one table rather
+// than building its arm from whichever the register happens to list last.
+func chainFillsByTable(fills []schemamaster.Fill) (map[string]schemamaster.Fill, error) {
+	byTable := map[string]schemamaster.Fill{}
+	for _, f := range fills {
+		if f.Column != "chain_id" {
+			continue
+		}
+		if _, seen := byTable[f.Table]; seen {
+			return nil, fmt.Errorf("%s declares more than one chain_id fill", f.Table)
+		}
+		byTable[f.Table] = f
+	}
+	return byTable, nil
+}
+
+// requireNativeChainColumn refuses a table with neither a chain_id fill nor its own chain_id column,
+// which would otherwise fail as SQL part way through a run.
 func (r *BlockMetaRepository) requireNativeChainColumn(ctx context.Context, table string) error {
 	var present bool
 	if err := r.pool.QueryRow(ctx, `
@@ -199,9 +203,7 @@ const chunksPerWindow = 16
 // and a missing relation is a parse error rather than an empty result — hence the probe rather than a
 // LEFT JOIN or a to_regclass inside the query.
 //
-// Both halves are read as public only. The transformed layer names its hypertables after the raw tables
-// they canonicalise, so an unqualified lookup unions a table's chunks with its twin's and groups ranges
-// that are not disjoint.
+// Both halves are read as public only: the transformed layer reuses the raw tables' names.
 const chunkRangeSQL = `
 		SELECT range_start_integer, range_end_integer, range_start, range_end
 		  FROM timescaledb_information.chunks

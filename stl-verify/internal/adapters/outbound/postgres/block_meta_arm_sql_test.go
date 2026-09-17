@@ -50,8 +50,6 @@ func TestArmSQLTakesChainFromTheFillsShape(t *testing.T) {
 	}
 }
 
-// The constant filters rather than labels: it is compared to the run's chain, so a constant arm
-// contributes nothing to another chain's run instead of stamping its blocks with that chain.
 func TestArmSQLComparesTheConstantToTheRunsChain(t *testing.T) {
 	got, err := armSQL("prime_debt", schemamaster.Fill{Const: new(1)}, true)
 	if err != nil {
@@ -100,5 +98,36 @@ func TestArmSQLRefusesShapesItCannotBuild(t *testing.T) {
 				t.Errorf("error %q does not say what is unhandled (want it to mention %q)", err, tt.want)
 			}
 		})
+	}
+}
+
+// Two chain_id fills for one table would leave the arm built from whichever the register lists last.
+func TestChainFillsByTableRefusesTwoFillsForOneTable(t *testing.T) {
+	fills := []schemamaster.Fill{
+		{Table: "prime_debt", Column: "chain_id", Const: new(1)},
+		{Table: "borrower", Column: "chain_id", Parent: "protocol", Key: "protocol_id", Ref: "id"},
+		{Table: "prime_debt", Column: "chain_id", Const: new(8453)},
+	}
+	got, err := chainFillsByTable(fills)
+	if err == nil {
+		t.Fatalf("two chain_id fills for prime_debt were accepted, keeping %+v", got["prime_debt"])
+	}
+	if !strings.Contains(err.Error(), "prime_debt") {
+		t.Errorf("error %q does not name the table", err)
+	}
+}
+
+func TestChainFillsByTableIndexesOneFillPerTable(t *testing.T) {
+	fills := []schemamaster.Fill{
+		{Table: "prime_debt", Column: "chain_id", Const: new(1)},
+		{Table: "prime_debt", Column: "block_timestamp", BlockMeta: true},
+		{Table: "borrower", Column: "chain_id", Parent: "protocol", Key: "protocol_id", Ref: "id"},
+	}
+	got, err := chainFillsByTable(fills)
+	if err != nil {
+		t.Fatalf("chainFillsByTable: %v", err)
+	}
+	if len(got) != 2 || got["prime_debt"].Const == nil || *got["prime_debt"].Const != 1 || got["borrower"].Parent != "protocol" {
+		t.Errorf("got %+v, want prime_debt const 1 and borrower via protocol only", got)
 	}
 }

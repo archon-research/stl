@@ -117,9 +117,7 @@ func TestWorkListWindowsCoverEveryReferencedBlock(t *testing.T) {
 	}
 }
 
-// A table whose chain is a register constant is work like any other. prime_debt carries no chain
-// column and no config parent -- schema_master gives it chain 1 as a literal -- so its arm has to take
-// the chain from that constant. Before the const arm exists its blocks are simply absent from the list.
+// prime_debt's chain is a register constant, and its blocks are work under that chain.
 func TestWorkListEnumeratesAConstChainArm(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
@@ -134,10 +132,8 @@ func TestWorkListEnumeratesAConstChainArm(t *testing.T) {
 	}
 }
 
-// The constant is a filter, not a label. A run for another chain must not write Sky's blocks into the
-// work list at all -- asserted on the table rather than on that run's cursor, because a row inserted
-// under chain 1 is invisible to a chain-8453 cursor and survives the next run's DELETE, which is scoped
-// to its own chain. Block 1250000 is that run's own work, so an empty list cannot pass this.
+// Asserted on the table, not the run's cursor: a Sky row written under chain 1 is invisible to a
+// chain-8453 cursor and survives that run's chain-scoped DELETE.
 func TestWorkListConstChainArmIsScopedToItsChain(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
@@ -697,7 +693,7 @@ func TestWindowPredicatesCoverTieredChunkRanges(t *testing.T) {
 	}
 	covered := false
 	for _, w := range after {
-		if strings.Contains(w, strconv.Itoa(tieredLo)) {
+		if strings.Contains(w, lowerBound(tieredLo)) {
 			covered = true
 			break
 		}
@@ -706,12 +702,15 @@ func TestWindowPredicatesCoverTieredChunkRanges(t *testing.T) {
 		t.Errorf("the tiered range [%d, %d) is in no window (%d windows: %v); the loader would never scan "+
 			"the tiered tail and would report success having skipped it", tieredLo, tieredHi, len(after), after)
 	}
-	// The transformed layer names its hypertables after the raw ones, so the same name appears twice in
-	// the OSM catalogue. Its ranges belong to a different table, and unioned in they make the groups
-	// overlap, so the window's upper bound stops being the group's maximum.
+	// The transformed twin shares the raw table's name; its range unioned in makes the groups overlap.
 	for _, w := range after {
-		if strings.Contains(w, strconv.Itoa(tieredLo-50000)) {
+		if strings.Contains(w, lowerBound(tieredLo-50000)) {
 			t.Errorf("a window covers the transformed twin's tiered range: %s", w)
 		}
 	}
+}
+
+// lowerBound renders a window's opening bound whole, so 100000 cannot match inside 1000000.
+func lowerBound(n int) string {
+	return "sr.block_number >= " + strconv.Itoa(n) + " AND"
 }
