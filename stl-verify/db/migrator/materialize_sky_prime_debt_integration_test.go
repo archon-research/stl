@@ -4,6 +4,7 @@ package migrator_test
 
 import (
 	"context"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,8 @@ const (
 	skyPrimeC = "cccccccccccccccccccccccccccccccccccccccc"
 	// The Vat the projection keys on; the indexer's own default is tied to it by
 	// TestDefaultVatAddressMatchesTheProjectionKey in the prime-debt-indexer package.
-	skyVatKey = "35d1b3f3d7966a1dfe207aa4514c12a259a0492b:"
+	skyVatAddress = "35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
+	skyVatKey     = skyVatAddress + ":"
 )
 
 // seedSkyPrimeDebt gives a test its own migrated database, seeds the fixture and runs the projection
@@ -173,22 +175,27 @@ func TestSkyPrimeDebtKeysOnTheVatAddressWithoutAProtocol(t *testing.T) {
 		       count(*) FILTER (WHERE chain_id IS DISTINCT FROM 1
 		                           OR protocol_id IS NOT NULL
 		                           OR position_id <> position_id(1, NULL, instrument_key, holder_id)
-		                           OR left(instrument_key, 41) <> $1)
-		FROM position_state`, skyVatKey).Scan(&rows, &off); err != nil {
+		                           OR left(instrument_key, $2) <> $1)
+		FROM position_state`, skyVatKey, len(skyVatKey)).Scan(&rows, &off); err != nil {
 		t.Fatalf("read position_state: %v", err)
 	}
 	if rows == 0 || off != 0 {
 		t.Errorf("%d of %d rows are not chain 1, protocol NULL, keyed on the Vat address", off, rows)
 	}
-	var want, got []byte
+	// sha256 of position_key(1, NULL, key, holder) = "1;;<vat>:ILK-B;<holder>", computed outside the database
+	// so a change to position_key() or position_id() cannot move both sides of the comparison.
+	want, err := hex.DecodeString("73e3c3becebe457c0a1b3ccd16d5ba62b427eac18333c65f24645e4f05f697c8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []byte
 	if err := pool.QueryRow(ctx, `
-		SELECT position_id(1, NULL, $1 || 'ILK-B', $2),
-		       (SELECT position_id FROM position_state WHERE holder_id = $2 AND instrument_key = $1 || 'ILK-B' LIMIT 1)`,
-		skyVatKey, skyPrimeA).Scan(&want, &got); err != nil {
-		t.Fatalf("compute the expected id: %v", err)
+		SELECT position_id FROM position_state WHERE holder_id = $1 AND instrument_key = $2`,
+		skyPrimeA, skyVatKey+"ILK-B").Scan(&got); err != nil {
+		t.Fatalf("read A/ILK-B: %v", err)
 	}
 	if string(want) != string(got) {
-		t.Errorf("A/ILK-B position_id = %x; want %x, derived from chain 1, no protocol and the Vat key", got, want)
+		t.Errorf("A/ILK-B position_id = %x; want %x, the hash of chain 1, no protocol and the Vat key", got, want)
 	}
 }
 
@@ -198,11 +205,16 @@ func TestSkyPrimeDebtMigrationLeavesPrimeDebtAndProtocolUntouched(t *testing.T) 
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-	var hasColumn, hasVatProtocol bool
+	var viewExists, hasColumn, hasVatProtocol bool
 	if err := pool.QueryRow(ctx, `
-		SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'prime_debt' AND column_name = 'protocol_id'),
-		       EXISTS (SELECT 1 FROM protocol WHERE address = decode('35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'hex'))`).Scan(&hasColumn, &hasVatProtocol); err != nil {
+		SELECT to_regclass('public.position_sky_prime_debt') IS NOT NULL,
+		       EXISTS (SELECT 1 FROM information_schema.columns
+		                WHERE table_schema = 'public' AND table_name = 'prime_debt' AND column_name = 'protocol_id'),
+		       EXISTS (SELECT 1 FROM protocol WHERE address = decode($1, 'hex'))`, skyVatAddress).Scan(&viewExists, &hasColumn, &hasVatProtocol); err != nil {
 		t.Fatalf("read the catalogue: %v", err)
+	}
+	if !viewExists {
+		t.Fatal("position_sky_prime_debt does not exist; the Sky migration did not run, so the checks below prove nothing")
 	}
 	if hasColumn {
 		t.Error("prime_debt has a protocol_id column; the Sky projection must not alter prime_debt")
@@ -221,8 +233,8 @@ func TestSkyPrimeDebtRefusesASnapshotItCannotKey(t *testing.T) {
 		{"leading space in ilk_name", " ILK-X", goodVault, "ilk ' ILK-X'"},
 		{"trailing space in ilk_name", "ILK-X ", goodVault, "ilk 'ILK-X '"},
 		{"blank ilk_name", "", goodVault, "ilk ''"},
-		{"tab-only ilk_name", "\t", goodVault, "ilk '"},
-		{"newline-only ilk_name", "\n", goodVault, "ilk '"},
+		{"tab-only ilk_name", "\t", goodVault, "ilk '\t'"},
+		{"newline-only ilk_name", "\n", goodVault, "ilk '\n'"},
 		{"ilk_name carrying the key delimiter", "ILK;X", goodVault, "ilk 'ILK;X'"},
 		{"empty vault_address", "ILK-X", "", "vault_address ''"},
 		{"19-byte vault_address", "ILK-X", goodVault[:38], "vault_address '" + goodVault[:38] + "'"},

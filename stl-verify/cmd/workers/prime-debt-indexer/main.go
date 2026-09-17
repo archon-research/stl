@@ -73,8 +73,8 @@ type cliConfig struct {
 	chainID           int64
 }
 
-// The MCD Vat. position_sky_prime_debt (20260819_140000) keys every snapshot on this address, since
-// prime_debt does not record which Vat it was read from, so the two must agree.
+// The MCD Vat. position_sky_prime_debt (20260917_130000) keys every snapshot on this address, since
+// prime_debt does not record which Vat it was read from, so parseConfig refuses any other.
 const defaultVatAddress = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
 
 func parseConfig(args []string) (cliConfig, error) {
@@ -128,11 +128,19 @@ func parseConfig(args []string) (cliConfig, error) {
 	if !common.IsHexAddress(cfg.vatAddr) {
 		return cliConfig{}, fmt.Errorf("invalid vat address: %q", cfg.vatAddr)
 	}
+	// prime_debt records no Vat and no chain, so position_sky_prime_debt keys every row on the MCD Vat
+	// on chain 1. Any other value would be written under that key silently, so it is refused here.
+	if common.HexToAddress(cfg.vatAddr) != common.HexToAddress(defaultVatAddress) {
+		return cliConfig{}, fmt.Errorf("vat address %s is not the MCD Vat %s, the only Vat position_sky_prime_debt keys on", cfg.vatAddr, defaultVatAddress)
+	}
 
 	chainIDStr := env.Get("CHAIN_ID", "1")
 	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
 	if err != nil {
 		return cliConfig{}, fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
+	}
+	if chainID != 1 {
+		return cliConfig{}, fmt.Errorf("CHAIN_ID %d is not 1, the only chain position_sky_prime_debt keys on", chainID)
 	}
 	cfg.chainID = chainID
 
