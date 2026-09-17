@@ -61,14 +61,12 @@ func (c *Client) FetchPackages(ctx context.Context) ([]Package, error) {
 	return all, nil
 }
 
-// ForEachOperationsPage fetches operations page by page, calling fn for each page.
-// This avoids accumulating all operations in memory during large backfills.
-// If afterID is non-empty, only operations after that cursor are fetched.
-func (c *Client) ForEachOperationsPage(ctx context.Context, afterID string, fn func([]Operation) error) error {
+// ForEachOperationsPage fetches every operation page by page, calling fn for
+// each page, and follows the API's own page.next links. It never sends a
+// caller-built afterId: the operations endpoint's cursor format is
+// undocumented and a synthesised one silently returned nothing (VEC-826).
+func (c *Client) ForEachOperationsPage(ctx context.Context, fn func([]Operation) error) error {
 	u := fmt.Sprintf("%s/v2/collateral_management/operations?limit=100", c.baseURL)
-	if afterID != "" {
-		u += "&afterId=" + url.QueryEscape(afterID)
-	}
 
 	for u != "" {
 		var page OperationsResponse

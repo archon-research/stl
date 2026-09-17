@@ -182,7 +182,7 @@ func TestClient_ForEachOperationsPage(t *testing.T) {
 	client := NewClient(server.URL, "key")
 
 	var allOps []Operation
-	err := client.ForEachOperationsPage(context.Background(), "", func(ops []Operation) error {
+	err := client.ForEachOperationsPage(context.Background(), func(ops []Operation) error {
 		allOps = append(allOps, ops...)
 		return nil
 	})

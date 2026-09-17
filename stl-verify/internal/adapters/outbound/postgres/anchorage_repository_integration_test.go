@@ -72,3 +72,48 @@ func TestAnchorageSaveOperations_WrittenRowsCarryTheRunID(t *testing.T) {
 	}
 	testutil.RequireRunID(t, gotRunID, runID)
 }
+
+// KnownOperationIDs is the sync's dedupe set (VEC-826): it must report every
+// id stored for the prime, exactly once, and nothing from other primes.
+func TestAnchorageKnownOperationIDs_ListsStoredIDsForThePrimeOnly(t *testing.T) {
+	ctx := context.Background()
+	pool, repo, primeID, _ := newAnchorageRunFixture(t, ctx)
+	otherPrimeID := seedReferencePrime(t, ctx, pool, "other-anchorage-prime")
+
+	known, err := repo.KnownOperationIDs(ctx, primeID)
+	if err != nil {
+		t.Fatalf("KnownOperationIDs on empty table: %v", err)
+	}
+	if len(known) != 0 {
+		t.Fatalf("expected no known ids before any insert, got %v", known)
+	}
+
+	op := func(prime int64, id string, day int) entity.AnchorageOperation {
+		return entity.AnchorageOperation{
+			PrimeID: prime, OperationID: id, Action: "TOP_UP", OperationType: "COLLATERAL_PACKAGE", TypeID: "pkg-1",
+			AssetType: "BTC", CustodyType: "ANCHORAGECUSTODY", Quantity: "1",
+			CreatedAt: time.Date(2026, 9, day, 12, 0, 0, 0, time.UTC),
+		}
+	}
+	if err := repo.SaveOperations(ctx, []entity.AnchorageOperation{
+		op(primeID, "op-1", 1), op(primeID, "op-2", 2), op(otherPrimeID, "op-other", 3),
+	}); err != nil {
+		t.Fatalf("SaveOperations: %v", err)
+	}
+
+	known, err = repo.KnownOperationIDs(ctx, primeID)
+	if err != nil {
+		t.Fatalf("KnownOperationIDs: %v", err)
+	}
+	if len(known) != 2 {
+		t.Fatalf("expected 2 known ids, got %v", known)
+	}
+	for _, id := range []string{"op-1", "op-2"} {
+		if _, ok := known[id]; !ok {
+			t.Errorf("expected %s in known ids, got %v", id, known)
+		}
+	}
+	if _, ok := known["op-other"]; ok {
+		t.Errorf("other prime's operation leaked into known ids: %v", known)
+	}
+}
