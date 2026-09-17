@@ -428,6 +428,16 @@ func TestMapleLoanPlacement(t *testing.T) {
 		}
 	})
 
+	t.Run("a higher version of the same height on another chain does not supersede this chain's block", func(t *testing.T) {
+		seedBlocks(t)
+		f.block(t, 8453, 1017, 1, "2026-06-16T11:00:00Z")
+		f.cycle(t, "a", "2026-06-16T08:35:00Z", "500", 1)
+		f.mustRun(t)
+		if r := f.mustRows(t, "a", 1)[0]; r.bn != 1017 {
+			t.Errorf("placed at block %d; want chain 1's 1017, which chain 8453's 1017/v1 must not supersede", r.bn)
+		}
+	})
+
 	t.Run("the block lookup is scoped to the loan's own chain", func(t *testing.T) {
 		seedBlocks(t)
 		// At 08:36 chain 1 has a block AT 08:36 while chain 8453's latest is 08:35.
@@ -1122,6 +1132,9 @@ func TestMapleLoanRefusals(t *testing.T) {
 		for _, m := range regexp.MustCompile(`S\d x`).FindAllString(msg, -1) {
 			got = append(got, strings.TrimSuffix(m, " x"))
 		}
+		if !strings.Contains(msg, "holds 7 state(s)") {
+			t.Errorf("refusal %q; want the total of 7 states", msg)
+		}
 		if strings.Join(got, ",") != "S1,S2,S3,S5,S7" {
 			t.Errorf("reported states %v; want the first five in order, S1,S2,S3,S5,S7", got)
 		}
@@ -1132,7 +1145,10 @@ func TestMapleLoanRefusals(t *testing.T) {
 		f.blocks(t, 1, 3000, "2026-06-16T08:00:00Z", 10, 120)
 		f.block(t, 1, 2500, 0, "2026-06-16T08:19:00Z")
 		f.cycle(t, "a", "2026-06-16T08:18:30Z", "500", 1)
-		f.mustRefuse(t, mapleTolerance, "precedes block 2500 at")
+		msg := f.mustRefuse(t, mapleTolerance, "precedes block 2500 at")
+		if !strings.Contains(msg, "at 1 pair(s)") {
+			t.Errorf("refusal %q; want the total of 1 inverted pair", msg)
+		}
 	})
 
 	t.Run("an orphaned reorg version does not count as an inversion", func(t *testing.T) {
@@ -1159,26 +1175,28 @@ func TestMapleLoanRefusals(t *testing.T) {
 		f.mustRefuse(t, mapleTolerance, "invert against height")
 	})
 
-	t.Run("the inversion check stays linear in the number of blocks", func(t *testing.T) {
+	t.Run("more than five bad addresses are counted in full and five are named", func(t *testing.T) {
+		f.reset(t)
+		f.exec(t, `INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
+		           SELECT 1, p.id, decode(lpad(to_hex(g), 8, '0'), 'hex'), $1, l.borrower_user_id
+		           FROM protocol p CROSS JOIN generate_series(1, 7) g
+		           JOIN maple_loan l ON l.id = $2
+		           WHERE p.chain_id = 1 AND p.name = 'Maple'`, f.pools["p1"], f.loans["a"])
+		t.Cleanup(func() { f.exec(t, `DELETE FROM maple_loan WHERE length(loan_address) = 4`) })
+		msg := f.mustRefuse(t, mapleTolerance, "7 address(es) are not 20-byte EVM addresses")
+		if n := strings.Count(msg, "4-byte loan address"); n != 5 {
+			t.Errorf("refusal names %d addresses; want 5: %s", n, msg)
+		}
+	})
+
+	t.Run("more than five inverted pairs are counted in full and five are named", func(t *testing.T) {
 		f.reset(t)
 		f.exec(t, `INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
-		           SELECT 1, 1000000 + g, 0, '2026-07-01T00:00:00Z'::timestamptz + (g * interval '12 seconds')
-		           FROM generate_series(1, 40000) g`)
-		conn, err := pool.Acquire(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer conn.Release()
-		if _, err := conn.Exec(ctx, `SET statement_timeout = '30s'`); err != nil {
-			t.Fatal(err)
-		}
-		defer func() {
-			if _, err := conn.Exec(ctx, `RESET statement_timeout`); err != nil {
-				t.Error(err)
-			}
-		}()
-		if _, err := conn.Exec(ctx, `SELECT materialize_maple_loan(p_build_id => 0)`); err != nil {
-			t.Fatalf("the pre-checks must finish well inside 30s on 40,000 blocks: %v", err)
+		           SELECT 1, 3000 + g, 0, '2026-06-16T08:00:00Z'::timestamptz + (CASE WHEN g % 2 = 0 THEN g ELSE g - 2 END) * interval '1 minute'
+		           FROM generate_series(1, 14) g`)
+		msg := f.mustRefuse(t, mapleTolerance, "invert against height at 6 pair(s)")
+		if n := strings.Count(msg, "precedes block"); n != 5 {
+			t.Errorf("refusal names %d pairs; want 5: %s", n, msg)
 		}
 	})
 
@@ -1347,6 +1365,33 @@ func TestMapleLoanWrapper(t *testing.T) {
 	})
 }
 
+// Timing guard: a wall-clock bound, so a slow CI host can fail it without a regression.
+func TestMapleLoanTimingGuardInversionCheckIsLinear(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	f := seedMaple(ctx, t, pool, map[string]mapleLoanSpec{"a": {1, "p1"}})
+	f.exec(t, `INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
+	           SELECT 1, 1000000 + g, 0, '2026-07-01T00:00:00Z'::timestamptz + (g * interval '12 seconds')
+	           FROM generate_series(1, 40000) g`)
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SET statement_timeout = '30s'`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, err := conn.Exec(ctx, `RESET statement_timeout`); err != nil {
+			t.Error(err)
+		}
+	}()
+	if _, err := conn.Exec(ctx, `SELECT materialize_maple_loan(p_build_id => 0)`); err != nil {
+		t.Fatalf("the pre-checks must finish well inside 30s on 40,000 blocks: %v", err)
+	}
+}
+
 // seedPlacementVolume gives the planner enough rows to choose the shapes it chooses at staging volume:
 // a dense block series with reorged heights, loan cycles across it, and a pool cycle beside each.
 func seedPlacementVolume(t *testing.T, f *mapleFixture) {
@@ -1391,9 +1436,8 @@ func explainLines(ctx context.Context, t *testing.T, pool *pgxpool.Pool, query s
 	return plan
 }
 
-// The placement's time bound must be an index condition on block_meta_chain_time_idx, or each cycle
-// sorts the chain's blocks.
-func TestMapleLoanPlacementReadsTheTimeIndex(t *testing.T) {
+// Plan guard: asserts plan text, so a planner or version change can fail it without a regression.
+func TestMapleLoanPlanGuardPlacementReadsTheTimeIndex(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
@@ -1424,8 +1468,8 @@ func TestMapleLoanPlacementReadsTheTimeIndex(t *testing.T) {
 // is evaluated for every pair instead of as an index condition.
 var pairwiseFilter = regexp.MustCompile(`Filter: .*(block_timestamp (<=|>) \S*synced_at|synced_at (>=|<) \S*block_timestamp|synced_at >= \S*nb\.block_timestamp)`)
 
-// Every plan a run executes is captured, since the checks live inside the function where EXPLAIN cannot reach.
-func TestMapleLoanRunComparesNoCycleWithEveryBlock(t *testing.T) {
+// Plan guard: asserts plan text from auto_explain, so a planner or version change can fail it without a regression.
+func TestMapleLoanPlanGuardRunComparesNoCycleWithEveryBlock(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()

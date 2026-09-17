@@ -2,14 +2,6 @@
 -- VEC-405: project Maple Open Term Loan state onto the position spine. One loan is one position: the
 -- borrower's outstanding principal in that loan contract, held by the borrower's address.
 
--- Concurrent, so a retry after a failed build does not hold ACCESS EXCLUSIVE on block_meta.
-DROP INDEX CONCURRENTLY IF EXISTS public.block_meta_chain_time_idx;
-
-CREATE INDEX CONCURRENTLY block_meta_chain_time_idx
-    ON public.block_meta (chain_id, block_timestamp DESC, block_number DESC, block_version DESC, processing_version DESC);
-
-COMMENT ON INDEX public.block_meta_chain_time_idx IS '[Dimension] Serves the instant-to-block lookup that position_maple_loan (VEC-405) performs per sync cycle. Column order matches the view''s ORDER BY, so the pick and its surviving-version check are index-only scans.';
-
 CREATE OR REPLACE VIEW public.position_maple_loan AS
 WITH cycle AS (
     SELECT s.maple_loan_id, s.synced_at, s.principal_owed, s.processing_version,
@@ -26,11 +18,8 @@ WITH cycle AS (
     FROM last_seen ls
     -- A cycle that places at the last sighting's block would lose the close to it in the collapse below.
     CROSS JOIN LATERAL (
-        SELECT m.block_timestamp FROM public.block_meta m
+        SELECT m.block_timestamp FROM public.block_meta_surviving m
         WHERE m.chain_id = ls.chain_id AND m.block_timestamp > ls.last_synced_at
-          AND NOT EXISTS (SELECT 1 FROM public.block_meta o
-                           WHERE o.chain_id = m.chain_id AND o.block_number = m.block_number
-                             AND (o.block_version, o.processing_version) > (m.block_version, m.processing_version))
         ORDER BY m.block_timestamp LIMIT 1) nb
     CROSS JOIN LATERAL (
         SELECT ps.synced_at FROM public.maple_pool_state ps
@@ -55,11 +44,8 @@ WITH cycle AS (
     -- LEFT: an unplaceable cycle reaches the materializer as a NULL block and is refused there.
     LEFT JOIN LATERAL (
         SELECT m.block_timestamp, m.block_number, m.block_version
-        FROM public.block_meta m
+        FROM public.block_meta_surviving m
         WHERE m.chain_id = c.chain_id AND m.block_timestamp <= c.synced_at
-          AND NOT EXISTS (SELECT 1 FROM public.block_meta o
-                           WHERE o.chain_id = m.chain_id AND o.block_number = m.block_number
-                             AND (o.block_version, o.processing_version) > (m.block_version, m.processing_version))
         ORDER BY m.block_timestamp DESC, m.block_number DESC
         LIMIT 1) b ON true
     ORDER BY c.maple_loan_id, b.block_number, b.block_version, c.synced_at, c.processing_version DESC
@@ -77,7 +63,7 @@ SELECT p.chain_id,
 FROM placed p
 JOIN public."user" u ON u.id = p.borrower_user_id;
 
-COMMENT ON VIEW public.position_maple_loan IS '[Operational] VEC-405 projection: Maple Open Term Loan state as native position rows, one observation per (loan, resolved block_number, block_version). instrument_key is the loan contract address as hex, the bare native id its sibling projections use; holder_id is the borrower''s address; quantity is principal_owed, a raw integer in the POOL asset''s native decimals (maple_loan.maple_pool_id -> maple_pool.asset_token_id -> token.decimals); deal_type is BORROW, because the holder is the borrower and the quantity is what they owe. The source carries no block, so each cycle is placed at the last surviving (highest block_version, then processing_version) block_meta block at or before its synced_at and takes that block''s timestamp. Cycles resolving to one block collapse to the earliest synced_at, carrying that cycle''s highest processing_version, so a later reading inside the same block window appears at no block. A repaid loan is closed from its absence at a COMPLETE cycle of its pool: one whose maple_pool_state.principal_out, fetched from a separate endpoint, equals the sum of principal_owed over the loans that cycle reported for the pool. A truncated fetch that drops a loan owing anything fails that equality and closes nothing, so a close is not retracted by the loan reappearing; several loans repaying in one cycle all close. The close is placed at the first complete cycle at or after the first surviving block later than the last sighting, so it never shares that sighting''s block. Loans outside maple_loan_state that count toward principal_out would make every cycle incomplete and stop closes, not falsify them. Emits the shared position_state column contract; closure is applied by materialize_position_projection().';
+COMMENT ON VIEW public.position_maple_loan IS '[Operational] VEC-405 projection: Maple Open Term Loan state as native position rows, one observation per (loan, resolved block_number, block_version). instrument_key is the loan contract address as hex, the bare native id its sibling projections use; holder_id is the borrower''s address; quantity is principal_owed, a raw integer in the POOL asset''s native decimals (maple_loan.maple_pool_id -> maple_pool.asset_token_id -> token.decimals); deal_type is BORROW, because the holder is the borrower and the quantity is what they owe. The source carries no block, so each cycle is placed at the last surviving (highest block_version, then processing_version) block_meta block at or before its synced_at and takes that block''s timestamp. Cycles resolving to one block collapse to the earliest synced_at, carrying that cycle''s highest processing_version, so a later reading inside the same block window appears at no block. A repaid loan is closed from its absence at a COMPLETE cycle of its pool: one whose maple_pool_state.principal_out, fetched from a separate endpoint, equals the sum of principal_owed over the loans that cycle reported for the pool. A truncated fetch that drops a loan owing anything fails that equality and closes nothing, so a close is not retracted by the loan reappearing; several loans repaying in one cycle all close. The close is placed at the first complete cycle at or after the first surviving block later than the last sighting, so it never shares that sighting''s block. Loans outside maple_loan_state that count toward principal_out would make every cycle incomplete and stop closes, not falsify them; materialize_maple_loan warns naming each loan left open that way. Emits the shared position_state column contract; closure is applied by materialize_position_projection().';
 
 -- An older argument list beside this one makes a call that omits trailing arguments ambiguous.
 DROP FUNCTION IF EXISTS public.materialize_maple_loan(integer);
@@ -104,24 +90,21 @@ BEGIN
      WHERE c.oid = 'public.position_maple_loan'::regclass;
 
     -- Adjacent pairs find every inversion, because an out-of-order sequence inverts somewhere adjacent.
-    SELECT string_agg(msg, '; ' ORDER BY msg) INTO v_bad FROM (
-        SELECT format('chain %s: block %s at %s precedes block %s at %s', p.chain_id,
-                      p.block_number, p.block_timestamp, p.prev_number, p.prev_timestamp) AS msg
-        FROM (SELECT s.chain_id, s.block_number, s.block_timestamp,
-                     lag(s.block_number)    OVER w AS prev_number,
-                     lag(s.block_timestamp) OVER w AS prev_timestamp
-              FROM (SELECT DISTINCT ON (m.chain_id, m.block_number)
-                           m.chain_id, m.block_number, m.block_timestamp
-                    FROM public.block_meta m
-                    WHERE EXISTS (SELECT 1 FROM public.maple_loan l WHERE l.chain_id = m.chain_id)
-                    ORDER BY m.chain_id, m.block_number,
-                             m.block_version DESC, m.processing_version DESC) s
-              WINDOW w AS (PARTITION BY s.chain_id ORDER BY s.block_number)) p
-        WHERE p.prev_timestamp IS NOT NULL AND p.block_timestamp < p.prev_timestamp
-        ORDER BY 1
+    SELECT max(total), string_agg(msg, '; ' ORDER BY msg) INTO v_chains, v_bad FROM (
+        SELECT msg, count(*) OVER () AS total FROM (
+            SELECT format('chain %s: block %s at %s precedes block %s at %s', p.chain_id,
+                          p.block_number, p.block_timestamp, p.prev_number, p.prev_timestamp) AS msg
+            FROM (SELECT s.chain_id, s.block_number, s.block_timestamp,
+                         lag(s.block_number)    OVER w AS prev_number,
+                         lag(s.block_timestamp) OVER w AS prev_timestamp
+                  FROM public.block_meta_surviving s
+                  WHERE EXISTS (SELECT 1 FROM public.maple_loan l WHERE l.chain_id = s.chain_id)
+                  WINDOW w AS (PARTITION BY s.chain_id ORDER BY s.block_number)) p
+            WHERE p.prev_timestamp IS NOT NULL AND p.block_timestamp < p.prev_timestamp) q
+        ORDER BY msg
         LIMIT 5) z;
     IF v_bad IS NOT NULL THEN
-        RAISE EXCEPTION 'materialize_maple_loan: block_meta header times invert against height, so a placement would be wrong; fix the mis-parsed rows first (first 5): %', v_bad;
+        RAISE EXCEPTION 'materialize_maple_loan: block_meta header times invert against height at % pair(s), so a placement would be wrong; fix the mis-parsed rows first (first 5): %', v_chains, v_bad;
     END IF;
 
     -- Loan cycles place positives and pool cycles place closes, so both are checked.
@@ -147,11 +130,8 @@ BEGIN
                  AND EXISTS (SELECT 1 FROM public.maple_loan_state s
                               WHERE s.maple_loan_id = l.id AND s.synced_at < ps.synced_at)) i
         LEFT JOIN LATERAL (
-            SELECT m.block_timestamp FROM public.block_meta m
+            SELECT m.block_timestamp FROM public.block_meta_surviving m
             WHERE m.chain_id = i.chain_id AND m.block_timestamp <= i.synced_at
-              AND NOT EXISTS (SELECT 1 FROM public.block_meta o WHERE o.chain_id = m.chain_id
-                               AND o.block_number = m.block_number
-                               AND (o.block_version, o.processing_version) > (m.block_version, m.processing_version))
             ORDER BY m.block_timestamp DESC LIMIT 1) b ON true
         WHERE b.block_timestamp IS NULL OR i.synced_at - b.block_timestamp > p_max_skew
         GROUP BY i.chain_id) z;
@@ -160,8 +140,8 @@ BEGIN
     END IF;
 
     -- position_state requires a 40-hex holder_id and position_key() a non-blank instrument_key.
-    SELECT string_agg(msg, '; ' ORDER BY msg) INTO v_bad FROM (
-        SELECT msg FROM (
+    SELECT max(total), string_agg(msg, '; ' ORDER BY msg) INTO v_chains, v_bad FROM (
+        SELECT msg, count(*) OVER () AS total FROM (
             SELECT format('loan %s (chain %s) has a %s-byte borrower address', l.id, l.chain_id, length(u.address)) AS msg
             FROM public.maple_loan l
             JOIN public."user" u ON u.id = l.borrower_user_id
@@ -174,18 +154,18 @@ BEGIN
         ORDER BY msg
         LIMIT 5) z;
     IF v_bad IS NOT NULL THEN
-        RAISE EXCEPTION 'materialize_maple_loan: an address is not a 20-byte EVM address, so the identity it keys would be malformed: %', v_bad;
+        RAISE EXCEPTION 'materialize_maple_loan: % address(es) are not 20-byte EVM addresses, so the identities they key would be malformed (first 5): %', v_chains, v_bad;
     END IF;
 
-    SELECT string_agg(msg, '; ' ORDER BY msg) INTO v_bad FROM (
-        SELECT format('%s x%s, earliest at %s', s.state, count(*), min(s.synced_at)) AS msg
+    SELECT max(total), string_agg(msg, '; ' ORDER BY msg) INTO v_chains, v_bad FROM (
+        SELECT format('%s x%s, earliest at %s', s.state, count(*), min(s.synced_at)) AS msg, count(*) OVER () AS total
         FROM public.maple_loan_state s
         WHERE s.state <> 'Active' AND s.synced_at > v_since
         GROUP BY s.state
         ORDER BY msg
         LIMIT 5) z;
     IF v_bad IS NOT NULL THEN
-        RAISE EXCEPTION 'materialize_maple_loan: maple_loan_state holds states this projection cannot classify as an open BORROW: %', v_bad;
+        RAISE EXCEPTION 'materialize_maple_loan: maple_loan_state holds % state(s) this projection cannot classify as an open BORROW (first 5): %', v_chains, v_bad;
     END IF;
 
     v_appended := public.materialize_position_projection('public.position_maple_loan'::regclass, p_build_id, p_run_id, p_window);
@@ -209,6 +189,6 @@ BEGIN
 END
 $fn$;
 
-COMMENT ON FUNCTION public.materialize_maple_loan(integer, bigint, interval, interval) IS '[Operational] VEC-405: materialize Maple loan state into position_state via materialize_position_projection(position_maple_loan). Takes that function''s advisory lock first, then refuses on four conditions: block_meta header times that invert against height, naming up to five; loan or pool cycles that no surviving block precedes, or that sit further than p_max_skew from the block they resolve to, naming every offending chain and saying when a chain has no blocks at all; a borrower or loan address that is not 20 bytes, naming up to five; and source states other than Active, naming up to five. After appending, it warns naming every loan still open more than a day after its last sighting while its pool kept reporting, since such a pool has no complete cycle to close it from. Widen p_max_skew only deliberately, since it is the only bound on placement error. The cycle and state checks read only rows with synced_at after now() - p_window, which is every row that can place inside the window, so a bounded run ignores older offenders; an unbounded run still refuses on them, since maple_loan_state cannot be deleted from. COST: the inversion and address checks read all of block_meta and maple_loan on every call, and the cycle check probes block_meta once per cycle in the window. The advisory lock excludes other runs, not the Maple indexer, so a cycle committed after the checks is read by the run unchecked, and the next run names it. Idempotent for a FIXED block_meta: a block added later closer to a cycle re-places it and appends a second observation, so block_meta must be complete for a chain''s range before this is run over it. Returns rows appended. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2). p_window is forwarded to the materializer, which bounds the batch it reads.';
+COMMENT ON FUNCTION public.materialize_maple_loan(integer, bigint, interval, interval) IS '[Operational] VEC-405: materialize Maple loan state into position_state via materialize_position_projection(position_maple_loan). Takes that function''s advisory lock first, then refuses on four conditions: block_meta header times that invert against height, counting every inverted pair and naming up to five; loan or pool cycles that no surviving block precedes, or that sit further than p_max_skew from the block they resolve to, naming every offending chain and saying when a chain has no blocks at all; a borrower or loan address that is not 20 bytes, counting every one and naming up to five; and source states other than Active, counting every state and naming up to five. After appending, it warns naming every loan still open more than a day after its last sighting while its pool kept reporting, since such a pool has no complete cycle to close it from. Widen p_max_skew only deliberately, since it is the only bound on placement error. The cycle and state checks read only rows with synced_at after now() - p_window, which is every row that can place inside the window, so a bounded run ignores older offenders; an unbounded run still refuses on them, since maple_loan_state cannot be deleted from. COST: the inversion and address checks read all of block_meta and maple_loan on every call, and the cycle check probes block_meta once per cycle in the window. The advisory lock excludes other runs, not the Maple indexer, so a cycle committed after the checks is read by the run unchecked, and the next run names it. Idempotent for a FIXED block_meta: a block added later closer to a cycle re-places it and appends a second observation, so block_meta must be complete for a chain''s range before this is run over it. Returns rows appended. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2). p_window is forwarded to the materializer, which bounds the batch it reads.';
 
 INSERT INTO migrations (filename) VALUES ('20260909_140000_materialize_maple_loan.sql') ON CONFLICT (filename) DO NOTHING;
