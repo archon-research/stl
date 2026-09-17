@@ -602,8 +602,10 @@ async function checkBalanceSeriesReportsCoverage() {
  * type-checking and unit-testing clean, because `prime_id` is a `string` either
  * way and no unit test round-trips a handler.
  *
- * The window is pinned: a defaulted one is now-relative, so two requests a
- * millisecond apart differ in `window` alone.
+ * The clock is frozen and the window pinned, because both are otherwise
+ * now-relative: a defaulted window differs in `window` alone between two
+ * requests a millisecond apart, and rows re-based on the clock each request
+ * reads differ in `latest_activity_at` alone.
  *
  * `SPARK_BASE_PROXY` holds nothing itself, so it also carries what the narrower
  * allocations-only check this replaces was for: a proxy with no rows of its own
@@ -675,17 +677,24 @@ async function checkEveryIdentifierFormAnswersTheSamePrime() {
     ],
   ];
 
-  for (const [route, read] of reads) {
-    const bodies = new Set(
-      await Promise.all(
-        identifiers.map(async (id) => JSON.stringify(await read(id))),
-      ),
-    );
-    assert.equal(
-      bodies.size,
-      1,
-      `${route} answered differently across a prime's identifier forms`,
-    );
+  const realNow = Date.now;
+  const frozenMs = realNow();
+  Date.now = () => frozenMs;
+  try {
+    for (const [route, read] of reads) {
+      const bodies = new Set(
+        await Promise.all(
+          identifiers.map(async (id) => JSON.stringify(await read(id))),
+        ),
+      );
+      assert.equal(
+        bodies.size,
+        1,
+        `${route} answered differently across a prime's identifier forms`,
+      );
+    }
+  } finally {
+    Date.now = realNow;
   }
 }
 
