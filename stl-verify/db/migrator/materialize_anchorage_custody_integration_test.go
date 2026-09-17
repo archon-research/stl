@@ -55,7 +55,7 @@ func seedAnchorageBase(t *testing.T) (context.Context, *pgxpool.Pool) {
 func addPrime(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, vaultHex string) {
 	t.Helper()
 	tag, err := pool.Exec(ctx,
-		`INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), $1, decode($2, 'hex'))`,
+		`INSERT INTO prime (external_id, name, vault_address, chain_id) VALUES (gen_random_uuid(), $1, decode($2, 'hex'), 1)`,
 		name, vaultHex)
 	if err != nil {
 		t.Fatalf("seed prime %s: %v", name, err)
