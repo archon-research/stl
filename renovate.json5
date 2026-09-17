@@ -41,9 +41,9 @@
   ],
 
   // Renovate merges packageRules in array order and the LAST matching rule wins
-  // for any field set by more than one match, groupName included. The majors
-  // rule below sets only dependencyDashboardApproval, so it layers over the
-  // groups rather than replacing them.
+  // for any field set by more than one match, groupName included. The gomod
+  // pair below turns on that ordering: everything from the manager is disabled,
+  // then the golang depType alone is re-enabled.
   packageRules: [
     {
       // gomod is here only to move go.mod's `go` directive and tidy afterwards.
@@ -85,19 +85,11 @@
       groupName: "node toolchain",
     },
     {
-      // A major is a migration, not a bump. Majors wait behind an explicit tick
-      // on the dependency dashboard; closing one there keeps it closed without
-      // blocking the minor and patch updates underneath it.
-      matchUpdateTypes: ["major"],
-      dependencyDashboardApproval: true,
-    },
-    {
       // Go and Python number a language move as a semver minor — go 1.26 to
-      // 1.27, python 3.12 to 3.14 — so the rule above never reaches the jumps
-      // that actually carry work. Splitting patch from minor is what makes
-      // 1.26.8 available on its own; gating the minor puts 1.27 on the
-      // dashboard beside the majors, where a migration belongs. Node is here
-      // for the same reason: its LTS line moves in the minor position.
+      // 1.27, python 3.12 to 3.14 — so a combined minor and patch stream offers
+      // only the language move. Splitting them makes the patch, 1.26.8,
+      // available on its own. Node is here for the same reason: its LTS line
+      // moves in the minor position.
       matchPackageNames: [
         "go",
         "golang",
@@ -106,17 +98,6 @@
         "node",
       ],
       separateMinorPatch: true,
-    },
-    {
-      matchPackageNames: [
-        "go",
-        "golang",
-        "mcr.microsoft.com/devcontainers/go",
-        "python",
-        "node",
-      ],
-      matchUpdateTypes: ["minor"],
-      dependencyDashboardApproval: true,
     },
   ],
 }
