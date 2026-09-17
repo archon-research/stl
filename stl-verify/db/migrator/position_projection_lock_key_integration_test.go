@@ -4,6 +4,7 @@ package migrator_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -11,11 +12,6 @@ import (
 // VEC-810 contract: the advisory lock key that serialises runs of one position projection has ONE
 // definition, position_projection_lock_key(regclass). The spine calls it, and every wrapper calls it
 // before its own pre-checks, so the pre-check and the append stay one unit.
-//
-// Note on what is NOT testable from a wrapper: the spine takes this lock itself, so a wrapper whose
-// key drifted would STILL block -- inside the spine, after its pre-checks had already run. A test
-// that merely observes "something blocked" cannot tell the two apart. What discriminates is moving
-// the one definition and requiring the caller to follow it.
 
 const lockKeyProjection = "public.position_anchorage_custody"
 
@@ -35,10 +31,10 @@ func TestProjectionLockKeyDefinitionDrivesTheSpine(t *testing.T) {
 		t.Fatalf("the projection must run cleanly when nothing holds its lock: %v", err)
 	}
 
-	if _, err := pool.Exec(ctx, `
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
 		CREATE OR REPLACE FUNCTION position_projection_lock_key(p_view regclass)
 		    RETURNS bigint LANGUAGE sql STABLE PARALLEL SAFE AS
-		$fn$ SELECT 4242424242::bigint $fn$`); err != nil {
+		$fn$ SELECT %d::bigint $fn$`, sentinel)); err != nil {
 		t.Fatalf("redefining the key: %v", err)
 	}
 
@@ -97,7 +93,7 @@ func TestProjectionLockKeyIsNotSpelledInTheSpine(t *testing.T) {
 	if !strings.Contains(helper, "materialize_position_projection.") {
 		t.Error("position_projection_lock_key does not build the key, so it is not the definition")
 	}
-	if strings.Contains(spine, "hashtextextended('materialize_position_projection.") {
+	if strings.Contains(spine, "hashtextextended") {
 		t.Error("the spine still builds the lock key inline; it must call position_projection_lock_key()")
 	}
 	if !strings.Contains(spine, "position_projection_lock_key") {
@@ -105,24 +101,43 @@ func TestProjectionLockKeyIsNotSpelledInTheSpine(t *testing.T) {
 	}
 }
 
-// An oid naming no relation must not silently lock nothing: the helper returns NULL and
-// pg_advisory_xact_lock rejects it, so the run cannot proceed unserialised.
-func TestProjectionLockKeyIsNullForAnUnknownRelation(t *testing.T) {
+// An oid naming no relation raises, so a caller cannot lock nothing: pg_advisory_xact_lock is strict
+// and takes no lock on a NULL key.
+func TestProjectionLockKeyRaisesForAnUnknownRelation(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	t.Cleanup(cleanup)
 
 	var key *int64
-	if err := pool.QueryRow(ctx, `SELECT position_projection_lock_key(0::regclass)`).Scan(&key); err != nil {
-		t.Fatalf("calling the helper with an unknown oid: %v", err)
+	err := pool.QueryRow(ctx, `SELECT position_projection_lock_key(0::regclass)`).Scan(&key)
+	if err == nil {
+		t.Fatalf("an unknown relation returned key %v instead of raising, so a caller would take no lock", key)
 	}
-	if key != nil {
-		t.Errorf("an unknown relation returned key %d; want NULL, which pg_advisory_xact_lock refuses", *key)
+	if !strings.Contains(err.Error(), "does not name an existing relation") {
+		t.Errorf("the helper failed, but not by rejecting the unknown relation: %v", err)
+	}
+}
+
+// Wrappers still spell the key by hand until each adopts the helper, and nothing else compares the
+// two. Delete once no wrapper carries a literal.
+func TestProjectionLockKeyMatchesTheWrapperLiteral(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	t.Cleanup(cleanup)
+
+	var same bool
+	if err := pool.QueryRow(ctx, `
+		SELECT hashtextextended('materialize_position_projection.public.position_anchorage_custody', 0)
+		     = position_projection_lock_key($1::regclass)`, lockKeyProjection).Scan(&same); err != nil {
+		t.Fatalf("comparing the helper with the hand-written key: %v", err)
+	}
+	if !same {
+		t.Errorf("position_projection_lock_key(%s) no longer equals the key its wrapper spells by hand", lockKeyProjection)
 	}
 }
 
 // The key must separate projections: two views sharing one key would serialise runs that have no
-// reason to exclude each other, and would mask a genuine collision.
+// reason to exclude each other.
 func TestProjectionLockKeyDiffersPerProjection(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -130,11 +145,49 @@ func TestProjectionLockKeyDiffersPerProjection(t *testing.T) {
 
 	var same bool
 	if err := pool.QueryRow(ctx, `
-		SELECT position_projection_lock_key('public.position_anchorage_custody'::regclass)
-		     = position_projection_lock_key('public.position_current'::regclass)`).Scan(&same); err != nil {
+		SELECT position_projection_lock_key($1::regclass)
+		     = position_projection_lock_key('public.position_prime_allocation'::regclass)`, lockKeyProjection).Scan(&same); err != nil {
 		t.Fatalf("comparing two relations' keys: %v", err)
 	}
 	if same {
-		t.Error("two different relations render one lock key")
+		t.Error("two different projections render one lock key")
+	}
+}
+
+// The key must not depend on the caller's search_path: a text || text operator shadowing pg_catalog
+// would move the helper's key while the spine and the wrappers' literals kept theirs.
+func TestProjectionLockKeyIgnoresTheCallersSearchPath(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	t.Cleanup(cleanup)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	for _, stmt := range []string{
+		`CREATE SCHEMA shadow`,
+		`CREATE FUNCTION shadow.cat(text, text) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT $2 || $1 $$`,
+		`CREATE OPERATOR shadow.|| (LEFTARG = text, RIGHTARG = text, FUNCTION = shadow.cat)`,
+	} {
+		if _, err := tx.Exec(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	var clean int64
+	if err := tx.QueryRow(ctx, `SELECT position_projection_lock_key($1::regclass)`, lockKeyProjection).Scan(&clean); err != nil {
+		t.Fatalf("key under the default path: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `SET LOCAL search_path = shadow, pg_catalog, public`); err != nil {
+		t.Fatal(err)
+	}
+	var shadowed int64
+	if err := tx.QueryRow(ctx, `SELECT public.position_projection_lock_key($1::regclass)`, lockKeyProjection).Scan(&shadowed); err != nil {
+		t.Fatalf("key under the shadowing path: %v", err)
+	}
+	if shadowed != clean {
+		t.Errorf("a shadowing || on the caller's path moved the key from %d to %d", clean, shadowed)
 	}
 }

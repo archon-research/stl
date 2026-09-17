@@ -1,24 +1,27 @@
 -- VEC-810: derive the position-projection advisory lock key in one place.
 -- VEC-799: record why materialize_position_projection overrides enable_tiered_reads.
 
--- VEC-810. The spine built the key inline and every wrapper wrote the finished string out by hand
--- before its pre-checks. They agree today only because format('%I.%I', ...) needs no quoting for the
--- current names. Nothing compares the two, so a change to either side is silent.
--- No SET search_path: a SQL function carrying one cannot be inlined, and every object here is
--- already schema-qualified. STABLE, not IMMUTABLE -- it reads the catalogue.
 CREATE OR REPLACE FUNCTION position_projection_lock_key(p_view regclass)
     RETURNS bigint
-    LANGUAGE sql
+    LANGUAGE plpgsql
     STABLE
-    PARALLEL SAFE AS $fn$
-SELECT pg_catalog.hashtextextended(
-           'materialize_position_projection.' || pg_catalog.format('%I.%I', nsp.nspname, cls.relname), 0)
-  FROM pg_catalog.pg_class cls
-  JOIN pg_catalog.pg_namespace nsp ON nsp.oid = cls.relnamespace
- WHERE cls.oid = p_view
-$fn$;
+    PARALLEL SAFE
+    SET search_path = pg_catalog, pg_temp
+    AS $fn$
+DECLARE v_key bigint;
+BEGIN
+    SELECT hashtextextended('materialize_position_projection.' || format('%I.%I', nsp.nspname, cls.relname), 0)
+      INTO v_key
+      FROM pg_catalog.pg_class cls
+      JOIN pg_catalog.pg_namespace nsp ON nsp.oid = cls.relnamespace
+     WHERE cls.oid = p_view;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'position_projection_lock_key: p_view (oid %) does not name an existing relation', p_view::oid;
+    END IF;
+    RETURN v_key;
+END $fn$;
 
-COMMENT ON FUNCTION position_projection_lock_key(regclass) IS '[Operational] VEC-810: the single definition of the advisory lock key that serialises runs of one position projection. materialize_position_projection() takes it, and every wrapper takes the same key before its own pre-checks so that the pre-check and the append are one unit. Returns NULL for an oid that names no relation, which pg_advisory_xact_lock rejects rather than silently locking nothing. A wrapper that writes the key out by hand instead of calling this is a review finding: the two agree only while format(''%I.%I'') needs no quoting for that view''s name, and nothing compares them.';
+COMMENT ON FUNCTION position_projection_lock_key(regclass) IS '[Operational] VEC-810: the single definition of the advisory lock key that serialises runs of one position projection. materialize_position_projection() takes it. A wrapper that pre-checks before calling the spine takes this key first, so the losing run blocks before paying for its pre-check scan. Raises for an oid that names no relation, because pg_advisory_xact_lock is strict and would take no lock on a NULL key. A wrapper that writes the key out by hand instead of calling this is a review finding: the two agree only while format(''%I.%I'') needs no quoting for that view''s name, and nothing compares them.';
 
 CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_build_id integer DEFAULT 0,
                                                            p_run_id bigint DEFAULT NULL,
@@ -347,10 +350,6 @@ BEGIN
 
     RETURN n;
 END $fn$;
--- VEC-799. The override is on the function since #943; review of #624/#626 asked for the reason.
--- Newest-per-key over position_state against local chunks alone reads a partial spine once chunks
--- tier, and the sources begin tiering 2027-02-03 and 2027-02-27. A time predicate on the source is
--- what legitimately removes the tiered tail from scope; this override is not a substitute for one.
-COMMENT ON FUNCTION materialize_position_projection(regclass, integer, bigint, interval) IS '[Operational] VEC-402..407 shared materializer: evaluate a per-protocol projection view ONCE into a temp table, validate it against the position_state column contract (each RAISE in the body names its own check), then apply closure and APPEND the new observations, recording the completed run with its counts in position_projection_run, all in one transaction. A view bug (NULLs, a wrong type, a double-emitted key, a negative quantity, the off-chain block_number rule) aborts the run BEFORE closure can drop the offending row; a position_id owned by another projection aborts it too, but after closure, because the check reads what the run would actually append. A data conflict aborts nothing: a position whose new observations invert block against instant is withheld this run, and a stored key re-emitted with a different value keeps the stored row, each recorded in position_projection_refusal and warned. deal_type is copied through; the FK to ref_deal_type constrains the value. position_id is recomputed via position_id(); serialized per view by an advisory lock whose key comes from position_projection_lock_key(p_view), the one definition wrappers share (VEC-810). Idempotent for a fixed source; run out of band. p_build_id and p_run_id are stamped on every row it appends, on the refusals and on the run record (NULL run means pre-tracking). Returns rows INSERTED. p_window (VEC-566) bounds the batch to view rows with block_timestamp > now() - p_window, the instant interpolated as a literal; NULL is unbounded. The bound is applied to the view''s output: every projection dedupes with a DISTINCT ON whose key excludes block_timestamp, and PostgreSQL does not push a qualifier below such a DISTINCT, so against those views it filters rows without pruning chunks. A bounded run keeps closure correct (the LAG falls back to history probed from position_state) but cannot discover positions whose observations all fall outside the window, so bootstrap and any recovery after an outage longer than the window must pass NULL. The window is stamped on the run record as window_interval. TIERED READS (VEC-799): this function pins timescaledb.enable_tiered_reads = on, overriding a database-level off, because its newest-per-key reads over position_state would otherwise answer from local chunks alone and see a partial spine once chunks tier to S3. Measured cost of the pin today is 0.3%.';
+COMMENT ON FUNCTION materialize_position_projection(regclass, integer, bigint, interval) IS '[Operational] VEC-402..407 shared materializer: evaluate a per-protocol projection view ONCE into a temp table, validate it against the position_state column contract (each RAISE in the body names its own check), then apply closure and APPEND the new observations, recording the completed run with its counts in position_projection_run, all in one transaction. A view bug (NULLs, a wrong type, a double-emitted key, a negative quantity, the off-chain block_number rule) aborts the run BEFORE closure can drop the offending row; a position_id owned by another projection aborts it too, but after closure, because the check reads what the run would actually append. A data conflict aborts nothing: a position whose new observations invert block against instant is withheld this run, and a stored key re-emitted with a different value keeps the stored row, each recorded in position_projection_refusal and warned. deal_type is copied through; the FK to ref_deal_type constrains the value. position_id is recomputed via position_id(); serialized per view by an advisory lock whose key comes from position_projection_lock_key(p_view), the one definition wrappers share (VEC-810). Idempotent for a fixed source; run out of band. p_build_id and p_run_id are stamped on every row it appends, on the refusals and on the run record (NULL run means pre-tracking). Returns rows INSERTED. p_window (VEC-566) bounds the batch to view rows with block_timestamp > now() - p_window, the instant interpolated as a literal; NULL is unbounded. The bound is applied to the view''s output: every projection dedupes with a DISTINCT ON whose key excludes block_timestamp, and PostgreSQL does not push a qualifier below such a DISTINCT, so against those views it filters rows without pruning chunks. A bounded run keeps closure correct (the LAG falls back to history probed from position_state) but cannot discover positions whose observations all fall outside the window, so bootstrap and any recovery after an outage longer than the window must pass NULL. The window is stamped on the run record as window_interval. TIERED READS (VEC-799): every read in this function runs with timescaledb.enable_tiered_reads = on, the projection view as well as the newest-per-key probes over position_state, because against local chunks alone either would see a partial history once chunks tier to S3; borrower and borrower_collateral begin tiering 2027-02-03, morpho_market_position and morpho_vault_position 2027-02-27. A time predicate on the source is what legitimately removes the tiered tail from scope; this pin is not a substitute for one.';
 
 INSERT INTO migrations (filename) VALUES ('20260916_170000_projection_lock_key_and_tiered_reads_reason.sql') ON CONFLICT (filename) DO NOTHING;
