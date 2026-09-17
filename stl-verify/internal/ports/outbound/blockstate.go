@@ -76,6 +76,13 @@ type BackfillCursor struct {
 	RewindCount int64
 }
 
+// BlockHashResolver is the read-only slice of BlockStateRepository a consumer
+// needs to turn a block hash into a number, without taking on the write-side
+// block-lifecycle surface (reorgs, watermarks, orphaning) it has no use for.
+type BlockHashResolver interface {
+	GetBlockByHash(ctx context.Context, hash string) (*BlockState, error)
+}
+
 // BlockStateRepository defines the interface for persisting block state.
 // Used for tracking the last processed block, detecting reorgs, and deduplication.
 type BlockStateRepository interface {
