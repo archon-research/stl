@@ -1892,3 +1892,177 @@ func TestSecStorePlanShapeEdgeSrcIdx(t *testing.T) {
 		t.Errorf("plan contains %d sort nodes — the index should provide the order\nplan: %s", sortCount, planJSON)
 	}
 }
+
+// TestSecStoreSupersessionChainThreeLinks verifies that a 3-link correction
+// chain (pv=0 → pv=1 → pv=2) resolves to the latest correction across all
+// read objects, and that a forked chain (two independent corrections of the
+// same original) also resolves to the highest processing_version.
+func TestSecStoreSupersessionChainThreeLinks(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	const chainNodeID = "em-t-chain3"
+	const chainEdgeSrc = "sec-t-chain3-src"
+	const chainEdgeDst = "em-t-chain3-dst"
+
+	// pv=0: original
+	_, err := pool.Exec(ctx, `
+		INSERT INTO sec_node (id, record_type, status, valid_from, processing_version, `+secstoreSpine+`)
+		VALUES ($1, 'ENTITY', 'ACTIVE', '2026-01-01', 0, 'test', 'SEED_LOAD', 'pv0 original', 'test')`, chainNodeID)
+	if err != nil {
+		t.Fatalf("insert node pv0: %v", err)
+	}
+	// pv=1: first correction
+	_, err = pool.Exec(ctx, `
+		INSERT INTO sec_node (id, record_type, status, valid_from, processing_version, `+secstoreSpine+`)
+		VALUES ($1, 'ENTITY', 'ACTIVE', '2026-01-01', 1, 'test', 'RESTATEMENT', 'pv1 first correction', 'test')`, chainNodeID)
+	if err != nil {
+		t.Fatalf("insert node pv1: %v", err)
+	}
+	// pv=2: second correction
+	_, err = pool.Exec(ctx, `
+		INSERT INTO sec_node (id, record_type, status, valid_from, processing_version, `+secstoreSpine+`)
+		VALUES ($1, 'ENTITY', 'INACTIVE', '2026-01-01', 2, 'test', 'RESTATEMENT', 'pv2 second correction', 'test')`, chainNodeID)
+	if err != nil {
+		t.Fatalf("insert node pv2: %v", err)
+	}
+
+	// Same 3-link chain for edges
+	_, err = pool.Exec(ctx, `
+		INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, processing_version, `+secstoreSpine+`)
+		VALUES ($1, 'SECURITY', $2, 'ENTITY', 'ISSUED_BY', '2026-01-01', 0, 'test', 'SEED_LOAD', 'edge pv0', 'test')`, chainEdgeSrc, chainEdgeDst)
+	if err != nil {
+		t.Fatalf("insert edge pv0: %v", err)
+	}
+	_, err = pool.Exec(ctx, `
+		INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, processing_version, `+secstoreSpine+`)
+		VALUES ($1, 'SECURITY', $2, 'ENTITY', 'ISSUED_BY', '2026-01-01', 1, 'test', 'RESTATEMENT', 'edge pv1', 'test')`, chainEdgeSrc, chainEdgeDst)
+	if err != nil {
+		t.Fatalf("insert edge pv1: %v", err)
+	}
+	_, err = pool.Exec(ctx, `
+		INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, processing_version, `+secstoreSpine+`)
+		VALUES ($1, 'SECURITY', $2, 'ENTITY', 'ISSUED_BY', '2026-01-01', 2, 'test', 'RESTATEMENT', 'edge pv2', 'test')`, chainEdgeSrc, chainEdgeDst)
+	if err != nil {
+		t.Fatalf("insert edge pv2: %v", err)
+	}
+
+	t.Run("node_current_returns_pv2", func(t *testing.T) {
+		var pv int
+		if err := pool.QueryRow(ctx, `
+			SELECT processing_version FROM sec_node_current WHERE id = $1`, chainNodeID).Scan(&pv); err != nil {
+			t.Fatalf("sec_node_current: %v", err)
+		}
+		if pv != 2 {
+			t.Fatalf("got processing_version=%d, want 2", pv)
+		}
+	})
+
+	t.Run("node_as_of_returns_pv2", func(t *testing.T) {
+		var pv int
+		if err := pool.QueryRow(ctx, `
+			SELECT processing_version FROM sec_node_as_of('2026-03-01'::date) WHERE id = $1`, chainNodeID).Scan(&pv); err != nil {
+			t.Fatalf("sec_node_as_of: %v", err)
+		}
+		if pv != 2 {
+			t.Fatalf("got processing_version=%d, want 2", pv)
+		}
+	})
+
+	t.Run("node_as_of_kind_returns_pv2", func(t *testing.T) {
+		var pv int
+		if err := pool.QueryRow(ctx, `
+			SELECT processing_version FROM sec_node_as_of_kind('2026-03-01'::date, 'ENTITY') WHERE id = $1`, chainNodeID).Scan(&pv); err != nil {
+			t.Fatalf("sec_node_as_of_kind: %v", err)
+		}
+		if pv != 2 {
+			t.Fatalf("got processing_version=%d, want 2", pv)
+		}
+	})
+
+	t.Run("edge_current_returns_pv2", func(t *testing.T) {
+		var pv int
+		if err := pool.QueryRow(ctx, `
+			SELECT processing_version FROM sec_edge_current
+			WHERE src_id = $1 AND rel_type = 'ISSUED_BY'`, chainEdgeSrc).Scan(&pv); err != nil {
+			t.Fatalf("sec_edge_current: %v", err)
+		}
+		if pv != 2 {
+			t.Fatalf("got processing_version=%d, want 2", pv)
+		}
+	})
+
+	t.Run("edge_as_of_returns_pv2", func(t *testing.T) {
+		var pv int
+		if err := pool.QueryRow(ctx, `
+			SELECT processing_version FROM sec_edge_as_of('2026-03-01'::date)
+			WHERE src_id = $1 AND rel_type = 'ISSUED_BY'`, chainEdgeSrc).Scan(&pv); err != nil {
+			t.Fatalf("sec_edge_as_of: %v", err)
+		}
+		if pv != 2 {
+			t.Fatalf("got processing_version=%d, want 2", pv)
+		}
+	})
+
+	t.Run("node_status_reflects_latest_correction", func(t *testing.T) {
+		var status string
+		if err := pool.QueryRow(ctx, `
+			SELECT status FROM sec_node_current WHERE id = $1`, chainNodeID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != "INACTIVE" {
+			t.Fatalf("got status=%s, want INACTIVE (pv=2 changed status from ACTIVE)", status)
+		}
+	})
+}
+
+// TestSecStoreSupersessionFork verifies that when two independent corrections
+// target the same (id, valid_from), the one with the higher processing_version wins.
+func TestSecStoreSupersessionFork(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	const forkNodeID = "em-t-fork"
+
+	// pv=0: original
+	_, err := pool.Exec(ctx, `
+		INSERT INTO sec_node (id, record_type, status, valid_from, processing_version, `+secstoreSpine+`)
+		VALUES ($1, 'ENTITY', 'ACTIVE', '2026-01-01', 0, 'test', 'SEED_LOAD', 'original', 'test')`, forkNodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Two independent corrections: pv=3 and pv=5 (non-sequential)
+	_, err = pool.Exec(ctx, `
+		INSERT INTO sec_node (id, record_type, status, valid_from, processing_version, `+secstoreSpine+`)
+		VALUES ($1, 'ENTITY', 'ACTIVE', '2026-01-01', 3, 'test', 'RESTATEMENT', 'correction A (pv=3)', 'test')`, forkNodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = pool.Exec(ctx, `
+		INSERT INTO sec_node (id, record_type, status, valid_from, processing_version, `+secstoreSpine+`)
+		VALUES ($1, 'ENTITY', 'INACTIVE', '2026-01-01', 5, 'test', 'RESTATEMENT', 'correction B (pv=5)', 'test')`, forkNodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var status string
+	if err := pool.QueryRow(ctx, `
+		SELECT status FROM sec_node_current WHERE id = $1`, forkNodeID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "INACTIVE" {
+		t.Fatalf("got status=%s, want INACTIVE (pv=5 must beat pv=3)", status)
+	}
+
+	var pv int
+	if err := pool.QueryRow(ctx, `
+		SELECT processing_version FROM sec_node_as_of('2026-06-01'::date) WHERE id = $1`, forkNodeID).Scan(&pv); err != nil {
+		t.Fatal(err)
+	}
+	if pv != 5 {
+		t.Fatalf("got processing_version=%d, want 5", pv)
+	}
+}

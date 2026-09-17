@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -655,6 +656,76 @@ func assertSQLStateAndConstraint(t *testing.T, err error, wantCode, wantConstrai
 	}
 	if pgErr.ConstraintName != wantConstraint {
 		t.Fatalf("%s: got constraint %q, want %q", desc, pgErr.ConstraintName, wantConstraint)
+	}
+}
+
+// TestSecStoreTableAndColumnCommentsExist verifies that COMMENT ON statements
+// in the migration produced the expected pg_description entries. A representative
+// sample of tables and columns is checked — enough to kill mutations that drop
+// COMMENT lines.
+func TestSecStoreTableAndColumnCommentsExist(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	tables := []struct {
+		name   string
+		prefix string
+	}{
+		{"weight_basis_vocabulary", "[Configuration] Legal weight bases"},
+		{"rel_type_vocabulary", "[Configuration] Governed relationship vocabulary"},
+		{"change_reason_vocabulary", "[Configuration] Structured change_reason_code set"},
+		{"concept_class_vocabulary", "[Configuration] Concept classes"},
+		{"node_status_vocabulary", "[Configuration] Per-kind node status vocabulary"},
+		{"sec_node", "[Dimension] Combined SECs master"},
+		{"sec_edge", "[Dimension] Directed, typed, weighted relationship store"},
+	}
+
+	for _, tc := range tables {
+		t.Run("table_"+tc.name, func(t *testing.T) {
+			var comment string
+			err := pool.QueryRow(ctx, `
+				SELECT obj_description(c.oid, 'pg_class')
+				FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+				WHERE c.relname = $1 AND n.nspname = 'public'`, tc.name).Scan(&comment)
+			if err != nil {
+				t.Fatalf("no comment on table %s: %v", tc.name, err)
+			}
+			if len(comment) < len(tc.prefix) || comment[:len(tc.prefix)] != tc.prefix {
+				t.Fatalf("table %s comment starts with %q, want prefix %q", tc.name, comment[:min(60, len(comment))], tc.prefix)
+			}
+		})
+	}
+
+	columns := []struct {
+		table  string
+		column string
+		substr string
+	}{
+		{"rel_type_vocabulary", "rel_type", "PK"},
+		{"rel_type_vocabulary", "cluster_key", "payload keys that distinguish"},
+		{"sec_node", "id", "Roles:"},
+		{"sec_node", "processing_version", "Roles:"},
+		{"sec_edge", "edge_disc", "Roles:"},
+		{"sec_edge", "content_hash", "Roles:"},
+	}
+
+	for _, tc := range columns {
+		t.Run(fmt.Sprintf("column_%s_%s", tc.table, tc.column), func(t *testing.T) {
+			var comment string
+			err := pool.QueryRow(ctx, `
+				SELECT col_description(c.oid, a.attnum)
+				FROM pg_class c
+				JOIN pg_namespace n ON n.oid = c.relnamespace
+				JOIN pg_attribute a ON a.attrelid = c.oid
+				WHERE c.relname = $1 AND n.nspname = 'public' AND a.attname = $2`, tc.table, tc.column).Scan(&comment)
+			if err != nil {
+				t.Fatalf("no comment on %s.%s: %v", tc.table, tc.column, err)
+			}
+			if !strings.Contains(comment, tc.substr) {
+				t.Fatalf("%s.%s comment %q does not contain %q", tc.table, tc.column, comment[:min(80, len(comment))], tc.substr)
+			}
+		})
 	}
 }
 
