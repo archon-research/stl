@@ -235,9 +235,8 @@ func (f *fakeVatCaller) lastReadHash() common.Hash {
 type fakePrimeDebtRepository struct {
 	mu sync.Mutex
 
-	primes        []entity.Prime
-	primesErr     error
-	primesChainID int64
+	primes    []entity.Prime
+	primesErr error
 
 	saved   [][]*entity.PrimeDebt
 	saveErr error
@@ -246,15 +245,6 @@ type fakePrimeDebtRepository struct {
 func (r *fakePrimeDebtRepository) GetPrimes(_ context.Context) ([]entity.Prime, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.primes, r.primesErr
-}
-
-// The service must ask for its own chain's vaults, so the fake records the chain it was asked for and
-// answers only when it matches: a service that called the unscoped reader would get nothing.
-func (r *fakePrimeDebtRepository) GetPrimesOnChain(_ context.Context, chainID int64) ([]entity.Prime, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.primesChainID = chainID
 	return r.primes, r.primesErr
 }
 
@@ -410,27 +400,6 @@ func TestStart_NoPrimes(t *testing.T) {
 	}
 	if !containsAny(err.Error(), "no primes", "primes") {
 		t.Errorf("unexpected error message: %v", err)
-	}
-}
-
-// The vaults a tracker reads are its own chain's. Debt comes from the Vat on the vault's chain, so a
-// tracker that loaded every prime would write another chain's debt under this one's block numbers.
-func TestStart_LoadsOnlyItsOwnChainsPrimes(t *testing.T) {
-	consumer := newFakeSQSConsumer(nil)
-	repo := &fakePrimeDebtRepository{}
-	svc, err := prime_debt.NewVaultDebtService(defaultConfig(75), newFakeVatCaller(), repo, consumer, newFakeBlockQuerier(testBlockNum))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// The fake answers whatever it is asked for; Start fails on the empty result, which is not the
-	// point. What is pinned is the chain the service asked about.
-	_ = svc.Start(context.Background())
-
-	repo.mu.Lock()
-	defer repo.mu.Unlock()
-	if repo.primesChainID != testChainID {
-		t.Errorf("the service loaded primes for chain %d, want %d", repo.primesChainID, testChainID)
 	}
 }
 

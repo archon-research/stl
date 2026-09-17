@@ -109,8 +109,8 @@ func TestPrimeNameMustBeAnAddressableSlug(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := pool.Exec(ctx,
-				`INSERT INTO prime (external_id, name, vault_address, chain_id)
-				  VALUES (gen_random_uuid(), $1, decode('11223344556677889900aabbccddeeff00112233', 'hex'), 1)`,
+				`INSERT INTO prime (external_id, name, vault_address)
+				  VALUES (gen_random_uuid(), $1, decode('11223344556677889900aabbccddeeff00112233', 'hex'))`,
 				tc.primeName)
 			if err == nil {
 				t.Fatalf("prime name %q should be rejected", tc.primeName)

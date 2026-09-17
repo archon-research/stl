@@ -27,7 +27,7 @@ func seedReferencePrime(t *testing.T, ctx context.Context, pool *pgxpool.Pool, n
 	vaultHex := hex.EncodeToString(hash[:20])
 
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO prime (external_id, name, vault_address, chain_id) VALUES (gen_random_uuid(), $1, decode($2, 'hex'), 1)
+		INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), $1, decode($2, 'hex'))
 		ON CONFLICT (name) DO NOTHING`,
 		name, vaultHex); err != nil {
 		t.Fatalf("seeding prime %q: %v", name, err)

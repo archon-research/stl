@@ -774,8 +774,8 @@ func upsertFixturePrime(t *testing.T, ctx context.Context, pool *pgxpool.Pool) i
 
 	var id int64
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO prime (external_id, name, vault_address, chain_id)
-		VALUES (gen_random_uuid(), 'pv-plan-cache-fixture', '\xdeadbeef00000000000000000000000000000001', 1)
+		INSERT INTO prime (external_id, name, vault_address)
+		VALUES (gen_random_uuid(), 'pv-plan-cache-fixture', '\xdeadbeef00000000000000000000000000000001')
 		ON CONFLICT (name) DO UPDATE SET vault_address = EXCLUDED.vault_address
 		RETURNING id`).Scan(&id); err != nil {
 		t.Fatalf("upsert fixture prime: %v", err)
