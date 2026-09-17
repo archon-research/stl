@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
@@ -184,12 +185,18 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 		CREATE FUNCTION materialize_itest_wrong_type(p_build_id text, p_run_id bigint DEFAULT NULL) RETURNS bigint
 			LANGUAGE sql AS $fn$ SELECT 0::bigint $fn$;
 		CREATE PROCEDURE materialize_itest_procedure(p_build_id integer, p_run_id bigint)
-			LANGUAGE sql AS $fn$ SELECT 1 $fn$;`); err != nil {
+			LANGUAGE sql AS $fn$ SELECT 1 $fn$;
+		CREATE FUNCTION materialize_itest_void(p_build_id integer DEFAULT 0, p_run_id bigint DEFAULT NULL) RETURNS void
+			LANGUAGE sql AS $fn$ SELECT $fn$;
+		CREATE FUNCTION materialize_itest_setof(p_build_id integer DEFAULT 0, p_run_id bigint DEFAULT NULL) RETURNS SETOF bigint
+			LANGUAGE sql AS $fn$ SELECT 0::bigint $fn$;
+		CREATE FUNCTION materialize_itest_out(p_build_id integer, p_run_id bigint, OUT n bigint, OUT m bigint)
+			LANGUAGE sql AS $fn$ SELECT 0::bigint, 0::bigint $fn$;`); err != nil {
 		t.Fatalf("create uncallable wrappers: %v", err)
 	}
 	bad := []string{"materialize_no_such", "materialize_itest_positional", "materialize_itest_build_only",
 		"materialize_itest_overloaded", "materialize_itest_required_extra", "materialize_itest_wrong_type",
-		"materialize_itest_procedure"}
+		"materialize_itest_procedure", "materialize_itest_void", "materialize_itest_setof", "materialize_itest_out"}
 	_, err = setupRunner(ctx, temporal.Dependencies{Pool: pool, Logger: slog.Default()},
 		append([]string{"materialize_itest"}, bad...))
 	if err == nil || !strings.Contains(err.Error(), strings.Join(bad, ", ")) {
@@ -202,7 +209,7 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 
 // The withheld level is read with SQL, so it needs to run against a real position_projection_run:
 // the query takes the newest row per projection written by one writer run, and a projection with no
-// row under that run is absent rather than zero. Rows from another run -- a retired projection, or one
+// row under that run since the tick began is absent rather than zero. Rows from another run -- a retired projection, or one
 // run by hand -- must not be reported, or their last level is republished every tick.
 func TestPositionMaterializer_RefusedByProjection(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
@@ -216,12 +223,13 @@ func TestPositionMaterializer_RefusedByProjection(t *testing.T) {
 		       ('public.position_a',       '2026-09-01T01:00:00Z', 0, 42, NULL, 10,  0, 4),
 		       ('public.position_a',       '2026-09-01T02:00:00Z', 0, 41, NULL, 10,  0, 9),
 		       ('public.position_b',       '2026-09-01T00:30:00Z', 0, 42, NULL,  5,  5, 0),
-		       ('public.position_retired', '2026-09-01T00:30:00Z', 0, 41, NULL,  5,  0, 7)`); err != nil {
+		       ('public.position_retired', '2026-09-01T00:30:00Z', 0, 41, NULL,  5,  0, 7),
+		       ('public.position_stale',   '2026-09-01T00:10:00Z', 0, 42, NULL,  5,  0, 12)`); err != nil {
 		t.Fatalf("seeding runs: %v", err)
 	}
 
 	repo := postgres.NewPositionMaterializerRepository(pool, slog.Default())
-	got, err := repo.RefusedByProjection(ctx, 42)
+	got, err := repo.RefusedByProjection(ctx, 42, time.Date(2026, 9, 1, 0, 15, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("RefusedByProjection: %v", err)
 	}
@@ -233,6 +241,9 @@ func TestPositionMaterializer_RefusedByProjection(t *testing.T) {
 	}
 	if _, ok := got["public.position_retired"]; ok {
 		t.Error("a projection written only by another run is reported, so its level would never clear")
+	}
+	if _, ok := got["public.position_stale"]; ok {
+		t.Error("a projection whose newest row predates this tick is reported, so a failing projection holds its old level")
 	}
 	if _, ok := got["public.position_never_run"]; ok {
 		t.Error("a projection with no run row is reported; it must be absent so absence stays distinguishable")

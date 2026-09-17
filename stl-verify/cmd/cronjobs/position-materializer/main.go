@@ -21,6 +21,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
@@ -38,9 +40,7 @@ func run() int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Require DATABASE_URL rather than default to localhost: a deployed worker that
-	// silently connected to a local (empty) database would report healthy while
-	// materializing nothing.
+	// DATABASE_URL is required: a worker on a local empty database would report healthy while writing nothing.
 	dbURL, err := env.Require("DATABASE_URL")
 	if err != nil {
 		slog.Error("position-materializer startup failed: missing configuration", "error", err)
@@ -79,18 +79,21 @@ func cronjobConfig(serviceName, dbURL string, materializers []string) temporal.C
 		IntervalDefault:   "1h",
 		IntervalOffsetEnv: "MATERIALIZE_SCHEDULE_OFFSET",
 		ActivityTimeouts:  materializeActivityTimeouts,
-		OpenDatabase:      postgres.PoolOpener(materializerDBConfig(dbURL)),
+		OpenDatabase: func(ctx context.Context) (*pgxpool.Pool, error) {
+			// slog.Default() is read here, not above: the cronjob bootstrap installs its logger first.
+			return postgres.OpenPool(ctx, materializerDBConfig(dbURL, slog.Default()))
+		},
 		Setup: func(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
 			return setupRunner(ctx, deps, materializers)
 		},
 	}
 }
 
-// materializerDBConfig checks the client connection while a statement runs: a pod that dies mid-run
-// otherwise leaves its query running beside the retry, holding locks and the vacuum horizon.
-func materializerDBConfig(dbURL string) postgres.DBConfig {
+// materializerDBConfig logs the server's WARNINGs, which is how the shared function reports a
+// withheld or declined position.
+func materializerDBConfig(dbURL string, logger *slog.Logger) postgres.DBConfig {
 	cfg := postgres.DefaultDBConfig(dbURL)
-	cfg.ClientConnectionCheckInterval = 30 * time.Second
+	cfg.NoticeLogger = logger.With("component", "position-materializer")
 	return cfg
 }
 
@@ -129,8 +132,8 @@ func parseProjections(raw string) ([]string, error) {
 }
 
 // materializeActivityTimeouts sizes a tick against the first run, the whole-history bootstrap. The
-// schedule keeps the timeouts it was created with; the heartbeat notices a dead worker in minutes and
-// carries Temporal's cancellations to the running query.
+// schedule keeps the timeouts it was created with. The heartbeat carries Temporal's cancellation to the
+// running query while the pod lives; a SIGKILLed pod's query keeps running behind the pooler.
 var materializeActivityTimeouts = temporal.ActivityTimeouts{
 	StartToClose:    6 * time.Hour,
 	ScheduleToClose: 12 * time.Hour,

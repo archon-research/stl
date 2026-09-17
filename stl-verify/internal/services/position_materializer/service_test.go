@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mockMaterializer implements outbound.PositionMaterializer with a func field.
@@ -16,6 +17,7 @@ type mockMaterializer struct {
 	cacheRows  map[string]int64
 	cacheErr   error
 	refusedRun int64
+	since      time.Time
 	missing    []string
 	missingErr error
 }
@@ -25,8 +27,9 @@ func (m *mockMaterializer) Materialize(ctx context.Context, view string, buildID
 	return m.fn(ctx, view, buildID, runID)
 }
 
-func (m *mockMaterializer) RefusedByProjection(_ context.Context, runID int64) (map[string]int64, error) {
+func (m *mockMaterializer) RefusedByProjection(_ context.Context, runID int64, since time.Time) (map[string]int64, error) {
 	m.refusedRun = runID
+	m.since = since
 	return m.refused, m.refusedErr
 }
 
@@ -196,6 +199,23 @@ func TestRunOnce_ReadsTheWithheldLevelForItsOwnRun(t *testing.T) {
 	}
 	if mm.refusedRun != 8823 {
 		t.Errorf("withheld level read for run %d; want this process's run 8823", mm.refusedRun)
+	}
+}
+
+// The withheld level is read from this tick's runs only. Unbounded, a projection that withheld 12 and
+// then failed every tick kept returning its old row, and the gauge read 12 for the life of the pod.
+func TestRunOnce_ReadsTheWithheldLevelFromThisTickOnly(t *testing.T) {
+	mm := &mockMaterializer{fn: func(context.Context, string, int, int64) (int64, error) { return 0, nil }}
+	s, err := NewService([]string{"materialize_a"}, mm, 0, 8823, nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	before := time.Now()
+	if err := s.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if mm.since.IsZero() || mm.since.After(before) || mm.since.Before(before.Add(-2*refusedReadSkew)) {
+		t.Errorf("withheld level read since %v; want within %v before the tick started at %v", mm.since, refusedReadSkew, before)
 	}
 }
 

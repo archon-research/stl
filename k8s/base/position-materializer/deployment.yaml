@@ -7,11 +7,10 @@ spec:
   # history and appends the observations not yet stored, so the FIRST tick is the
   # bootstrap. Rollout is in the runbook ("Before the first run"); bump to 1 in a
   # separate change, per environment, through the replicas: entry in each
-  # overlay's kustomization.yaml rather than here. VectorCronjobWorkerDown is
-  # guarded on desired replicas > 0, so it does not page while this is 0.
+  # overlay's kustomization.yaml rather than here.
   replicas: 0
   # Recreate, because replicas: 1 is a correctness bound (one pod on the Temporal
-  # task queue), not a cost choice; maxSurge: 0 would not be equivalent.
+  # task queue), not a cost choice.
   strategy:
     type: Recreate
   selector:

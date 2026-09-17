@@ -48,9 +48,9 @@ func NewPositionMaterializerRepository(pool *pgxpool.Pool, logger *slog.Logger) 
 // ON CONFLICT DO NOTHING), so a retry re-runs safely: a deadlocked attempt
 // committed nothing, and a redundant attempt inserts zero rows.
 //
-// Config matches blockstate_repository.go. Only deadlocks and serialization failures are retried; the
-// pool sets no lock_timeout, so a chunk lock held by a compression job is waited on, and the backoff
-// need not outlast it (TestMaterialize_WaitsOutALockLongerThanTheRetryBackoff).
+// Config matches blockstate_repository.go. Only deadlocks and serialization failures are retried. A
+// chunk lock held by a compression job is waited on for as long as it is held, under DefaultDBConfig's
+// unset lock_timeout (TestMaterialize_WaitsOutALockLongerThanTheRetryBackoff).
 func (r *PositionMaterializerRepository) Materialize(ctx context.Context, materializer string, buildID int, runID int64) (int64, error) {
 	cfg := retry.Config{
 		MaxRetries:     10,
@@ -74,14 +74,14 @@ func (r *PositionMaterializerRepository) Materialize(ctx context.Context, materi
 	})
 }
 
-// RefusedByProjection reads positions_refused from the latest run row of each projection runID
-// wrote. A projection with no run under runID is absent rather than zero.
-func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context, runID int64) (map[string]int64, error) {
+// RefusedByProjection reads positions_refused from the latest run row of each projection runID wrote
+// at or after since. A projection with no such row is absent rather than zero.
+func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context, runID int64, since time.Time) (map[string]int64, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT DISTINCT ON (projection) projection, positions_refused
 		  FROM position_projection_run
-		 WHERE run_id = $1
-		 ORDER BY projection, created_at DESC`, runID)
+		 WHERE run_id = $1 AND created_at >= $2
+		 ORDER BY projection, created_at DESC`, runID, since)
 	if err != nil {
 		return nil, fmt.Errorf("reading positions_refused: %w", err)
 	}
@@ -103,18 +103,19 @@ func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context
 }
 
 // MissingMaterializers returns the configured names materializeOnce cannot call: it needs exactly one
-// public function of that name, executable, p_build_id integer and p_run_id bigint,
-// and a default for every other argument.
+// public function of that name, executable, returning one bigint, with no OUT parameters, p_build_id
+// integer and p_run_id bigint, and a default for every other argument.
 func (r *PositionMaterializerRepository) MissingMaterializers(ctx context.Context, materializers []string) ([]string, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT c.m
 		  FROM unnest($1::text[]) WITH ORDINALITY AS c(m, ord)
 		 WHERE (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-		         WHERE n.nspname = 'public' AND p.proname = c.m) <> 1
+		         WHERE n.nspname = 'public' AND p.proname = c.m AND p.prokind = 'f') <> 1
 		    OR NOT EXISTS (
 		       SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 		        WHERE n.nspname = 'public' AND p.proname = c.m AND p.prokind = 'f'
 		          AND has_function_privilege(p.oid, 'EXECUTE')
+		          AND p.prorettype = 'bigint'::regtype AND NOT p.proretset AND p.proallargtypes IS NULL
 		          AND EXISTS (SELECT 1 FROM unnest(p.proargnames, p.proargtypes::oid[]) a(name, typ)
 		                       WHERE a.name = 'p_build_id' AND a.typ = 'integer'::regtype)
 		          AND EXISTS (SELECT 1 FROM unnest(p.proargnames, p.proargtypes::oid[]) a(name, typ)
@@ -132,18 +133,16 @@ func (r *PositionMaterializerRepository) MissingMaterializers(ctx context.Contex
 	return missing, nil
 }
 
-// positionStateCaches are the trigger-fed caches derived from position_state. Named here rather
-// than discovered, so a table that stops being one has to be removed deliberately, and a new one
-// registers itself here in the migration that creates it.
+// positionStateCaches are the trigger-fed caches derived from position_state, named explicitly.
+// TestPositionStateCaches_NamesEveryTriggerFedCache fails when a trigger on position_state writes a
+// table missing here.
 var positionStateCaches = []string{"position_current"}
 
 // CacheRowEstimates reads each cache's estimated row count.
 //
-// approximate_row_count, not count(*): these are the tables the tripwire watches for being large, so
-// the read must not scan them. Not pg_class.reltuples either — that counts rows in the named relation,
-// and a hypertable's live in its chunks, so reltuples reads 0 the moment someone follows the runbook
-// and converts, leaving the tripwire silently reading empty (measured: 5,000 -> 0 on conversion, where
-// approximate_row_count stayed 5,000). It also reports 0 rather than -1 for a never-analyzed table.
+// approximate_row_count reads planner statistics, so watching a large table costs no scan, and it sums
+// a hypertable's chunks, so the level survives the conversion the runbook prescribes (measured: 5,000
+// before and after, where the root's reltuples fell to 0). A never-analyzed table reads 0.
 func (r *PositionMaterializerRepository) CacheRowEstimates(ctx context.Context) (map[string]int64, error) {
 	return r.rowEstimates(ctx, positionStateCaches)
 }

@@ -3,6 +3,8 @@ package position_materializer
 import (
 	"context"
 	"fmt"
+	"maps"
+	"sync"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -24,14 +26,27 @@ const (
 // runStatuses is every status RecordRun is passed, and so every series the seed exports.
 var runStatuses = []string{statusOK, statusError, statusCanceled}
 
+// Reads recorded by read_failures.total, seeded so its first failure is an increase.
+const (
+	readRefused   = "refused"
+	readCacheRows = "cache_rows"
+)
+
+var reads = []string{readRefused, readCacheRows}
+
 // Telemetry provides OpenTelemetry metrics for the position materializer. A nil
 // *Telemetry is valid: every method no-ops, so tests and callers without a meter
 // provider need no stub.
 type Telemetry struct {
-	projectionRuns   metric.Int64Counter
-	rowsChanged      metric.Int64Counter
-	positionsRefused metric.Int64Gauge
-	cacheRows        metric.Int64Gauge
+	projectionRuns metric.Int64Counter
+	rowsChanged    metric.Int64Counter
+	readFailures   metric.Int64Counter
+
+	// The gauges export only what the latest tick set: an observable gauge drops a series its
+	// callback stops observing, so a projection absent from the latest read goes absent.
+	mu        sync.Mutex
+	refused   map[string]int64
+	cacheRows map[string]int64
 }
 
 // NewTelemetry creates a Telemetry using the global meter provider, seeding the counters of every
@@ -40,9 +55,9 @@ func NewTelemetry(materializers []string) (*Telemetry, error) {
 	return NewTelemetryWithProvider(otel.GetMeterProvider(), materializers)
 }
 
-// NewTelemetryWithProvider creates a Telemetry with a custom meter provider. The run and row counters
-// are seeded at zero for each materializer: an alert reading increase() cannot see a series that
-// first appears at its first value.
+// NewTelemetryWithProvider creates a Telemetry with a custom meter provider. The counters are seeded
+// at zero for each materializer and read: an alert reading increase() cannot see a series that first
+// appears at its first value.
 func NewTelemetryWithProvider(mp metric.MeterProvider, materializers []string) (*Telemetry, error) {
 	meter := mp.Meter(instrumentationName)
 
@@ -54,24 +69,37 @@ func NewTelemetryWithProvider(mp metric.MeterProvider, materializers []string) (
 	); err != nil {
 		return nil, fmt.Errorf("creating projectionRuns counter: %w", err)
 	}
-	if t.positionsRefused, err = meter.Int64Gauge(
-		"position_materializer.positions_refused",
-		metric.WithDescription("Positions the projection's latest run withheld or declined a correction for"),
-	); err != nil {
-		return nil, fmt.Errorf("building positionsRefused gauge: %w", err)
-	}
-	if t.cacheRows, err = meter.Int64Gauge(
-		"position_materializer.cache_rows",
-		metric.WithDescription("Estimated rows in each trigger-fed cache derived from position_state, by table"),
-	); err != nil {
-		return nil, fmt.Errorf("building cacheRows gauge: %w", err)
-	}
 	if t.rowsChanged, err = meter.Int64Counter(
 		"position_materializer.rows_changed.total",
 		metric.WithDescription("position_state rows appended per projection run (a rerun that finds nothing new records 0)"),
 	); err != nil {
 		return nil, fmt.Errorf("creating rowsChanged counter: %w", err)
 	}
+	if t.readFailures, err = meter.Int64Counter(
+		"position_materializer.read_failures.total",
+		metric.WithDescription("Failed reads of the withheld level or the cache sizes; the gauge goes absent until one succeeds"),
+	); err != nil {
+		return nil, fmt.Errorf("creating readFailures counter: %w", err)
+	}
+	if _, err = meter.Int64ObservableGauge(
+		"position_materializer.positions_refused",
+		metric.WithDescription("Positions the projection's run in the latest tick withheld or declined a correction for"),
+		metric.WithInt64Callback(t.observe(&t.refused, "projection")),
+	); err != nil {
+		return nil, fmt.Errorf("building positionsRefused gauge: %w", err)
+	}
+	if _, err = meter.Int64ObservableGauge(
+		"position_materializer.cache_rows",
+		metric.WithDescription("Estimated rows in each trigger-fed cache derived from position_state, by table"),
+		metric.WithInt64Callback(t.observe(&t.cacheRows, "table")),
+	); err != nil {
+		return nil, fmt.Errorf("building cacheRows gauge: %w", err)
+	}
+	t.seed(materializers)
+	return t, nil
+}
+
+func (t *Telemetry) seed(materializers []string) {
 	ctx := context.Background()
 	for _, m := range materializers {
 		view := attribute.String("materializer", m)
@@ -80,7 +108,20 @@ func NewTelemetryWithProvider(mp metric.MeterProvider, materializers []string) (
 		}
 		telemetry.SeedCounter(ctx, t.rowsChanged, view)
 	}
-	return t, nil
+	for _, r := range reads {
+		telemetry.SeedCounter(ctx, t.readFailures, attribute.String("read", r))
+	}
+}
+
+func (t *Telemetry) observe(levels *map[string]int64, key string) metric.Int64Callback {
+	return func(_ context.Context, o metric.Int64Observer) error {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		for name, v := range *levels {
+			o.Observe(v, metric.WithAttributes(attribute.String(key, name)))
+		}
+		return nil
+	}
 }
 
 // RecordRun records one projection run and its changed-row count.
@@ -98,23 +139,32 @@ func (t *Telemetry) RecordRun(ctx context.Context, view, status string, changed 
 	t.rowsChanged.Add(ctx, changed, metric.WithAttributes(attribute.String("materializer", view)))
 }
 
-// RecordCacheRows publishes one cache's estimated row count. A gauge, not a counter: these caches
-// are written by database triggers, so no process here can count the rows they persisted the way an
-// indexer counts its own writes. The level is what the plain-table tripwire compares to its budget.
-func (t *Telemetry) RecordCacheRows(ctx context.Context, table string, rows int64) {
+// SetCacheRows replaces the exported cache sizes, keyed by table. The caches are written by database
+// triggers, so their size is read as a level rather than counted as it is written.
+func (t *Telemetry) SetCacheRows(rows map[string]int64) {
 	if t == nil {
 		return
 	}
-	t.cacheRows.Record(ctx, rows, metric.WithAttributes(attribute.String("table", table)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cacheRows = maps.Clone(rows)
 }
 
-// RecordRefused publishes how many positions a projection's latest run withheld. A gauge, not a
-// counter: the question is how many are withheld now, and a projection that keeps refusing the
-// same position reports the same level every tick, which is what a sustained alert reads.
-func (t *Telemetry) RecordRefused(ctx context.Context, projection string, refused int64) {
+// SetRefused replaces the exported withheld levels, keyed by projection. A projection that keeps
+// refusing the same position exports the same level every tick, which is what a sustained alert reads.
+func (t *Telemetry) SetRefused(refused map[string]int64) {
 	if t == nil {
 		return
 	}
-	t.positionsRefused.Record(ctx, refused,
-		metric.WithAttributes(attribute.String("projection", projection)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.refused = maps.Clone(refused)
+}
+
+// RecordReadFailure counts a failed read of one gauge's source (readRefused or readCacheRows).
+func (t *Telemetry) RecordReadFailure(ctx context.Context, read string) {
+	if t == nil {
+		return
+	}
+	t.readFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("read", read)))
 }

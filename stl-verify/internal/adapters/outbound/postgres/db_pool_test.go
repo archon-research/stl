@@ -107,28 +107,33 @@ func TestBuildPoolConfig_SeedsErrorClassesWhenTelemetryStartsLast(t *testing.T) 
 	}
 }
 
-// Without a handler pgx discards server notices, so a RAISE WARNING reaches
-// nothing. The position materializer signals a withheld position that way.
-func TestBuildPoolConfig_LogsServerNotices(t *testing.T) {
-	poolConfig, err := buildPoolConfig(DBConfig{URL: "postgres://u:p@localhost:5432/d?sslmode=disable"})
+// The handler is opt-in: every service shares this pool builder, and one that did not ask must not
+// start logging server notices. The position materializer asks, to log its withheld-position warnings.
+func TestBuildPoolConfig_LogsServerNoticesOnlyWhenAsked(t *testing.T) {
+	const url = "postgres://u:p@localhost:5432/d?sslmode=disable"
+	plain, err := buildPoolConfig(DBConfig{URL: url})
 	if err != nil {
 		t.Fatalf("buildPoolConfig() error: %v", err)
 	}
-	if poolConfig.ConnConfig.OnNotice == nil {
-		t.Fatal("ConnConfig.OnNotice is nil, so every server WARNING is discarded")
+	if plain.ConnConfig.OnNotice != nil {
+		t.Error("a pool without NoticeLogger logs server notices")
+	}
+	asked, err := buildPoolConfig(DBConfig{URL: url, NoticeLogger: slog.Default()})
+	if err != nil {
+		t.Fatalf("buildPoolConfig() error: %v", err)
+	}
+	if asked.ConnConfig.OnNotice == nil {
+		t.Error("a pool with NoticeLogger discards server WARNINGs")
 	}
 }
 
-// Only warnings are logged, judged on the unlocalized severity: the handler is on every service's
-// pool, so NOTICE-level chatter must not reach the logs, and a server with a non-English lc_messages
-// must still log a WARNING as a warning.
+// Only warnings are logged, to the configured logger, judged on the unlocalized severity so a server
+// with a non-English lc_messages still logs a WARNING as a warning.
 func TestNoticeLogger_LogsOnlyWarnings(t *testing.T) {
 	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})).With("component", "c")
 
-	poolConfig, err := buildPoolConfig(DBConfig{URL: "postgres://u:p@localhost:5432/d?sslmode=disable"})
+	poolConfig, err := buildPoolConfig(DBConfig{URL: "postgres://u:p@localhost:5432/d?sslmode=disable", NoticeLogger: logger})
 	if err != nil {
 		t.Fatalf("buildPoolConfig() error: %v", err)
 	}
@@ -150,7 +155,7 @@ func TestNoticeLogger_LogsOnlyWarnings(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("logged %d lines, want only the warning: %v", len(lines), lines)
 	}
-	if lines[0]["level"] != "WARN" || lines[0]["message"] != "withheld 3 positions" || lines[0]["severity"] != "WARNING" {
-		t.Errorf("logged %v; want the warning at WARN with severity WARNING", lines[0])
+	if lines[0]["level"] != "WARN" || lines[0]["message"] != "withheld 3 positions" || lines[0]["severity"] != "WARNING" || lines[0]["component"] != "c" {
+		t.Errorf("logged %v; want the warning at WARN with severity WARNING, on the configured logger", lines[0])
 	}
 }

@@ -80,7 +80,7 @@ func (s *Service) CheckConfigured(ctx context.Context) error {
 		return fmt.Errorf("checking configured materializers: %w", err)
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("configured materializers not callable (absent, ambiguous, or not taking a build and a writer run): %s",
+		return fmt.Errorf("configured materializers not callable (absent, ambiguous, not returning one bigint, or not taking a build and a writer run): %s",
 			strings.Join(missing, ", "))
 	}
 	return nil
@@ -96,26 +96,27 @@ func runStatus(ctx context.Context) string {
 	return statusError
 }
 
+// refusedReadSkew is subtracted from a tick's start when reading its run rows, so a pod clock ahead
+// of the database does not drop them. It must stay well below the schedule interval.
+const refusedReadSkew = time.Minute
+
 // RunOnce runs every configured projection materializer once, sequentially.
 //
-// Sequential is load-bearing, not a simplification: the shared function's
-// per-view advisory lock is held to transaction commit, and its contract is
-// AT MOST ONE projection per transaction — each Materialize call is a single
-// statement (one transaction), and running projections one after another means this
-// process can never hold two view locks at once.
+// Sequential is load-bearing: the shared function's per-view advisory lock is held to commit, and
+// each Materialize call is one transaction, so this process never holds two view locks at once.
 //
-// A single projection's failure is logged and recorded but does not abort the rest: a
-// periodic job should still advance the projections it can rather than let one
-// bad projection starve the others (a poisoned source row wedges only its own
-// protocol). The failures are joined and returned so the run is still marked
-// failed and retried on the next tick. Parent-context cancellation aborts the
-// remaining projections immediately.
+// A projection's failure is logged and recorded but does not stop the rest, so one poisoned source
+// row wedges only its own protocol; the failures are joined and returned so the run is marked
+// failed. Once the parent context ends, every remaining projection is recorded as not run with the
+// same status, so a starved projection is visible by name.
 func (s *Service) RunOnce(ctx context.Context) error {
+	tickStart := time.Now()
 	var errs []error
 	for _, m := range s.materializers {
 		if err := ctx.Err(); err != nil {
-			errs = append(errs, fmt.Errorf("aborting before %s: %w", m, err))
-			break
+			s.telemetry.RecordRun(ctx, m, runStatus(ctx), 0)
+			errs = append(errs, fmt.Errorf("skipping %s: %w", m, err))
+			continue
 		}
 		start := time.Now()
 		changed, err := s.materializer.Materialize(ctx, m, s.buildID, s.runID)
@@ -129,51 +130,49 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			"materializer", m, "rows_changed", changed, "duration", time.Since(start))
 		s.telemetry.RecordRun(ctx, m, statusOK, changed)
 	}
-	// Both reads are skipped on a cancelled context: the loop above has already recorded the abort,
-	// and a shutdown mid-run would otherwise log a spurious read failure on every deploy.
+	// Both reads are skipped on an ended context: the loop has recorded the abort, and a shutdown
+	// mid-run would otherwise count a read failure on every deploy.
 	if ctx.Err() == nil {
-		s.publishWithheld(ctx)
+		s.publishWithheld(ctx, tickStart.Add(-refusedReadSkew))
 		s.publishCacheRows(ctx)
 	}
 	return errors.Join(errs...)
 }
 
-// publishCacheRows reports the size of each trigger-fed cache derived from position_state. Those
-// caches are plain tables, and db/migrations/AGENTS.md makes a row-growth tripwire the price of
-// that: nothing else notices a plain table growing. They are written by database triggers, so this
-// run cannot count what they persisted — it reads their level instead, once per run.
+// publishCacheRows exports the size of each trigger-fed cache derived from position_state, the level
+// the plain-table tripwire compares to its budget (db/migrations/AGENTS.md).
 //
-// A failure here does not fail the run, for the same reason as publishWithheld: the projections
-// did their work and the rows are committed. It is logged. Note it does NOT show as the gauge going
-// absent: the SDK exports cumulatively, so the last good level stands for the life of the pod. A
-// read that keeps failing is visible only in the logs until it gets its own signal.
+// A failed read does not fail the run, whose rows are committed. It is logged and counted in
+// read_failures, and the gauge goes absent until a read succeeds.
 func (s *Service) publishCacheRows(ctx context.Context) {
 	estimates, err := s.materializer.CacheRowEstimates(ctx)
 	if err != nil {
 		s.logger.Error("reading cache row estimates failed; the projections themselves succeeded", "error", err)
+		s.telemetry.RecordReadFailure(ctx, readCacheRows)
+		s.telemetry.SetCacheRows(nil)
 		return
 	}
-	for table, rows := range estimates {
-		s.telemetry.RecordCacheRows(ctx, table, rows)
-	}
+	s.telemetry.SetCacheRows(estimates)
 }
 
-// publishWithheld reports each projection's positions_refused from its latest run: positions whose
-// new observations were withheld, and positions whose re-emitted stored key was declined. The
-// shared function does both and continues, so without this a projection reports success every tick
-// while a position sits at a stale value or the view and the spine disagree, and nothing says so.
-// The two classes are told apart by position_projection_refusal.reason, not by this number.
+// publishWithheld exports positions_refused for each projection that completed a run since since:
+// positions whose new observations were withheld, and positions whose re-emitted stored key was
+// declined. The shared function does both and reports success, so this level is what shows it; the
+// two classes are told apart by position_projection_refusal.reason.
 //
-// A failure here does not fail the run: the projections did their work and the rows are committed.
-// It is logged, and a read that keeps failing shows up as the gauge going absent.
-func (s *Service) publishWithheld(ctx context.Context) {
-	refused, err := s.materializer.RefusedByProjection(ctx, s.runID)
+// A projection that did not complete this tick is absent, so its gauge does not hold an old level.
+// A failed read does not fail the run: it is logged, counted in read_failures, and every level goes
+// absent until a read succeeds.
+func (s *Service) publishWithheld(ctx context.Context, since time.Time) {
+	refused, err := s.materializer.RefusedByProjection(ctx, s.runID, since)
 	if err != nil {
 		s.logger.Error("reading withheld positions failed; the projections themselves succeeded", "error", err)
+		s.telemetry.RecordReadFailure(ctx, readRefused)
+		s.telemetry.SetRefused(nil)
 		return
 	}
+	s.telemetry.SetRefused(refused)
 	for projection, n := range refused {
-		s.telemetry.RecordRefused(ctx, projection, n)
 		if n > 0 {
 			s.logger.Warn("projection withheld or declined observations for some positions",
 				"projection", projection, "positions_refused", n)

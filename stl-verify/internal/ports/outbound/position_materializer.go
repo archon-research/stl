@@ -1,6 +1,9 @@
 package outbound
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // PositionMaterializer runs one per-projection materializer function
 // (materialize_morpho_market, materialize_sky_prime_debt, materialize_aave_lending, ...).
@@ -19,13 +22,14 @@ type PositionMaterializer interface {
 	// views in different orders would deadlock).
 	Materialize(ctx context.Context, materializer string, buildID int, runID int64) (int64, error)
 
-	// RefusedByProjection returns positions_refused from the latest run of each projection runID wrote.
-	// A projection that withholds positions still reports success, so this count is what shows it; one
-	// writer run only, so a retired projection or a manual run does not keep publishing its last level.
-	RefusedByProjection(ctx context.Context, runID int64) (map[string]int64, error)
+	// RefusedByProjection returns positions_refused from the latest run of each projection that runID
+	// completed at or after since. A projection that withholds positions still reports success, so this
+	// count is what shows it. A projection with no run in that span is absent: retired, run by hand, or
+	// failed this tick.
+	RefusedByProjection(ctx context.Context, runID int64, since time.Time) (map[string]int64, error)
 
 	// MissingMaterializers returns the names in materializers that Materialize could not call: absent,
-	// ambiguous, or not accepting a build and a writer run.
+	// ambiguous, not returning one bigint, or not accepting a build and a writer run.
 	MissingMaterializers(ctx context.Context, materializers []string) ([]string, error)
 
 	// CacheRowEstimates returns the estimated row count of each trigger-fed cache derived from

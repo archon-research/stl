@@ -13,13 +13,17 @@ import (
 // backoff budget (~0.5s) fourfold and the call still succeeds.
 func TestMaterialize_WaitsOutALockLongerThanTheRetryBackoff(t *testing.T) {
 	ctx := context.Background()
-	if _, err := cacheRowsPool.Exec(ctx, `
+	if _, err := positionMaterializerPool.Exec(ctx, `
 		CREATE TABLE lock_wait_itest (n int);
 		CREATE FUNCTION materialize_lock_wait_itest(p_build_id integer, p_run_id bigint) RETURNS bigint
 			LANGUAGE sql AS $fn$ INSERT INTO lock_wait_itest VALUES (1); SELECT 1::bigint $fn$;`); err != nil {
 		t.Fatalf("create lock-wait wrapper: %v", err)
 	}
-	holder, err := cacheRowsPool.Begin(ctx)
+	t.Cleanup(func() {
+		_, _ = positionMaterializerPool.Exec(context.Background(),
+			`DROP FUNCTION IF EXISTS materialize_lock_wait_itest; DROP TABLE IF EXISTS lock_wait_itest`)
+	})
+	holder, err := positionMaterializerPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin lock holder: %v", err)
 	}
@@ -33,7 +37,7 @@ func TestMaterialize_WaitsOutALockLongerThanTheRetryBackoff(t *testing.T) {
 	}()
 
 	start := time.Now()
-	n, err := NewPositionMaterializerRepository(cacheRowsPool, nil).Materialize(ctx, "materialize_lock_wait_itest", 0, 1)
+	n, err := NewPositionMaterializerRepository(positionMaterializerPool, nil).Materialize(ctx, "materialize_lock_wait_itest", 0, 1)
 	if err != nil {
 		t.Fatalf("Materialize under a %s lock: %v", hold, err)
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 func newRecordingTelemetry(t *testing.T) (*Telemetry, sdkmetric.Reader) {
@@ -127,9 +128,104 @@ func TestRunOnce_CacheSizeReadFailureDoesNotFailTheRun(t *testing.T) {
 }
 
 // A nil Telemetry is the documented no-op, and the service passes nil when no meter is wired.
-func TestRecordCacheRows_NilTelemetryIsANoOp(t *testing.T) {
+func TestTelemetry_NilSettersAreNoOps(t *testing.T) {
 	var tel *Telemetry
-	tel.RecordCacheRows(context.Background(), "position_current", 42) // must not panic
+	tel.SetCacheRows(map[string]int64{"position_current": 42}) // must not panic
+	tel.SetRefused(map[string]int64{"p": 1})
+	tel.RecordReadFailure(context.Background(), readRefused)
+}
+
+// A gauge exports only what the latest tick set. With a synchronous gauge the last level stood for
+// the life of the pod, so a projection that stopped completing, or a read that kept failing, still
+// exported its old withheld level and fired VectorPositionMaterializerWithholdingPositions on it.
+func TestRunOnce_GaugesGoAbsentWhenTheLatestTickDidNotReportThem(t *testing.T) {
+	tel, reader := newRecordingTelemetry(t)
+	mm := &mockMaterializer{
+		fn:        func(context.Context, string, int, int64) (int64, error) { return 0, nil },
+		refused:   map[string]int64{"public.position_a": 12, "public.position_b": 0},
+		cacheRows: map[string]int64{"position_current": 7},
+	}
+	s, err := NewService([]string{"materialize_a"}, mm, 0, 77, nil, tel)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	tick := func() {
+		if err := s.RunOnce(context.Background()); err != nil {
+			t.Fatalf("RunOnce: %v", err)
+		}
+	}
+	tick()
+	if got := gaugeLevels(t, reader, "position_materializer.positions_refused", "projection"); len(got) != 2 || got["public.position_a"] != 12 {
+		t.Fatalf("first tick levels = %v; want position_a 12 and position_b 0", got)
+	}
+
+	mm.refused = map[string]int64{"public.position_b": 0} // position_a did not complete this tick
+	tick()
+	if got := gaugeLevels(t, reader, "position_materializer.positions_refused", "projection"); len(got) != 1 {
+		t.Errorf("levels after position_a stopped completing = %v; want only position_b", got)
+	}
+
+	mm.refusedErr, mm.cacheErr = errors.New("permission denied"), errors.New("permission denied")
+	tick()
+	for name, key := range map[string]string{"position_materializer.positions_refused": "projection", "position_materializer.cache_rows": "table"} {
+		if got := gaugeLevels(t, reader, name, key); len(got) != 0 {
+			t.Errorf("%s after a failed read = %v; want absent", name, got)
+		}
+	}
+	failures := testutil.CollectCounterByAttr(t, reader, "position_materializer.read_failures.total", "read")
+	if failures[readRefused] != 1 || failures[readCacheRows] != 1 {
+		t.Errorf("read_failures = %v; want one of each read", failures)
+	}
+}
+
+// gaugeLevels returns the int64 gauge levels of name by key, empty when the SDK exported no series.
+func gaugeLevels(t *testing.T, reader sdkmetric.Reader, name, key string) map[string]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+	out := map[string]int64{}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != name {
+				continue
+			}
+			g, ok := m.Data.(metricdata.Gauge[int64])
+			if !ok {
+				t.Fatalf("metric %q is %T, want metricdata.Gauge[int64]", name, m.Data)
+			}
+			for _, dp := range g.DataPoints {
+				out[testutil.AttrValue(dp, key)] = dp.Value
+			}
+		}
+	}
+	return out
+}
+
+// Recording must land on the seeded series. testutil.CollectCounterByAttr sums data points, so a
+// recording on a parallel attribute set reads back the same total; the data-point count does not.
+func TestRecordRun_WritesTheSeededSeries(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	tel, err := NewTelemetryWithProvider(mp, []string{"materialize_a"})
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProvider: %v", err)
+	}
+	for _, status := range runStatuses {
+		tel.RecordRun(context.Background(), "materialize_a", status, 5)
+	}
+	tel.RecordReadFailure(context.Background(), readRefused)
+	for name, want := range map[string]int{
+		"position_materializer.projection_runs.total": len(runStatuses),
+		"position_materializer.rows_changed.total":    1,
+		"position_materializer.read_failures.total":   len(reads),
+	} {
+		if got := len(testutil.CollectSumDataPoints(t, reader, name)); got != want {
+			t.Errorf("%s has %d series after recording; want the %d seeded ones", name, got, want)
+		}
+	}
 }
 
 // Unseeded, a counter first appears at its first value and increase() misses the 0->1 after a pod
@@ -157,6 +253,38 @@ func TestNewTelemetry_SeedsEveryConfiguredMaterializer(t *testing.T) {
 			t.Errorf("rows_changed %s = %d (present %v); want a seeded 0", m, v, ok)
 		}
 	}
+	failures := testutil.CollectCounterByAttr(t, reader, "position_materializer.read_failures.total", "read")
+	for _, r := range reads {
+		if v, ok := failures[r]; !ok || v != 0 {
+			t.Errorf("read_failures %s = %d (present %v); want a seeded 0", r, v, ok)
+		}
+	}
+}
+
+// A view skipped because the parent ended must still be recorded, or a view starved by a long one
+// before it emits nothing and every alert stays silent. Each skipped view is named, not only the first.
+func TestRunOnce_RecordsEveryViewSkippedByCancellation(t *testing.T) {
+	tel, reader := newRecordingTelemetry(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mat := &mockMaterializer{fn: func(context.Context, string, int, int64) (int64, error) {
+		cancel()
+		return 1, nil
+	}}
+	svc, err := NewService([]string{"materialize_a", "materialize_b", "materialize_c"}, mat, 0, 77, nil, tel)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.RunOnce(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunOnce = %v; want context.Canceled", err)
+	}
+	if got := strings.Join(mat.calls, ","); got != "materialize_a" {
+		t.Errorf("calls = %s; want only materialize_a", got)
+	}
+	runs := runsByViewAndStatus(t, reader)
+	assertOneRunIn(t, runs, "materialize_a", statusOK)
+	assertOneRunIn(t, runs, "materialize_b", statusCanceled)
+	assertOneRunIn(t, runs, "materialize_c", statusCanceled)
 }
 
 // A run interrupted by a shutdown is not a broken view. Recorded as an error, every deploy that
@@ -170,12 +298,13 @@ func TestRunOnce_ClassifiesAFailedProjection(t *testing.T) {
 		parent     func() (context.Context, context.CancelFunc)
 		fail       func(ctx context.Context, cancel context.CancelFunc) error
 		wantStatus string
+		wantB      string // the projection after it: skipped under an ended parent, run otherwise
 	}{
-		{"parent cancelled mid-projection", cancellableParent, cancelThenReturnCtxErr, statusCanceled},
-		{"unrelated error while the parent is cancelled", cancellableParent, cancelThenReturn(boom), statusCanceled},
-		{"projection's own deadline on a live parent", cancellableParent, returnErr(context.DeadlineExceeded), statusError},
-		{"parent deadline expires mid-projection", shortDeadlineParent, waitForParent, statusError},
-		{"plain failure", cancellableParent, returnErr(boom), statusError},
+		{"parent cancelled mid-projection", cancellableParent, cancelThenReturnCtxErr, statusCanceled, statusCanceled},
+		{"unrelated error while the parent is cancelled", cancellableParent, cancelThenReturn(boom), statusCanceled, statusCanceled},
+		{"projection's own deadline on a live parent", cancellableParent, returnErr(context.DeadlineExceeded), statusError, statusOK},
+		{"parent deadline expires mid-projection", shortDeadlineParent, waitForParent, statusError, statusError},
+		{"plain failure", cancellableParent, returnErr(boom), statusError, statusOK},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -192,10 +321,7 @@ func TestRunOnce_ClassifiesAFailedProjection(t *testing.T) {
 			}
 			runs := runsByViewAndStatus(t, reader)
 			assertOneRunIn(t, runs, "materialize_a", tt.wantStatus)
-			if tt.wantStatus == statusCanceled {
-				// A view the cancellation skipped never ran, so it records nothing.
-				assertNoRuns(t, runs, "materialize_b")
-			}
+			assertOneRunIn(t, runs, "materialize_b", tt.wantB)
 		})
 	}
 }
@@ -258,15 +384,6 @@ func assertOneRunIn(t *testing.T, runs map[string]int64, view, wantStatus string
 		}
 		if got := runs[view+"/"+status]; got != want {
 			t.Errorf("%s/%s = %d; want %d (all runs: %v)", view, status, got, want, runs)
-		}
-	}
-}
-
-func assertNoRuns(t *testing.T, runs map[string]int64, view string) {
-	t.Helper()
-	for key, v := range runs {
-		if strings.HasPrefix(key, view+"/") && v != 0 {
-			t.Errorf("%s = %d; want nothing recorded for a view that never ran", key, v)
 		}
 	}
 }

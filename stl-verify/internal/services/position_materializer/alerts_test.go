@@ -21,8 +21,7 @@ import (
 // The contract is collected from a real Telemetry, not written down here, so renaming an instrument,
 // an attribute or a status in telemetry.go fails these tests instead of leaving an alert dead.
 type emitted struct {
-	metrics  map[string]bool // Prometheus names: dots as underscores
-	attrs    map[string]bool
+	metrics  map[string]map[string]bool // Prometheus name (dots as underscores) -> its attribute keys
 	statuses map[string]bool
 }
 
@@ -32,29 +31,35 @@ var infraLabels = map[string]bool{
 	"pod": true, "namespace": true, "job": true, "instance": true,
 }
 
-// collectEmitted exercises every recording path once and reads back what the SDK exported.
+// collectEmitted exercises every recording path once and reads back what the SDK exported. It runs
+// on an unseeded Telemetry, so every attribute it reports came from a recording path, not the seed.
 func collectEmitted(t *testing.T) emitted {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
-	tel, err := NewTelemetryWithProvider(mp, []string{"materialize_a"})
+	tel, err := NewTelemetryWithProvider(mp, nil)
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProvider: %v", err)
 	}
-	tel.RecordRefused(context.Background(), "public.position_a", 0)
-	tel.RecordCacheRows(context.Background(), "position_current", 0)
+	for _, status := range runStatuses {
+		tel.RecordRun(context.Background(), "materialize_a", status, 0)
+	}
+	tel.SetRefused(map[string]int64{"public.position_a": 0})
+	tel.SetCacheRows(map[string]int64{"position_current": 0})
+	tel.RecordReadFailure(context.Background(), readRefused)
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {
 		t.Fatalf("collecting metrics: %v", err)
 	}
-	out := emitted{metrics: map[string]bool{}, attrs: map[string]bool{}, statuses: map[string]bool{}}
+	out := emitted{metrics: map[string]map[string]bool{}, statuses: map[string]bool{}}
 	for _, scope := range rm.ScopeMetrics {
 		for _, m := range scope.Metrics {
-			out.metrics[strings.ReplaceAll(m.Name, ".", "_")] = true
+			keys := map[string]bool{}
+			out.metrics[strings.ReplaceAll(m.Name, ".", "_")] = keys
 			for _, set := range attributeSets(t, m) {
-				out.addAttrs(set)
+				out.addAttrs(keys, set)
 			}
 		}
 	}
@@ -80,9 +85,9 @@ func attributeSets(t *testing.T, m metricdata.Metrics) []attribute.Set {
 	return sets
 }
 
-func (e emitted) addAttrs(set attribute.Set) {
+func (e emitted) addAttrs(keys map[string]bool, set attribute.Set) {
 	for _, kv := range set.ToSlice() {
-		e.attrs[string(kv.Key)] = true
+		keys[string(kv.Key)] = true
 		if kv.Key == "status" {
 			e.statuses[kv.Value.AsString()] = true
 		}
@@ -105,7 +110,7 @@ func TestAlerts_UseMetricsThisWorkerEmits(t *testing.T) {
 	seen := map[string]bool{}
 	for _, m := range regexp.MustCompile(`position_materializer_[a-z_]+`).FindAllString(body, -1) {
 		seen[m] = true
-		if !emittedMetrics[m] {
+		if _, ok := emittedMetrics[m]; !ok {
 			t.Errorf("an alert selects %q, which this worker never emits", m)
 		}
 	}
@@ -139,13 +144,21 @@ func TestAlerts_GroupByLabelsThatExist(t *testing.T) {
 	}
 }
 
+// checkGroupByLabels requires every grouped label on every metric the rule selects: a label only a
+// sibling metric carries collapses this one into a single series that names nothing.
 func checkGroupByLabels(t *testing.T, name, block string, e emitted) {
 	t.Helper()
+	selected := regexp.MustCompile(`position_materializer_[a-z_]+`).FindAllString(block, -1)
 	for _, by := range regexp.MustCompile(`by \(([^)]*)\)`).FindAllStringSubmatch(block, -1) {
 		for label := range strings.SplitSeq(by[1], ",") {
 			label = strings.TrimSpace(label)
-			if label != "" && !e.attrs[label] && !infraLabels[label] {
-				t.Errorf("%s groups by %q, which is neither an emitted attribute nor an infra label", name, label)
+			if label == "" || infraLabels[label] {
+				continue
+			}
+			for _, m := range selected {
+				if !e.metrics[m][label] {
+					t.Errorf("%s groups by %q, which %s does not carry", name, label, m)
+				}
 			}
 		}
 	}

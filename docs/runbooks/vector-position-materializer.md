@@ -18,13 +18,21 @@ Two properties make almost every incident low-risk:
   stored history. The worst outcome is missing rows, not wrong ones.
 
 The shared cronjob alerts in `vector-cronjobs.yaml` read `cronjob_runs_total`, which the Temporal
-adapter records for the whole run: they cover a failing run (`VectorCronjobRunFailing`,
-`VectorCronjobAllRunsFailing`, under `service_name="position-materializer"`) and a worker with no available
-replica (`VectorCronjobWorkerDown`). No alert reads run duration or container restarts, so a crash-looping
-pod may surface as `VectorCronjobWorkerDown` only while it stays unavailable. The five alerts below read
-this service's own `position_materializer_*` metrics. A run cut short by a rollout is recorded as
+adapter records for the whole run: `VectorCronjobRunFailing` warns on a failing run under
+`service_name="position-materializer"`, and `VectorCronjobWorkerDown` fires on a worker with no available
+replica. `VectorCronjobAllRunsFailing` excludes this service: one failing view fails the whole hourly run,
+so it would page critical while the other views wrote. `ViewFailing` and `ViewNotCompleting` name the view
+instead. No alert reads run duration or container restarts, so a crash-looping pod may surface as
+`VectorCronjobWorkerDown` only while it stays unavailable. The six alerts below read this service's own
+`position_materializer_*` metrics. A run cut short by a rollout is recorded as
 `status="canceled"` on both counters, so neither the shared failure alerts nor `ViewFailing` fire on it;
-`ViewNotCompleting` fires when a view is cancelled with no completed run for 3 hours.
+`ViewNotCompleting` fires when a view is cancelled with no completed run for 3 hours. When a run is cut
+short, every view it did not reach is recorded as cancelled too, so a view starved by a slow one before it
+is named.
+
+The two gauges, `positions_refused` and `cache_rows`, carry only what the latest tick read. A projection
+that did not complete in that tick, or a read that failed, has no series until a later tick reports it,
+and a restarted pod has none until its first run ends.
 
 The alerts label a projection two ways: `VectorPositionMaterializerViewFailing` carries the function
 (`materializer="materialize_morpho_market"`), `VectorPositionMaterializerWithholdingPositions` the view
@@ -41,7 +49,7 @@ Before bumping an environment to 1:
 
 1. Every entry in `POSITION_PROJECTIONS` exists in the target database. The worker checks this at
    startup and exits naming the ones it cannot call; `materialize_morpho_market` and
-   `materialize_morpho_vault` ship with their own `materialize_morpho_*` migrations.
+   `materialize_morpho_vault` are not deployed yet: they ship with #624 and #626, and both must be migrated.
 2. Time one projection by hand and watch its transaction. The call holds a snapshot and a transaction
    id, and with them the vacuum horizon for every table in the database, for its whole duration:
 
@@ -77,6 +85,10 @@ Before bumping an environment to 1:
 While a run is longer than `MATERIALIZE_INTERVAL`, the ticks that fall inside it are skipped rather than
 queued; the bootstrap skips several. That is expected, not a stall.
 
+The activity heartbeat carries a Temporal cancellation to the running query while the pod is alive. A pod
+that is killed outright leaves its query running behind the pooler until it finishes, holding its locks
+and transaction id; check `pg_stat_activity` before starting another run by hand.
+
 Every tick re-reads each view's whole history. On staging (2026-09-17) the two view reads alone took
 19.4 s for `morpho_vault_position` (9.9M rows, ~1.7 GB of temp spill) and 8.4 s for
 `morpho_market_position` (1.4M rows); each call also holds its transaction id for at least that long.
@@ -89,6 +101,8 @@ The cost grows with the source tables. If a tick's read passes about 10 minutes,
 
 **What it means.** Runs are succeeding, but no observation has been appended for any view in 6 hours.
 `position_state` has stopped tracking positions while everything looks healthy.
+It needs the counter to have existed 6 hours back, so a new pod after a hand bootstrap, whose first runs
+correctly append nothing, does not fire it.
 
 **Why it is not paging.** The data is stale, not wrong. Nothing is corrupted and no manual repair is
 needed — once the cause is fixed, the next run appends the backlog, because the projection covers the
@@ -136,8 +150,9 @@ backfill command exists or is needed — the full projection *is* the backfill.
 **What it means.** A projection is withholding positions rather than failing. Its run succeeds, the
 other positions land, and these sit at whatever was last stored, which every downstream reader treats
 as current. `position_projection_run.positions_refused` is the per-run count the alert reads, taken from
-the latest run each projection had under the running pod's writer run, so a projection removed from
-`POSITION_PROJECTIONS` stops reporting once the pod restarts.
+each projection's run in the latest tick under the running pod's writer run. It fires when every reading
+over 3 hours is above zero and one arrived in the last 65 minutes, so a restart does not reset it and a
+projection that has stopped completing stops firing it (`ViewFailing` or `ViewNotCompleting` takes over).
 
 **Which positions.** The refusal table holds one row per refused observation for the life of the
 refusal, and the two classes need different questions asked of them.
@@ -222,12 +237,34 @@ alerts ignore, so without this rule a view that never finishes would fire nothin
 
 ---
 
+## VectorPositionMaterializerLevelReadFailing
+
+**What it means.** The read behind a gauge failed on at least two ticks in 3 hours: `read="refused"`
+(`position_projection_run`, for `WithholdingPositions`) or `read="cache_rows"` (`approximate_row_count` on
+the caches, for `CacheTableGrowthHigh`). The projections themselves still ran and their rows are committed,
+but the gauge is absent, so its alert cannot fire.
+
+**Triage.** The pod logs carry the error (`reading withheld positions failed` or
+`reading cache row estimates failed`). The usual causes are a changed grant on `position_projection_run`
+for the worker's role, or a renamed or dropped cache table. Run the same read as that role to confirm:
+
+```sql
+SELECT DISTINCT ON (projection) projection, positions_refused
+  FROM position_projection_run ORDER BY projection, created_at DESC;
+```
+
+**Resolution.** Restore the grant or the relation. The next tick republishes the level.
+
+---
+
 ## VectorPositionMaterializerCacheTableGrowthHigh
 
 **What it means.** A trigger-fed cache off `position_state` — today `position_current` — has passed 50M
 estimated rows. It is a plain table, and this is the tripwire `db/migrations/AGENTS.md` charges for that
 choice: nothing else notices a plain table growing. **Nothing is broken.** It says the table has outgrown
 the size at which staying plain was the right trade.
+
+The alert fires when every reading over 6 hours is above 50M, so a pod restart does not reset it.
 
 **Confirm it.** The alert reads `approximate_row_count`, an estimate from planner statistics that moves
 with autovacuum rather than continuously:
@@ -264,7 +301,9 @@ The alert's metric survives the conversion — `approximate_row_count` counts ch
 `pg_class.reltuples` would drop to zero and silently take the tripwire with it.
 
 **Resolution.** Fix the upstream cause and let the table shrink, or convert where the table's key allows it. If the threshold itself is wrong once there is a real production write rate to judge by,
-change it in `alerts/vector-cronjobs.yaml` and say so in the PR; its derivation is in the rule's comment.
+change it in `alerts/vector-cronjobs.yaml` and say so in the PR. It is half the ~100M plain-table budget
+used by `VectorUniswapV4AppendOnChangeGrowthHigh`; there is no production write rate yet to derive a
+runway in time from.
 
 ---
 

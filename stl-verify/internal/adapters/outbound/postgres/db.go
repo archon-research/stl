@@ -57,9 +57,9 @@ type DBConfig struct {
 	// latency-bounded services that should never run a long single statement.
 	StatementTimeout time.Duration
 
-	// ClientConnectionCheckInterval, if > 0, is applied as `SET client_connection_check_interval`, so a
-	// statement whose client has died is cancelled within the interval instead of running to completion.
-	ClientConnectionCheckInterval time.Duration
+	// NoticeLogger, if non-nil, receives the server's WARNINGs, which pgx otherwise discards. Unset by
+	// default, so a service that does not ask for them logs nothing new.
+	NoticeLogger *slog.Logger
 
 	// MeterProvider supplies the pool's query metrics. Defaults to the global
 	// provider, whose instruments record nothing until telemetry.InitMetrics
@@ -116,9 +116,6 @@ func (c DBConfig) timeoutGUCs() map[string]string {
 	if c.StatementTimeout > 0 {
 		gucs["statement_timeout"] = strconv.FormatInt(c.StatementTimeout.Milliseconds(), 10)
 	}
-	if c.ClientConnectionCheckInterval > 0 {
-		gucs["client_connection_check_interval"] = strconv.FormatInt(c.ClientConnectionCheckInterval.Milliseconds(), 10)
-	}
 	if len(gucs) == 0 {
 		return nil
 	}
@@ -174,14 +171,16 @@ func buildPoolConfig(cfg DBConfig) (*pgxpool.Config, error) {
 	if err := attachQueryTracer(poolConfig, cfg.MeterProvider); err != nil {
 		return nil, err
 	}
-	attachNoticeLogger(poolConfig)
+	if cfg.NoticeLogger != nil {
+		attachNoticeLogger(poolConfig, cfg.NoticeLogger)
+	}
 
 	return poolConfig, nil
 }
 
-// attachNoticeLogger logs server WARNINGs, which pgx otherwise discards; every pool gets it, so lower
-// severities are dropped. Severity follows the server's lc_messages, so the unlocalized one is compared.
-func attachNoticeLogger(poolConfig *pgxpool.Config) {
+// attachNoticeLogger logs server WARNINGs to logger and drops lower severities. Severity follows the
+// server's lc_messages, so the unlocalized one is compared.
+func attachNoticeLogger(poolConfig *pgxpool.Config, logger *slog.Logger) {
 	poolConfig.ConnConfig.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
 		if n == nil || n.SeverityUnlocalized != "WARNING" {
 			return
@@ -193,7 +192,7 @@ func attachNoticeLogger(poolConfig *pgxpool.Config) {
 		if n.Hint != "" {
 			attrs = append(attrs, "hint", n.Hint)
 		}
-		slog.Warn("postgres notice", attrs...)
+		logger.Warn("postgres notice", attrs...)
 	}
 }
 

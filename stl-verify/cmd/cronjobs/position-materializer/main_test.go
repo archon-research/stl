@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"slices"
 	"testing"
 	"time"
@@ -64,10 +65,11 @@ func TestCronjobConfig_UsesTheMaterializeTimeouts(t *testing.T) {
 	}
 }
 
-// A pod that dies mid-run must not leave its statement running beside the retry.
-func TestMaterializerDBConfig_ChecksTheClientWhileAStatementRuns(t *testing.T) {
-	cfg := materializerDBConfig("postgres://u:p@localhost:5432/d")
-	if cfg.ClientConnectionCheckInterval <= 0 || cfg.ClientConnectionCheckInterval > time.Minute {
-		t.Errorf("ClientConnectionCheckInterval = %s, want a positive interval of at most 1m", cfg.ClientConnectionCheckInterval)
+// The shared function reports withheld and declined positions as server WARNINGs, which the pool
+// discards unless it is given a logger.
+func TestMaterializerDBConfig_LogsServerWarnings(t *testing.T) {
+	cfg := materializerDBConfig("postgres://u:p@localhost:5432/d", slog.Default())
+	if cfg.NoticeLogger == nil {
+		t.Error("NoticeLogger is nil, so the materializer's withheld-position warnings are discarded")
 	}
 }
