@@ -29,6 +29,7 @@ linters:
       # because they flag ~20 pre-existing call sites; modernizing those is
       # its own task.
       disable:
+        - embedlit
         - errorsastype
         - reflecttypeassert
     # Hexagonal layering from AGENTS.md ("dependencies flow inward"), enforced
