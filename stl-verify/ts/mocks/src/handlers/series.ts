@@ -11,8 +11,8 @@ import { mockDelay } from '@archon-research/http-client-msw';
 import type { MockHandler } from '@archon-research/http-client-msw';
 
 import { DAY_MS, MINUTE_MS, iso, mockNow } from '../clock.ts';
-import { PRIMES } from '../fixtures/registry.ts';
-import type { PrimeName, SeededPrime } from '../fixtures/registry.ts';
+import { findPrime } from '../fixtures/registry.ts';
+import type { PrimeName } from '../fixtures/registry.ts';
 import {
   PRIME_COLLATERAL_USD,
   PRIME_MONITOR_ENCUMBRANCE,
@@ -36,7 +36,6 @@ import {
   readProvenance,
   resampledWindowEcho,
   resolveWindow,
-  sameHex,
   rawWindowEcho,
 } from '../query.ts';
 import type {
@@ -59,22 +58,6 @@ const ILK_BY_PRIME: Readonly<Record<PrimeName, string>> = {
   spark: 'ALLOCATOR-SPARK-A',
   grove: 'ALLOCATOR-BLOOM-A',
 };
-
-/**
- * Exposure and total-capital take a proxy address; only debt resolves a vault
- * address too. Accepting a vault everywhere would answer a lookup the real API
- * 404s.
- */
-function findProxy(primeId: string): SeededPrime | undefined {
-  return PRIMES.find((prime) => sameHex(prime.address, primeId));
-}
-
-function findPrimeOrProxy(primeId: string): SeededPrime | undefined {
-  return (
-    findProxy(primeId) ??
-    PRIMES.find((prime) => sameHex(prime.prime_vault_address, primeId))
-  );
-}
 
 type SeriesRequest = {
   resolved: ResolvedWindow;
@@ -169,7 +152,7 @@ export function seriesHandlers(): MockHandler[] {
       async ({ params, query, response }) => {
         await mockDelay(SERIES_DELAY_MS);
         const nowMs = mockNow();
-        if (findProxy(params.prime_id) === undefined) {
+        if (findPrime(params.prime_id) === undefined) {
           return response.untyped(
             problemResponse(unknownPrime(params.prime_id)),
           );
@@ -205,7 +188,7 @@ export function seriesHandlers(): MockHandler[] {
       async ({ params, query, response }) => {
         await mockDelay(SERIES_DELAY_MS);
         const nowMs = mockNow();
-        if (findProxy(params.prime_id) === undefined) {
+        if (findPrime(params.prime_id) === undefined) {
           return response.untyped(
             problemResponse(unknownPrime(params.prime_id)),
           );
@@ -218,7 +201,7 @@ export function seriesHandlers(): MockHandler[] {
           return response.untyped(problemResponse(request.problem));
         }
 
-        const proxy = findProxy(params.prime_id);
+        const proxy = findPrime(params.prime_id);
         // Wherever the response holds Sky's figures the buckets also carry the
         // upstream collateral and the monitor's ratio; self mode reports null.
         const monitorFields =
@@ -252,7 +235,7 @@ export function seriesHandlers(): MockHandler[] {
       async ({ params, query, response }) => {
         await mockDelay(SERIES_DELAY_MS);
         const nowMs = mockNow();
-        const prime = findPrimeOrProxy(params.prime_id);
+        const prime = findPrime(params.prime_id);
         if (prime === undefined) {
           return response.untyped(
             problemResponse(unknownPrime(params.prime_id)),

@@ -593,6 +593,102 @@ async function checkBalanceSeriesReportsCoverage() {
   }
 }
 
+/**
+ * Every identifier form answers the same prime, as the API guarantees (VEC-722).
+ *
+ * The app addresses prime-scoped reads by NAME — `PrimeGroup.primeId` is
+ * `prime.name` — while the fixtures are keyed by proxy address. A handler that
+ * resolves only an address 404s the whole screen against mocks while
+ * type-checking and unit-testing clean, because `prime_id` is a `string` either
+ * way and no unit test round-trips a handler.
+ *
+ * The window is pinned: a defaulted one is now-relative, so two requests a
+ * millisecond apart differ in `window` alone.
+ *
+ * `SPARK_BASE_PROXY` holds nothing itself, so it also carries what the narrower
+ * allocations-only check this replaces was for: a proxy with no rows of its own
+ * must still answer with its prime's.
+ */
+async function checkEveryIdentifierFormAnswersTheSamePrime() {
+  const identifiers = [
+    'spark',
+    SPARK_VAULT,
+    SPARK_MAINNET_PROXY,
+    SPARK_BASE_PROXY,
+  ];
+  const window = {
+    from_timestamp: '2026-09-01T00:00:00Z',
+    to_timestamp: '2026-09-02T00:00:00Z',
+    frequency: 'PT1H',
+  } as const;
+
+  const reads: [string, (primeId: string) => Promise<unknown>][] = [
+    [
+      'risk-capital',
+      (prime_id) =>
+        request(
+          '/v1/primes/{prime_id}/risk-capital',
+          { params: { path: { prime_id } } },
+          `risk-capital by ${prime_id}`,
+        ),
+    ],
+    [
+      'allocations',
+      (prime_id) =>
+        request(
+          '/v1/primes/{prime_id}/allocations',
+          { params: { path: { prime_id } } },
+          `allocations by ${prime_id}`,
+        ),
+    ],
+    [
+      'total-capital',
+      (prime_id) =>
+        request(
+          '/v1/primes/{prime_id}/total-capital',
+          { params: { path: { prime_id }, query: window } },
+          `total-capital by ${prime_id}`,
+        ),
+    ],
+    [
+      'exposure',
+      (prime_id) =>
+        request(
+          '/v1/primes/{prime_id}/exposure',
+          { params: { path: { prime_id }, query: window } },
+          `exposure by ${prime_id}`,
+        ),
+    ],
+    [
+      'debt',
+      (prime_id) =>
+        request(
+          '/v1/primes/{prime_id}/debt',
+          {
+            params: {
+              path: { prime_id },
+              query: { ...window, aggregation_method: 'end-period' },
+            },
+          },
+          `debt by ${prime_id}`,
+        ),
+    ],
+  ];
+
+  for (const [route, read] of reads) {
+    const bodies = new Set(
+      await Promise.all(
+        identifiers.map(async (id) => JSON.stringify(await read(id))),
+      ),
+    );
+    assert.equal(
+      bodies.size,
+      1,
+      `${route} answered differently across a prime's identifier forms`,
+    );
+  }
+}
+
 async function checkRawActivityHonoursLimit() {
   const feed = await request(
     '/v1/allocations/activity',
@@ -1292,27 +1388,6 @@ async function checkReferenceTranchesSplitTotalCapital() {
   }
 }
 
-async function checkEveryIdentifierAnswersTheSamePrime() {
-  const [fromBase, fromMainnet] = await Promise.all([
-    request(
-      '/v1/primes/{prime_id}/allocations',
-      primeAt(SPARK_BASE_PROXY),
-      'allocations via a proxy that holds nothing itself',
-    ),
-    request(
-      '/v1/primes/{prime_id}/allocations',
-      primeAt(SPARK_MAINNET_PROXY),
-      'allocations via the mainnet proxy',
-    ),
-  ]);
-
-  assert.deepEqual(
-    fromBase,
-    fromMainnet,
-    'a proxy holding nothing itself must still answer with its prime’s rows',
-  );
-}
-
 async function checkUnknownPrimeIsNotFound() {
   for (const path of [
     '/v1/primes/{prime_id}/allocations',
@@ -1649,16 +1724,16 @@ const checks: [string, () => Promise<void>][] = [
     'the reference tranches split total capital',
     checkReferenceTranchesSplitTotalCapital,
   ],
-  [
-    'every identifier answers the same prime',
-    checkEveryIdentifierAnswersTheSamePrime,
-  ],
   ['an unknown prime is a 404', checkUnknownPrimeIsNotFound],
   ['an unknown asset is a 404', checkUnknownAssetIsNotFound],
   ['an inherited key is not a fixture', checkInheritedKeysAreNotFound],
   [
     'reference debt requires an aggregation method',
     checkReferenceDebtRequiresAMethod,
+  ],
+  [
+    'every identifier form answers the same prime',
+    checkEveryIdentifierFormAnswersTheSamePrime,
   ],
   ['malformed params are rejected', checkMalformedParamsAreRejected],
   ['boolean flags follow pydantic', checkBooleanFlagsFollowPydantic],

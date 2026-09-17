@@ -4,6 +4,7 @@
 import { mockDelay } from '@archon-research/http-client-msw';
 import type { MockHandler } from '@archon-research/http-client-msw';
 
+import { findPrime } from '../fixtures/registry.ts';
 import {
   RISK_CAPITAL_BY_PROXY,
   breakdownFor,
@@ -36,12 +37,13 @@ export function riskHandlers(): MockHandler[] {
         if (!source.ok) {
           return response.untyped(problemResponse(source.problem));
         }
-        const selfScoped = ownEntry(
-          RISK_CAPITAL_BY_PROXY,
-          params.prime_id.toLowerCase(),
-        );
+        // Any identifier resolves to the prime; the table is keyed by proxy
+        // address, so the resolved prime supplies the key.
+        const prime = findPrime(params.prime_id);
+        const selfScoped =
+          prime && ownEntry(RISK_CAPITAL_BY_PROXY, prime.address.toLowerCase());
 
-        if (selfScoped === undefined) {
+        if (selfScoped === undefined || selfScoped === null) {
           return response.untyped(
             problemResponse(notFound(`Prime not found: ${params.prime_id}`)),
           );

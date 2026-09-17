@@ -22,7 +22,7 @@ import {
   seedCompositeAllocations,
   seedReferenceAllocations,
 } from '../fixtures/allocations.ts';
-import { PRIMES } from '../fixtures/registry.ts';
+import { findPrime } from '../fixtures/registry.ts';
 import type { PrimeName } from '../fixtures/registry.ts';
 import { decimalString, usdString } from '../fixtures/series.ts';
 import { LIST_DELAY_MS, SERIES_DELAY_MS, mock } from '../mock-api.ts';
@@ -227,9 +227,7 @@ function signedFlowUsd(
  */
 function primeNamed(identifier: string | null): PrimeName | null | undefined {
   if (identifier === null) return null;
-  return PRIMES.find(
-    (prime) => prime.name === identifier || sameHex(prime.address, identifier),
-  )?.name;
+  return findPrime(identifier)?.name;
 }
 
 export function allocationHandlers(): MockHandler[] {
@@ -246,11 +244,7 @@ export function allocationHandlers(): MockHandler[] {
         if (!source.ok) {
           return response.untyped(problemResponse(source.problem));
         }
-        const proxy = PRIMES.find(
-          (prime) =>
-            prime.name === params.prime_id ||
-            sameHex(prime.address, params.prime_id),
-        );
+        const proxy = findPrime(params.prime_id);
 
         // The identifier names a prime or it names nothing; the rows below are
         // the prime's whole set either way.
