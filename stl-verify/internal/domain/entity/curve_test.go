@@ -270,10 +270,10 @@ func TestNewCurveStableswapConfig(t *testing.T) {
 			errContains: "admin_fee",
 		},
 		{
-			name:        "nil FutureFee rejected",
-			modify:      func(p *CurveStableswapConfigParams) { p.FutureFee = nil },
-			wantErr:     true,
-			errContains: "future_fee",
+			// The later Stableswap-NG pools expose no future_fee(), so the read is
+			// not issued for them and nil is the structural absence, not a failure.
+			name:   "nil FutureFee accepted",
+			modify: func(p *CurveStableswapConfigParams) { p.FutureFee = nil },
 		},
 		{
 			name:        "zero Timestamp rejected",

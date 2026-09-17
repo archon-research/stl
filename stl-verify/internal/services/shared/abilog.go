@@ -190,25 +190,66 @@ func UnpackSingleUint(r outbound.Result) (*big.Int, error) {
 	return bi, nil
 }
 
-// UnpackUintArray decodes a uint256[n]-returning multicall result into a
+// UnpackUintArray decodes an n-element uint256-array multicall result into a
 // []*big.Int of length n. A reverted sub-call or an undecodable payload is an error.
+//
+// The same getter returns the array in either ABI encoding depending on the
+// contract: a fixed uint256[n] is n inline words, a Vyper DynArray is an offset
+// word, a length word, then n words. Reading a dynamic payload as uint256[n]
+// does NOT fail — it decodes the offset and length as the first two values
+// (Curve stored_rates() yields [32, 2] instead of the rates) — so the shape is
+// discriminated structurally up front rather than by decoding and falling back.
 func UnpackUintArray(r outbound.Result, n int) ([]*big.Int, error) {
 	if !r.Success {
 		return nil, fmt.Errorf("uint256[%d] call reverted", n)
 	}
-	arrT, err := abi.NewType(fmt.Sprintf("uint256[%d]", n), "", nil)
+	if n <= 0 {
+		return nil, fmt.Errorf("uint256[%d]: element count must be positive", n)
+	}
+	typ, err := uintArrayTypeFor(r.ReturnData, n)
 	if err != nil {
-		return nil, fmt.Errorf("uint256[%d] type: %w", n, err)
+		return nil, err
+	}
+	arrT, err := abi.NewType(typ, "", nil)
+	if err != nil {
+		return nil, fmt.Errorf("%s type: %w", typ, err)
 	}
 	args := abi.Arguments{{Type: arrT}}
 	vals, err := args.Unpack(r.ReturnData)
 	if err != nil {
-		return nil, fmt.Errorf("unpacking uint256[%d]: %w", n, err)
+		return nil, fmt.Errorf("unpacking %s: %w", typ, err)
 	}
 	if len(vals) == 0 {
-		return nil, fmt.Errorf("uint256[%d] returned no values", n)
+		return nil, fmt.Errorf("%s returned no values", typ)
 	}
-	return toBigIntSlice(vals[0])
+	out, err := toBigIntSlice(vals[0])
+	if err != nil {
+		return nil, err
+	}
+	if len(out) != n {
+		return nil, fmt.Errorf("%s decoded %d values, want %d", typ, len(out), n)
+	}
+	return out, nil
+}
+
+// uintArrayTypeFor picks the ABI type that matches the payload's actual
+// encoding: the canonical dynamic head (offset 32, length n) or a fixed
+// uint256[n]. Anything else is rejected rather than decoded into plausible
+// garbage.
+func uintArrayTypeFor(data []byte, n int) (string, error) {
+	const word = 32
+	if len(data) == word*(n+2) &&
+		new(big.Int).SetBytes(data[:word]).Cmp(big.NewInt(word)) == 0 &&
+		new(big.Int).SetBytes(data[word:2*word]).Cmp(big.NewInt(int64(n))) == 0 {
+		return "uint256[]", nil
+	}
+	if len(data) == word*n {
+		return fmt.Sprintf("uint256[%d]", n), nil
+	}
+	return "", fmt.Errorf(
+		"uint256 array: %d-byte payload is neither a fixed uint256[%d] (%d bytes) nor a dynamic array of %d elements (%d bytes)",
+		len(data), n, word*n, n, word*(n+2),
+	)
 }
 
 // toBigIntSlice converts a Go fixed-size array or slice of *big.Int (as

@@ -1,8 +1,8 @@
-# syntax=docker/dockerfile:1.10
+# syntax=docker/dockerfile:1.10@sha256:865e5dd094beca432e8c0a1d5e1c465db5f998dca4e439981029b3b81fb39ed5
 
 # Build UI on the native builder architecture — the output is static JS/HTML/CSS,
 # so there's no reason to run npm under QEMU arm64 emulation (which crashes node).
-FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:50c8e8ca1d27439048670df5883f32d57cf81cff6233222c893fd0d9884cbd81 AS ui-builder
+FROM --platform=$BUILDPLATFORM node:24.20.0-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf AS ui-builder
 
 WORKDIR /ui
 
@@ -18,10 +18,14 @@ RUN npm run prepare --workspace=@stl-verify/ui
 
 RUN npm run build --workspace=@stl-verify/ui
 
-# Build Python dependencies
-FROM python:3.12.14-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS builder
+# The one pinned Python base. Every stage below builds from this name, so the
+# tag+digest is written once.
+FROM python:3.12.14-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS py-base
 
-COPY --from=ghcr.io/astral-sh/uv:0.11.5 /uv /uvx /bin/
+# Build Python dependencies
+FROM py-base AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:0.11.5@sha256:555ac94f9a22e656fc5f2ce5dfee13b04e94d099e46bb8dd3a73ec7263f2e484 /uv /uvx /bin/
 
 WORKDIR /app
 
@@ -38,7 +42,7 @@ COPY python/app/ app/
 COPY python/suraf/ suraf/
 RUN uv sync --frozen --no-dev
 
-FROM python:3.12.14-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+FROM py-base
 
 # groupadd/useradd live in the passwd package, which the hardening step below
 # removes — user creation must stay above it.

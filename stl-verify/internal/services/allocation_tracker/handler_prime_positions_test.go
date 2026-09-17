@@ -1235,6 +1235,7 @@ func TestBuildPositions_UnderlyingValuationPolicy(t *testing.T) {
 		{"erc20 is its own underlying and ignores asset_address", "erc20", &policyUSDC, big.NewInt(42), nil, big.NewInt(42), policyVault},
 		{"superstate NAV token stays NULL", "superstate", &policyUSDC, big.NewInt(7), nil, nil, common.Address{}},
 		{"centrifuge NAV token stays NULL", "centrifuge", &policyUSDC, big.NewInt(7), nil, nil, common.Address{}},
+		{"centrifuge_feeder NAV token stays NULL", "centrifuge_feeder", &policyUSDC, big.NewInt(7), nil, nil, common.Address{}},
 		{"curve stays NULL even at zero balance", "curve", &policyUSDC, big.NewInt(0), nil, nil, common.Address{}},
 		{"erc7540 deferred stays NULL even when UnderlyingValue set", "erc7540", &policyUSDC, big.NewInt(7), big.NewInt(9), nil, common.Address{}},
 		{"uni_v3_pool uses tracker-computed full value in asset_address", "uni_v3_pool", &policyUSDC, big.NewInt(100), big.NewInt(999), big.NewInt(999), policyUSDC},

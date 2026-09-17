@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/archon-research/stl/stl-verify/cmd/workers/internal/dexbootstrap"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -33,7 +34,43 @@ type Factory interface {
 // SweepBlocks-driven service construction.
 type curveFactory struct{}
 
-func (curveFactory) Kind() string         { return "curve" }
+func (curveFactory) Kind() string { return "curve" }
+
+// validateCurveCuration rejects a registry where a stableswap pool is missing
+// the curated metadata the snapshot needs. The gates default to "issue nothing",
+// so an uncurated pool does not stall the chain — it silently writes NULL for
+// calc_token_amount, the fee schedule and, on NG, the five oracle columns, on
+// every block and forever. That is exactly the swallowed-absence the append-only
+// rules forbid, so it fails the worker here, where it names the rows to fix,
+// rather than going quiet in prod.
+func validateCurveCuration(pools []curveindexer.RegisteredPool) error {
+	var uncurated []string
+	for _, p := range pools {
+		var missing []string
+		if p.CalcTokenAmountDynArray == nil {
+			missing = append(missing, "calc_token_amount_dyn_array")
+		}
+		if isCurveStableswap(p.Kind) && !p.HasFutureFee && !p.HasOffpegFeeMultiplier {
+			missing = append(missing, "has_future_fee/has_offpeg_fee_multiplier")
+		}
+		if len(missing) > 0 {
+			uncurated = append(uncurated, fmt.Sprintf("%s (%s)", p.Address, strings.Join(missing, ", ")))
+		}
+	}
+	if len(uncurated) > 0 {
+		return fmt.Errorf(
+			"curve pools are registered without the curated ABI metadata the snapshot needs: %s. "+
+				"Probe the getters on each pool and set the columns (see db/migrations/20260831_110000_curve_pool_abi_capabilities.sql)",
+			strings.Join(uncurated, "; "),
+		)
+	}
+	return nil
+}
+
+func isCurveStableswap(k curveindexer.PoolKind) bool {
+	return k == curveindexer.KindStableswapPreNG || k == curveindexer.KindStableswapNG
+}
+
 func (curveFactory) ServiceName() string  { return "curve-indexer" }
 func (curveFactory) MetricPrefix() string { return "curve" }
 
@@ -49,10 +86,14 @@ func (curveFactory) BuildHandler(ctx context.Context, deps *dexbootstrap.Deps, c
 	if len(poolRows) == 0 {
 		return nil, fmt.Errorf("no curve pools registered for chain %d", cfg.ChainID)
 	}
-	// Per-pool A_precise availability comes from curated DB metadata
-	// (curve_pool.has_a_precise, carried through LoadPools), so the snapshot issues
-	// that call only where it exists — no startup capability probe.
+	// Per-pool getter availability comes from curated DB metadata (the
+	// curve_pool.has_* columns and calc_token_amount_dyn_array, carried through
+	// LoadPools), so the snapshot issues those calls only where they exist — no
+	// startup capability probe.
 	pools := curveindexer.IndexPoolsByAddress(poolRows)
+	if err := validateCurveCuration(pools); err != nil {
+		return nil, err
+	}
 
 	stableABI, err := abis.CurveStableswapABI()
 	if err != nil {
