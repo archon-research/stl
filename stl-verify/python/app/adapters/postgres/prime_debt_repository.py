@@ -9,10 +9,8 @@ from app.adapters.postgres._time_window import (
     optional_time_window_clause,
     required_time_window_clause,
 )
-from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_debt import PrimeDebtSnapshot
 from app.domain.entities.time_series_bucket import PrimeDebtBucket
-from app.ports.prime_resolver import PrimeResolver
 
 logger = logging.getLogger(__name__)
 
@@ -58,14 +56,8 @@ DEBT_BUCKETS_SQL = f"""
 class PrimeDebtRepository:
     """PostgreSQL adapter for prime debt snapshot queries."""
 
-    def __init__(self, engine: AsyncEngine, primes: PrimeResolver) -> None:
+    def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
-        self._primes = primes
-
-    async def resolve_prime_id(self, prime_address: EthAddress) -> int | None:
-        """Resolve either prime identity (vault or proxy address) to ``prime.id``."""
-        prime = await self._primes.resolve(str(prime_address))
-        return prime.id if prime is not None else None
 
     async def list_debt_snapshots(
         self,

@@ -15,7 +15,6 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.prime_debt_repository import PrimeDebtRepository
-from app.adapters.postgres.prime_resolver_repository import PrimeResolverRepository
 
 _WINDOW_START = datetime(2026, 8, 19, 0, 0, tzinfo=timezone.utc)
 _OBSERVED = _WINDOW_START + timedelta(hours=2)
@@ -63,7 +62,7 @@ async def seeded(db_url: str):
 async def _buckets(async_db_url: str, prime_id: int, *, hours: int = 6):
     engine = create_async_engine(async_db_url)
     try:
-        repository = PrimeDebtRepository(engine, PrimeResolverRepository(engine))
+        repository = PrimeDebtRepository(engine)
         return await repository.list_reference_debt_buckets(
             prime_id,
             from_timestamp=_WINDOW_START,

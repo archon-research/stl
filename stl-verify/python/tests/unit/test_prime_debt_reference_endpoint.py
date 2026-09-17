@@ -16,16 +16,17 @@ from app.api.v1 import prime_debts
 from app.domain.entities.time_series_bucket import PrimeDebtBucket
 from app.main import app
 from app.services.prime_debt_service import PrimeDebtService
+from tests.factories import make_prime_identity
 
 _VALID_ADDR = "0x" + "ab" * 20
-_PRIME_ID = 7
+#: What the fake resolver in tests/unit/conftest.py names this prime.
+_PRIME_ID = make_prime_identity().id
 _BUCKET = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture
 def client():
     service = AsyncMock(spec=PrimeDebtService)
-    service.resolve_prime_id.return_value = _PRIME_ID
     service.list_reference_debt_buckets.return_value = [
         PrimeDebtBucket(bucket_start=_BUCKET, debt_wad=Decimal("2645260280720000000000000000"))
     ]
@@ -91,9 +92,9 @@ def test_self_mode_is_unchanged_and_never_reads_the_reference_series(client):
     service.list_reference_debt_buckets.assert_not_awaited()
 
 
-def test_reference_debt_still_404s_for_an_unknown_prime(client):
-    test_client, service = client
-    service.resolve_prime_id.return_value = None
+def test_reference_debt_still_404s_for_an_unknown_prime(client, prime_resolver):
+    test_client, _ = client
+    prime_resolver.identity = None
 
     response = test_client.get(f"/v1/primes/{_VALID_ADDR}/debt?reference=true&aggregation_method=end-period")
 

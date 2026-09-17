@@ -1,13 +1,11 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.adapters.postgres.prime_debt_repository import PrimeDebtRepository
 from app.domain.entities.allocation import EthAddress
-from app.domain.entities.prime import PrimeIdentity
 
 _VALID_ADDR = EthAddress("0x" + "ab" * 20)
 _PRIME_ID = 7
@@ -15,40 +13,13 @@ _PRIME_ID = 7
 
 @pytest.fixture
 def debt_repo(stub_engine):
-    """Build a repository over stubbed results, returning it with the connection.
-
-    The resolver is a bare stub: every test here drives a SQL path, which never
-    reaches it. ``resolve_prime_id`` is the one that does, and it stubs its own.
-    """
+    """Build a repository over stubbed results, returning it with the connection."""
 
     def build(*results: dict, error: Exception | None = None):
         engine, conn = stub_engine(*results, error=error)
-        return PrimeDebtRepository(engine, AsyncMock()), conn
+        return PrimeDebtRepository(engine), conn
 
     return build
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("resolved", "expected"),
-    [
-        (
-            PrimeIdentity(
-                id=_PRIME_ID,
-                name="spark",
-                external_id="4bd9ee3c-58df-4587-9c04-63b928f1a169",
-                vault_address=_VALID_ADDR,
-            ),
-            _PRIME_ID,
-        ),
-        (None, None),
-    ],
-)
-async def test_resolve_prime_id_returns_the_matched_id(resolved, expected) -> None:
-    primes = AsyncMock()
-    primes.resolve.return_value = resolved
-
-    assert await PrimeDebtRepository(MagicMock(), primes).resolve_prime_id(_VALID_ADDR) == expected
 
 
 @pytest.mark.asyncio

@@ -7,8 +7,8 @@ from pydantic import BaseModel, Field, RootModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.prime_debt_repository import PrimeDebtRepository
-from app.api._validators import PrimeOrProxyAddressPathParam
-from app.api.deps import get_engine, get_prime_resolver, require_prime_view
+from app.api._validators import PrimeIdentifierPathParam
+from app.api.deps import get_engine, prime_scope, require_prime_view
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
@@ -20,11 +20,10 @@ from app.api.time_series import (
     build_resampled_window,
     get_time_series_query_params,
 )
-from app.domain.entities.allocation import EthAddress
+from app.domain.entities.prime import PrimeScope
 from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery
-from app.ports.prime_resolver import PrimeResolver
 from app.services.prime_debt_service import PrimeDebtService
 
 router = APIRouter(tags=["primes"])
@@ -128,11 +127,8 @@ class PrimeDebtEnvelope(
     """Prime debt response: raw snapshots or aggregated time buckets."""
 
 
-async def _get_prime_debt_service(
-    engine: AsyncEngine = Depends(get_engine),
-    primes: PrimeResolver = Depends(get_prime_resolver),
-) -> PrimeDebtService:
-    return PrimeDebtService(PrimeDebtRepository(engine, primes))
+async def _get_prime_debt_service(engine: AsyncEngine = Depends(get_engine)) -> PrimeDebtService:
+    return PrimeDebtService(PrimeDebtRepository(engine))
 
 
 @router.get(
@@ -151,16 +147,17 @@ async def _get_prime_debt_service(
     ),
 )
 async def list_prime_debt_snapshots(
-    prime_id: PrimeOrProxyAddressPathParam,
+    prime_id: PrimeIdentifierPathParam,
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max snapshots returned (default 100, max 500)."),
     requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: PrimeDebtService = Depends(_get_prime_debt_service),
+    scope: PrimeScope = Depends(prime_scope),
     _authz: None = Depends(require_prime_view),
 ) -> PrimeDebtEnvelope:
-    resolved_prime_id = await service.resolve_prime_id(EthAddress(prime_id))
-    if resolved_prime_id is None:
-        raise HTTPException(status_code=404, detail="Prime not found")
+    # Vault ilk debt is SHARED (see `PrimeScope`): one figure per prime,
+    # keyed on the resolved identity rather than fanned out over its wallets.
+    resolved_prime_id = scope.identity.id
 
     source = resolve_or_422(requested_provenance, available=frozenset(Provenance), default=Provenance.INDEXED)
 

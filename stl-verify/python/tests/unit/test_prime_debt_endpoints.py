@@ -4,24 +4,24 @@ from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
-from app.domain.entities.allocation import EthAddress
+from app.api.deps import PRIME_DENIED_DETAIL
 from app.domain.entities.prime_debt import PrimeDebtSnapshot
 from app.domain.entities.time_series_bucket import PrimeDebtBucket
 from app.main import app
 from app.services.prime_debt_service import PrimeDebtService
+from tests.factories import make_prime_identity
 
 _VALID_ADDR = "0x" + "ab" * 20
-_PRIME_ID = 7
+#: What the fake resolver in tests/unit/conftest.py names this prime.
+_PRIME_ID = make_prime_identity().id
 
 
 def _make_service(
     *,
-    resolved_prime_id: int | None = _PRIME_ID,
     snapshots: list[PrimeDebtSnapshot] | None = None,
     buckets: list[PrimeDebtBucket] | None = None,
 ) -> AsyncMock:
     service = AsyncMock(spec=PrimeDebtService)
-    service.resolve_prime_id.return_value = resolved_prime_id
     service.list_debt_snapshots.return_value = snapshots or []
     service.list_debt_buckets.return_value = buckets or []
     return service
@@ -85,7 +85,6 @@ def test_list_prime_debt_snapshots_returns_rows():
                 "synced_at": "2026-03-05T12:00:00Z",
             }
         ]
-        service.resolve_prime_id.assert_awaited_once_with(EthAddress(_VALID_ADDR))
         kwargs = service.list_debt_snapshots.await_args.kwargs
         assert service.list_debt_snapshots.await_args.args[0] == _PRIME_ID
         assert kwargs["limit"] == 25
@@ -182,10 +181,11 @@ def test_list_prime_debt_returns_aggregated_buckets():
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 
 
-def test_list_prime_debt_snapshots_returns_404_when_prime_missing():
+def test_list_prime_debt_snapshots_returns_404_when_prime_missing(prime_resolver):
     from app.api.v1 import prime_debts
 
-    service = _make_service(resolved_prime_id=None)
+    service = _make_service()
+    prime_resolver.identity = None
     app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
     try:
         client = TestClient(app)
@@ -194,7 +194,7 @@ def test_list_prime_debt_snapshots_returns_404_when_prime_missing():
             response = client.get(f"/v1/primes/{_VALID_ADDR}/debt", params=params)
 
             assert response.status_code == 404
-            assert response.json()["detail"] == "Prime not found"
+            assert response.json()["detail"] == PRIME_DENIED_DETAIL
         service.list_debt_snapshots.assert_not_awaited()
         service.list_debt_buckets.assert_not_awaited()
     finally:
@@ -227,7 +227,7 @@ def test_list_prime_debt_snapshots_returns_422_for_limit_too_large():
         response = client.get(f"/v1/primes/{_VALID_ADDR}/debt?limit=600")
 
         assert response.status_code == 422
-        service.resolve_prime_id.assert_not_awaited()
+        service.list_debt_snapshots.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 
@@ -243,23 +243,24 @@ def test_list_prime_debt_snapshots_returns_422_for_malformed_timestamp():
         response = client.get(f"/v1/primes/{_VALID_ADDR}/debt?from_timestamp=not-a-date")
 
         assert response.status_code == 422
-        service.resolve_prime_id.assert_not_awaited()
+        service.list_debt_snapshots.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 
 
-def test_list_prime_debt_snapshots_returns_422_for_address_without_prefix():
+def test_an_address_without_its_prefix_is_read_as_a_name(prime_resolver):
+    """`0x` is what commits the segment to being an address. Without it the
+    value is a prime name, and one that names nothing is 404, not 422."""
     from app.api.v1 import prime_debts
 
     service = _make_service()
+    prime_resolver.identity = None
     app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
     try:
-        client = TestClient(app)
+        response = TestClient(app).get(f"/v1/primes/{'ab' * 20}/debt")
 
-        response = client.get(f"/v1/primes/{'ab' * 20}/debt")
-
-        assert response.status_code == 422
-        service.resolve_prime_id.assert_not_awaited()
+        assert response.status_code == 404
+        service.list_debt_snapshots.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 
@@ -275,7 +276,7 @@ def test_list_prime_debt_snapshots_returns_422_for_address_too_long():
         response = client.get("/v1/primes/0xabababababababababababababababababababababab/debt")
 
         assert response.status_code == 422
-        service.resolve_prime_id.assert_not_awaited()
+        service.list_debt_snapshots.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 

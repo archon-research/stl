@@ -135,7 +135,7 @@ export interface paths {
     };
     /**
      * Prime exposure time series
-     * @description Return the prime's priced receipt-token exposure over time, gap-filled (LOCF) into buckets. Per bucket, each receipt-token position's carried-forward balance is valued at the latest underlying oracle price and summed (the current `balance * price` exposure extended over time). Direct (non-receipt-token) holdings are excluded, matching the risk-capital exposure basis. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `frequency` for longer ranges.
+     * @description Return the prime's priced receipt-token exposure over time, gap-filled (LOCF) into buckets. Per bucket, each receipt-token position's carried-forward balance is valued at the latest underlying oracle price and summed (the current `balance * price` exposure extended over time). Direct (non-receipt-token) holdings are excluded, matching the risk-capital exposure basis. The series is the whole prime's whichever of its identifiers you pass: exposure is held per proxy, so it is summed across them. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `frequency` for longer ranges.
      */
     get: operations['list_prime_exposure_v1_primes__prime_id__exposure_get'];
     put?: never;
@@ -2871,7 +2871,7 @@ export interface operations {
       };
       header?: never;
       path: {
-        /** @description Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses — this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`. Results are whole-prime: passing a proxy address returns the entire prime, including the chains that proxy has nothing to do with. */
+        /** @description A prime, named by any of four forms: its **name** (preferred, e.g. `spark`), its vault address, or any of its ALM proxy or SubProxy addresses. Addresses must carry the `0x` prefix. All four resolve to the same prime, silently and with no redirect. **Results are always whole-prime**: passing a proxy address returns the entire prime, including the chains that proxy has nothing to do with. */
         prime_id: string;
       };
       cookie?: never;
@@ -2921,7 +2921,7 @@ export interface operations {
       };
       header?: never;
       path: {
-        /** @description A prime's 0x-prefixed ALM **proxy** address on one chain — not a prime identifier. A prime allocates through one proxy per chain; list them via `GET /v1/primes` and group by `prime_vault_address`. */
+        /** @description A prime, named by any of four forms: its **name** (preferred, e.g. `spark`), its vault address, or any of its ALM proxy or SubProxy addresses. Addresses must carry the `0x` prefix. All four resolve to the same prime, silently and with no redirect. **Results are always whole-prime**: passing a proxy address returns the entire prime, including the chains that proxy has nothing to do with. */
         prime_id: string;
       };
       cookie?: never;

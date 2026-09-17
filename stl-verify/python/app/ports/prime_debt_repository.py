@@ -1,17 +1,12 @@
 from datetime import datetime
 from typing import Protocol
 
-from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_debt import PrimeDebtSnapshot
 from app.domain.entities.time_series_bucket import PrimeDebtBucket
 
 
 class PrimeDebtRepositoryPort(Protocol):
     """Repository interface for prime debt snapshot queries."""
-
-    async def resolve_prime_id(self, prime_address: EthAddress) -> int | None:
-        """Return the prime id for a vault or proxy address, or ``None`` if unknown."""
-        ...
 
     async def list_debt_snapshots(
         self,

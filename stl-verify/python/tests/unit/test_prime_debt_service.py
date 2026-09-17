@@ -26,18 +26,6 @@ def _snapshot() -> PrimeDebtSnapshot:
 
 
 @pytest.mark.asyncio
-async def test_resolve_prime_id_delegates_to_repository() -> None:
-    repo = AsyncMock()
-    repo.resolve_prime_id.return_value = _PRIME_ID
-    service = PrimeDebtService(repo)
-
-    result = await service.resolve_prime_id(_VALID_ADDR)
-
-    assert result == _PRIME_ID
-    repo.resolve_prime_id.assert_awaited_once_with(_VALID_ADDR)
-
-
-@pytest.mark.asyncio
 async def test_list_debt_snapshots_delegates_with_limit() -> None:
     repo = AsyncMock()
     snap = _snapshot()
@@ -120,13 +108,3 @@ async def test_list_reference_debt_buckets_delegates_to_repository() -> None:
         bucket_seconds=300.0,
         limit=10,
     )
-
-
-@pytest.mark.asyncio
-async def test_resolve_prime_id_propagates_repository_error() -> None:
-    repo = AsyncMock()
-    repo.resolve_prime_id.side_effect = ValueError("db failure")
-    service = PrimeDebtService(repo)
-
-    with pytest.raises(ValueError, match="db failure"):
-        await service.resolve_prime_id(_VALID_ADDR)
