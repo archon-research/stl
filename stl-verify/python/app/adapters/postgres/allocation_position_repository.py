@@ -1076,8 +1076,8 @@ class AllocationRepository:
 
         The treasury is the USDS held in the prime's SubProxy wallets, which the
         caller resolves prime-wide. USDS is dollar-pegged, so the balance is the
-        USD figure. Total Risk Capital is SHARED (``app.domain.prime_scope``):
-        the wallet set scopes one read rather than being summed per wallet.
+        USD figure. Total Risk Capital is SHARED (see ``PrimeScope``): the
+        wallet set scopes one read rather than being summed per wallet.
         Returns ``None`` when the prime has no SubProxy treasury position.
         """
         if not subproxies:

@@ -213,9 +213,9 @@ class PrimeRiskCapitalService:
 
         Exposure, modeled exposure and Required Risk Capital are ADDITIVE, so
         they sum across the prime's ALM proxies; Total Risk Capital is SHARED
-        and is read once over its SubProxy treasury wallets
-        (``app.domain.prime_scope``). Nothing is scoped to one proxy, so the
-        answer is identical whichever identifier named the prime.
+        and is read once over its SubProxy treasury wallets (see
+        ``PrimeScope``). Nothing is scoped to one proxy, so the answer is
+        identical whichever identifier named the prime.
 
         ``source`` is the caller's resolved provenance (``indexed`` or ``both``
         — never ``reference``, which runs no model and never reaches this

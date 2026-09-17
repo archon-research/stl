@@ -1636,8 +1636,7 @@ export interface components {
      *
      *     Every figure is whole-prime, so it is the same answer whichever of the
      *     prime's identifiers was passed. Additive quantities are summed across the
-     *     prime's ALM proxies and shared ones are counted once; which is which is
-     *     declared in `app.domain.prime_scope`.
+     *     prime's ALM proxies and shared ones are counted once.
      *
      *     Under `source: "self"` (the default) the figures are model-derived from
      *     on-chain data: `required_risk_capital_usd` sums per-allocation RRC from the

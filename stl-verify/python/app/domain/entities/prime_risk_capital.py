@@ -87,9 +87,9 @@ class PrimeRiskCapital:
     """Self-computed capital metrics for a prime.
 
     Every figure is whole-prime: additive quantities are summed across the
-    prime's ALM proxies and shared ones are read once, per
-    ``app.domain.prime_scope``. Nothing here is scoped to a single proxy, so the
-    answer is identical whichever of the prime's identifiers was passed.
+    prime's ALM proxies and shared ones are read once, per ``PrimeScope``.
+    Nothing here is scoped to a single proxy, so the answer is identical
+    whichever of the prime's identifiers was passed.
 
     ``exposure_usd`` sums the prime's priced receipt-token allocations (the set
     the model is applied over), which is distinct from total allocation (that

@@ -1829,7 +1829,7 @@
         "type": "object"
       },
       "PrimeRiskCapitalResponse": {
-        "description": "Capital metrics for a prime, from one of two provenances \u2014 see `source`.\n\nEvery figure is whole-prime, so it is the same answer whichever of the\nprime's identifiers was passed. Additive quantities are summed across the\nprime's ALM proxies and shared ones are counted once; which is which is\ndeclared in `app.domain.prime_scope`.\n\nUnder `source: \"self\"` (the default) the figures are model-derived from\non-chain data: `required_risk_capital_usd` sums per-allocation RRC from the\ndefault model (`model`), so it is **partial** \u2014 only allocations the model\ncan price contribute \u2014 and **will not** match Sky's dashboard.\n\nUnder `source: \"reference\"` they are Sky's own published figures.",
+        "description": "Capital metrics for a prime, from one of two provenances \u2014 see `source`.\n\nEvery figure is whole-prime, so it is the same answer whichever of the\nprime's identifiers was passed. Additive quantities are summed across the\nprime's ALM proxies and shared ones are counted once.\n\nUnder `source: \"self\"` (the default) the figures are model-derived from\non-chain data: `required_risk_capital_usd` sums per-allocation RRC from the\ndefault model (`model`), so it is **partial** \u2014 only allocations the model\ncan price contribute \u2014 and **will not** match Sky's dashboard.\n\nUnder `source: \"reference\"` they are Sky's own published figures.",
         "properties": {
           "encumbrance_ratio": {
             "anyOf": [
