@@ -262,7 +262,7 @@ func TestCentrifugeSnapshotWithoutShareToken_IsRefused(t *testing.T) {
 	}
 	buildPositions := func(t *testing.T, snap *PositionSnapshot) error {
 		h := newPolicyTestHandler(t, nil)
-		_, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap}, map[string]bool{})
+		_, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap})
 		return err
 	}
 
@@ -1226,21 +1226,25 @@ func TestBuildPositions_UnderlyingValuationPolicy(t *testing.T) {
 		underlying *big.Int
 		wantVal    *big.Int
 		wantAsset  common.Address
+		poolPair   bool // set PoolToken0/PoolToken1 so univ3RowMeta can compose a symbol
 	}{
-		{"erc4626 uses convertToAssets result denominated in asset_address", "erc4626", &policyUSDC, big.NewInt(100), big.NewInt(123), big.NewInt(123), policyUSDC},
-		{"erc4626 convert failure stays NULL", "erc4626", &policyUSDC, big.NewInt(100), nil, nil, common.Address{}},
-		{"erc4626 without asset_address stays NULL", "erc4626", nil, big.NewInt(100), big.NewInt(123), nil, common.Address{}},
-		{"atoken uses balanceOf denominated in asset_address", "atoken", &policyUSDC, big.NewInt(555), nil, big.NewInt(555), policyUSDC},
-		{"atoken without asset_address stays NULL", "atoken", nil, big.NewInt(555), nil, nil, common.Address{}},
-		{"erc20 is its own underlying and ignores asset_address", "erc20", &policyUSDC, big.NewInt(42), nil, big.NewInt(42), policyVault},
-		{"superstate NAV token stays NULL", "superstate", &policyUSDC, big.NewInt(7), nil, nil, common.Address{}},
-		{"centrifuge NAV token stays NULL", "centrifuge", &policyUSDC, big.NewInt(7), nil, nil, common.Address{}},
-		{"centrifuge_feeder NAV token stays NULL", "centrifuge_feeder", &policyUSDC, big.NewInt(7), nil, nil, common.Address{}},
-		{"curve stays NULL even at zero balance", "curve", &policyUSDC, big.NewInt(0), nil, nil, common.Address{}},
-		{"erc7540 deferred stays NULL even when UnderlyingValue set", "erc7540", &policyUSDC, big.NewInt(7), big.NewInt(9), nil, common.Address{}},
-		{"uni_v3_pool uses tracker-computed full value in asset_address", "uni_v3_pool", &policyUSDC, big.NewInt(100), big.NewInt(999), big.NewInt(999), policyUSDC},
-		{"uni_v3_lp uses tracker-computed full value in asset_address", "uni_v3_lp", &policyUSDC, big.NewInt(100), big.NewInt(888), big.NewInt(888), policyUSDC},
-		{"uni_v3_pool missing tracker value stays NULL", "uni_v3_pool", &policyUSDC, big.NewInt(100), nil, nil, common.Address{}},
+		{"erc4626 uses convertToAssets result denominated in asset_address", "erc4626", &policyUSDC, big.NewInt(100), big.NewInt(123), big.NewInt(123), policyUSDC, false},
+		{"erc4626 convert failure stays NULL", "erc4626", &policyUSDC, big.NewInt(100), nil, nil, common.Address{}, false},
+		{"erc4626 without asset_address stays NULL", "erc4626", nil, big.NewInt(100), big.NewInt(123), nil, common.Address{}, false},
+		{"atoken uses balanceOf denominated in asset_address", "atoken", &policyUSDC, big.NewInt(555), nil, big.NewInt(555), policyUSDC, false},
+		{"atoken without asset_address stays NULL", "atoken", nil, big.NewInt(555), nil, nil, common.Address{}, false},
+		{"erc20 is its own underlying and ignores asset_address", "erc20", &policyUSDC, big.NewInt(42), nil, big.NewInt(42), policyVault, false},
+		{"superstate NAV token stays NULL", "superstate", &policyUSDC, big.NewInt(7), nil, nil, common.Address{}, false},
+		{"centrifuge NAV token stays NULL", "centrifuge", &policyUSDC, big.NewInt(7), nil, nil, common.Address{}, false},
+		{"centrifuge_feeder NAV token stays NULL", "centrifuge_feeder", &policyUSDC, big.NewInt(7), nil, nil, common.Address{}, false},
+		{"curve stays NULL even at zero balance", "curve", &policyUSDC, big.NewInt(0), nil, nil, common.Address{}, false},
+		{"erc7540 deferred stays NULL even when UnderlyingValue set", "erc7540", &policyUSDC, big.NewInt(7), big.NewInt(9), nil, common.Address{}, false},
+		{"uni_v3_pool uses tracker-computed full value in asset_address", "uni_v3_pool", &policyUSDC, big.NewInt(100), big.NewInt(999), big.NewInt(999), policyUSDC, true},
+		{"uni_v3_lp uses tracker-computed full value in asset_address", "uni_v3_lp", &policyUSDC, big.NewInt(100), big.NewInt(888), big.NewInt(888), policyUSDC, true},
+		{"uni_v3_pool missing tracker value stays NULL", "uni_v3_pool", &policyUSDC, big.NewInt(100), nil, nil, common.Address{}, true},
+		{"uni_v4_pool uses tracker-computed full value in asset_address", "uni_v4_pool", &policyUSDC, big.NewInt(100), big.NewInt(999), big.NewInt(999), policyUSDC, false},
+		{"uni_v4_lp uses tracker-computed full value in asset_address", "uni_v4_lp", &policyUSDC, big.NewInt(100), big.NewInt(888), big.NewInt(888), policyUSDC, false},
+		{"uni_v4_lp missing tracker value stays NULL", "uni_v4_lp", &policyUSDC, big.NewInt(100), nil, nil, common.Address{}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1265,7 +1269,11 @@ func TestBuildPositions_UnderlyingValuationPolicy(t *testing.T) {
 				// keys on, and buildPositions refuses one that does not.
 				snap.ShareToken = &policyVault
 			}
-			positions, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap}, map[string]bool{})
+			if tc.poolPair {
+				snap.PoolToken0 = &policyVault
+				snap.PoolToken1 = &policyUSDC
+			}
+			positions, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap})
 			if err != nil {
 				t.Fatalf("buildPositions: %v", err)
 			}
@@ -1289,6 +1297,104 @@ func TestBuildPositions_UnderlyingValuationPolicy(t *testing.T) {
 	}
 }
 
+func TestBuildPositions_RowMeta_ERC20MissingMetadata_Error(t *testing.T) {
+	h := newPolicyTestHandler(t, nil)
+	unregistered := common.HexToAddress("0x000000000000000000000000000000000000fFfF")
+	snap := &PositionSnapshot{
+		Entry: &TokenEntry{
+			ContractAddress: unregistered,
+			WalletAddress:   policyWallet,
+			Star:            "spark",
+			TokenType:       "erc20",
+		},
+		Balance:        big.NewInt(100),
+		ChainID:        1,
+		BlockNumber:    100,
+		Direction:      DirectionSweep,
+		BlockTimestamp: time.Unix(1750000000, 0).UTC(),
+	}
+	if _, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap}); err == nil {
+		t.Fatal("expected error when a plain token's own metadata was never fetched")
+	}
+}
+
+// TestBuildPositions_UniV4RowMeta_ComposesFromHintAsset locks univ4RowMeta's
+// symbol/decimals composition: unlike univ3RowMeta, it never needs
+// PoolToken0/PoolToken1 (a V4 entry can aggregate positions from pools with
+// different pairs, so there is no single pool pair to compose from).
+func TestBuildPositions_UniV4RowMeta_ComposesFromHintAsset(t *testing.T) {
+	h := newPolicyTestHandler(t, nil)
+	snap := &PositionSnapshot{
+		Entry: &TokenEntry{
+			ContractAddress: policyVault,
+			WalletAddress:   policyWallet,
+			AssetAddress:    &policyUSDC,
+			Star:            "spark",
+			TokenType:       "uni_v4_lp",
+		},
+		Balance:         big.NewInt(100),
+		UnderlyingValue: big.NewInt(100),
+		ChainID:         1,
+		BlockNumber:     100,
+		Direction:       DirectionSweep,
+		BlockTimestamp:  time.Unix(1750000000, 0).UTC(),
+	}
+
+	positions, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap})
+	if err != nil {
+		t.Fatalf("buildPositions: %v", err)
+	}
+	if got, want := positions[0].TokenSymbol, "UNIV4-LP-USDC"; got != want {
+		t.Errorf("TokenSymbol = %q, want %q", got, want)
+	}
+	if got, want := positions[0].TokenDecimals, 6; got != want {
+		t.Errorf("TokenDecimals = %d, want %d (the hint asset's, not the PositionManager's)", got, want)
+	}
+}
+
+func TestBuildPositions_UniV4RowMeta_NoAssetAddress_Error(t *testing.T) {
+	h := newPolicyTestHandler(t, nil)
+	snap := &PositionSnapshot{
+		Entry: &TokenEntry{
+			ContractAddress: policyVault,
+			WalletAddress:   policyWallet,
+			AssetAddress:    nil,
+			Star:            "spark",
+			TokenType:       "uni_v4_lp",
+		},
+		Balance:        big.NewInt(100),
+		ChainID:        1,
+		BlockNumber:    100,
+		Direction:      DirectionSweep,
+		BlockTimestamp: time.Unix(1750000000, 0).UTC(),
+	}
+	if _, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap}); err == nil {
+		t.Fatal("expected error for a uni_v4 entry with no asset address")
+	}
+}
+
+func TestBuildPositions_UniV4RowMeta_MissingAssetMetadata_Error(t *testing.T) {
+	h := newPolicyTestHandler(t, nil)
+	unregistered := common.HexToAddress("0x000000000000000000000000000000000000fFfF")
+	snap := &PositionSnapshot{
+		Entry: &TokenEntry{
+			ContractAddress: policyVault,
+			WalletAddress:   policyWallet,
+			AssetAddress:    &unregistered,
+			Star:            "spark",
+			TokenType:       "uni_v4_pool",
+		},
+		Balance:        big.NewInt(100),
+		ChainID:        1,
+		BlockNumber:    100,
+		Direction:      DirectionSweep,
+		BlockTimestamp: time.Unix(1750000000, 0).UTC(),
+	}
+	if _, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap}); err == nil {
+		t.Fatal("expected error when the hint asset's metadata was never fetched")
+	}
+}
+
 func TestBuildPositions_RecordsFailureMetricWhenValuationMissing(t *testing.T) {
 	tel, reader := newRecordingTelemetry(t)
 	h := newPolicyTestHandler(t, tel)
@@ -1309,7 +1415,7 @@ func TestBuildPositions_RecordsFailureMetricWhenValuationMissing(t *testing.T) {
 		BlockTimestamp:  time.Unix(1750000000, 0).UTC(),
 	}
 
-	_, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap}, map[string]bool{})
+	_, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap})
 	if err != nil {
 		t.Fatalf("buildPositions: %v", err)
 	}
@@ -1364,7 +1470,7 @@ func TestBuildPositions_RecordsFailureMetric_MissingAssetAddress(t *testing.T) {
 		BlockTimestamp:  time.Unix(1750000000, 0).UTC(),
 	}
 
-	_, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap}, map[string]bool{})
+	_, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap})
 	if err != nil {
 		t.Fatalf("buildPositions: %v", err)
 	}

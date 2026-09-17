@@ -17,6 +17,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
+// univ3TokenTypes and univ4TokenTypes are the single source of truth for which
+// token types are pool-style (not ERC20-compatible): HandleBatch's metadata
+// gate and rowMeta's dispatch both read these instead of repeating the type
+// strings, so the two can't drift apart.
+var (
+	univ3TokenTypes = map[string]bool{"uni_v3_pool": true, "uni_v3_lp": true}
+	univ4TokenTypes = map[string]bool{"uni_v4_pool": true, "uni_v4_lp": true}
+)
+
 type PrimePositionHandler struct {
 	repo        outbound.AllocationRepository
 	supplyRepo  outbound.TokenTotalSupplyRepository
@@ -71,13 +80,14 @@ func (h *PrimePositionHandler) HandleBatch(
 		blockNum = batch.Supplies[0].BlockNumber
 	}
 
-	// Token types where the contract itself isn't ERC20-compatible
-	// (e.g. Uniswap V3 pool contracts don't have decimals/symbol).
-	// Their row metadata comes from univ3RowMeta: decimals from the hint
-	// asset, symbol composed from the pool pair.
-	nonERC20Types := map[string]bool{
-		"uni_v3_pool": true,
-		"uni_v3_lp":   true,
+	// Neither a V3 pool contract nor the V4 PositionManager is ERC20-compatible;
+	// see rowMeta for how each gets its row metadata instead.
+	nonERC20Types := make(map[string]bool, len(univ3TokenTypes)+len(univ4TokenTypes))
+	for t := range univ3TokenTypes {
+		nonERC20Types[t] = true
+	}
+	for t := range univ4TokenTypes {
+		nonERC20Types[t] = true
 	}
 
 	var addrs []common.Address
@@ -111,7 +121,7 @@ func (h *PrimePositionHandler) HandleBatch(
 		return fmt.Errorf("metadata fetch: %w", err)
 	}
 
-	positions, err := h.buildPositions(ctx, batch.Snapshots, nonERC20Types)
+	positions, err := h.buildPositions(ctx, batch.Snapshots)
 	if err != nil {
 		return err
 	}
@@ -158,7 +168,6 @@ func positionTokenAddress(s *PositionSnapshot) (common.Address, error) {
 func (h *PrimePositionHandler) buildPositions(
 	ctx context.Context,
 	snapshots []*PositionSnapshot,
-	nonERC20Types map[string]bool,
 ) ([]*entity.AllocationPosition, error) {
 	positions := make([]*entity.AllocationPosition, 0, len(snapshots))
 	for _, s := range snapshots {
@@ -167,22 +176,9 @@ func (h *PrimePositionHandler) buildPositions(
 			return nil, fmt.Errorf("position token: %w", err)
 		}
 
-		var meta tokenMeta
-		if nonERC20Types[s.Entry.TokenType] {
-			m, err := h.univ3RowMeta(s)
-			if err != nil {
-				return nil, err
-			}
-			meta = m
-		} else {
-			m, ok := h.metadata.get(tokenAddr)
-			if !ok {
-				return nil, fmt.Errorf(
-					"metadata missing for token %s",
-					tokenAddr.Hex(),
-				)
-			}
-			meta = m
+		meta, err := h.rowMeta(s, tokenAddr)
+		if err != nil {
+			return nil, err
 		}
 
 		primeID, ok := h.primeLookup[s.Entry.Star]
@@ -285,6 +281,49 @@ func (h *PrimePositionHandler) univ3RowMeta(s *PositionSnapshot) (tokenMeta, err
 	}, nil
 }
 
+// rowMeta picks the row-metadata strategy for s.Entry.TokenType: a V3 pool
+// composes its symbol from the pool pair, a V4 posm position from the hint
+// asset alone (see univ4RowMeta), and everything else reads its own ERC20
+// metadata.
+func (h *PrimePositionHandler) rowMeta(s *PositionSnapshot, tokenAddr common.Address) (tokenMeta, error) {
+	switch {
+	case univ3TokenTypes[s.Entry.TokenType]:
+		return h.univ3RowMeta(s)
+	case univ4TokenTypes[s.Entry.TokenType]:
+		return h.univ4RowMeta(s)
+	default:
+		m, ok := h.metadata.get(tokenAddr)
+		if !ok {
+			return tokenMeta{}, fmt.Errorf("metadata missing for token %s", tokenAddr.Hex())
+		}
+		return m, nil
+	}
+}
+
+// univ4RowMeta names a uni_v4 posm-managed LP position's token-registry row
+// from the hint asset alone: a V4 entry has no single pool pair to compose
+// from (see UniV4Source's doc comment for why).
+func (h *PrimePositionHandler) univ4RowMeta(s *PositionSnapshot) (tokenMeta, error) {
+	if s.Entry.AssetAddress == nil {
+		return tokenMeta{}, fmt.Errorf(
+			"uni_v4 entry %s has no asset address",
+			s.Entry.ContractAddress.Hex(),
+		)
+	}
+	asset, ok := h.metadata.get(*s.Entry.AssetAddress)
+	if !ok {
+		return tokenMeta{}, fmt.Errorf(
+			"metadata missing for asset %s (uni_v4 entry %s)",
+			s.Entry.AssetAddress.Hex(),
+			s.Entry.ContractAddress.Hex(),
+		)
+	}
+	return tokenMeta{
+		symbol:   fmt.Sprintf("UNIV4-LP-%s", asset.symbol),
+		decimals: asset.decimals,
+	}, nil
+}
+
 // poolPairSymbol resolves one pool token's symbol for composition. The cache
 // never holds an unresolved symbol (fetchMissing fails the batch instead of
 // caching a fallback), so a cache hit is always safe to compose with.
@@ -308,12 +347,9 @@ func (h *PrimePositionHandler) poolPairSymbol(token, pool common.Address) (strin
 // means "nil by design, not a failure".
 func (h *PrimePositionHandler) underlyingValuation(s *PositionSnapshot) (*entity.UnderlyingValuation, FailureReason) {
 	switch s.Entry.TokenType {
-	case "erc4626", "uni_v3_pool", "uni_v3_lp":
-		// Both carry a source-computed value denominated in asset_address:
-		// erc4626 reads convertToAssets(shares); uni_v3 computes the full
-		// position value (both sides at the pool's own spot price). The V3
-		// pool is not an ERC20 and can never have its own oracle, so this
-		// valuation is the only way the API can price the position.
+	case "erc4626", "uni_v3_pool", "uni_v3_lp", "uni_v4_pool", "uni_v4_lp":
+		// All carry a source-computed value denominated in asset_address; a V3
+		// pool and the V4 PositionManager are never ERC20s with their own oracle.
 		if s.Entry.AssetAddress == nil {
 			return nil, reasonMissingAssetAddress
 		}

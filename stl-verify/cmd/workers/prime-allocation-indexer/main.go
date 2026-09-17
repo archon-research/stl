@@ -314,7 +314,9 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 
 	// Build source registry. Assembly lives in the allocation_tracker package so the
 	// routing guardrail test and the worker share one definition (see registry_build.go).
-	registry, err := at.BuildSourceRegistry(mc, logger)
+	uniswapV4Repo := postgres.NewUniswapV4Repository(dbPool, buildReg.BuildID())
+	blockStateRepo := postgres.NewBlockStateRepository(dbPool, cfg.chainID, logger)
+	registry, err := at.BuildSourceRegistry(mc, uniswapV4Repo, blockStateRepo, logger)
 	if err != nil {
 		return fmt.Errorf("build source registry: %w", err)
 	}
