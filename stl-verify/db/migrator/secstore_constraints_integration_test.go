@@ -113,6 +113,13 @@ func TestSecStoreEveryEngineRuleRejectsItsInput(t *testing.T) {
 		}
 	})
 
+	t.Run("sec_node_record_type_check_rejects_bogus_kind", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, `+secstoreSpine+`)
+			VALUES ('em-t-bogus-kind', 'BOGUS', 'ACTIVE', '2026-01-01', 'test', 'SEED_LOAD', 'invalid record_type', 'test')`)
+		assertSQLState(t, err, "23514", "sec_node record_type inline CHECK")
+	})
+
 	t.Run("sec_edge_run_id_fk_rejects_unknown_run", func(t *testing.T) {
 		_, err := pool.Exec(ctx, `
 			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, run_id, valid_from, `+secstoreSpine+`)

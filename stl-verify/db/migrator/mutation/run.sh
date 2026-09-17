@@ -171,10 +171,8 @@ classify_result() {
         echo "HARNESS_ERROR"
     elif [[ "$test_output" == *"build failed"* || "$test_output" == *"cannot load package"* ]]; then
         echo "HARNESS_ERROR"
-    elif [[ "$test_output" == *"--- FAIL:"* && "$test_output" == *"--- PASS:"* ]]; then
-        echo "KILLED"
     elif [[ "$test_output" == *"--- FAIL:"* ]]; then
-        echo "HARNESS_ERROR"
+        echo "KILLED"
     else
         echo "HARNESS_ERROR"
     fi
