@@ -725,6 +725,89 @@ func TestAliasRegisterClosesAWindowByAppending(t *testing.T) {
 	})
 }
 
+// TestTheApprovalRuleAppliesToEveryGuardedTable covers CR-3.3 on all four tables
+// sec_store_append_guard is attached to, not just the one this ticket added it for.
+//
+// The function is shared but the triggers are per-table, so the rule can stop applying to one
+// table while still working on another — a later migration that recreates sec_node_append_guard
+// without it, or a guard reordering that skips the block on a path only edges take, would leave
+// a register-only test green. That ordering is not hypothetical: the approval block sits after
+// the supersedes resolution precisely so wave 1's orphan-pointer test keeps failing for its own
+// reason, and anyone adjusting that is one edit away from moving it again.
+//
+// sec_node and sec_edge matter most here. On the registers the rule is new and the tables are
+// empty; on the stores it TIGHTENS a contract that already shipped, so a regression there breaks
+// code other people already write against.
+func TestTheApprovalRuleAppliesToEveryGuardedTable(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	// RETRACTION carries requires_approval and needs no supersedes pointer, so each case is one
+	// insert. approver is nil for the refusal and a second identity for the accept.
+	for _, tc := range []struct {
+		table  string
+		insert func(approver any, n string) error
+	}{
+		{
+			table: "sec_node",
+			insert: func(approver any, n string) error {
+				_, err := pool.Exec(ctx, `
+					INSERT INTO sec_node (id, record_type, status, valid_from, valid_to,
+					                      actor, change_reason_code, change_reason, approved_by, source_system)
+					VALUES ('em-t-approval-' || $1::text, 'ENTITY', 'ACTIVE', '2026-01-01', '2026-01-01',
+					        'curator', 'RETRACTION', 'tombstone', $2, 'test')`, n, approver)
+				return err
+			},
+		},
+		{
+			table: "sec_edge",
+			insert: func(approver any, n string) error {
+				_, err := pool.Exec(ctx, `
+					INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to,
+					                      actor, change_reason_code, change_reason, approved_by, source_system)
+					VALUES ('sec-t-approval-' || $1::text, 'SECURITY', 'em-t-approval-dst', 'ENTITY',
+					        'ISSUED_BY', '2026-01-01', '2026-01-01',
+					        'curator', 'RETRACTION', 'tombstone', $2, 'test')`, n, approver)
+				return err
+			},
+		},
+		{
+			table: "instrument_register",
+			insert: func(approver any, n string) error {
+				_, err := pool.Exec(ctx, `
+					INSERT INTO instrument_register
+						(instrument_key, key_namespace, security_id, chain_id, valid_from, valid_to,
+						 actor, change_reason_code, change_reason, approved_by, source_system)
+					VALUES ('approval-key-' || $1::text, 'token_address', 'sec-x', 1,
+					        '2026-01-01', 'infinity',
+					        'curator', 'RETRACTION', 'tombstone', $2, 'test')`, n, approver)
+				return err
+			},
+		},
+		{
+			table: "alias_register",
+			insert: func(approver any, n string) error {
+				_, err := pool.Exec(ctx, `
+					INSERT INTO alias_register (id_scheme, id_value, node_id, valid_from, valid_to,
+					                            actor, change_reason_code, change_reason, approved_by, source_system)
+					VALUES ('INTERNAL', 'approval-value-' || $1::text, 'em-approval', '2026-01-01', 'infinity',
+					        'curator', 'RETRACTION', 'tombstone', $2, 'test')`, n, approver)
+				return err
+			},
+		},
+	} {
+		t.Run(tc.table, func(t *testing.T) {
+			if err := tc.insert(nil, "a"); !raisedWith(err, "requires an approver") {
+				t.Errorf("a RETRACTION with no approver on %s gave %v, want a refusal", tc.table, err)
+			}
+			if err := tc.insert("reviewer", "b"); err != nil {
+				t.Errorf("a RETRACTION with a distinct approver on %s was refused: %v", tc.table, err)
+			}
+		})
+	}
+}
+
 // TestRegistersReplayDoesNotLoseARowToALaterCorrection is the only fixture that can tell the
 // two snapshot implementations apart, and the reason the overloads must not read _latest.
 //
