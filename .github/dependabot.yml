@@ -15,15 +15,3 @@ updates:
     ignore:
       # uikit versions move only through deliberate adoption PRs, never bot PRs
       - dependency-name: "@archon-research/*"
-  # Base images are pinned by digest (VEC-783), so a published patch is a visible,
-  # reviewable PR.
-  - package-ecosystem: "docker"
-    directory: "/stl-verify"
-    schedule:
-      interval: "weekly"
-  # Mirrors the /stl-verify entry above: python/Dockerfile's base images are
-  # also digest-pinned (VEC-783).
-  - package-ecosystem: "docker"
-    directory: "/stl-verify/python"
-    schedule:
-      interval: "weekly"
