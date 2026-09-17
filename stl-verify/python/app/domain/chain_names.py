@@ -39,11 +39,13 @@ def chain_name_for(chain_id: int | None) -> str | None:
     """Return the internal chain name for ``chain_id``, or ``None`` if unknown.
 
     Returns ``None`` rather than raising: an unrecognised chain id means a
-    position exists on a chain this vocabulary has not been taught, which must
-    surface as a null field on the response rather than a failed request. A
-    ``None`` id is the same answer one step earlier — reference rows carry one
-    for a network STL has no id for, and 0 is unavailable because it already
-    means off-chain custody.
+    position exists on a chain this vocabulary has not been taught, and each
+    caller decides what that is worth. A row whose chain is a label answers a
+    null field; one whose chain keys a figure into an audited total cannot, and
+    says so instead (``prime_risk_capital_service._chain_of``). A ``None`` id
+    is the same answer one step earlier — reference rows carry one for a
+    network STL has no id for, and 0 is unavailable because it already means
+    off-chain custody.
     """
     return None if chain_id is None else CHAIN_ID_TO_NAME.get(chain_id)
 
