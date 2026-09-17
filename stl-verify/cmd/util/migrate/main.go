@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -26,7 +27,17 @@ func run() error {
 	}
 	ctx := context.Background()
 
-	pool, err := pgxpool.New(ctx, connStr)
+	cfg, err := pgxpool.ParseConfig(connStr)
+	if err != nil {
+		return fmt.Errorf("parsing DATABASE_URL: %w", err)
+	}
+	// pgx discards NOTICEs unless a handler is attached, and a migration that rewrites
+	// tables for tens of minutes is otherwise silent until it commits or dies.
+	cfg.ConnConfig.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
+		log.Printf("%s: %s", n.Severity, n.Message)
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("connecting to database: %w", err)
 	}
