@@ -49,7 +49,8 @@ Before bumping an environment to 1:
 
 1. Every entry in `POSITION_PROJECTIONS` exists in the target database. The worker checks this at
    startup and exits naming the ones it cannot call; `materialize_morpho_market` and
-   `materialize_morpho_vault` each ship with their own migration, which must be applied first.
+   `materialize_morpho_vault` are prerequisites, not yet deployed: they ship with #624 and #626, and both
+   must be merged and migrated first.
 2. Time one projection by hand and watch its transaction. The call holds a snapshot and a transaction
    id, and with them the vacuum horizon for every table in the database, for its whole duration:
 

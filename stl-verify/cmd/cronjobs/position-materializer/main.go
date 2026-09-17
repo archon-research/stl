@@ -46,10 +46,8 @@ func run() int {
 		slog.Error("position-materializer startup failed: missing configuration", "error", err)
 		return 1
 	}
-	// The projection list is explicit configuration, never discovery: a projection is
-	// materialized because an operator listed its wrapper, so a stray contract-shaped
-	// view can never be picked up by accident (the per-view disjointness contract makes
-	// an accidental extra writer a correctness hazard, not just noise).
+	// A projection runs only when an operator lists its wrapper: the per-view disjointness
+	// contract makes an extra writer a correctness hazard.
 	projectionsRaw, err := env.Require("POSITION_PROJECTIONS")
 	if err != nil {
 		slog.Error("position-materializer startup failed: missing configuration", "error", err)
