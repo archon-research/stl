@@ -16,6 +16,10 @@ it a *different* read rather than a cheaper one:
   silently omitting the entity from the total (VEC-537's failure class);
 * the direct-pricing arm gates on the oracle's enabled mapping too, so a
   disabled-oracle direct holding reaches the same poisoned state;
+* a direct holding with no price of its own but a tracker-recorded
+  ``underlying_value`` in a priced underlying is valued through that
+  underlying (the last arm), which never overrides an arm above it and
+  cannot price a row whose underlying is unpriced too;
 * a tie on ``created_at`` alone (a sweep row and a same-block flow row) is
   broken by block/version/log_index, both for the carry-in seed and the
   per-bucket winner;
@@ -45,21 +49,26 @@ from tests.integration.seed import (
     BS_DIRECT_BALANCE,
     BS_DIRECT_PRICE,
     BS_MIXED_DIRECT_BALANCE,
+    BS_OWN_PRICE_WINS_BALANCE,
     BS_PROXY_CARRY,
     BS_PROXY_CORRECTED,
     BS_PROXY_DIRECT,
     BS_PROXY_DIRECT_DISABLED_ORACLE,
     BS_PROXY_DIVERGENT,
     BS_PROXY_MIXED,
+    BS_PROXY_OWN_PRICE_WINS,
     BS_PROXY_SEED_TIEBREAK,
     BS_PROXY_SEEDED,
     BS_PROXY_SUMMED,
+    BS_PROXY_UNDERLYING_ONLY,
+    BS_PROXY_UNDERLYING_UNPRICED,
     BS_PROXY_WINDOW_TIEBREAK,
     BS_PROXY_ZERO_UNPRICEABLE,
     BS_SEED_TIEBREAK_FLOW_VALUE,
     BS_SEEDED_UNDERLYING_VALUE,
     BS_SUMMED_DIRECT_BALANCE,
     BS_SUMMED_UNDERLYING_VALUE,
+    BS_UNDERLYING_ONLY_VALUE,
     BS_UNDERLYING_PRICE,
     BS_VAULT_HEX,
     BS_WINDOW_TIEBREAK_FLOW_VALUE,
@@ -281,6 +290,40 @@ async def test_buckets_before_the_first_observation_are_null_not_zero(repo: Allo
     oldest_first = sorted(buckets, key=lambda b: b.bucket_start)
     assert oldest_first[0].balance_usd is None, "a bucket before any observation must not report a figure"
     assert oldest_first[-1].balance_usd == BS_CARRY_UNDERLYING_VALUE * BS_UNDERLYING_PRICE
+
+
+async def test_direct_holding_without_own_price_is_valued_through_its_underlying(
+    repo: AllocationRepository,
+) -> None:
+    # BS_PROXY_UNDERLYING_ONLY holds a token the registry does not know and no
+    # oracle prices, but the tracker recorded its redeemable value in a priced
+    # underlying (sparkPrimeUSDC1 / the AUSD-USDC Uni V3 position on mainnet).
+    # The last arm values it as underlying_value times that price, and the
+    # bucket reports full coverage.
+    buckets = await _buckets(repo, BS_PROXY_UNDERLYING_ONLY)
+    observed = [b for b in buckets if b.entity_count]
+    assert observed, "expected buckets after the first observation"
+    for bucket in observed:
+        assert bucket.balance_usd == BS_UNDERLYING_ONLY_VALUE * BS_UNDERLYING_PRICE, [b.balance_usd for b in observed]
+        assert bucket.priced_entity_count == bucket.entity_count == 1
+
+
+async def test_underlying_arm_cannot_price_an_unpriced_underlying(repo: AllocationRepository) -> None:
+    # Same shape, but the underlying has no enabled price either. The arm has
+    # nothing to multiply by, so the entity stays unpriceable and poisons its
+    # buckets exactly as before this arm existed.
+    buckets = await _buckets(repo, BS_PROXY_UNDERLYING_UNPRICED)
+    assert buckets, "an unpriceable row must still produce buckets, not vanish"
+    assert all(b.balance_usd is None for b in buckets), [b.balance_usd for b in buckets]
+
+
+async def test_own_price_wins_over_the_underlying_arm(repo: AllocationRepository) -> None:
+    # A direct holding that has its own price also carries an underlying_value
+    # (sUSDS-style: a per-share oracle AND a convertToAssets reading). The own
+    # price arm sits above the fallback, so the fallback must never override
+    # it -- otherwise the same position would be valued twice over.
+    buckets = await _buckets(repo, BS_PROXY_OWN_PRICE_WINS)
+    assert buckets[0].balance_usd == BS_OWN_PRICE_WINS_BALANCE * BS_DIRECT_PRICE
 
 
 async def test_direct_holding_with_only_a_disabled_oracle_is_unpriced(repo: AllocationRepository) -> None:
