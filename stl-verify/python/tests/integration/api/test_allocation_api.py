@@ -218,15 +218,20 @@ async def _seed(db_url: str) -> None:
 
             # USDC has an oracle price, so obex's direct holding is valued in USD.
             # GNO (grove's direct holding) is deliberately left unpriced to assert
-            # the null-amount_usd path for tokens with no oracle feed.
+            # the null-amount_usd path for tokens with no oracle feed. Dated well
+            # before every fixed-date fixture window in this module (VEC-763): a
+            # bucketed read resolves the price effective at its own historical
+            # point, not at insertion time, so a price meant to hold throughout
+            # must predate the window rather than land at NOW().
             oracle_id = await conn.fetchval("SELECT id FROM oracle WHERE name = 'aave_v3'")
             await conn.execute(
                 "INSERT INTO onchain_token_price "
                 "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
-                "VALUES ($1, $2, 1500, 0, NOW(), $3)",
+                "VALUES ($1, $2, 1500, 0, $4, $3)",
                 usdc_id,
                 oracle_id,
                 Decimal(1),
+                datetime(2020, 1, 1, tzinfo=UTC),
             )
             # Enabled oracle_asset mapping keeps this price eligible for the
             # latest-price reads, which exclude sources with no enabled mapping.
