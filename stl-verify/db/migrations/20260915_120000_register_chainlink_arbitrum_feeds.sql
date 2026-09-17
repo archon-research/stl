@@ -20,7 +20,7 @@ VALUES ('chainlink_arbitrum', 'Chainlink (Arbitrum)', 42161, NULL, 'chainlink_fe
 ON CONFLICT (name) DO NOTHING;
 
 INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, processing_version, change_reason)
-SELECT o.id, t.id, true, v.feed_address, 8, 'USD', 0, 'VEC-519: initial Arbitrum feed registration'
+SELECT o.id, t.id, true, v.feed_address, 8, 'USD', 0, 'ARCT-511: initial Arbitrum feed registration'
 FROM (VALUES
     ('\x6491c05a82219b8d1479057361ff1654749b876b'::bytea, '\x37833E5b3fbbEd4D613a3e0C354eF91A42B81eeB'::bytea),
     ('\xaf88d065e77c8cc2239327c5edb3a432268e5831'::bytea, '\x50834F3163758fcC1Df9973b6e91f0F0F0434aD3'::bytea)

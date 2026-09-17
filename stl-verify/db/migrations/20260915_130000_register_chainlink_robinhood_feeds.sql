@@ -26,7 +26,7 @@ VALUES ('chainlink_robinhood', 'Chainlink (Robinhood)', 4663, NULL, 'chainlink_f
 ON CONFLICT (name) DO NOTHING;
 
 INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, processing_version, change_reason)
-SELECT o.id, t.id, true, '\x61B7e5650328764B076A108EFF5fa7282a1B9aD2'::bytea, 8, 'USD', 0, 'VEC-519: initial Robinhood feed registration'
+SELECT o.id, t.id, true, '\x61B7e5650328764B076A108EFF5fa7282a1B9aD2'::bytea, 8, 'USD', 0, 'ARCT-511: initial Robinhood feed registration'
 FROM oracle o
 JOIN token t ON t.chain_id = 4663 AND t.address = '\x5fc5360d0400a0fd4f2af552add042d716f1d168'::bytea
 WHERE o.name = 'chainlink_robinhood'

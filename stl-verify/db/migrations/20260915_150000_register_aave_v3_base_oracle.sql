@@ -21,7 +21,7 @@ VALUES ('aave_v3_base', 'Aave V3 Base', 8453,
 ON CONFLICT (name) DO NOTHING;
 
 INSERT INTO oracle_asset (oracle_id, token_id, enabled, quote_currency, processing_version, change_reason)
-SELECT o.id, t.id, true, 'USD', 0, 'VEC-519: initial Aave V3 Base oracle registration'
+SELECT o.id, t.id, true, 'USD', 0, 'ARCT-511: initial Aave V3 Base oracle registration'
 FROM oracle o
 JOIN token t ON t.chain_id = 8453 AND t.address = '\x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'::bytea
 WHERE o.name = 'aave_v3_base'
