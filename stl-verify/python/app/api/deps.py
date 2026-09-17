@@ -353,11 +353,22 @@ async def resolve_prime_scope(
     resolution exists to remove.
     """
     identity = await resolve_prime(identifier, resolver, request=request, principal=principal)
-    return await _scope_for(identity, resolver)
+    return await _scope_for(identity, resolver, request=request, principal=principal)
 
 
-async def _scope_for(identity: PrimeIdentity, resolver: PrimeResolver) -> PrimeScope:
-    """Widen a resolved identity to the prime's whole wallet set."""
+async def _scope_for(
+    identity: PrimeIdentity,
+    resolver: PrimeResolver,
+    *,
+    request: Request | None = None,
+    principal: Principal | None = None,
+) -> PrimeScope:
+    """Widen a resolved identity to the prime's whole wallet set.
+
+    ``request`` and ``principal`` come from the authz gate alone, like
+    ``resolve_prime``'s: a query filter answers the same 503 but makes no
+    authorization decision, so it has none to record.
+    """
     try:
         wallets = await resolver.list_proxies(identity.id)
     except ValueError as exc:

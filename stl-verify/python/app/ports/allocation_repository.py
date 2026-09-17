@@ -53,9 +53,8 @@ class AllocationRepositoryPort(Protocol):
     async def list_anchorage_custody_holdings(self, prime_id: int) -> list[AnchorageCustodyHolding]:
         """Return off-chain Anchorage custody collateral for the prime.
 
-        Keyed on the resolved ``prime.id``: custody is SHARED
-        (``app.domain.prime_scope``), one figure per prime with no proxy to
-        attribute it to.
+        Keyed on the resolved ``prime.id``: custody is SHARED (see
+        ``PrimeScope``), one figure per prime with no proxy to attribute it to.
 
         One row per ``(asset_type, custody_type)``, collapsed across every
         package in the prime's *latest snapshot cohort* — the packages sharing

@@ -38,8 +38,8 @@ class AllocationService:
     async def list_receipt_token_positions(self, scope: PrimeScope) -> list[ReceiptTokenPosition]:
         """The prime's receipt-token positions, union across its ALM proxies.
 
-        Allocation rows are ADDITIVE (``app.domain.prime_scope``): each proxy
-        holds its own, so the prime's set is their union.
+        Allocation rows are ADDITIVE (see ``PrimeScope``): each proxy holds
+        its own, so the prime's set is their union.
         """
         return await self._repository.list_receipt_token_positions(scope.alm_proxies)
 
