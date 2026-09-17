@@ -232,7 +232,7 @@ test:
 
 test-integration: integration-shard-check
 	@echo "==> Running integration tests..."
-	GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=20m -p 4 ./...
+	go test -tags=integration -v -timeout=20m -p 4 ./...
 
 test-integration-shard: integration-shard-check
 	@case "$(INTEGRATION_SHARD)" in \
@@ -241,7 +241,7 @@ test-integration-shard: integration-shard-check
 	esac
 	@echo "==> Running integration test shard $(INTEGRATION_SHARD)/2..."
 	@packages=$$(grep -hEv '^[[:space:]]*(#|$$)' ci/integration-shards/$(INTEGRATION_SHARD).txt | tr '\n' ' '); \
-		GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=20m -p 4 $$packages
+		go test -tags=integration -v -timeout=20m -p 4 $$packages
 
 integration-shard-check:
 	@bash ci/check-integration-shards.sh
@@ -418,7 +418,9 @@ e2e-real-reserve-facts:
 # Install development tools
 tools:
 	@echo "==> Installing development tools..."
-	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 # keep in sync with .github/workflows/go-ci.yml
+	# v2.13.0+ is built with Go 1.27; v2.12.x was built with Go 1.26 and
+	# panics on Go 1.27 stdlib type-checking.
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 # keep in sync with .github/workflows/go-ci.yml
 	go install golang.org/x/vuln/cmd/govulncheck@latest
 	go install golang.org/x/tools/cmd/goimports@v0.49.0 # keep in sync with .github/workflows/go-ci.yml
 	go install github.com/go-delve/delve/cmd/dlv@latest
