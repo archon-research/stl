@@ -297,9 +297,9 @@ func (s *stackInvariants) viewEqualsSpineArgmax() string {
 		     got AS (SELECT position_id, as_of_date, quantity, block_number, block_version,
 		                    processing_version, block_timestamp, deal_type, holder_id, instrument_key
 		               FROM position_daily)
-		SELECT (SELECT count(*) FROM (SELECT * FROM oracle EXCEPT SELECT * FROM got) a),
-		       (SELECT count(*) FROM (SELECT * FROM got EXCEPT SELECT * FROM oracle) b),
-		       COALESCE((SELECT a::text FROM (SELECT * FROM oracle EXCEPT SELECT * FROM got) a LIMIT 1), '')`,
+		SELECT (SELECT count(*) FROM (SELECT * FROM oracle EXCEPT ALL SELECT * FROM got) a),
+		       (SELECT count(*) FROM (SELECT * FROM got EXCEPT ALL SELECT * FROM oracle) b),
+		       COALESCE((SELECT a::text FROM (SELECT * FROM oracle EXCEPT ALL SELECT * FROM got) a LIMIT 1), '')`,
 		"the spine implies", "the view holds that the spine does not")
 }
 
@@ -333,9 +333,9 @@ func (s *stackInvariants) currentEqualsSpineArgmax() string {
 		                       processing_version, block_timestamp, deal_type FROM ranked WHERE rn = 1),
 		     got AS (SELECT position_id, quantity, block_number, block_version,
 		                    processing_version, block_timestamp, deal_type FROM position_current)
-		SELECT (SELECT count(*) FROM (SELECT * FROM oracle EXCEPT SELECT * FROM got) a),
-		       (SELECT count(*) FROM (SELECT * FROM got EXCEPT SELECT * FROM oracle) b),
-		       COALESCE((SELECT a::text FROM (SELECT * FROM oracle EXCEPT SELECT * FROM got) a LIMIT 1), '')`,
+		SELECT (SELECT count(*) FROM (SELECT * FROM oracle EXCEPT ALL SELECT * FROM got) a),
+		       (SELECT count(*) FROM (SELECT * FROM got EXCEPT ALL SELECT * FROM oracle) b),
+		       COALESCE((SELECT a::text FROM (SELECT * FROM oracle EXCEPT ALL SELECT * FROM got) a LIMIT 1), '')`,
 		"the spine implies", "position_current holds that the spine does not")
 }
 
@@ -368,7 +368,7 @@ func (s *stackInvariants) asOfIsMonotone() string {
 		SELECT count(*) FROM (
 		    SELECT position_id, as_of_date, block_number, block_version, processing_version, block_timestamp
 		      FROM position_daily_as_of((SELECT lo FROM bounds))
-		    EXCEPT
+		    EXCEPT ALL
 		    SELECT position_id, (block_timestamp AT TIME ZONE 'utc')::date, block_number, block_version,
 		           processing_version, block_timestamp
 		      FROM position_state WHERE created_at <= (SELECT hi FROM bounds)) x`,

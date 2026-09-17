@@ -327,14 +327,44 @@ func TestPositionDailyOnWindowEdgesAreUTCMidnight(t *testing.T) {
 	f.observe("d-edge-first", dailyObs{qty: 2, block: 101, ts: "2026-02-02T00:00:00Z", dealType: "LOAN"})
 	f.observe("d-edge-prev", dailyObs{qty: 3, block: 99, ts: "2026-01-31T23:59:59.999999Z", dealType: "LOAN"})
 	// The session zone must not move the window: the bound is built in UTC, not in the caller's zone.
-	if _, err := f.pool.Exec(f.ctx, `SET TIME ZONE 'Pacific/Kiritimati'`); err != nil {
+	// One held connection, so the SET reaches the connection the reads run on.
+	conn, err := f.pool.Acquire(f.ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if _, err := f.pool.Exec(context.Background(), `RESET TIME ZONE`); err != nil {
+	defer conn.Release()
+	if _, err := conn.Exec(f.ctx, `SET TIME ZONE 'Pacific/Kiritimati'`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, err := conn.Exec(context.Background(), `RESET TIME ZONE`); err != nil {
 			t.Errorf("reset the time zone: %v", err)
 		}
-	})
+	}()
+	read := func(q, date string) []string {
+		t.Helper()
+		rows, err := conn.Query(f.ctx, q, date)
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var v string
+			if err := rows.Scan(&v); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, v)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("%s iteration: %v", q, err)
+		}
+		return out
+	}
+	var zone string
+	if err := conn.QueryRow(f.ctx, `SHOW TIME ZONE`).Scan(&zone); err != nil || zone != "Pacific/Kiritimati" {
+		t.Fatalf("the session zone is %q (%v); the reads below would not test a non-UTC session", zone, err)
+	}
 	for _, tc := range []struct {
 		date string
 		want []string
@@ -343,8 +373,8 @@ func TestPositionDailyOnWindowEdgesAreUTCMidnight(t *testing.T) {
 		{"2026-02-01", []string{"1"}},
 		{"2026-02-02", []string{"2"}},
 	} {
-		on := f.column(`SELECT quantity::text FROM position_daily_on($1::date) ORDER BY 1`, tc.date)
-		view := f.column(`SELECT quantity::text FROM position_daily WHERE as_of_date = $1::date ORDER BY 1`, tc.date)
+		on := read(`SELECT quantity::text FROM position_daily_on($1::date) ORDER BY 1`, tc.date)
+		view := read(`SELECT quantity::text FROM position_daily WHERE as_of_date = $1::date ORDER BY 1`, tc.date)
 		if !slices.Equal(on, tc.want) || !slices.Equal(view, tc.want) {
 			t.Errorf("%s: position_daily_on reads %v and position_daily reads %v; want %v", tc.date, on, view, tc.want)
 		}

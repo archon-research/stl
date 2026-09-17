@@ -111,5 +111,6 @@ COMMENT ON VIEW position_daily IS '[Operational] What each position held on each
 
 GRANT SELECT ON position_daily TO stl_readonly;
 GRANT SELECT ON position_daily TO stl_readwrite;
+GRANT EXECUTE ON FUNCTION position_daily_on(date, timestamptz), position_daily_as_of(timestamptz) TO stl_readonly, stl_readwrite;
 
 INSERT INTO public.migrations (filename) VALUES ('20260824_120000_create_position_daily.sql') ON CONFLICT (filename) DO NOTHING;
