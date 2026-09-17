@@ -318,13 +318,15 @@ patches:
         annotations:
           reloader.stakater.com/auto: "true"
 
+  # The edge is the only tailnet entry point now (verify-staging, api-staging);
+  # the direct proxy would bypass its login. Staging alone sheds the base
+  # annotation, prod retires its own at cutover (ADR-015).
   - target:
       kind: Service
       name: python-api
     patch: |
-      - op: add
-        path: /metadata/annotations/tailscale.com~1hostname
-        value: python-api-staging
+      - op: remove
+        path: /metadata/annotations/tailscale.com~1expose
 
   # verify-staging becomes the edge's UI name (ADR-015): the alias Service must
   # release it before the Tailscale Ingress can claim it. Prod keeps its alias.

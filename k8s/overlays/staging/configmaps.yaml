@@ -922,9 +922,9 @@ data:
   OTEL_ENABLED: "true"
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
   OTEL_SERVICE_NAME: "stl-verify-python-api"
-  # Auth plane (ADR-015) — ships dark. Flipping AUTH_ENABLED turns on token
-  # verification, the per-router role gates and the OpenFGA checks together.
-  AUTH_ENABLED: "false"
+  # Auth plane (ADR-015). AUTH_ENABLED turns on token verification, the
+  # per-router role gates and the OpenFGA checks together; on since ORB-403.
+  AUTH_ENABLED: "true"
   # Two names for one Keycloak. OIDC_ISSUER must equal the `iss` CLAIM
   # (KC_HOSTNAME, https and the full tailnet name since ORB-440), which jwt.py
   # compares exactly and Swagger sends a BROWSER to; OIDC_JWKS_URL is where this
