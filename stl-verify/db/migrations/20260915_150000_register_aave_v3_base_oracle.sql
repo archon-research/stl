@@ -6,10 +6,11 @@
 -- the Aave unit skips a block (it reverts wholesale when any asset is unpriceable).
 -- Both are ~$1, so harmless.
 --
--- AaveOracle address from the aave-address-book (AaveV3Base.sol):
---   0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156
+-- AaveOracle 0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156, verified on-chain at block
+-- 51419879: PoolAddressesProvider(0xe20fcbdbffc4dd138ce8b2e6fbb6cb49777ad64d).getPriceOracle()
+-- returns it, BASE_CURRENCY_UNIT() = 1e8, getAssetPrice(USDC) = 99987382.
 -- Pool address (protocol natural key): 0xA238Dd80C259a72e81d7e4664a9801593F98d1c5
--- Pool created at block 2357134 (protocols.go).
+-- Pool created at block 2357134 (protocols.go, confirmed on-chain).
 -- USDC on Base: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 (6 decimals)
 -- aBasUSDC receipt token already exists (20260909_130000).
 

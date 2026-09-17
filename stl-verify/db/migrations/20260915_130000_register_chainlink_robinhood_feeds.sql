@@ -2,16 +2,19 @@
 -- Unlocks ~$15M of unpriced USDG held directly on Robinhood, plus groveUSDG
 -- (~$102k) via the receipt-token path once USDG is priced.
 --
--- Feed address from the Chainlink RDD for Robinhood:
---   USDG/USD  proxy 0x61B7e5650328764B076A108EFF5fa7282a1B9aD2  (8 decimals, path usdg-usd)
--- Source: https://reference-data-directory.vercel.app/feeds-robinhood-mainnet.json
+-- Feed address from the Chainlink reference-data-directory for Robinhood, verified
+-- on-chain at block 65178110 (description/decimals/latestRoundData):
+--   USDG/USD  proxy 0x61B7e5650328764B076A108EFF5fa7282a1B9aD2  "USDG / USD", 8dp, deployed at 33322
+-- deployment_block is that feed, as chainlink/chainlink_base carry.
 --
 -- groveUSDG is a Morpho Vault V2 (curator Steakhouse) on Robinhood. It is priced
 -- through the receipt-token path: the tracker writes underlying_value in USDG
 -- units via convertToAssets, and the receipt path multiplies by the USDG/USD
 -- price from this oracle. No Go code change needed.
--- groveUSDG receipt token: 0xbEeFF039907422219FB367E525954ddC092854D9
--- Morpho Blue on Robinhood: 0x9D53d5E3bd5E8d4Cbfa6DB1ca238AEA02E651010
+-- Verified on-chain at block 65178110: USDG 0x5fc5360d... symbol USDG, 6dp, deployed at 57;
+-- groveUSDG receipt token 0xbEeFF039907422219FB367E525954ddC092854D9 asset() = USDG, 18dp,
+-- convertToAssets(1e18) = 1001191, deployed at 47860; Morpho Blue on Robinhood
+-- 0x9D53d5E3bd5E8d4Cbfa6DB1ca238AEA02E651010 deployed at 286; Multicall3 present from block 0.
 
 INSERT INTO token (chain_id, address, symbol, decimals)
 VALUES
@@ -31,18 +34,18 @@ ON CONFLICT (oracle_id, token_id, feed_key, processing_version) DO NOTHING;
 
 INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
 VALUES (4663, '\x9D53d5E3bd5E8d4Cbfa6DB1ca238AEA02E651010'::bytea,
-        'Morpho Blue', 'lending', 57, NOW(), '{}'::jsonb)
+        'Morpho Blue', 'lending', 286, NOW(), '{}'::jsonb)
 ON CONFLICT (chain_id, address) DO NOTHING;
 
 INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block)
-SELECT p.id, o.id, 57
+SELECT p.id, o.id, 286
 FROM protocol p, oracle o
 WHERE p.chain_id = 4663 AND p.address = '\x9D53d5E3bd5E8d4Cbfa6DB1ca238AEA02E651010'::bytea
   AND o.name = 'chainlink_robinhood'
 ON CONFLICT (protocol_id, oracle_id, from_block) DO NOTHING;
 
 INSERT INTO receipt_token (chain_id, protocol_id, underlying_token_id, receipt_token_address, symbol, created_at_block)
-SELECT 4663, p.id, t.id, '\xbEeFF039907422219FB367E525954ddC092854D9'::bytea, 'groveUSDG', 57
+SELECT 4663, p.id, t.id, '\xbEeFF039907422219FB367E525954ddC092854D9'::bytea, 'groveUSDG', 47860
 FROM protocol p, token t
 WHERE p.chain_id = 4663 AND p.address = '\x9D53d5E3bd5E8d4Cbfa6DB1ca238AEA02E651010'::bytea
   AND t.chain_id = 4663 AND t.address = '\x5fc5360d0400a0fd4f2af552add042d716f1d168'::bytea

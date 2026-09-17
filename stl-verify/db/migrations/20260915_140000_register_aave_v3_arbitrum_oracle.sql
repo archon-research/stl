@@ -1,15 +1,16 @@
 -- Register the Aave V3 Arbitrum AaveOracle (chain 42161) so aArbUSDCn receipt
 -- tokens are priced via the protocol's own oracle rather than a generic feed.
 --
--- AaveOracle address from the aave-address-book (AaveV3Arbitrum.sol):
---   0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7
+-- AaveOracle 0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7, verified on-chain at block
+-- 506019592: PoolAddressesProvider(0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb).getPriceOracle()
+-- returns it, BASE_CURRENCY_UNIT() = 1e8, getAssetPrice(USDC) = 99985045.
 -- Pool address (protocol natural key): 0x794a61358D6845594F94dc1DB02A252b5b4814aD
--- PoolAddressesProvider: 0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb
--- Pool created at block 7742429 (protocols.go).
+-- Pool created at block 7742429 (protocols.go, confirmed on-chain).
 -- Only USDC is an Aave V3 Arbitrum reserve that we hold; USDS/sUSDS are not
--- reserves (getSourceOfAsset returns 0x0), so they must NOT be added to this
--- oracle unit (an aave unit reverts wholesale if any asset is unpriceable).
--- aArbUSDCn receipt token: 0x724dc807b04555b71ed48a6896b6f41593b8c637
+-- reserves (getSourceOfAsset returns 0x0 and getAssetPrice reverts), so they must NOT
+-- be added to this oracle unit (an aave unit reverts wholesale if any asset is unpriceable).
+-- aArbUSDCn receipt token 0x724dc807b04555b71ed48a6896b6f41593b8c637:
+-- UNDERLYING_ASSET_ADDRESS() = USDC, 6dp, deployed at 105740626.
 
 INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
 VALUES (42161, '\x794a61358D6845594F94dc1DB02A252b5b4814aD'::bytea,
@@ -37,7 +38,7 @@ WHERE p.chain_id = 42161 AND p.address = '\x794a61358D6845594F94dc1DB02A252b5b48
 ON CONFLICT (protocol_id, oracle_id, from_block) DO NOTHING;
 
 INSERT INTO receipt_token (chain_id, protocol_id, underlying_token_id, receipt_token_address, symbol, created_at_block)
-SELECT 42161, p.id, t.id, '\x724dc807b04555b71ed48a6896b6f41593b8c637'::bytea, 'aArbUSDCn', 7742429
+SELECT 42161, p.id, t.id, '\x724dc807b04555b71ed48a6896b6f41593b8c637'::bytea, 'aArbUSDCn', 105740626
 FROM protocol p, token t
 WHERE p.chain_id = 42161 AND p.address = '\x794a61358D6845594F94dc1DB02A252b5b4814aD'::bytea
   AND t.chain_id = 42161 AND t.address = '\xaf88d065e77c8cc2239327c5edb3a432268e5831'::bytea

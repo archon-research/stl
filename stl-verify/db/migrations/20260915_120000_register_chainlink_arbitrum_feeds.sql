@@ -1,10 +1,11 @@
 -- Register Chainlink price feeds for Arbitrum (chain 42161): USDS/USD and USDC/USD.
 -- Unlocks ~$90M of unpriced USDS held directly on Arbitrum.
 --
--- Feed addresses from the Chainlink reference-data-directory (RDD) for Arbitrum,
--- verified at https://reference-data-directory.vercel.app/feeds-ethereum-mainnet-arbitrum-1.json:
---   USDS/USD  proxy 0x37833E5b3fbbEd4D613a3e0C354eF91A42B81eeB  (8 decimals, path usds-usd)
---   USDC/USD  proxy 0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3  (8 decimals, path usdc-usd)
+-- Feed addresses from the Chainlink reference-data-directory for Arbitrum, verified
+-- on-chain at block 506019592 (description/decimals/latestRoundData, token symbol/decimals):
+--   USDS/USD  proxy 0x37833E5b3fbbEd4D613a3e0C354eF91A42B81eeB  "USDS / USD", 8dp, deployed at 305996885
+--   USDC/USD  proxy 0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3  "USDC / USD", 8dp, deployed at 101256
+-- deployment_block is the earliest of the two feeds, as chainlink/chainlink_base carry.
 -- The USDS/USD feed is a dex_state_price feed (24h heartbeat, 0.5% deviation), weaker
 -- than mainnet's Chainlink USDS/USD. PSM3 itself values USDS at exactly $1.
 
@@ -15,7 +16,7 @@ VALUES
 ON CONFLICT (chain_id, address) DO NOTHING;
 
 INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, price_decimals, enabled)
-VALUES ('chainlink_arbitrum', 'Chainlink (Arbitrum)', 42161, NULL, 'chainlink_feed', 0, 8, true)
+VALUES ('chainlink_arbitrum', 'Chainlink (Arbitrum)', 42161, NULL, 'chainlink_feed', 101256, 8, true)
 ON CONFLICT (name) DO NOTHING;
 
 INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, processing_version, change_reason)
