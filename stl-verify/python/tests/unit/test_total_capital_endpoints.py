@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
+from app.api.deps import PRIME_DENIED_DETAIL
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.time_series_bucket import TotalCapitalBucket
 from app.main import app
@@ -12,13 +13,8 @@ from app.services.allocation_service import AllocationService
 _VALID_ADDR = "0x" + "ab" * 20
 
 
-def _make_service(
-    *,
-    exists: bool = True,
-    buckets: list[TotalCapitalBucket] | None = None,
-) -> AsyncMock:
+def _make_service(*, buckets: list[TotalCapitalBucket] | None = None) -> AsyncMock:
     service = AsyncMock(spec=AllocationService)
-    service.prime_exists.return_value = exists
     service.list_total_capital_buckets.return_value = buckets or []
     return service
 
@@ -30,7 +26,7 @@ def _override_service(service: AsyncMock):
     return _dep
 
 
-def test_list_prime_total_capital_returns_aggregated_buckets():
+def test_list_prime_total_capital_returns_aggregated_buckets(prime_resolver):
     from app.api.v1 import total_capital
 
     buckets = [
@@ -83,8 +79,8 @@ def test_list_prime_total_capital_returns_aggregated_buckets():
                 "capital_observed_at": None,
             },
         ]
-        service.prime_exists.assert_awaited_once_with(EthAddress(_VALID_ADDR))
-        assert service.list_total_capital_buckets.await_args.args[0] == EthAddress(_VALID_ADDR)
+        scope = service.list_total_capital_buckets.await_args.args[0]
+        assert scope.subproxies == (EthAddress("0x" + "22" * 20),)
         kwargs = service.list_total_capital_buckets.await_args.kwargs
         assert kwargs["bucket_seconds"] == 6 * 60 * 60
         assert kwargs["from_timestamp"] == datetime(2026, 5, 19, 0, 0, tzinfo=UTC)
@@ -149,10 +145,13 @@ def test_list_prime_total_capital_sets_no_store_when_bounds_not_pinned():
         app.dependency_overrides.pop(total_capital._get_service, None)
 
 
-def test_list_prime_total_capital_returns_404_when_prime_missing():
+def test_list_prime_total_capital_returns_404_when_prime_missing(prime_resolver):
+    """The resolver is the existence check: a prime is one the resolver names,
+    not one that happens to have a position row."""
     from app.api.v1 import total_capital
 
-    service = _make_service(exists=False)
+    service = _make_service()
+    prime_resolver.identity = None
     app.dependency_overrides[total_capital._get_service] = _override_service(service)
     try:
         client = TestClient(app)
@@ -160,8 +159,25 @@ def test_list_prime_total_capital_returns_404_when_prime_missing():
         response = client.get(f"/v1/primes/{_VALID_ADDR}/total-capital")
 
         assert response.status_code == 404
-        assert response.json()["detail"] == "Prime not found"
+        assert response.json()["detail"] == PRIME_DENIED_DETAIL
         service.list_total_capital_buckets.assert_not_awaited()
+    finally:
+        app.dependency_overrides.pop(total_capital._get_service, None)
+
+
+def test_list_prime_total_capital_answers_a_prime_with_no_treasury_wallet(prime_resolver):
+    """A vault with no proxies is a whole-prime answer over an empty wallet set,
+    not a 404."""
+    from app.api.v1 import total_capital
+
+    service = _make_service()
+    prime_resolver.wallets = []
+    app.dependency_overrides[total_capital._get_service] = _override_service(service)
+    try:
+        response = TestClient(app).get(f"/v1/primes/{_VALID_ADDR}/total-capital")
+
+        assert response.status_code == 200
+        assert service.list_total_capital_buckets.await_args.args[0].subproxies == ()
     finally:
         app.dependency_overrides.pop(total_capital._get_service, None)
 
@@ -177,7 +193,7 @@ def test_list_prime_total_capital_returns_422_for_invalid_prime_id():
         response = client.get("/v1/primes/0xdeadbeef/total-capital")
 
         assert response.status_code == 422
-        service.prime_exists.assert_not_awaited()
+        service.list_total_capital_buckets.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(total_capital._get_service, None)
 
@@ -193,7 +209,7 @@ def test_list_prime_total_capital_returns_422_for_limit_too_large():
         response = client.get(f"/v1/primes/{_VALID_ADDR}/total-capital?limit=600")
 
         assert response.status_code == 422
-        service.prime_exists.assert_not_awaited()
+        service.list_total_capital_buckets.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(total_capital._get_service, None)
 

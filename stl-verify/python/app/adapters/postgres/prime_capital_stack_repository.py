@@ -16,7 +16,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres._time_window import clamp_limit, required_time_window_clause
-from app.domain.entities.allocation import EthAddress
 from app.domain.entities.reference_risk_capital import ReferenceCapitalBucket
 
 logger = logging.getLogger(__name__)
@@ -28,12 +27,7 @@ _MAX_BUCKETS = 500
 # original against its own reprocessed correction.
 _REFERENCE_CAPITAL_BUCKETS_SQL = text(
     """
-    WITH target AS (
-        SELECT prime_id
-        FROM prime_proxy
-        WHERE proxy_address = decode(:address_hex, 'hex')
-        LIMIT 1
-    ), snapshots AS (
+    WITH snapshots AS (
         SELECT DISTINCT ON (pcs.synced_at)
             pcs.synced_at AS observed_at,
             pcs.total_risk_capital_usd,
@@ -42,7 +36,7 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
             NULL::NUMERIC AS assets_usd,
             NULL::TIMESTAMPTZ AS assets_observed_at
         FROM prime_capital_stack pcs
-        WHERE pcs.prime_id = (SELECT prime_id FROM target)
+        WHERE pcs.prime_id = :prime_id
         """
     + required_time_window_clause("pcs.synced_at")
     + """
@@ -61,7 +55,7 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
             pbs.assets_usd,
             pbs.observed_at AS assets_observed_at
         FROM prime_reference_balance_sheet pbs
-        WHERE pbs.prime_id = (SELECT prime_id FROM target)
+        WHERE pbs.prime_id = :prime_id
         """
     + required_time_window_clause("pbs.observed_at")
     + """
@@ -76,7 +70,7 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
             0 AS precedence,
             pcs.processing_version
         FROM prime_capital_stack pcs
-        WHERE pcs.prime_id = (SELECT prime_id FROM target)
+        WHERE pcs.prime_id = :prime_id
           AND pcs.synced_at < CAST(:from_timestamp AS TIMESTAMPTZ)
           AND pcs.synced_at >= CAST(:from_timestamp AS TIMESTAMPTZ) - INTERVAL '90 days'
         UNION ALL
@@ -89,7 +83,7 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
             1 AS precedence,
             pbs.processing_version
         FROM prime_reference_balance_sheet pbs
-        WHERE pbs.prime_id = (SELECT prime_id FROM target)
+        WHERE pbs.prime_id = :prime_id
           AND pbs.observed_at < CAST(:from_timestamp AS TIMESTAMPTZ)
           AND pbs.observed_at >= CAST(:from_timestamp AS TIMESTAMPTZ) - INTERVAL '90 days'
     ), ranked AS (
@@ -222,7 +216,7 @@ class PrimeCapitalStackRepository:
 
     async def list_reference_capital_buckets(
         self,
-        prime_address: EthAddress,
+        prime_id: int,
         *,
         from_timestamp: datetime,
         to_timestamp: datetime,
@@ -231,7 +225,7 @@ class PrimeCapitalStackRepository:
     ) -> list[ReferenceCapitalBucket]:
         """Return the last upstream observation per time bucket (LOCF gap-filled)."""
         params = {
-            "address_hex": prime_address.hex,
+            "prime_id": prime_id,
             "from_timestamp": from_timestamp,
             "to_timestamp": to_timestamp,
             "bucket_seconds": bucket_seconds,
@@ -250,12 +244,12 @@ class PrimeCapitalStackRepository:
                 extra={
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
-                    "prime_address": str(prime_address),
+                    "prime_id": prime_id,
                 },
                 exc_info=True,
             )
             raise ValueError(
-                f"Database query failed while fetching reference capital buckets for prime {prime_address}: {exc}"
+                f"Database query failed while fetching reference capital buckets for prime {prime_id}: {exc}"
             ) from exc
 
         return [

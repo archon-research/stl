@@ -605,15 +605,14 @@ class AllocationRepository:
         )
 
     @staticmethod
-    def _record_empty_total_capital(prime_address: EthAddress, buckets: list[TotalCapitalBucket]) -> None:
+    def _record_empty_total_capital(subproxies: Sequence[EthAddress], buckets: list[TotalCapitalBucket]) -> None:
         """Surface a total-capital series that gapfilled to all-``None``.
 
-        A prime passes the ``prime_exists`` check on its ALM ``proxy_address``,
-        but total capital is read from a *different* row set — the SubProxy
-        treasury USDS scoped by ``_USDS_ADDRESS_HEX``. If that set is empty (no
-        SubProxy configured for the prime, treasury not yet indexed, or the USDS
-        address drifting out of the ``token`` registry) the gapfill still returns
-        a full window of buckets, every one ``None``. That is a valid 200 for a
+        The prime resolved and has treasury wallets, but total capital is read
+        from a narrower row set — their USDS scoped by ``_USDS_ADDRESS_HEX``. If
+        that set is empty (treasury not yet indexed, or the USDS address
+        drifting out of the ``token`` registry) the gapfill still returns a full
+        window of buckets, every one ``None``. That is a valid 200 for a
         brand-new prime but is indistinguishable from a coverage regression, so
         record it for alerting rather than letting it surface as a blank chart.
         """
@@ -623,7 +622,7 @@ class AllocationRepository:
         logger.warning(
             "Total capital series is entirely empty for a known prime",
             extra={
-                "prime_address": str(prime_address),
+                "subproxies": [str(address) for address in subproxies],
                 "bucket_count": len(buckets),
             },
         )
@@ -892,7 +891,7 @@ class AllocationRepository:
 
     async def list_total_capital_buckets(
         self,
-        prime_address: EthAddress,
+        subproxies: Sequence[EthAddress],
         *,
         from_timestamp: datetime,
         to_timestamp: datetime,
@@ -901,24 +900,24 @@ class AllocationRepository:
     ) -> list[TotalCapitalBucket]:
         """Return the last observed treasury USDS balance per time bucket (LOCF).
 
-        A prime's total capital is the USDS held in its SubProxy wallet, which
-        shares the prime's ``prime_id`` but a distinct ``proxy_address``. The
-        prime is identified by its ALM ``proxy_address``; the matching SubProxy
-        is the one sharing that ``prime_id``. USDS is dollar-pegged, so the raw
-        balance is the USD figure. Buckets with no observation carry the prior
-        value forward; leading buckets before the first observation are ``None``.
+        A prime's total capital is the USDS held in its SubProxy treasury
+        wallets, which the caller resolves prime-wide. USDS is dollar-pegged, so
+        the raw balance is the USD figure. Buckets with no observation carry the
+        prior value forward; leading buckets before the first observation are
+        ``None``.
+
+        Total capital is a SHARED quantity (``app.domain.prime_scope``): a prime
+        has one treasury, so the wallet set scopes the read rather than being
+        fanned out and summed. An empty set is a prime with no treasury wallet,
+        which answers an empty series rather than every prime's treasury.
         """
-        subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
+        if not subproxies:
+            return []
         distinct_on, version_order = _DISTINCT_ON_AP, _VERSION_ORDER_AP
         time_window = required_time_window_clause("ap.created_at")
         query = text(
             f"""
-            WITH target AS (
-                SELECT prime_id
-                FROM prime_proxy
-                WHERE proxy_address = decode(:address_hex, 'hex')
-                LIMIT 1
-            ),
+            WITH
             -- One row per identity, newest processing_version, BEFORE the
             -- bucketing below picks a per-bucket winner by time. A correction
             -- shares its original's created_at exactly, so last() cannot break
@@ -927,8 +926,7 @@ class AllocationRepository:
                 SELECT {distinct_on} ap.balance, ap.created_at
                 FROM allocation_position ap
                 JOIN token t ON t.id = ap.token_id
-                WHERE ap.prime_id = (SELECT prime_id FROM target)
-                  AND ap.proxy_address IN :subproxy_addrs
+                WHERE ap.proxy_address IN :subproxy_addrs
                   AND t.address = decode(:usds_hex, 'hex')
                   {time_window}
                 ORDER BY {version_order}
@@ -949,11 +947,10 @@ class AllocationRepository:
         ).bindparams(bindparam("subproxy_addrs", expanding=True))
 
         params = {
-            "address_hex": prime_address.hex,
             "from_timestamp": from_timestamp,
             "to_timestamp": to_timestamp,
             "bucket_seconds": bucket_seconds,
-            "subproxy_addrs": subproxies,
+            "subproxy_addrs": [address.to_bytes() for address in subproxies],
             "usds_hex": _USDS_ADDRESS_HEX,
             "limit": clamp_limit(limit, _ALLOCATION_ACTIVITY_LIMIT),
         }
@@ -970,13 +967,11 @@ class AllocationRepository:
                 extra={
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
-                    "prime_address": str(prime_address),
+                    "subproxies": [str(address) for address in subproxies],
                 },
                 exc_info=True,
             )
-            raise ValueError(
-                f"Database query failed while fetching total capital buckets for prime {prime_address}: {exc}"
-            ) from exc
+            raise ValueError(f"Database query failed while fetching total capital buckets: {exc}") from exc
 
         buckets = [
             TotalCapitalBucket(
@@ -989,7 +984,7 @@ class AllocationRepository:
             )
             for row in rows
         ]
-        self._record_empty_total_capital(prime_address, buckets)
+        self._record_empty_total_capital(subproxies, buckets)
         return buckets
 
     async def list_prime_proxy_addresses(self, prime_address: EthAddress) -> list[EthAddress]:

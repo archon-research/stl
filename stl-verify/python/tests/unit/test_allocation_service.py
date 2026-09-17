@@ -5,7 +5,7 @@ import pytest
 
 from app.domain.entities.allocation import ChainMetadata, EthAddress, Prime, ProtocolMetadata
 from app.services.allocation_service import AllocationService
-from tests.factories import make_direct_asset_holding, make_receipt_token_position
+from tests.factories import make_direct_asset_holding, make_prime_scope, make_receipt_token_position
 
 _VALID_ADDR = EthAddress("0x" + "ab" * 20)
 _SIBLING_ADDR = EthAddress("0x" + "cd" * 20)
@@ -163,8 +163,10 @@ async def test_list_total_capital_buckets_delegates_to_repository():
     from_timestamp = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
     to_timestamp = datetime(2026, 1, 2, 0, 0, tzinfo=UTC)
 
+    scope = make_prime_scope()
+
     result = await service.list_total_capital_buckets(
-        _VALID_ADDR,
+        scope,
         from_timestamp=from_timestamp,
         to_timestamp=to_timestamp,
         bucket_seconds=3600.0,
@@ -173,7 +175,7 @@ async def test_list_total_capital_buckets_delegates_to_repository():
 
     assert result == []
     repo.list_total_capital_buckets.assert_awaited_once_with(
-        _VALID_ADDR,
+        scope.subproxies,
         from_timestamp=from_timestamp,
         to_timestamp=to_timestamp,
         bucket_seconds=3600.0,

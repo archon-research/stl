@@ -57,7 +57,7 @@ def test_record_empty_total_capital_sets_span_attribute_when_all_null():
         "app.adapters.postgres.allocation_position_repository.trace.get_current_span",
         return_value=span,
     ):
-        AllocationRepository._record_empty_total_capital(_PRIME, buckets)
+        AllocationRepository._record_empty_total_capital([_PRIME], buckets)
 
     span.set_attribute.assert_called_once_with("allocations.total_capital.all_null", True)
 
@@ -70,7 +70,7 @@ def test_record_empty_total_capital_noop_when_any_observed():
         "app.adapters.postgres.allocation_position_repository.trace.get_current_span",
         return_value=span,
     ):
-        AllocationRepository._record_empty_total_capital(_PRIME, buckets)
+        AllocationRepository._record_empty_total_capital([_PRIME], buckets)
 
     span.set_attribute.assert_not_called()
 
@@ -81,7 +81,7 @@ def test_record_empty_total_capital_noop_when_no_buckets():
         "app.adapters.postgres.allocation_position_repository.trace.get_current_span",
         return_value=span,
     ):
-        AllocationRepository._record_empty_total_capital(_PRIME, [])
+        AllocationRepository._record_empty_total_capital([_PRIME], [])
 
     span.set_attribute.assert_not_called()
 

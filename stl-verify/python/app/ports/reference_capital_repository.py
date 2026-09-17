@@ -3,7 +3,6 @@
 from datetime import datetime
 from typing import Protocol
 
-from app.domain.entities.allocation import EthAddress
 from app.domain.entities.reference_risk_capital import ReferenceCapitalBucket
 
 
@@ -22,7 +21,7 @@ class ReferenceCapitalRepository(Protocol):
 
     async def list_reference_capital_buckets(
         self,
-        prime_address: EthAddress,
+        prime_id: int,
         *,
         from_timestamp: datetime,
         to_timestamp: datetime,
@@ -30,6 +29,10 @@ class ReferenceCapitalRepository(Protocol):
         limit: int = 100,
     ) -> list[ReferenceCapitalBucket]:
         """Return the last upstream observation per time bucket (LOCF gap-filled).
+
+        Keyed on the resolved ``prime.id``. Upstream publishes one figure per
+        prime, so this is a SHARED quantity (``app.domain.prime_scope``) and
+        there is no proxy to pick.
 
         The series starts when the syncer first ran, not when the prime did:
         the upstream monitor publishes no history, so nothing before that can

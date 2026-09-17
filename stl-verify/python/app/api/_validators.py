@@ -159,11 +159,11 @@ PrimeIdentifierPathParam = Annotated[
         examples=["spark"],
     ),
 ]
-"""Path-param type for a ``{prime_id}`` segment resolved by ``resolve_prime``.
+"""Path-param type for a ``{prime_id}`` segment resolved by ``deps.resolve_prime_scope``.
 
-Not yet adopted by any route, and adopting it takes more than swapping the annotation:
-``check_prime_view`` parses the segment as an address before the route validator runs, so
-a name reaches it as a 422. The gate has to resolve through ``PrimeResolver`` first.
+Adopting it takes more than swapping the annotation: the authz gate resolves the segment
+before the route validator runs, so a route using this must take ``Depends(prime_scope)``
+and read the prime off it rather than parsing the segment as an address.
 """
 
 OptionalEthAddressParam = Annotated[str | None, AfterValidator(_validate_optional_eth_address)]

@@ -5,19 +5,26 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import asynccontextmanager
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.adapters.postgres.prime_resolver_repository import PrimeResolverRepository
 from app.adapters.postgres.reference_as_of import utc_now
 from app.api import deps
 from app.api.errors import register_error_handlers
 from app.auth.jwt import Principal
+from app.domain.entities.allocation import EthAddress
+from app.domain.entities.prime import PrimeIdentity
+from app.domain.exceptions import InvalidPrimeIdentifierError
 
 VAULT = "0x" + "a" * 40
 PROXY = "0x" + "b" * 40
+_SPARK = PrimeIdentity(id=1, name="spark", external_id="4bd9ee3c", vault_address=EthAddress("0x" + "A" * 40))
 
 
 def _principal(roles: set[str], sub: str = "u1") -> Principal:
@@ -30,7 +37,16 @@ def _settings_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(deps, "get_settings", lambda: on)
 
 
-def _app(*, verifier=None, fga=None, principal=None, engine=None) -> TestClient:
+def _resolver(identity: PrimeIdentity | None = _SPARK, *, fails: bool = False) -> AsyncMock:
+    """A PrimeResolver the gate resolves the path segment through."""
+    resolver = AsyncMock()
+    resolver.resolve.side_effect = ValueError("Database query failed") if fails else None
+    resolver.resolve.return_value = identity
+    resolver.list_proxies.return_value = []
+    return resolver
+
+
+def _app(*, verifier=None, fga=None, principal=None, engine=None, resolver=None) -> TestClient:
     """A tiny app exercising the real dependencies without the service graph."""
     app = FastAPI()
     register_error_handlers(app)
@@ -41,6 +57,7 @@ def _app(*, verifier=None, fga=None, principal=None, engine=None) -> TestClient:
     if engine is not None:
         app.state.engine = engine
         app.state.reference_effective_at = utc_now
+    app.state.prime_resolver = resolver if resolver is not None else _resolver()
     if principal is not None:
         app.dependency_overrides[deps.get_principal] = lambda: principal
 
@@ -121,54 +138,62 @@ def test_viewer_gate_and_analyst_gate():
 
 
 @pytest.mark.parametrize("allowed,expected", [(True, 200), (False, 404)])
-def test_prime_check_uses_the_resolved_vault(monkeypatch, allowed, expected):
+def test_prime_check_uses_the_resolved_vault(allowed, expected):
     fga = AsyncMock()
     fga.check.return_value = allowed
+    # any of the prime's identifiers resolves to the VAULT the tuples are keyed on
     c = _app(fga=fga, principal=_principal({"org:viewer"}))
-    # any of the prime's addresses resolves to the VAULT via one indexed query
-    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=VAULT.upper()))
     r = c.get(f"/v1/primes/{PROXY}/debt")
     assert r.status_code == expected
     fga.check.assert_awaited_once_with("user:u1", "can_view", f"prime:{VAULT}")
 
 
-@pytest.mark.parametrize("vault,allowed", [(None, True), (VAULT, False)], ids=["unknown", "not-permitted"])
-def test_unknown_and_unpermitted_are_indistinguishable(monkeypatch, vault, allowed):
+def test_prime_check_accepts_a_name_where_the_old_gate_parsed_an_address():
+    """The gate resolving instead of parsing is what lets a name reach a route
+    at all: it runs before the route's own validator."""
+    fga = AsyncMock()
+    fga.check.return_value = True
+    c = _app(fga=fga, principal=_principal({"org:viewer"}))
+
+    assert c.get("/v1/primes/spark/debt").status_code == 200
+    fga.check.assert_awaited_once_with("user:u1", "can_view", f"prime:{VAULT}")
+
+
+@pytest.mark.parametrize("identity,allowed", [(None, True), (_SPARK, False)], ids=["unknown", "not-permitted"])
+def test_unknown_and_unpermitted_are_indistinguishable(identity, allowed):
     """A different code for a prime that does not exist would tell an
     unauthorized caller which ones do — the fact the list filtering hides."""
     fga = AsyncMock()
     fga.check.return_value = allowed
-    c = _app(fga=fga, principal=_principal({"org:viewer"}))
-    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=vault))
+    c = _app(fga=fga, principal=_principal({"org:viewer"}), resolver=_resolver(identity))
 
     response = c.get(f"/v1/primes/{PROXY}/debt")
 
     assert (response.status_code, response.json()) == (404, {"detail": "prime not found"})
 
 
-def test_malformed_prime_id_is_422_not_500(monkeypatch):
+def test_malformed_prime_id_is_422_not_500():
     """This dependency resolves before the route's own validator, so without
-    its own parse it would raise ValueError out of a 500."""
-    c = _app(fga=AsyncMock(), principal=_principal({"org:viewer"}))
-    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=VAULT))
-    assert c.get("/v1/primes/not-an-address/debt").status_code == 422
+    the resolver rejecting it, a bad address would raise out of a 500."""
+    resolver = _resolver()
+    resolver.resolve.side_effect = InvalidPrimeIdentifierError("Invalid prime identifier: 0xdeadbeef")
+    c = _app(fga=AsyncMock(), principal=_principal({"org:viewer"}), resolver=resolver)
+    assert c.get("/v1/primes/0xdeadbeef/debt").status_code == 422
 
 
-def test_enabled_without_fga_client_fails_closed(monkeypatch):
+def test_enabled_without_fga_client_fails_closed():
     """Auth on but no OpenFGA client on state: 503, mirroring the verifier
     guard — an unguarded read would be an AttributeError 500."""
     c = _app(principal=_principal({"org:viewer"}))
-    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=VAULT))
     assert c.get(f"/v1/primes/{PROXY}/debt").status_code == 503
 
 
-def test_openfga_down_fails_closed(monkeypatch):
+def test_openfga_down_fails_closed():
     from app.auth.fga import FgaError
 
     fga = AsyncMock()
     fga.check.side_effect = FgaError("down")
     c = _app(fga=fga, principal=_principal({"org:viewer"}))
-    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=VAULT))
     assert c.get(f"/v1/primes/{VAULT}/debt").status_code == 503
 
 
@@ -181,75 +206,87 @@ def test_list_filter_truncation_is_500():
     assert c.get("/v1/primes").status_code == 500
 
 
-# --- the REAL _vault_for path ----------------------------------------------
+# --- the REAL resolver path -------------------------------------------------
 #
-# Every test above stubs _vault_for, which is precisely how a change to
-# AllocationRepository's constructor (main #822 made reference_effective_at
-# required) stayed invisible: the gate raised TypeError -> 500 on every
+# Every test above hands the gate an AsyncMock resolver, which is precisely how
+# a change to a repository's constructor (main #822 made reference_effective_at
+# required) once stayed invisible: the gate raised TypeError -> 500 on every
 # prime-scoped request while the suite stayed green. These build the real
-# repository against a fake engine, so the constructor and the query both run.
+# PrimeResolverRepository against a fake engine, so the constructor, the query
+# and the row mapping all run.
 
 
 class _FakeResult:
-    def __init__(self, row):
-        self._row = row
+    def __init__(self, rows):
+        self._rows = rows
 
-    def first(self):
-        return self._row
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return self._rows
 
 
 class _FakeRow:
-    def __init__(self, vault_hex: str):
-        self.vault = vault_hex
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+
+def _prime_row(vault_hex: str) -> _FakeRow:
+    return _FakeRow(id=1, name="spark", external_id="4bd9ee3c", vault_hex=vault_hex)
 
 
 class _FakeConnection:
-    def __init__(self, row):
-        self._row = row
+    def __init__(self, rows):
+        self._rows = rows
         self.params: dict | None = None
 
     async def execute(self, _sql, params):
         self.params = params
-        return _FakeResult(self._row)
+        # The resolver's second statement lists the prime's wallets; the gate
+        # needs none of them, and returning prime rows there would not map.
+        return _FakeResult(self._rows if "prime_id" not in params else [])
 
 
 class _FakeEngine:
-    """Just enough engine for one point query, with no database behind it."""
+    """Just enough engine for the resolver's two statements, no database."""
 
-    def __init__(self, row):
-        self.connection = _FakeConnection(row)
+    def __init__(self, rows):
+        self.connection = _FakeConnection(rows)
 
     @asynccontextmanager
     async def connect(self):
         yield self.connection
 
 
-def _real_path_client(row, fga) -> TestClient:
-    return _app(fga=fga, principal=_principal({"org:viewer"}), engine=_FakeEngine(row))
+def _resolver_over(engine: _FakeEngine) -> PrimeResolverRepository:
+    return PrimeResolverRepository(cast(AsyncEngine, engine))
 
 
-def test_real_vault_lookup_builds_the_repository_the_way_the_app_does():
-    """Regression guard for the merge break: AllocationRepository takes the
-    process-wide reference provider as a second argument."""
+def _real_path_client(rows, fga) -> TestClient:
+    return _app(fga=fga, principal=_principal({"org:viewer"}), resolver=_resolver_over(_FakeEngine(rows)))
+
+
+def test_real_resolver_maps_the_row_the_gate_reads_its_vault_from():
     fga = AsyncMock()
     fga.check.return_value = True
-    c = _real_path_client(_FakeRow("a" * 40), fga)
+    c = _real_path_client([_prime_row("a" * 40)], fga)
     assert c.get(f"/v1/primes/{PROXY}/debt").status_code == 200
     fga.check.assert_awaited_once_with("user:u1", "can_view", f"prime:{VAULT}")
 
 
-def test_real_vault_lookup_returns_404_for_an_unknown_prime():
-    c = _real_path_client(None, AsyncMock())
+def test_real_resolver_returns_404_for_an_unknown_prime():
+    c = _real_path_client([], AsyncMock())
     assert c.get(f"/v1/primes/{PROXY}/debt").status_code == 404
 
 
-def test_real_vault_lookup_passes_the_parsed_address_to_the_query():
+def test_real_resolver_passes_the_parsed_address_to_the_query():
     fga = AsyncMock()
     fga.check.return_value = True
-    engine = _FakeEngine(_FakeRow("a" * 40))
-    client = _app(fga=fga, principal=_principal({"org:viewer"}), engine=engine)
+    engine = _FakeEngine([_prime_row("a" * 40)])
+    client = _app(fga=fga, principal=_principal({"org:viewer"}), resolver=_resolver_over(engine))
     client.get(f"/v1/primes/{PROXY}/debt")
-    assert engine.connection.params == {"addr": bytes.fromhex("b" * 40)}
+    assert engine.connection.params == {"prime_id": 1}
 
 
 # --- decision events (ADR-015 gate 3) --------------------------------------
@@ -292,10 +329,9 @@ def test_missing_bearer_emits_a_decision_event(monkeypatch, caplog):
     "allowed,decision,reason",
     [(True, "allow", "permitted"), (False, "deny", "not_permitted")],
 )  # the event still tells the two denials apart; only the response does not
-def test_prime_check_emits_a_decision_event_naming_the_resource(monkeypatch, caplog, allowed, decision, reason):
+def test_prime_check_emits_a_decision_event_naming_the_resource(caplog, allowed, decision, reason):
     fga = AsyncMock()
     fga.check.return_value = allowed
-    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=VAULT))
     with caplog.at_level(logging.INFO, logger="app.api.deps"):
         _app(fga=fga, principal=_principal({"org:viewer"})).get(f"/v1/primes/{PROXY}/debt")
     assert _events(caplog) == [
@@ -348,11 +384,10 @@ def test_decision_events_reach_the_json_log_as_queryable_fields():
 # so the Loki alert on that event never fires for what is really an outage.
 
 
-def test_a_database_outage_behind_the_prime_gate_is_503_not_500(monkeypatch, caplog):
-    """AllocationRepository reports a failed query as ValueError. Unhandled,
-    that is a 500 on every prime-scoped route the moment the database blips."""
-    c = _app(fga=AsyncMock(), principal=_principal({"org:viewer"}))
-    monkeypatch.setattr(deps, "_vault_for", AsyncMock(side_effect=ValueError("Database query failed")))
+def test_a_database_outage_behind_the_prime_gate_is_503_not_500(caplog):
+    """The resolver reports a failed query as ValueError. Unhandled, that is a
+    500 on every prime-scoped route the moment the database blips."""
+    c = _app(fga=AsyncMock(), principal=_principal({"org:viewer"}), resolver=_resolver(fails=True))
 
     with caplog.at_level(logging.INFO, logger="app.api.deps"):
         response = c.get(f"/v1/primes/{PROXY}/debt")

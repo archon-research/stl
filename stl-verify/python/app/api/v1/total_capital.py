@@ -4,17 +4,18 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
-from app.api._validators import ProxyAddressPathParam
+from app.api._validators import PrimeIdentifierPathParam
 from app.api.deps import (
     get_engine,
     get_reference_as_of,
     get_reference_capital_repository_factory,
+    prime_scope,
     require_prime_view,
 )
 from app.api.provenance import (
@@ -27,7 +28,7 @@ from app.api.time_series import (
     build_resampled_window,
     get_resampled_time_series_query_params,
 )
-from app.domain.entities.allocation import EthAddress
+from app.domain.entities.prime import PrimeScope
 from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery
@@ -158,12 +159,14 @@ def _reference_field(by_bucket: dict, bucket_start, field: str):
         "`total_capital`. Wherever the response carries Sky's figures (`source=reference` or "
         "`source=both`) each bucket also carries `assets_usd` "
         "(the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. "
+        "The figure is the whole prime's whichever of its identifiers you pass: a prime has "
+        "one treasury, counted once rather than summed across its wallets. "
         "Returns `404` if the prime is unknown. Defaults to the last 24h; "
         "pass a window and `frequency` for longer ranges."
     ),
 )
 async def list_prime_total_capital(
-    prime_id: ProxyAddressPathParam,
+    prime_id: PrimeIdentifierPathParam,
     response: Response,
     time_series: TimeSeriesQuery = Depends(get_resampled_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max buckets returned (default 100, max 500)."),
@@ -172,12 +175,9 @@ async def list_prime_total_capital(
     reference_repositories: Callable[[], ReferenceCapitalRepository] = Depends(
         get_reference_capital_repository_factory
     ),
+    scope: PrimeScope = Depends(prime_scope),
     _authz: None = Depends(require_prime_view),
 ) -> TotalCapitalEnvelope:
-    prime_address = EthAddress(prime_id)
-    if not await service.prime_exists(prime_address):
-        raise HTTPException(status_code=404, detail="Prime not found")
-
     source = resolve_or_422(requested_provenance, available=frozenset(Provenance), default=Provenance.INDEXED)
 
     # Treasury observations are immutable once written, so a fully-pinned window
@@ -187,7 +187,7 @@ async def list_prime_total_capital(
 
     if source is Provenance.REFERENCE:
         reference_buckets = await reference_repositories().list_reference_capital_buckets(
-            prime_address,
+            scope.identity.id,
             from_timestamp=time_series.from_timestamp,
             to_timestamp=time_series.to_timestamp,
             bucket_seconds=time_series.bucket.total_seconds(),
@@ -213,14 +213,14 @@ async def list_prime_total_capital(
     if source is Provenance.BOTH:
         reference_buckets, buckets = await asyncio.gather(
             reference_repositories().list_reference_capital_buckets(
-                prime_address,
+                scope.identity.id,
                 from_timestamp=time_series.from_timestamp,
                 to_timestamp=time_series.to_timestamp,
                 bucket_seconds=time_series.bucket.total_seconds(),
                 limit=limit,
             ),
             service.list_total_capital_buckets(
-                prime_address,
+                scope,
                 from_timestamp=time_series.from_timestamp,
                 to_timestamp=time_series.to_timestamp,
                 bucket_seconds=time_series.bucket.total_seconds(),
@@ -251,7 +251,7 @@ async def list_prime_total_capital(
         )
 
     buckets = await service.list_total_capital_buckets(
-        prime_address,
+        scope,
         from_timestamp=time_series.from_timestamp,
         to_timestamp=time_series.to_timestamp,
         bucket_seconds=time_series.bucket.total_seconds(),

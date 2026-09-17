@@ -2585,7 +2585,15 @@ _FAN_OUT_USDS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
 
 # aUSDC balance 1000 against a USDC price of 1 USD.
 _FAN_OUT_BALANCE = Decimal("1000")
-_FAN_OUT_TREASURY = Decimal("4000")
+FAN_OUT_TREASURY = Decimal("4000")
+FAN_OUT_GROVE_TREASURY = Decimal("7000")
+# Named rather than left to NOW(): the total-capital series is bucketed, so a
+# test asserting on it needs a window it can pin. Anchored to the current hour
+# rather than a calendar date so it stays inside the last-24h windows the
+# sibling activity tests use, however long this fixture lives.
+FAN_OUT_TREASURY_OBSERVED_AT = dt.datetime.now(dt.UTC).replace(minute=0, second=0, microsecond=0) - dt.timedelta(
+    hours=1
+)
 FAN_OUT_PROXY_EXPOSURE_USD = "0"
 FAN_OUT_PRIME_EXPOSURE_USD = "1000.000000"
 
@@ -2669,10 +2677,11 @@ async def seed_prime_fan_out(db_url: str, *, with_off_contract_proxy: bool = Fal
                 token_id=usds_id,
                 prime_id=spark_id,
                 proxy_hex=SPARK_SUB_PROXY_HEX,
-                balance=_FAN_OUT_TREASURY,
+                balance=FAN_OUT_TREASURY,
                 block=1002,
                 tx=_FAN_OUT_TX_TREASURY,
                 direction="in",
+                created_at=FAN_OUT_TREASURY_OBSERVED_AT,
             )
 
             await insert_anchorage_snapshot(
@@ -2713,10 +2722,11 @@ async def seed_prime_fan_out(db_url: str, *, with_off_contract_proxy: bool = Fal
                 token_id=usds_id,
                 prime_id=grove_id,
                 proxy_hex=GROVE_SUB_PROXY_HEX,
-                balance=_FAN_OUT_TREASURY,
+                balance=FAN_OUT_GROVE_TREASURY,
                 block=1012,
                 tx=_FAN_OUT_TX_GROVE_TREASURY,
                 direction="in",
+                created_at=FAN_OUT_TREASURY_OBSERVED_AT,
             )
 
             if with_off_contract_proxy:
@@ -3295,6 +3305,9 @@ PVD_UNDERLYING_PRICE = Decimal("2")
 # Real mainnet USDS address (matches the repository's hardcoded _USDS_ADDRESS_HEX;
 # the total-capital read filters on it directly, so a fixture value would never match).
 PVD_USDS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
+# A real registry SubProxy: the treasury read filters on the USDS token and the
+# prime's own declared SubProxy wallets, so the address has to classify as one.
+PVD_SUB_PROXY_HEX = sorted(subproxy_addresses())[0][2:]
 PVD_TOTAL_CAPITAL_TX = "77" * 32
 PVD_TOTAL_CAPITAL_BLOCK = 900_100
 PVD_TOTAL_CAPITAL_CREATED_AT = dt.datetime(2026, 3, 1, 12, 0, tzinfo=dt.UTC)
@@ -3362,17 +3375,17 @@ async def seed_processing_version_dedup_scenarios(db_url: str) -> None:
                     build_id=build_id,
                 )
 
-            # Feeds list_total_capital_buckets: a real SubProxy holding USDS,
-            # sharing prime_id with the ALM proxy above (any SubProxy address
-            # serves -- the read filters on the whole registry set).
-            subproxy_hex = sorted(subproxy_addresses())[0][2:]
+            # Feeds list_total_capital_buckets: a real SubProxy holding USDS.
+            # Declared in prime_proxy, which is where the read's wallet set now
+            # comes from -- positions alone do not make a wallet resolvable.
+            await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=PVD_SUB_PROXY_HEX)
             usds_id = await insert_token(conn, "pvdUSDS", 18, bytes.fromhex(PVD_USDS_HEX))
             for build_id, amount in ((0, PVD_TOTAL_CAPITAL_ORIGINAL), (1, PVD_TOTAL_CAPITAL_CORRECTED)):
                 await insert_allocation_position(
                     conn,
                     token_id=usds_id,
                     prime_id=prime_id,
-                    proxy_hex=subproxy_hex,
+                    proxy_hex=PVD_SUB_PROXY_HEX,
                     balance=amount,
                     block=PVD_TOTAL_CAPITAL_BLOCK,
                     tx=PVD_TOTAL_CAPITAL_TX,
