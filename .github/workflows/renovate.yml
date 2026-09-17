@@ -21,10 +21,16 @@ jobs:
   renovate:
     name: Renovate
     runs-on: ubuntu-latest
+    # Declaring any permission sets every scope not listed here to none, so this
+    # block names everything Renovate touches. statuses carries the
+    # renovate/stability-days check that minimumReleaseAge produces; without it
+    # that POST 403s, and Renovate reports the failure as "Repository has changed
+    # during renovation", ending the run before it opens anything.
     permissions:
       contents: write # branches for the update PRs
       pull-requests: write
       issues: write # the dependency dashboard, which gates major updates
+      statuses: write # the renovate/stability-days check from minimumReleaseAge
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -32,7 +38,7 @@ jobs:
           persist-credentials: false
 
       - name: Self-hosted Renovate
-        uses: renovatebot/github-action@79dc0ba74dc3de28db0a7aeb1d0b95d5bf5fde2a # v46.1.13
+        uses: renovatebot/github-action@c314dda4a9a93b08239ec978f2043b9a433b9ac4 # v46.3.0
         env:
           RENOVATE_AUTODISCOVER: "false"
           RENOVATE_REPOSITORIES: ${{ github.repository }}
