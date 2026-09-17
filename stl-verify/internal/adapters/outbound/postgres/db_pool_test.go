@@ -137,7 +137,7 @@ func TestNoticeLogger_LogsOnlyWarnings(t *testing.T) {
 	onNotice(nil, &pgconn.Notice{Severity: "NOTICE", SeverityUnlocalized: "NOTICE", Message: "relation exists, skipping"})
 
 	var lines []map[string]any
-	for _, l := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+	for l := range bytes.SplitSeq(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
 		if len(l) == 0 {
 			continue
 		}
