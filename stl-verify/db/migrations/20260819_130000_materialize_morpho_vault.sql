@@ -21,6 +21,39 @@ JOIN "user"       u ON u.id = o.user_id;
 
 COMMENT ON VIEW position_morpho_vault IS '[Operational] VEC-403 projection: Morpho vault positions as native position rows, one per vault deposit; instrument_key = vault contract address, holder_id = depositor address, quantity = assets in the vault asset''s native decimals, deal_type LOAN. chain_id and protocol_id are taken from the VAULT, never from the depositor: the position lives on the vault''s chain, and that is the fixed NULL-ness and provenance convention position_key() requires of each projection. Emits the position_state column contract; closure is applied by materialize_position_projection().';
 
+-- MATERIALIZED is explicit: NOT MATERIALIZED would make each branch re-read the source.
+CREATE OR REPLACE FUNCTION materialize_morpho_vault_refusals() RETURNS SETOF text
+    LANGUAGE sql STABLE AS $fn$
+WITH depositors AS MATERIALIZED (
+    SELECT v.id AS vault_id, v.address AS vault_address, u.id AS user_id, u.address, u.chain_id
+    FROM (SELECT DISTINCT p.user_id, p.morpho_vault_id FROM public.morpho_vault_position p) x
+    JOIN public.morpho_vault v ON v.id = x.morpho_vault_id
+    JOIN public."user" u ON u.id = x.user_id
+)
+SELECT msg FROM (
+    -- holder_id is the depositor's address alone while chain_id comes from the vault, so two
+    -- "user" rows sharing an address render one position_id and interleave under closure.
+    SELECT format('vault %s holds deposits from %s "user" rows sharing address %s across chains %s',
+                  encode(vault_address, 'hex'), count(DISTINCT user_id), encode(address, 'hex'),
+                  string_agg(DISTINCT chain_id::text, ',' ORDER BY chain_id::text)) AS msg
+    FROM depositors
+    GROUP BY vault_id, vault_address, address
+    HAVING count(DISTINCT user_id) > 1
+    UNION ALL
+    -- Only holder_id carries position_state's 40-hex check; instrument_key is a native key of
+    -- any width. Without this the run aborts inside position_key(), naming no row.
+    SELECT format('vault %s holder %s: a %s-byte holder address cannot render the 40-hex holder_id',
+                  encode(vault_address, 'hex'), encode(address, 'hex'), length(address))
+    FROM depositors
+    WHERE length(address) <> 20
+    GROUP BY vault_address, address
+) all_msgs
+ORDER BY msg
+LIMIT 5;
+$fn$;
+
+COMMENT ON FUNCTION materialize_morpho_vault_refusals() IS '[Operational] VEC-403: why materialize_morpho_vault() would refuse to run, at most five messages, none when it may run. Two refusals: one address held by "user" rows on several chains depositing in one vault, which would collapse into one position_id, and a holder address that is not 20 bytes, which cannot render the 40-hex holder_id. Reads morpho_vault_position once, for its distinct (user_id, morpho_vault_id) pairs. Reads tiered chunks only under the caller''s timescaledb.enable_tiered_reads; materialize_morpho_vault() sets it on.';
+
 -- Dropped first: the one-argument signature would survive CREATE OR REPLACE and make a call that
 -- omits p_run_id ambiguous between the two.
 DROP FUNCTION IF EXISTS materialize_morpho_vault(integer);
@@ -31,39 +64,15 @@ CREATE OR REPLACE FUNCTION materialize_morpho_vault(p_build_id integer DEFAULT 0
                                                     p_window interval DEFAULT NULL) RETURNS bigint
     LANGUAGE plpgsql
     SET search_path FROM CURRENT
-    -- Pinned to the materializer's own setting, or the checks below read fewer chunks than the run:
-    -- morpho_vault_position tiers at one year and tiered reads default off.
+    -- Pinned to the materializer's own setting, or the refusals read fewer chunks than the run:
+    -- morpho_vault_position tiers at one year and a database can set tiered reads off.
     SET timescaledb.enable_tiered_reads = 'on' AS $fn$
 DECLARE
     v_bad text;
 BEGIN
-    SELECT string_agg(msg, '; ' ORDER BY msg) INTO v_bad FROM (
-        SELECT msg FROM (
-            -- holder_id is the depositor's address alone while chain_id comes from the vault, so two
-            -- "user" rows sharing an address render one position_id and interleave under closure.
-            SELECT format('vault %s holds deposits from %s "user" rows sharing address %s across chains %s',
-                          encode(v.address, 'hex'), count(DISTINCT u.id), encode(u.address, 'hex'),
-                          string_agg(DISTINCT u.chain_id::text, ',' ORDER BY u.chain_id::text)) AS msg
-            FROM public.morpho_vault_position p
-            JOIN public.morpho_vault v ON v.id = p.morpho_vault_id
-            JOIN public."user" u ON u.id = p.user_id
-            GROUP BY v.id, v.address, u.address
-            HAVING count(DISTINCT u.id) > 1
-            UNION ALL
-            -- Only holder_id carries position_state's 40-hex check; instrument_key is a native key of
-            -- any width. Without this the run aborts inside position_key(), naming no row.
-            SELECT format('vault %s holder %s: a %s-byte holder address cannot render the 40-hex holder_id',
-                          encode(v.address, 'hex'), encode(u.address, 'hex'), length(u.address))
-            FROM public.morpho_vault_position p
-            JOIN public.morpho_vault v ON v.id = p.morpho_vault_id
-            JOIN public."user" u ON u.id = p.user_id
-            WHERE length(u.address) <> 20
-            GROUP BY v.address, u.address
-        ) all_msgs
-        ORDER BY msg
-        LIMIT 5) z;
+    SELECT string_agg(msg, '; ' ORDER BY msg) INTO v_bad FROM materialize_morpho_vault_refusals() AS r(msg);
     IF v_bad IS NOT NULL THEN
-        RAISE EXCEPTION 'materialize_morpho_vault: one address on several chains would collapse into one position, refusing to run: %', v_bad;
+        RAISE EXCEPTION 'materialize_morpho_vault: refusing to run: %', v_bad;
     END IF;
     RETURN public.materialize_position_projection('public.position_morpho_vault'::regclass, p_build_id, p_run_id, p_window);
 END

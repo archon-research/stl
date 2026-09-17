@@ -223,7 +223,7 @@ END $$;`, blockB, tsB)); err != nil {
 			if err == nil {
 				t.Fatalf("the run succeeded writing %d rows; want a refusal", written)
 			}
-			if !strings.Contains(err.Error(), "several chains would collapse into one position") {
+			if !strings.Contains(err.Error(), `2 "user" rows sharing address eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee across chains 1,8453`) {
 				t.Errorf("error %q does not name the collision", err.Error())
 			}
 			var rows int
@@ -512,6 +512,9 @@ END $$;`); err != nil {
 	if !strings.Contains(err.Error(), "refusing to run") || !strings.Contains(err.Error(), "cannot render the 40-hex holder_id") {
 		t.Errorf("error %q does not name the malformed address; it aborted somewhere that cannot identify the row", err.Error())
 	}
+	if strings.Contains(err.Error(), "several chains") {
+		t.Errorf("error %q reports a cross-chain collision for a fixture that has one chain and one user", err.Error())
+	}
 	var rows int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&rows); err != nil {
 		t.Fatal(err)
@@ -602,4 +605,59 @@ END $$;`); err != nil {
 	if !strings.Contains(err.Error(), "21") {
 		t.Errorf("error %q does not report the oversize length", err.Error())
 	}
+}
+
+// Both refusals are properties of which "user" rows deposit in which vault, not of how many times each
+// was observed, so the guard reads the source once whatever the history holds.
+func TestMaterializeMorphoVaultRefusalsReadTheSourceOnce(t *testing.T) {
+	ctx, pool, _ := seedMorphoVault(t)
+
+	scans, chunks := sourceChunkScans(t, ctx, pool, `SELECT * FROM materialize_morpho_vault_refusals()`)
+	if chunks < 2 {
+		t.Fatalf("the fixture spans %d chunks; it needs at least 2 or one read and two are indistinguishable", chunks)
+	}
+	if scans == 0 {
+		t.Fatal("the plan scans no source chunk: the function was not inlined, so this measures nothing")
+	}
+	if scans != chunks {
+		t.Errorf("the refusals plan %d scans over %d source chunks; want each chunk read once", scans, chunks)
+	}
+}
+
+// sourceChunkScans counts the plan nodes that scan a morpho_vault_position chunk, and how many chunks the
+// table has. A node names its relation after " on "; an index scan also names the chunk in its index name,
+// which this does not count.
+func sourceChunkScans(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string) (scans, chunks int) {
+	t.Helper()
+	var names []string
+	if err := pool.QueryRow(ctx, `
+		SELECT coalesce(array_agg(c::regclass::text), '{}')
+		FROM show_chunks('public.morpho_vault_position') c`).Scan(&names); err != nil {
+		t.Fatalf("list source chunks: %v", err)
+	}
+	rows, err := pool.Query(ctx, "EXPLAIN (COSTS OFF) "+sql)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, line)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("explain rows: %v", err)
+	}
+	for _, name := range names {
+		bare := name[strings.LastIndex(name, ".")+1:]
+		for _, line := range plan {
+			if strings.HasSuffix(line, " on "+bare) || strings.Contains(line, " on "+bare+" ") {
+				scans++
+			}
+		}
+	}
+	return scans, len(names)
 }
