@@ -38,6 +38,7 @@ resources:
   - ../../base/arbitrum-backup-worker
   - ../../base/arbitrum-sparklend-position-tracker
   - ../../base/arbitrum-allocation-tracker
+  - ../../base/arbitrum-oracle-price-worker
   - ../../base/prime-debt-indexer
   - ../../base/base-psm3-indexer
   - ../../base/optimism-psm3-indexer
