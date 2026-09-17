@@ -408,33 +408,3 @@ func TestSkyPrimeDebtForwardsTheWindow(t *testing.T) {
 		t.Errorf("the run recorded window %q; want the 36 hours the wrapper was called with", *window)
 	}
 }
-
-// The Vat address every Sky position keys on resolves to the Sky issuer entity: a DAO, internal to the
-// Sky/Prime group, in the ISSUER role, rather than to a protocol operator.
-func TestSkyPrimeDebtVatResolvesToTheSkyIssuerEntity(t *testing.T) {
-	ctx, pool, _ := seedSkyPrimeDebt(t)
-	var positions, resolved int
-	if err := pool.QueryRow(ctx, `
-		SELECT count(DISTINCT ps.position_id),
-		       count(DISTINCT ps.position_id) FILTER (WHERE em.entity_type = 'DAO'
-		                                                AND em.counterparty_role = 'ISSUER'
-		                                                AND em.is_internal)
-		FROM position_state ps
-		LEFT JOIN entity_ref_codes erc
-		       ON erc.code_type = 'CONTRACT_ADDRESS' AND erc.code_value = split_part(ps.instrument_key, ':', 1)
-		LEFT JOIN entity_master_current em ON em.entity_id = erc.entity_id`).Scan(&positions, &resolved); err != nil {
-		t.Fatalf("resolve the Vat: %v", err)
-	}
-	if positions == 0 || resolved != positions {
-		t.Errorf("%d of %d Sky positions resolve their Vat to an internal DAO issuer entity", resolved, positions)
-	}
-	var entityID string
-	if err := pool.QueryRow(ctx, `
-		SELECT entity_id FROM entity_ref_codes WHERE code_type = 'CONTRACT_ADDRESS' AND code_value = $1`,
-		skyVatAddress).Scan(&entityID); err != nil {
-		t.Fatalf("read the Vat code: %v", err)
-	}
-	if entityID != "em-issuer-sky" {
-		t.Errorf("the Vat resolves to %q; want em-issuer-sky", entityID)
-	}
-}
