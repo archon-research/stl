@@ -429,7 +429,9 @@ func TestSecStoreWave1IsAppendOnlyUnderTheRealRoles(t *testing.T) {
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
 
-	stores := []string{"sec_node", "sec_edge"}
+	// The registers are stores on the same terms, so the owner-side revoke and TRUNCATE are
+	// asserted here — convertedAppendOnlyTables covers neither (VEC-616).
+	stores := []string{"sec_node", "sec_edge", "instrument_register", "alias_register"}
 	vocabularies := []string{
 		"rel_type_vocabulary", "weight_basis_vocabulary", "change_reason_vocabulary",
 		"concept_class_vocabulary", "node_status_vocabulary",
