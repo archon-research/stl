@@ -3614,6 +3614,7 @@ BS_PROXY_ZERO_UNPRICEABLE = "bc" * 20
 BS_PROXY_UNDERLYING_ONLY = "cc" * 20
 BS_PROXY_UNDERLYING_UNPRICED = "dc" * 20
 BS_PROXY_OWN_PRICE_WINS = "ec" * 20
+BS_PROXY_UNDERLYING_ID_FLIP = "fc" * 20
 
 BS_VAULT_HEX = "b0" * 20
 _BS_PROTOCOL_HEX = "b1" * 20
@@ -3645,6 +3646,8 @@ BS_DISABLED_DIRECT_PRICE = Decimal("17")
 BS_UNDERLYING_ONLY_VALUE = Decimal("23")
 BS_OWN_PRICE_WINS_BALANCE = Decimal("9")
 BS_OWN_PRICE_WINS_UNDERLYING_VALUE = Decimal("1000")
+BS_FLIP_EARLY_BALANCE = Decimal("15")
+BS_FLIP_LATER_UNDERLYING_VALUE = Decimal("40")
 
 # Same-block pairs (identical created_at, VEC-760) of a sweep row -- always
 # log_index 0, the tracker never sets it for a sweep -- and a flow row at a
@@ -3700,6 +3703,13 @@ async def seed_balance_series_positions(db_url: str) -> None:
     * ``BS_PROXY_OWN_PRICE_WINS`` a direct holding that HAS a price of its own
       and also carries an ``underlying_value`` -> its own price times balance,
       so the fallback never overrides an arm above it.
+    * ``BS_PROXY_UNDERLYING_ID_FLIP`` a receipt-token position whose raw
+      per-row ``underlying_token_id`` is NULL on its seeded (pre-window) row
+      and set on its later, in-window row -- the same entity, valued through
+      the same registry-resolved arm either way -> the total after the later
+      row must be just that row's value, not both summed. Pins the VEC-759
+      backfill's actual shape: only the raw column changes, not which entity
+      or which arm prices it.
     """
     conn = await asyncpg.connect(db_url)
     try:
@@ -4013,6 +4023,40 @@ async def seed_balance_series_positions(db_url: str) -> None:
                 tx="d2" * 32,
                 direction="sweep",
                 underlying_value=BS_OWN_PRICE_WINS_UNDERLYING_VALUE,
+                underlying_token_id=underlying_id,
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            # Seeded row: pre-backfill shape, both underlying columns NULL, so
+            # this arm's fallback to balance applies. The registry still
+            # resolves this token's arm and price -- neither depends on this
+            # row's own (NULL) underlying_token_id.
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_UNDERLYING_ID_FLIP,
+                balance=BS_FLIP_EARLY_BALANCE,
+                block=1000,
+                tx="fd" * 32,
+                direction="sweep",
+                created_at=pre_window,
+                tx_amount=0,
+            )
+            # In-window row: backfilled shape, both underlying columns set.
+            # Same proxy/token, so this must be the SAME entity as the seeded
+            # row above, not a second one the newer state adds to.
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_UNDERLYING_ID_FLIP,
+                balance=Decimal("100"),
+                block=1000,
+                tx="fe" * 32,
+                direction="sweep",
+                underlying_value=BS_FLIP_LATER_UNDERLYING_VALUE,
                 underlying_token_id=underlying_id,
                 created_at=three_days_ago,
                 tx_amount=0,

@@ -2044,7 +2044,6 @@ per_entity AS (
         o.underlying_token_id,
         o.protocol_id,
         o.has_direct_price,
-        o.tracker_underlying_token_id,
         -- gapfill + locf, not the plain time_bucket the other bucketed reads
         -- use: a bucket with no observation of its own has to report the last
         -- known quantity, not nothing. The FILTER carries the newest
@@ -2053,6 +2052,16 @@ per_entity AS (
         -- state. The USD figure itself is resolved afterwards, per bucket,
         -- against the price series below (VEC-763).
         locf(last(o.valuation_units, o.created_at) FILTER (WHERE o.valuation_units IS NOT NULL)) AS priced_units,
+        -- Carried the same way as priced_units, and gated by the same FILTER,
+        -- so the two always describe one observation: this is the tracker's
+        -- own underlying as of that observation, not the entity's first- or
+        -- last-ever value. It must NOT be a GROUP BY key -- a backfill flips
+        -- a row's raw underlying_token_id from NULL to non-NULL without
+        -- changing what entity it is, and grouping on it split one entity
+        -- into two rows that could both independently pass the priced FILTER
+        -- below, double-counting it.
+        locf(last(o.tracker_underlying_token_id, o.created_at)
+             FILTER (WHERE o.valuation_units IS NOT NULL)) AS tracker_underlying_token_id,
         -- The created_at of that same latest-priceable observation, and of the
         -- latest observation of ANY kind. Comparing the two separates "not
         -- observed yet" (both NULL) from "observed, but its current state is
@@ -2062,7 +2071,7 @@ per_entity AS (
         locf(last(o.created_at, o.created_at)) AS last_event_at
     FROM deduped_observations o
     GROUP BY bucket_start, o.proxy_address, o.chain_id, o.token_id, o.underlying_token_id,
-             o.protocol_id, o.has_direct_price, o.tracker_underlying_token_id
+             o.protocol_id, o.has_direct_price
 ),
 -- Each entity's units are priced at ITS OWN bucket, not today's spot
 -- (VEC-763): the key set is resolved once per basis, like #728's latest-price

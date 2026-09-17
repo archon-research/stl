@@ -48,6 +48,8 @@ from tests.integration.seed import (
     BS_CORRECTED_ORIGINAL_UNDERLYING_VALUE,
     BS_DIRECT_BALANCE,
     BS_DIRECT_PRICE,
+    BS_FLIP_EARLY_BALANCE,
+    BS_FLIP_LATER_UNDERLYING_VALUE,
     BS_MIXED_DIRECT_BALANCE,
     BS_OWN_PRICE_WINS_BALANCE,
     BS_PROXY_CARRY,
@@ -60,6 +62,7 @@ from tests.integration.seed import (
     BS_PROXY_SEED_TIEBREAK,
     BS_PROXY_SEEDED,
     BS_PROXY_SUMMED,
+    BS_PROXY_UNDERLYING_ID_FLIP,
     BS_PROXY_UNDERLYING_ONLY,
     BS_PROXY_UNDERLYING_UNPRICED,
     BS_PROXY_WINDOW_TIEBREAK,
@@ -355,3 +358,21 @@ async def test_window_tiebreak_resolves_to_the_later_log_index(repo: AllocationR
     expected = BS_WINDOW_TIEBREAK_FLOW_VALUE * BS_UNDERLYING_PRICE
     assert buckets, "expected buckets for the window tiebreak proxy"
     assert buckets[0].balance_usd == expected
+
+
+async def test_a_rows_own_underlying_id_flip_does_not_double_count_the_entity(
+    repo: AllocationRepository,
+) -> None:
+    # BS_PROXY_UNDERLYING_ID_FLIP's seeded (pre-window) row has both
+    # underlying columns NULL; its in-window row has both set -- the VEC-759
+    # backfill's actual shape. Grouping per_entity on the raw column instead
+    # of locf-ing it split this one entity into two, both independently
+    # priced through the same registry-resolved arm and summed, so every
+    # bucket after the flip read as the two values added together.
+    buckets = await _buckets(repo, BS_PROXY_UNDERLYING_ID_FLIP)
+    assert buckets, "expected buckets for the underlying-id-flip proxy"
+    later_expected = BS_FLIP_LATER_UNDERLYING_VALUE * BS_UNDERLYING_PRICE
+    early_expected = BS_FLIP_EARLY_BALANCE * BS_UNDERLYING_PRICE
+    assert buckets[0].balance_usd == later_expected, [b.balance_usd for b in buckets]
+    assert buckets[-1].balance_usd == early_expected, [b.balance_usd for b in buckets]
+    assert all(b.balance_usd != later_expected + early_expected for b in buckets), [b.balance_usd for b in buckets]
