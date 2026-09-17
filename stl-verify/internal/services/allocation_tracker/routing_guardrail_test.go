@@ -42,7 +42,6 @@ func TestEmittedProtocolsAreKnown(t *testing.T) {
 // not-yet-implemented StubSource (i.e. are knowingly untracked). Anything else that
 // routes to a stub is a silently-dropped position and fails the guardrail below.
 var stubRoutedAllowlist = map[string]bool{
-	"psm3":       true,
 	"galaxy_clo": true,
 }
 
@@ -59,7 +58,7 @@ func TestEveryContractEntryRoutes(t *testing.T) {
 		t.Fatal("no token entries loaded from the committed contract")
 	}
 
-	registry, err := BuildSourceRegistry(nil, nil, nil, quietLogger())
+	registry, err := BuildSourceRegistry(nil, nil, nil, nil, quietLogger())
 	if err != nil {
 		t.Fatalf("build source registry: %v", err)
 	}
@@ -72,7 +71,7 @@ func TestEveryContractEntryRoutes(t *testing.T) {
 			continue
 		}
 		if _, isStub := source.(placeholderSource); isStub && !stubRoutedAllowlist[e.TokenType] {
-			t.Errorf("contract entry routes to a not-yet-implemented stub but token_type %q is not in the allowlist {psm3, galaxy_clo}: chain=%s protocol=%q contract=%s — implement a real source or add the token_type to stubRoutedAllowlist",
+			t.Errorf("contract entry routes to a not-yet-implemented stub but token_type %q is not in the allowlist {galaxy_clo}: chain=%s protocol=%q contract=%s — implement a real source or add the token_type to stubRoutedAllowlist",
 				e.TokenType, e.Chain, e.Protocol, e.ContractAddress.Hex())
 		}
 	}
@@ -83,7 +82,7 @@ func TestEveryContractEntryRoutes(t *testing.T) {
 // on ERC7540Source (which resolves share()), never on BalanceOfSource — whose
 // balanceOf/decimals calls revert on a vault and poison-stall the block.
 func TestCentrifugeRoutesToERC7540(t *testing.T) {
-	registry, err := BuildSourceRegistry(nil, nil, nil, quietLogger())
+	registry, err := BuildSourceRegistry(nil, nil, nil, nil, quietLogger())
 	if err != nil {
 		t.Fatalf("build source registry: %v", err)
 	}
@@ -107,7 +106,7 @@ func TestCentrifugeRoutesToERC7540(t *testing.T) {
 // tokens, plain ERC-20s — on BalanceOfSource, so a source registered ahead of it
 // cannot quietly claim them without failing here.
 func TestCentrifugeFeederRoutesToBalanceOf(t *testing.T) {
-	registry, err := BuildSourceRegistry(nil, nil, nil, quietLogger())
+	registry, err := BuildSourceRegistry(nil, nil, nil, nil, quietLogger())
 	if err != nil {
 		t.Fatalf("build source registry: %v", err)
 	}
@@ -131,7 +130,7 @@ func TestCentrifugeFeederRoutesToBalanceOf(t *testing.T) {
 // assertion through the real registry, so a source that stopped satisfying
 // shareResolver would fail every block on the chain; this pins it at build time.
 func TestCentrifugeRoutesToAShareResolver(t *testing.T) {
-	registry, err := BuildSourceRegistry(nil, nil, nil, quietLogger())
+	registry, err := BuildSourceRegistry(nil, nil, nil, nil, quietLogger())
 	if err != nil {
 		t.Fatalf("build source registry: %v", err)
 	}

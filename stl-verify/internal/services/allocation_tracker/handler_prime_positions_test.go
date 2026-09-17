@@ -1245,6 +1245,9 @@ func TestBuildPositions_UnderlyingValuationPolicy(t *testing.T) {
 		{"uni_v4_pool uses tracker-computed full value in asset_address", "uni_v4_pool", &policyUSDC, big.NewInt(100), big.NewInt(999), big.NewInt(999), policyUSDC, false},
 		{"uni_v4_lp uses tracker-computed full value in asset_address", "uni_v4_lp", &policyUSDC, big.NewInt(100), big.NewInt(888), big.NewInt(888), policyUSDC, false},
 		{"uni_v4_lp missing tracker value stays NULL", "uni_v4_lp", &policyUSDC, big.NewInt(100), nil, nil, common.Address{}, false},
+		{"psm3 rescales the 1e18 par value into the hint asset's own decimals", "psm3", &policyUSDC, big.NewInt(100), big.NewInt(1_000_000_000_000_000_000), big.NewInt(1_000_000), policyUSDC, false},
+		{"psm3 without asset_address stays NULL", "psm3", nil, big.NewInt(100), big.NewInt(1_000_000_000_000_000_000), nil, common.Address{}, false},
+		{"psm3 missing tracker value stays NULL", "psm3", &policyUSDC, big.NewInt(100), nil, nil, common.Address{}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1556,5 +1559,28 @@ func TestHandleBatch_ERC4626_SetsUnderlyingOnPosition(t *testing.T) {
 	}
 	if pos.Underlying.AssetSymbol != "USDS" {
 		t.Errorf("Underlying.AssetSymbol = %q, want USDS", pos.Underlying.AssetSymbol)
+	}
+}
+
+func TestRescaleDecimals(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    *big.Int
+		from, to int
+		want     *big.Int
+	}{
+		{"same scale is a no-op", big.NewInt(123), 18, 18, big.NewInt(123)},
+		{"down-scale truncates the remainder", big.NewInt(1_999_999_999_999), 18, 6, big.NewInt(1)},
+		{"down-scale exact", big.NewInt(1_000_000_000_000_000_000), 18, 6, big.NewInt(1_000_000)},
+		{"up-scale multiplies", big.NewInt(5), 6, 18, new(big.Int).Mul(big.NewInt(5), new(big.Int).Exp(big.NewInt(10), big.NewInt(12), nil))},
+		{"zero stays zero", big.NewInt(0), 18, 6, big.NewInt(0)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rescaleDecimals(tc.value, tc.from, tc.to)
+			if got.Cmp(tc.want) != 0 {
+				t.Errorf("rescaleDecimals(%s, %d, %d) = %s, want %s", tc.value, tc.from, tc.to, got, tc.want)
+			}
+		})
 	}
 }

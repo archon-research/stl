@@ -371,9 +371,47 @@ func (h *PrimePositionHandler) underlyingValuation(s *PositionSnapshot) (*entity
 		// AssetAddress is ignored: for erc20 entries the axis-synome export
 		// uses it as a pricing hint (AUSD->USDC), not a redemption denomination.
 		return h.valuationFor(s.Entry.ContractAddress, s.Balance)
+	case "psm3":
+		// PSM3Source reports UnderlyingValue in PSM3's own internal 1e18
+		// "USD-like" par unit (psm3_alm_shares.asset_value), not the hint
+		// asset's decimals -- rescale before valuing, treating PSM3's par $1
+		// as one unit of the hint asset (PSM3 values USDS/USDC at 1:1 par,
+		// docs/psm3_spec.md).
+		if s.Entry.AssetAddress == nil {
+			return nil, reasonMissingAssetAddress
+		}
+		if s.UnderlyingValue == nil {
+			return nil, reasonConvertFailed
+		}
+		meta, ok := h.metadata.get(*s.Entry.AssetAddress)
+		if !ok {
+			return nil, reasonAssetMetadataMissing
+		}
+		return h.valuationFor(*s.Entry.AssetAddress, rescaleDecimals(s.UnderlyingValue, psm3ParDecimals, meta.decimals))
 	default:
 		return nil, ""
 	}
+}
+
+// psm3ParDecimals is PSM3's internal share/par-value accounting scale: shares
+// and convertToAssetValue are both raw 1e18 "USD-like" integers (see
+// psm3_alm_shares' column comments and docs/psm3_spec.md), independent of
+// which of PSM3's three reserve tokens (USDS/sUSDS/USDC, 18/18/6 decimals) an
+// entry hints as its denomination asset.
+const psm3ParDecimals = 18
+
+// rescaleDecimals converts a raw fixed-point integer from one decimal scale to
+// another, truncating any fractional remainder so it never manufactures value.
+func rescaleDecimals(value *big.Int, fromDecimals, toDecimals int) *big.Int {
+	if fromDecimals == toDecimals {
+		return new(big.Int).Set(value)
+	}
+	if toDecimals > fromDecimals {
+		factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(toDecimals-fromDecimals)), nil)
+		return new(big.Int).Mul(value, factor)
+	}
+	factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(fromDecimals-toDecimals)), nil)
+	return new(big.Int).Quo(value, factor)
 }
 
 func (h *PrimePositionHandler) valuationFor(asset common.Address, value *big.Int) (*entity.UnderlyingValuation, FailureReason) {

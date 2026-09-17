@@ -9,18 +9,20 @@ import (
 )
 
 // BuildSourceRegistry assembles the production SourceRegistry — skip sources, the
-// balanceOf / erc4626 / curve / uni-v3 / uni-v4 fetchers, and the not-yet-implemented
-// stubs — in the registration order the worker relies on (earlier sources win in Route).
+// balanceOf / erc4626 / curve / uni-v3 / uni-v4 / psm3 fetchers, and the
+// not-yet-implemented stubs — in the registration order the worker relies on
+// (earlier sources win in Route).
 //
 // The multicaller is only used at fetch time (FetchBalances); routing (Route /
-// Supports) needs no live client, so tests can pass a nil multicaller (and nil V4
-// reader/block state) to assert which source every contract entry routes to. Keeping
+// Supports) needs no live client, so tests can pass a nil multicaller (and nil V4/psm3
+// readers or block state) to assert which source every contract entry routes to. Keeping
 // assembly here rather than inline in main means the routing guardrail test
 // (TestEveryContractEntryRoutes) and the worker share a single definition and cannot
 // drift.
 func BuildSourceRegistry(
 	mc outbound.Multicaller,
 	v4Reader outbound.UniswapV4PositionValuationReader,
+	psm3Reader outbound.Psm3PositionReader,
 	blockState outbound.BlockHashResolver,
 	logger *slog.Logger,
 ) (*SourceRegistry, error) {
@@ -65,6 +67,7 @@ func BuildSourceRegistry(
 	registry.Register(uniV3)
 
 	registry.Register(NewUniV4Source(v4Reader, blockState, logger))
+	registry.Register(NewPSM3Source(psm3Reader, blockState, logger))
 
 	for _, s := range defaultStubSources(logger) {
 		registry.Register(s)
