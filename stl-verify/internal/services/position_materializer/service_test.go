@@ -175,7 +175,7 @@ func TestTelemetry_NilSafeAndConstructible(t *testing.T) {
 	var nilT *Telemetry
 	nilT.RecordRun(context.Background(), "v", "ok", 5) // must not panic
 
-	tel, err := NewTelemetry() // global provider is a no-op meter in tests
+	tel, err := NewTelemetry(nil) // global provider is a no-op meter in tests
 	if err != nil {
 		t.Fatalf("NewTelemetry: %v", err)
 	}

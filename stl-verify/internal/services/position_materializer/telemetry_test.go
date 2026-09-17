@@ -15,7 +15,7 @@ func newRecordingTelemetry(t *testing.T) (*Telemetry, sdkmetric.Reader) {
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 
-	tel, err := NewTelemetryWithProvider(mp)
+	tel, err := NewTelemetryWithProvider(mp, nil)
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProvider() error: %v", err)
 	}
@@ -130,14 +130,13 @@ func TestRecordCacheRows_NilTelemetryIsANoOp(t *testing.T) {
 	tel.RecordCacheRows(context.Background(), "position_current", 42) // must not panic
 }
 
-// An unseeded counter first appears at its first value, so increase() misses the 0->1 after every
-// pod start: ViewFailing could not fire on a process's first error, and SilentlyEmpty fired for 6h
-// after a restart whose first run appended rows. Every configured materializer starts at zero.
+// Unseeded, a counter first appears at its first value and increase() misses the 0->1 after a pod
+// start, so ViewFailing missed a first error and SilentlyEmpty false-fired after a restart.
 func TestNewTelemetry_SeedsEveryConfiguredMaterializer(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
-	if _, err := NewTelemetryWithProvider(mp, "materialize_a", "materialize_b"); err != nil {
+	if _, err := NewTelemetryWithProvider(mp, []string{"materialize_a", "materialize_b"}); err != nil {
 		t.Fatalf("NewTelemetryWithProvider: %v", err)
 	}
 

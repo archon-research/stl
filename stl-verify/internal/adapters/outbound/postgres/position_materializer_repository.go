@@ -105,17 +105,26 @@ func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context
 	return out, nil
 }
 
-// MissingMaterializers returns the configured names with no public function that accepts p_build_id
-// and p_run_id by name, which is how materializeOnce calls them.
+// MissingMaterializers returns the configured names materializeOnce cannot call: it needs exactly one
+// public function of that name, executable, p_build_id integer and p_run_id bigint,
+// and a default for every other argument.
 func (r *PositionMaterializerRepository) MissingMaterializers(ctx context.Context, materializers []string) ([]string, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT m
+		SELECT c.m
 		  FROM unnest($1::text[]) WITH ORDINALITY AS c(m, ord)
-		 WHERE NOT EXISTS (
+		 WHERE (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+		         WHERE n.nspname = 'public' AND p.proname = c.m) <> 1
+		    OR NOT EXISTS (
 		       SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-		        WHERE n.nspname = 'public' AND p.proname = c.m
-		          AND p.proargnames @> ARRAY['p_build_id', 'p_run_id'])
-		 ORDER BY ord`, materializers)
+		        WHERE n.nspname = 'public' AND p.proname = c.m AND p.prokind = 'f'
+		          AND has_function_privilege(p.oid, 'EXECUTE')
+		          AND EXISTS (SELECT 1 FROM unnest(p.proargnames, p.proargtypes::oid[]) a(name, typ)
+		                       WHERE a.name = 'p_build_id' AND a.typ = 'integer'::regtype)
+		          AND EXISTS (SELECT 1 FROM unnest(p.proargnames, p.proargtypes::oid[]) a(name, typ)
+		                       WHERE a.name = 'p_run_id' AND a.typ = 'bigint'::regtype)
+		          AND NOT EXISTS (SELECT 1 FROM unnest(p.proargnames[1:p.pronargs - p.pronargdefaults]) a(name)
+		                           WHERE a.name NOT IN ('p_build_id', 'p_run_id')))
+		 ORDER BY c.ord`, materializers)
 	if err != nil {
 		return nil, fmt.Errorf("looking up materializer functions: %w", err)
 	}
@@ -180,7 +189,7 @@ func (r *PositionMaterializerRepository) rowEstimates(ctx context.Context, table
 // positional second argument would land on whatever that projection declares there.
 func (r *PositionMaterializerRepository) materializeOnce(ctx context.Context, materializer string, buildID int, runID int64) (int64, error) {
 	var changed int64
-	q := fmt.Sprintf(`SELECT %s(p_build_id => $1, p_run_id => $2)`, pgx.Identifier{materializer}.Sanitize())
+	q := fmt.Sprintf(`SELECT %s(p_build_id => $1, p_run_id => $2)`, pgx.Identifier{"public", materializer}.Sanitize())
 	// buildregistry.RunID, not the bare int64: its Valuer maps 0 to NULL, because a zero would name a
 	// writer_run row that does not exist and run_id carries no FK to catch it.
 	if err := r.pool.QueryRow(ctx, q, buildID, buildregistry.RunID(runID)).Scan(&changed); err != nil {

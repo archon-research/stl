@@ -15,6 +15,7 @@ func TestDBConfig_TimeoutGUCs(t *testing.T) {
 		{"none", DBConfig{}, nil},
 		{"lock only", DBConfig{LockTimeout: 10 * time.Second}, map[string]string{"lock_timeout": "10000"}},
 		{"statement only", DBConfig{StatementTimeout: 60 * time.Second}, map[string]string{"statement_timeout": "60000"}},
+		{"client check only", DBConfig{ClientConnectionCheckInterval: 30 * time.Second}, map[string]string{"client_connection_check_interval": "30000"}},
 		{
 			"both",
 			DBConfig{LockTimeout: 10 * time.Second, StatementTimeout: 60 * time.Second},

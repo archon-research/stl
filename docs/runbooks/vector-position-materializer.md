@@ -29,11 +29,10 @@ The alerts label a projection two ways: `VectorPositionMaterializerViewFailing` 
 The deployment ships at `replicas: 0`. Before bumping it to 1:
 
 1. Every entry in `POSITION_PROJECTIONS` exists in the target database. The worker checks this at
-   startup and exits naming the missing ones; `materialize_morpho_market` and `materialize_morpho_vault`
-   ship with #624 and #626.
-2. Time one projection by hand and watch its transaction. The shared function writes temp tables, so
-   the call holds a transaction id, and with it the vacuum horizon for every table in the database,
-   for its whole duration:
+   startup and exits naming the ones it cannot call; `materialize_morpho_market` and
+   `materialize_morpho_vault` ship with their own `materialize_morpho_*` migrations.
+2. Time one projection by hand and watch its transaction. The call holds a snapshot and a transaction
+   id, and with them the vacuum horizon for every table in the database, for its whole duration:
 
    ```sql
    -- session A
@@ -43,8 +42,15 @@ The deployment ships at `replicas: 0`. Before bumping it to 1:
      FROM pg_stat_activity WHERE backend_xid IS NOT NULL;
    ```
 
-   That duration is how long autovacuum cannot clean rows deleted after the call started. Decide
-   whether it is acceptable before the scheduled run makes it hourly.
+   Run it while the deployment is at 0: until session A ends it holds the per-view advisory lock and
+   blocks any other call on that view. The duration is how long autovacuum cannot clean rows deleted
+   after the call started; decide whether that is acceptable before the schedule makes it hourly.
+3. Confirm no schedule exists yet (`temporal schedule describe --schedule-id position-materializer`).
+   A schedule keeps the activity timeouts it was created with, and a redeploy updates only its
+   interval, so changing the timeouts later means deleting the schedule and letting the worker recreate it.
+
+While a run is longer than `MATERIALIZE_INTERVAL`, the ticks that fall inside it are skipped rather than
+queued; the bootstrap skips several. That is expected, not a stall.
 
 ---
 
@@ -143,9 +149,9 @@ projection, so every other view in that run did write; only this one did not. Th
 you do not have to find it in logs. Check `position_projection_refusal` and `positions_refused` in
 `position_projection_run` too: a run can succeed while withholding individual positions.
 
-A configured wrapper that does not exist does not reach this alert: the worker exits at startup with
-`configured materializers not in the database`, and the shared cronjob alerts report the restarts.
-Fix `POSITION_PROJECTIONS`, or deploy the wrapper's migration.
+A configured wrapper the worker cannot call does not reach this alert: it exits at startup with
+`configured materializers not callable`, the pod crash-loops and `VectorCronjobWorkerDown` fires after
+10m. Fix `POSITION_PROJECTIONS`, or deploy the wrapper's migration.
 
 **The ways a run fails, and what each one means.**
 

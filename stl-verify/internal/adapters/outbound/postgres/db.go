@@ -57,6 +57,10 @@ type DBConfig struct {
 	// latency-bounded services that should never run a long single statement.
 	StatementTimeout time.Duration
 
+	// ClientConnectionCheckInterval, if > 0, is applied as `SET client_connection_check_interval`, so a
+	// statement whose client has died is cancelled within the interval instead of running to completion.
+	ClientConnectionCheckInterval time.Duration
+
 	// MeterProvider supplies the pool's query metrics. Defaults to the global
 	// provider, whose instruments record nothing until telemetry.InitMetrics
 	// installs the exporting one.
@@ -111,6 +115,9 @@ func (c DBConfig) timeoutGUCs() map[string]string {
 	}
 	if c.StatementTimeout > 0 {
 		gucs["statement_timeout"] = strconv.FormatInt(c.StatementTimeout.Milliseconds(), 10)
+	}
+	if c.ClientConnectionCheckInterval > 0 {
+		gucs["client_connection_check_interval"] = strconv.FormatInt(c.ClientConnectionCheckInterval.Milliseconds(), 10)
 	}
 	if len(gucs) == 0 {
 		return nil
@@ -172,10 +179,8 @@ func buildPoolConfig(cfg DBConfig) (*pgxpool.Config, error) {
 	return poolConfig, nil
 }
 
-// attachNoticeLogger logs server warnings. Without a handler pgx discards them, so a RAISE WARNING
-// reaches nothing: the position materializer signals a withheld position that way. Every service's
-// pool gets this, so lower severities are dropped, and the unlocalized severity is compared because
-// Severity follows the server's lc_messages. RAISE EXCEPTION arrives as a query error, not a notice.
+// attachNoticeLogger logs server WARNINGs, which pgx otherwise discards; every pool gets it, so lower
+// severities are dropped. Severity follows the server's lc_messages, so the unlocalized one is compared.
 func attachNoticeLogger(poolConfig *pgxpool.Config) {
 	poolConfig.ConnConfig.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
 		if n == nil || n.SeverityUnlocalized != "WARNING" {

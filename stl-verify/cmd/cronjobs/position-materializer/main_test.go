@@ -36,18 +36,18 @@ func TestParseProjections(t *testing.T) {
 	}
 }
 
-// The first tick is the full-history bootstrap, one statement per projection. At the shared 10m
-// StartToClose Temporal would start a second attempt while the first query kept running, and the
-// schedule keeps the timeouts it was created with, so the default could not be raised by a redeploy.
+// The first tick is the whole-history bootstrap; at the shared 10m StartToClose it could never finish,
+// and the schedule keeps the timeouts it was created with, so a redeploy could not raise them.
 func TestMaterializeActivityTimeouts_AccommodateTheBootstrap(t *testing.T) {
 	if materializeActivityTimeouts.StartToClose < 6*time.Hour {
 		t.Errorf("StartToClose = %s, want at least 6h for the full-history first run", materializeActivityTimeouts.StartToClose)
 	}
-	if materializeActivityTimeouts.ScheduleToClose < materializeActivityTimeouts.StartToClose {
-		t.Errorf("ScheduleToClose (%s) is below StartToClose (%s)", materializeActivityTimeouts.ScheduleToClose, materializeActivityTimeouts.StartToClose)
+	// Every attempt must be able to run to StartToClose, or the last one is cut short or never starts.
+	if full := time.Duration(materializeActivityTimeouts.MaximumAttempts) * materializeActivityTimeouts.StartToClose; materializeActivityTimeouts.ScheduleToClose < full {
+		t.Errorf("ScheduleToClose (%s) is below %d attempts of StartToClose (%s)", materializeActivityTimeouts.ScheduleToClose, materializeActivityTimeouts.MaximumAttempts, full)
 	}
-	// Without a heartbeat the activity's context is never cancelled when Temporal gives up on it,
-	// so the database query keeps running beside the next attempt.
+	// Without a heartbeat a dead worker is noticed only at StartToClose, and Temporal's cancellations
+	// never reach the running query.
 	if materializeActivityTimeouts.Heartbeat <= 0 || materializeActivityTimeouts.Heartbeat >= materializeActivityTimeouts.StartToClose {
 		t.Errorf("Heartbeat = %s, want positive and shorter than StartToClose", materializeActivityTimeouts.Heartbeat)
 	}
@@ -61,5 +61,13 @@ func TestCronjobConfig_UsesTheMaterializeTimeouts(t *testing.T) {
 	cfg := cronjobConfig("position-materializer", "postgres://u:p@localhost:5432/d", []string{"materialize_a"})
 	if cfg.ActivityTimeouts != materializeActivityTimeouts {
 		t.Errorf("ActivityTimeouts = %+v, want materializeActivityTimeouts %+v", cfg.ActivityTimeouts, materializeActivityTimeouts)
+	}
+}
+
+// A pod that dies mid-run must not leave its statement running beside the retry.
+func TestMaterializerDBConfig_ChecksTheClientWhileAStatementRuns(t *testing.T) {
+	cfg := materializerDBConfig("postgres://u:p@localhost:5432/d")
+	if cfg.ClientConnectionCheckInterval <= 0 || cfg.ClientConnectionCheckInterval > time.Minute {
+		t.Errorf("ClientConnectionCheckInterval = %s, want a positive interval of at most 1m", cfg.ClientConnectionCheckInterval)
 	}
 }

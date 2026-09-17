@@ -25,14 +25,14 @@ type Telemetry struct {
 
 // NewTelemetry creates a Telemetry using the global meter provider, seeding the counters of every
 // configured materializer.
-func NewTelemetry(materializers ...string) (*Telemetry, error) {
-	return NewTelemetryWithProvider(otel.GetMeterProvider(), materializers...)
+func NewTelemetry(materializers []string) (*Telemetry, error) {
+	return NewTelemetryWithProvider(otel.GetMeterProvider(), materializers)
 }
 
 // NewTelemetryWithProvider creates a Telemetry with a custom meter provider. The run and row counters
 // are seeded at zero for each materializer: an alert reading increase() cannot see a series that
 // first appears at its first value.
-func NewTelemetryWithProvider(mp metric.MeterProvider, materializers ...string) (*Telemetry, error) {
+func NewTelemetryWithProvider(mp metric.MeterProvider, materializers []string) (*Telemetry, error) {
 	meter := mp.Meter(instrumentationName)
 
 	t := &Telemetry{}

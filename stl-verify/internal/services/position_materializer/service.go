@@ -1,13 +1,6 @@
-// Package position_materializer runs the position projections on a schedule.
-// Each invocation calls one materialize_<projection>() wrapper per configured
-// projection; the wrappers and the shared materialize_position_projection() own
-// the validation and the append (VEC-402), so this service is the scheduler.
-//
-// Every run re-projects each view's whole history and appends only observation
-// keys position_state does not hold: nothing is updated, so a rerun appends
-// nothing. The FIRST scheduled run is therefore the history bootstrap. Its cost
-// grows with each source table's history on every run; p_window does not change
-// that, because the shared function applies it above the views' DISTINCT ON.
+// Package position_materializer calls one materialize_<projection>() wrapper per configured projection
+// on a schedule. Each run re-projects whole history and appends only unseen observation keys, so the
+// first run is the bootstrap; p_window bounds the batch, not the read (materialize_position_projection).
 package position_materializer
 
 import (
@@ -87,7 +80,7 @@ func (s *Service) CheckConfigured(ctx context.Context) error {
 		return fmt.Errorf("checking configured materializers: %w", err)
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("configured materializers not in the database (or not taking p_build_id and p_run_id): %s",
+		return fmt.Errorf("configured materializers not callable (absent, ambiguous, or not taking a build and a writer run): %s",
 			strings.Join(missing, ", "))
 	}
 	return nil

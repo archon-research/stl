@@ -169,17 +169,34 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 
 	// A configured wrapper that does not exist, or does not take the provenance arguments by name,
 	// stops the worker at startup naming it, rather than failing every tick.
-	if _, err := pool.Exec(ctx, `CREATE FUNCTION materialize_itest_positional(integer, bigint) RETURNS bigint
-		LANGUAGE sql AS $fn$ SELECT 0::bigint $fn$`); err != nil {
-		t.Fatalf("create positional wrapper: %v", err)
+	// Each of these would fail on every tick, so each must stop the worker instead.
+	if _, err := pool.Exec(ctx, `
+		CREATE FUNCTION materialize_itest_positional(integer, bigint) RETURNS bigint
+			LANGUAGE sql AS $fn$ SELECT 0::bigint $fn$;
+		CREATE FUNCTION materialize_itest_build_only(p_build_id integer) RETURNS bigint
+			LANGUAGE sql AS $fn$ SELECT 0::bigint $fn$;
+		CREATE FUNCTION materialize_itest_overloaded(p_build_id integer DEFAULT 0, p_run_id bigint DEFAULT NULL) RETURNS bigint
+			LANGUAGE sql AS $fn$ SELECT 0::bigint $fn$;
+		CREATE FUNCTION materialize_itest_overloaded(p_build_id integer, p_run_id bigint, p_extra text DEFAULT '') RETURNS bigint
+			LANGUAGE sql AS $fn$ SELECT 0::bigint $fn$;
+		CREATE FUNCTION materialize_itest_required_extra(p_build_id integer, p_chain integer, p_run_id bigint DEFAULT NULL) RETURNS bigint
+			LANGUAGE sql AS $fn$ SELECT 0::bigint $fn$;
+		CREATE FUNCTION materialize_itest_wrong_type(p_build_id text, p_run_id bigint DEFAULT NULL) RETURNS bigint
+			LANGUAGE sql AS $fn$ SELECT 0::bigint $fn$;
+		CREATE PROCEDURE materialize_itest_procedure(p_build_id integer, p_run_id bigint)
+			LANGUAGE sql AS $fn$ SELECT 1 $fn$;`); err != nil {
+		t.Fatalf("create uncallable wrappers: %v", err)
 	}
+	bad := []string{"materialize_no_such", "materialize_itest_positional", "materialize_itest_build_only",
+		"materialize_itest_overloaded", "materialize_itest_required_extra", "materialize_itest_wrong_type",
+		"materialize_itest_procedure"}
 	_, err = setupRunner(ctx, temporal.Dependencies{Pool: pool, Logger: slog.Default()},
-		[]string{"materialize_itest", "materialize_no_such", "materialize_itest_positional"})
-	if err == nil || !strings.Contains(err.Error(), "materialize_no_such, materialize_itest_positional") {
-		t.Errorf("bad entries: got %v; want a startup failure naming materialize_no_such and materialize_itest_positional", err)
+		append([]string{"materialize_itest"}, bad...))
+	if err == nil || !strings.Contains(err.Error(), strings.Join(bad, ", ")) {
+		t.Errorf("uncallable entries: got %v; want a startup failure naming, in order, %s", err, strings.Join(bad, ", "))
 	}
 	if err != nil && strings.Contains(err.Error(), "materialize_itest,") {
-		t.Errorf("bad entries: %v also names materialize_itest, which exists", err)
+		t.Errorf("uncallable entries: %v also names materialize_itest, which is callable", err)
 	}
 }
 

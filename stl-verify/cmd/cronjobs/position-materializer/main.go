@@ -79,11 +79,19 @@ func cronjobConfig(serviceName, dbURL string, materializers []string) temporal.C
 		IntervalDefault:   "1h",
 		IntervalOffsetEnv: "MATERIALIZE_SCHEDULE_OFFSET",
 		ActivityTimeouts:  materializeActivityTimeouts,
-		OpenDatabase:      postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
+		OpenDatabase:      postgres.PoolOpener(materializerDBConfig(dbURL)),
 		Setup: func(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
 			return setupRunner(ctx, deps, materializers)
 		},
 	}
+}
+
+// materializerDBConfig checks the client connection while a statement runs: a pod that dies mid-run
+// otherwise leaves its query running beside the retry, holding locks and the vacuum horizon.
+func materializerDBConfig(dbURL string) postgres.DBConfig {
+	cfg := postgres.DefaultDBConfig(dbURL)
+	cfg.ClientConnectionCheckInterval = 30 * time.Second
+	return cfg
 }
 
 // Build metadata, populated from VCS in init() (GitBranch is set at link time).
@@ -120,14 +128,13 @@ func parseProjections(raw string) ([]string, error) {
 	return materializers, nil
 }
 
-// materializeActivityTimeouts sizes one tick against the first run, which appends every configured
-// view's whole history in one statement per view. Set before the first pod starts: the schedule's
-// action keeps the timeouts it was created with, and a redeploy reconciles only its interval. The
-// heartbeat is what cancels the activity's context, and so its database query, when Temporal gives up.
+// materializeActivityTimeouts sizes a tick against the first run, the whole-history bootstrap. The
+// schedule keeps the timeouts it was created with; the heartbeat notices a dead worker in minutes and
+// carries Temporal's cancellations to the running query.
 var materializeActivityTimeouts = temporal.ActivityTimeouts{
 	StartToClose:    6 * time.Hour,
 	ScheduleToClose: 12 * time.Hour,
-	MaximumAttempts: 3,
+	MaximumAttempts: 2,
 	Heartbeat:       time.Minute,
 }
 
@@ -136,7 +143,7 @@ var materializerName = regexp.MustCompile(`^materialize_[a-z][a-z0-9_]*$`)
 const sharedMaterializer = "materialize_position_projection"
 
 func setupRunner(ctx context.Context, deps temporal.Dependencies, materializers []string) (temporal.Runner, error) {
-	telemetry, err := position_materializer.NewTelemetry(materializers...)
+	telemetry, err := position_materializer.NewTelemetry(materializers)
 	if err != nil {
 		return nil, fmt.Errorf("creating position materializer telemetry: %w", err)
 	}
@@ -155,7 +162,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, materializers 
 		return nil, fmt.Errorf("creating position materializer service: %w", err)
 	}
 	if err := service.CheckConfigured(ctx); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("position materializer startup check: %w", err)
 	}
 
 	return temporal.RunnerFunc(service.RunOnce), nil

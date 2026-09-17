@@ -29,6 +29,7 @@ func TestOpenPool_TimeoutsApplied(t *testing.T) {
 
 	worker := WorkerDBConfig(dsn)
 	worker.StatementTimeout = 45 * time.Second
+	worker.ClientConnectionCheckInterval = 30 * time.Second
 	wp, err := OpenPool(ctx, worker)
 	if err != nil {
 		t.Fatalf("OpenPool(worker): %v", err)
@@ -47,6 +48,13 @@ func TestOpenPool_TimeoutsApplied(t *testing.T) {
 	}
 	if stmtTO != "45s" {
 		t.Errorf("WorkerDBConfig statement_timeout = %q, want 45s", stmtTO)
+	}
+	var checkInterval string
+	if err := wp.QueryRow(ctx, "SHOW client_connection_check_interval").Scan(&checkInterval); err != nil {
+		t.Fatalf("SHOW client_connection_check_interval: %v", err)
+	}
+	if checkInterval != "30s" {
+		t.Errorf("client_connection_check_interval = %q, want 30s", checkInterval)
 	}
 
 	dp, err := OpenPool(ctx, DefaultDBConfig(dsn))
