@@ -151,23 +151,29 @@ async def insert_onchain_price(
     price: str | Decimal,
     block: int,
     time_offset: str = "0 seconds",
+    timestamp: dt.datetime | None = None,
 ) -> None:
     """Insert an onchain_token_price row (no oracle_asset mapping — seed that separately).
 
     ``time_offset`` is a Postgres interval added to the row's timestamp, for
     scenarios that need to order rows by observation time rather than block.
+    Pass an explicit ``timestamp`` instead (mutually exclusive with
+    ``time_offset``) to pin the row to an exact instant -- e.g.
+    ``HISTORICAL_PRICE_SEED_AT`` for a scenario a bucketed read exercises, so
+    the row predates the query window rather than landing at NOW() (VEC-763).
     """
     await conn.execute(
         """
         INSERT INTO onchain_token_price
             (token_id, oracle_id, block_number, block_version, timestamp, price_usd)
-        VALUES ($1, $2, $3, 0, NOW() + $4::text::interval, $5::numeric(30,18))
+        VALUES ($1, $2, $3, 0, COALESCE($6::timestamptz, NOW() + $4::text::interval), $5::numeric(30,18))
         """,
         token_id,
         oracle_id,
         block,
         time_offset,
         str(price),
+        timestamp,
     )
 
 
@@ -968,19 +974,38 @@ async def retire_oracle_asset(
         )
 
 
-async def _insert_price(conn: asyncpg.Connection, token_id: int, oracle_id: int, price: Decimal) -> None:
+# A price row this far in the past is a "seed" for every fixed-date or
+# now-relative fixture window in this module (VEC-763): bucketed reads now
+# resolve prices at their own historical point rather than at NOW(), so a
+# scenario that wants one price to hold throughout its whole window must date
+# the row before that window, not at insertion time.
+HISTORICAL_PRICE_SEED_AT = dt.datetime(2000, 1, 1, tzinfo=dt.UTC)
+
+
+async def _insert_price(
+    conn: asyncpg.Connection,
+    token_id: int,
+    oracle_id: int,
+    price: Decimal,
+    *,
+    timestamp: dt.datetime | None = None,
+) -> None:
     """Insert a price row AND its enabled oracle_asset mapping (see insert_oracle_asset).
 
     Retired-source scenarios that need a price without an enabled mapping must
-    insert the price row directly instead of calling this.
+    insert the price row directly instead of calling this. ``timestamp``
+    defaults to now; pass ``HISTORICAL_PRICE_SEED_AT`` (or another explicit
+    instant) for a scenario a bucketed read exercises, so the row predates the
+    query window instead of landing inside or after it.
     """
     await conn.execute(
         "INSERT INTO onchain_token_price "
         "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
-        "VALUES ($1, $2, 1000, 0, NOW(), $3)",
+        "VALUES ($1, $2, 1000, 0, COALESCE($4::timestamptz, NOW()), $3)",
         token_id,
         oracle_id,
         price,
+        timestamp,
     )
     await insert_oracle_asset(conn, oracle_id, token_id)
 
@@ -1501,6 +1526,21 @@ RUV_MORPHO_UNDERLYING_VALUE = Decimal("1023.917201")
 # Distinct from RUV_UNDERLYING_PRICE so a cross-binding price mixup is visible.
 RUV_MORPHO_UNDERLYING_PRICE = Decimal("1.04")
 
+RUV_PRICE_CHANGE_PROXY_HEX = "ab" * 20
+_RUV_PRICE_CHANGE_PROTOCOL_HEX = "d5" * 20
+_RUV_PRICE_CHANGE_ORACLE_HEX = "d6" * 20
+_RUV_PRICE_CHANGE_UNDERLYING_HEX = "bb" * 20
+_RUV_PRICE_CHANGE_RECEIPT_HEX = "c9" * 20
+
+# A position held constant across the whole window (created before it, no
+# in-window activity), while its underlying's price changes exactly at the
+# start of bucket 2 (VEC-763): the pre-fix "latest price" read would show
+# RUV_PRICE_CHANGE_AFTER for every bucket, including the first two, which
+# predate that price ever existing.
+RUV_PRICE_CHANGE_BALANCE = Decimal("50")
+RUV_PRICE_CHANGE_BEFORE = Decimal("10.00")
+RUV_PRICE_CHANGE_AFTER = Decimal("25.00")
+
 
 async def seed_receipt_underlying_value_positions(db_url: str) -> None:
     """Seed the receipt-token redeemable-value scenarios into the given database."""
@@ -1519,8 +1559,12 @@ async def seed_receipt_underlying_value_positions(db_url: str) -> None:
 
             underlying_id = await insert_token(conn, "rUSDC", 6, bytes.fromhex(_RUV_UNDERLYING_HEX))
             alt_underlying_id = await insert_token(conn, "rALT", 6, bytes.fromhex(_RUV_ALT_UNDERLYING_HEX))
-            await _insert_price(conn, underlying_id, oracle_id, RUV_UNDERLYING_PRICE)
-            await _insert_price(conn, alt_underlying_id, oracle_id, RUV_ALT_UNDERLYING_PRICE)
+            await _insert_price(
+                conn, underlying_id, oracle_id, RUV_UNDERLYING_PRICE, timestamp=HISTORICAL_PRICE_SEED_AT
+            )
+            await _insert_price(
+                conn, alt_underlying_id, oracle_id, RUV_ALT_UNDERLYING_PRICE, timestamp=HISTORICAL_PRICE_SEED_AT
+            )
 
             receipts = [
                 ("syrupLike", _RUV_SYRUP_LIKE_RECEIPT_HEX),
@@ -1571,6 +1615,7 @@ async def seed_receipt_underlying_value_positions(db_url: str) -> None:
             await _ruv_seed_locf_series(conn, prime_id=prime_id, protocol_id=protocol_id, underlying_id=underlying_id)
             await _ruv_seed_morpho_like_position(conn, prime_id=prime_id)
             await _ruv_seed_price_contest_position(conn, prime_id=prime_id)
+            await _ruv_seed_price_change_position(conn, prime_id=prime_id)
     finally:
         await conn.close()
 
@@ -1667,7 +1712,14 @@ async def _ruv_seed_price_contest_position(conn: asyncpg.Connection, *, prime_id
         (low_oracle_id, 2100, RUV_CONTEST_WINNING_PRICE),
     ]
     for oracle_id, block, price in prices:
-        await insert_onchain_price(conn, token_id=underlying_id, oracle_id=oracle_id, price=price, block=block)
+        await insert_onchain_price(
+            conn,
+            token_id=underlying_id,
+            oracle_id=oracle_id,
+            price=price,
+            block=block,
+            timestamp=HISTORICAL_PRICE_SEED_AT,
+        )
     for oracle_id in (low_oracle_id, high_oracle_id):
         await insert_oracle_asset(conn, oracle_id, underlying_id)
 
@@ -1684,6 +1736,78 @@ async def _ruv_seed_price_contest_position(conn: asyncpg.Connection, *, prime_id
         underlying_value=RUV_CONTEST_BALANCE,
         underlying_token_id=underlying_id,
         created_at=RUV_LOCF_BASE_TS + dt.timedelta(minutes=10),
+    )
+
+
+async def _ruv_seed_price_change_position(conn: asyncpg.Connection, *, prime_id: int) -> None:
+    """Seed a position held constant across the window while its price changes mid-window (VEC-763).
+
+    ``list_exposure_buckets`` has no before-window seed (unlike the balance
+    read), so the position's one and only observation is placed AT the window
+    start rather than before it, and LOCF carries that same unit quantity into
+    every later bucket; only the underlying's oracle price differs, stepping
+    from ``RUV_PRICE_CHANGE_BEFORE`` to ``RUV_PRICE_CHANGE_AFTER`` exactly at
+    the start of bucket 2. A read that still priced every bucket at the latest
+    price would show ``RUV_PRICE_CHANGE_AFTER`` throughout, including the first
+    two buckets, which predate that price ever existing.
+    """
+    protocol_id = await conn.fetchval(
+        "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+        "VALUES (1, $1, 'ruvPriceChange', 'lending') RETURNING id",
+        bytes.fromhex(_RUV_PRICE_CHANGE_PROTOCOL_HEX),
+    )
+    oracle_id = await conn.fetchval(
+        "INSERT INTO oracle (name, display_name, chain_id, address) "
+        "VALUES ('ruv_price_change', 'RUV price-change test oracle', 1, $1) RETURNING id",
+        bytes.fromhex(_RUV_PRICE_CHANGE_ORACLE_HEX),
+    )
+    await conn.execute(
+        "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+        protocol_id,
+        oracle_id,
+    )
+
+    underlying_id = await insert_token(conn, "priceChangeUSD", 6, bytes.fromhex(_RUV_PRICE_CHANGE_UNDERLYING_HEX))
+    receipt_token_id = await insert_token(conn, "priceChangeReceipt", 6, bytes.fromhex(_RUV_PRICE_CHANGE_RECEIPT_HEX))
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=protocol_id,
+        underlying_token_id=underlying_id,
+        address=bytes.fromhex(_RUV_PRICE_CHANGE_RECEIPT_HEX),
+        symbol="priceChangeReceipt",
+    )
+
+    await insert_onchain_price(
+        conn,
+        token_id=underlying_id,
+        oracle_id=oracle_id,
+        price=RUV_PRICE_CHANGE_BEFORE,
+        block=1,
+        timestamp=HISTORICAL_PRICE_SEED_AT,
+    )
+    await insert_onchain_price(
+        conn,
+        token_id=underlying_id,
+        oracle_id=oracle_id,
+        price=RUV_PRICE_CHANGE_AFTER,
+        block=2,
+        timestamp=RUV_LOCF_BASE_TS + dt.timedelta(hours=2),
+    )
+    await insert_oracle_asset(conn, oracle_id, underlying_id)
+
+    await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=RUV_PRICE_CHANGE_PROXY_HEX)
+    await insert_allocation_position(
+        conn,
+        token_id=receipt_token_id,
+        prime_id=prime_id,
+        proxy_hex=RUV_PRICE_CHANGE_PROXY_HEX,
+        balance=RUV_PRICE_CHANGE_BALANCE,
+        block=1,
+        tx="2b" * 32,
+        direction="in",
+        underlying_value=RUV_PRICE_CHANGE_BALANCE,
+        underlying_token_id=underlying_id,
+        created_at=RUV_LOCF_BASE_TS,
     )
 
 
@@ -1711,7 +1835,9 @@ async def _ruv_seed_morpho_like_position(conn: asyncpg.Connection, *, prime_id: 
         morpho_oracle_id,
     )
     underlying_id = await insert_token(conn, "mbUSDC", 6, bytes.fromhex(_RUV_MORPHO_UNDERLYING_HEX))
-    await _insert_price(conn, underlying_id, morpho_oracle_id, RUV_MORPHO_UNDERLYING_PRICE)
+    await _insert_price(
+        conn, underlying_id, morpho_oracle_id, RUV_MORPHO_UNDERLYING_PRICE, timestamp=HISTORICAL_PRICE_SEED_AT
+    )
     share_token_id = await insert_token(conn, "sparkUSDCbcLike", 18, bytes.fromhex(_RUV_MORPHO_RECEIPT_HEX))
     await insert_receipt_token_row(
         conn,
@@ -1800,6 +1926,20 @@ _FR_ORACLE_HEX = "e9" * 20
 
 FR_UNDERLYING_PRICE = Decimal("1.03")
 FR_BUCKET_TS = dt.datetime(2026, 3, 5, 0, 30, tzinfo=dt.UTC)
+
+# Isolated protocol/oracle/underlying (own price series, untouched by any other
+# scenario) so a mid-window price change (VEC-763) cannot bleed into the
+# single-price fixtures above.
+FR_PROXY_PRICE_CHANGE = "df" * 20
+_FR_PRICE_CHANGE_PROTOCOL_HEX = "ea" * 20
+_FR_PRICE_CHANGE_ORACLE_HEX = "eb" * 20
+_FR_PRICE_CHANGE_UNDERLYING_HEX = "ec" * 20
+_FR_PRICE_CHANGE_RECEIPT_HEX = "ed" * 20
+
+FR_PRICE_CHANGE_BEFORE = Decimal("10.00")
+FR_PRICE_CHANGE_AFTER = Decimal("25.00")
+FR_PRICE_CHANGE_TX_AMOUNT_BEFORE = Decimal("40")
+FR_PRICE_CHANGE_TX_AMOUNT_AFTER = Decimal("60")
 
 # Ratio deposit: 100 shares in while the row's own balance/underlying_value pin
 # the share ratio at 234 / 200 = 1.17.
@@ -1912,9 +2052,11 @@ async def seed_flow_share_ratio_activity(db_url: str) -> None:
             )
 
             underlying_id = await insert_token(conn, "frUSDC", 6, bytes.fromhex(_FR_UNDERLYING_HEX))
-            await _insert_price(conn, underlying_id, oracle_id, FR_UNDERLYING_PRICE)
+            await _insert_price(conn, underlying_id, oracle_id, FR_UNDERLYING_PRICE, timestamp=HISTORICAL_PRICE_SEED_AT)
             alt_underlying_id = await insert_token(conn, "frALT", 6, bytes.fromhex(_FR_ALT_UNDERLYING_HEX))
-            await _insert_price(conn, alt_underlying_id, oracle_id, FR_ALT_UNDERLYING_PRICE)
+            await _insert_price(
+                conn, alt_underlying_id, oracle_id, FR_ALT_UNDERLYING_PRICE, timestamp=HISTORICAL_PRICE_SEED_AT
+            )
 
             async def receipt(address_hex: str, symbol: str) -> int:
                 token_id = await insert_token(conn, symbol, 6, bytes.fromhex(address_hex))
@@ -2187,6 +2329,75 @@ async def seed_flow_share_ratio_activity(db_url: str) -> None:
                     underlying_token_id=underlying_id,
                     created_at=FR_BUCKET_TS,
                     tx_amount=Decimal(0),
+                )
+
+            # Isolated price-change scenario (VEC-763): one flow in each of two
+            # hourly buckets, own-ratio path (underlying_value == balance, so
+            # ratio is fixed at 1) so only the underlying's price -- which steps
+            # between the buckets -- can move net_flow_usd.
+            fr_pc_protocol_id = await conn.fetchval(
+                "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+                "VALUES (1, $1, 'frPriceChange', 'lending') RETURNING id",
+                bytes.fromhex(_FR_PRICE_CHANGE_PROTOCOL_HEX),
+            )
+            fr_pc_oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('fr_price_change', 'FR price-change test oracle', 1, $1) RETURNING id",
+                bytes.fromhex(_FR_PRICE_CHANGE_ORACLE_HEX),
+            )
+            await conn.execute(
+                "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+                fr_pc_protocol_id,
+                fr_pc_oracle_id,
+            )
+            fr_pc_underlying_id = await insert_token(
+                conn, "frPriceChangeUSD", 6, bytes.fromhex(_FR_PRICE_CHANGE_UNDERLYING_HEX)
+            )
+            fr_pc_receipt_id = await insert_token(
+                conn, "frPriceChangeReceipt", 6, bytes.fromhex(_FR_PRICE_CHANGE_RECEIPT_HEX)
+            )
+            await insert_receipt_token_row(
+                conn,
+                protocol_id=fr_pc_protocol_id,
+                underlying_token_id=fr_pc_underlying_id,
+                address=bytes.fromhex(_FR_PRICE_CHANGE_RECEIPT_HEX),
+                symbol="frPriceChangeReceipt",
+            )
+            await insert_onchain_price(
+                conn,
+                token_id=fr_pc_underlying_id,
+                oracle_id=fr_pc_oracle_id,
+                price=FR_PRICE_CHANGE_BEFORE,
+                block=1,
+                timestamp=HISTORICAL_PRICE_SEED_AT,
+            )
+            await insert_onchain_price(
+                conn,
+                token_id=fr_pc_underlying_id,
+                oracle_id=fr_pc_oracle_id,
+                price=FR_PRICE_CHANGE_AFTER,
+                block=2,
+                timestamp=FR_BUCKET_TS + dt.timedelta(hours=1),
+            )
+            await insert_oracle_asset(conn, fr_pc_oracle_id, fr_pc_underlying_id)
+            await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=FR_PROXY_PRICE_CHANGE)
+            for offset, tx_amount, tx_hex in (
+                (dt.timedelta(0), FR_PRICE_CHANGE_TX_AMOUNT_BEFORE, "ee" * 32),
+                (dt.timedelta(hours=1), FR_PRICE_CHANGE_TX_AMOUNT_AFTER, "ef" * 32),
+            ):
+                await insert_allocation_position(
+                    conn,
+                    token_id=fr_pc_receipt_id,
+                    prime_id=prime_id,
+                    proxy_hex=FR_PROXY_PRICE_CHANGE,
+                    balance=tx_amount,
+                    block=1,
+                    tx=tx_hex,
+                    direction="in",
+                    underlying_value=tx_amount,
+                    underlying_token_id=fr_pc_underlying_id,
+                    created_at=FR_BUCKET_TS + offset,
+                    tx_amount=tx_amount,
                 )
     finally:
         await conn.close()
@@ -3331,7 +3542,9 @@ async def seed_processing_version_dedup_scenarios(db_url: str) -> None:
             )
 
             underlying_id = await insert_token(conn, "pvdUnderlying", 18, bytes.fromhex(PVD_UNDERLYING_HEX))
-            await _insert_price(conn, underlying_id, oracle_id, PVD_UNDERLYING_PRICE)
+            await _insert_price(
+                conn, underlying_id, oracle_id, PVD_UNDERLYING_PRICE, timestamp=HISTORICAL_PRICE_SEED_AT
+            )
             receipt_token_id = await insert_token(conn, "pvdReceipt", 18, bytes.fromhex(PVD_RECEIPT_HEX))
             await insert_receipt_token_row(
                 conn,
@@ -3513,9 +3726,9 @@ async def seed_balance_series_positions(db_url: str) -> None:
             )
 
             underlying_id = await insert_token(conn, "bsUSDC", 6, bytes.fromhex(_BS_UNDERLYING_HEX))
-            await _insert_price(conn, underlying_id, oracle_id, BS_UNDERLYING_PRICE)
+            await _insert_price(conn, underlying_id, oracle_id, BS_UNDERLYING_PRICE, timestamp=HISTORICAL_PRICE_SEED_AT)
             alt_underlying_id = await insert_token(conn, "bsALT", 6, bytes.fromhex(_BS_ALT_UNDERLYING_HEX))
-            await _insert_price(conn, alt_underlying_id, oracle_id, Decimal("5"))
+            await _insert_price(conn, alt_underlying_id, oracle_id, Decimal("5"), timestamp=HISTORICAL_PRICE_SEED_AT)
 
             receipt_id = await insert_token(conn, "bsRCPT", 6, bytes.fromhex(_BS_RECEIPT_HEX))
             await insert_receipt_token_row(
@@ -3526,7 +3739,7 @@ async def seed_balance_series_positions(db_url: str) -> None:
                 symbol="bsRCPT",
             )
             direct_id = await insert_token(conn, "bsDIR", 6, bytes.fromhex(_BS_DIRECT_HEX))
-            await _insert_price(conn, direct_id, oracle_id, BS_DIRECT_PRICE)
+            await _insert_price(conn, direct_id, oracle_id, BS_DIRECT_PRICE, timestamp=HISTORICAL_PRICE_SEED_AT)
 
             now = dt.datetime.now(dt.UTC)
             three_days_ago = now - dt.timedelta(days=3)
