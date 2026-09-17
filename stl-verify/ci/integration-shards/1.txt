@@ -64,3 +64,6 @@
 ./cmd/backfillers/allocation-underlying-value-backfill
 ./internal/services/uniswapv4bootstrap
 ./cmd/backfillers/uniswap-v4-position-bootstrap
+./cmd/cronjobs/core-model-reference-indexer
+./internal/adapters/outbound/coremodelfeed
+./internal/services/core_model_reference_indexer
