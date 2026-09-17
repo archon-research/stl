@@ -21,11 +21,10 @@ const (
 // The projection fans one raw row out into its loan-token leg (supply netted against borrow) and its
 // collateral-token leg, keyed market_id:token, and emits one closing zero-row when a leg goes from a
 // positive quantity to 0. A market whose collateral token is its loan token emits the loan leg only.
-// Tests that only read the seeded run share one database; a test that changes the source seeds its own.
+// Tests that leave the source rows unchanged share one database; a test that adds source rows seeds its own.
 
 // materializeMorphoMarketFixture gives a test its own migrated database, seeds the fixture and runs the projection
-// once, returning what it reported written. Scheduled jobs are off: every fixture is dated 2026-01/02, past
-// the compression window, so a policy run mid-test would take locks the assertions do not expect.
+// once, returning what it reported written. Scheduled jobs are off, so a policy run cannot take locks mid-test.
 func materializeMorphoMarketFixture(t *testing.T) (context.Context, *pgxpool.Pool, int64) {
 	t.Helper()
 	ctx := context.Background()
@@ -390,6 +389,9 @@ func TestMaterializeMorphoMarketRefusesOneAddressOnSeveralChains(t *testing.T) {
 	if !strings.Contains(err.Error(), "refusing to run") || !strings.Contains(err.Error(), `"user" rows sharing address`) {
 		t.Errorf("error %q does not name the shared holder address", err.Error())
 	}
+	if strings.Contains(err.Error(), "refusing to run: ;") {
+		t.Errorf("error %q opens with an empty negative-amount list", err.Error())
+	}
 }
 
 // A holder address that is not 20 bytes aborts on position_state's 40-hex CHECK naming no row.
@@ -418,34 +420,43 @@ func TestMaterializeMorphoMarketRefusesAMalformedHolder(t *testing.T) {
 // and are different tokens. Splitting the legs on the address would merge them into one quantity, so a
 // market that takes a token from another chain is refused by name.
 func TestMaterializeMorphoMarketRefusesATokenOnAnotherChain(t *testing.T) {
-	ctx, pool, _ := materializeMorphoMarketFixture(t)
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO chain (chain_id, name) VALUES (8453, 'base') ON CONFLICT (chain_id) DO NOTHING;
-		INSERT INTO token (chain_id, address, symbol, decimals) VALUES (8453, '\xdead', 'USDC', 6);
-		INSERT INTO morpho_market (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, lltv, oracle_address, irm_address, created_at_block)
-		SELECT 1, p.id, '\x9abc', lt.id, ct.id, 0, '\x00', '\x00', 1
-		FROM protocol p, token lt, token ct
-		WHERE p.chain_id = 1 AND p.address = '\xff' AND lt.chain_id = 1 AND lt.address = '\xdead' AND ct.chain_id = 8453 AND ct.address = '\xdead';
-		INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
-		SELECT u.id, m.id, 970, 0, '2026-02-01T00:00:00Z', 0, 0, 40, 100, 0
-		FROM "user" u, morpho_market m
-		WHERE u.chain_id = 1 AND u.address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND m.market_id = '\x9abc'`); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	var written int64
-	err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(&written)
-	if err == nil {
-		t.Fatalf("the run stored %d rows; a collateral token from chain 8453 in a chain-1 market must refuse", written)
-	}
-	if !strings.Contains(err.Error(), "market 9abc takes its collateral token from chain 8453 but is on chain 1") {
-		t.Errorf("error %q does not name the market and the token's chain", err.Error())
-	}
-	var rows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state WHERE block_number = 970`).Scan(&rows); err != nil {
-		t.Fatal(err)
-	}
-	if rows != 0 {
-		t.Errorf("stored %d rows at the offending block; want none", rows)
+	for _, leg := range []string{"loan", "collateral"} {
+		t.Run(leg, func(t *testing.T) {
+			ctx, pool, _ := materializeMorphoMarketFixture(t)
+			loan, coll := "1", "8453"
+			if leg == "loan" {
+				loan, coll = "8453", "1"
+			}
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO chain (chain_id, name) VALUES (8453, 'base') ON CONFLICT (chain_id) DO NOTHING;
+				INSERT INTO token (chain_id, address, symbol, decimals) VALUES (8453, '\xdead', 'USDC', 6);
+				INSERT INTO morpho_market (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, lltv, oracle_address, irm_address, created_at_block)
+				SELECT 1, p.id, '\x9abc', lt.id, ct.id, 0, '\x00', '\x00', 1
+				FROM protocol p, token lt, token ct
+				WHERE p.chain_id = 1 AND p.address = '\xff'
+				  AND lt.chain_id = `+loan+` AND lt.address = '\xdead' AND ct.chain_id = `+coll+` AND ct.address = '\xdead';
+				INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+				SELECT u.id, m.id, 970, 0, '2026-02-01T00:00:00Z', 0, 0, 40, 100, 0
+				FROM "user" u, morpho_market m
+				WHERE u.chain_id = 1 AND u.address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND m.market_id = '\x9abc'`); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			var written int64
+			err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(&written)
+			if err == nil {
+				t.Fatalf("the run stored %d rows; a %s token from chain 8453 in a chain-1 market must refuse", written, leg)
+			}
+			if want := "market 9abc takes its " + leg + " token from chain 8453 but is on chain 1"; !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not contain %q", err.Error(), want)
+			}
+			var rows int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state WHERE block_number = 970`).Scan(&rows); err != nil {
+				t.Fatal(err)
+			}
+			if rows != 0 {
+				t.Errorf("stored %d rows at the offending block; want none", rows)
+			}
+		})
 	}
 }
 
@@ -496,8 +507,8 @@ func TestMaterializeMorphoMarketRefusesAnOversizeHolder(t *testing.T) {
 	}
 }
 
-// The seeded run is only read by these, so they share one database. Order matters where a subtest runs
-// the projection again: those come after the ones that count what the first run wrote.
+// These leave the source rows unchanged, so they share one database. Subtests that run the projection again
+// come after the ones that count what the first run wrote.
 func TestMaterializeMorphoMarketOnTheSeed(t *testing.T) {
 	ctx, pool, written := materializeMorphoMarketFixture(t)
 	for _, c := range []struct {
@@ -516,7 +527,8 @@ func TestMaterializeMorphoMarketOnTheSeed(t *testing.T) {
 }
 
 // seedMorphoMarketRow appends one raw row for holder f2 (H) in the named market at block bn, with the
-// given timestamp, amounts and build_id.
+// given timestamp, amounts and build_id. A second row differing only in build_id is a reprocess: the
+// trigger gives it the next processing_version.
 func seedMorphoMarketRow(ctx context.Context, t *testing.T, pool *pgxpool.Pool, market string, bn int, ts string, supply, borrow, collateral string, buildID int) {
 	t.Helper()
 	if _, err := pool.Exec(ctx, `
@@ -584,6 +596,48 @@ func TestMaterializeMorphoMarketRefusesANegativeAmountCorrectedOnlyAtAnotherTime
 	}
 }
 
+// A correction is a higher processing_version of the SAME observation. A reprocess of another holder,
+// market or block_version at the same block and timestamp corrects nothing here: the check must still
+// refuse, and the view must still emit the negative observation rather than drop it.
+func TestMaterializeMorphoMarketRefusesANegativeAmountCorrectedOnlyElsewhere(t *testing.T) {
+	for _, c := range []struct {
+		name, user, market string
+		bv                 int
+	}{
+		{"another holder", `\xf3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3`, `\x1234`, 0},
+		{"another market", `\xf2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2`, `\x5678`, 0},
+		{"another block_version", `\xf2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2`, `\x1234`, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx, pool, _ := materializeMorphoMarketFixture(t)
+			seedMorphoMarketRow(ctx, t, pool, `\x1234`, 900, "2026-02-01T00:00:00Z", "0", "-70", "0", 0)
+			for _, build := range []int{0, 1} {
+				if _, err := pool.Exec(ctx, `
+					INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets, build_id)
+					SELECT u.id, m.id, 900, $1, '2026-02-01T00:00:00Z', 0, 0, 0, 70, 0, $2
+					FROM "user" u, morpho_market m
+					WHERE u.chain_id = 1 AND u.address = $3::bytea AND m.market_id = $4::bytea`, c.bv, build, c.user, c.market); err != nil {
+					t.Fatalf("seed the other observation: %v", err)
+				}
+			}
+			err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(new(int64))
+			if err == nil || !strings.Contains(err.Error(), "user f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2 at bn=900 bv=0 pv=0 has a negative source amount") {
+				t.Errorf("error %v; the uncorrected negative observation must refuse", err)
+			}
+			var n int
+			if err := pool.QueryRow(ctx, `
+				SELECT count(*) FROM position_morpho_market
+				WHERE block_number = 900 AND block_version = 0 AND processing_version = 0
+				  AND holder_id = 'f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2' AND instrument_key LIKE '1234:%'`).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			if n == 0 {
+				t.Error("the view dropped the uncorrected negative observation")
+			}
+		})
+	}
+}
+
 // A windowed run reads only the window's observations, so only a negative amount inside the window can
 // reach it. One outside must not refuse that run; an unbounded run still sees and refuses it.
 func TestMaterializeMorphoMarketJudgesNegativeAmountsInTheWindow(t *testing.T) {
@@ -607,8 +661,8 @@ func TestMaterializeMorphoMarketJudgesNegativeAmountsInTheWindow(t *testing.T) {
 	}
 }
 
-// Each refusal class keeps its own five: sorted together, five negative amounts on a lower market id hid
-// a shared holder address entirely.
+// Each refusal class keeps its own five, so six negative amounts on a lower market id do not hide a shared
+// holder address.
 func TestMaterializeMorphoMarketNamesEveryRefusalClass(t *testing.T) {
 	ctx, pool, _ := materializeMorphoMarketFixture(t)
 	for bn := 901; bn <= 906; bn++ {
@@ -639,8 +693,10 @@ func TestMaterializeMorphoMarketNamesEveryRefusalClass(t *testing.T) {
 func TestMaterializeMorphoMarketRejectsAnInvalidWindowFirst(t *testing.T) {
 	ctx, pool, _ := materializeMorphoMarketFixture(t)
 	seedMorphoMarketRow(ctx, t, pool, `\x1234`, 900, "2026-02-01T00:00:00Z", "-70", "0", "0", 0)
-	err := pool.QueryRow(ctx, `SELECT materialize_morpho_market(0, NULL, interval '-1 day')`).Scan(new(int64))
-	if err == nil || !strings.Contains(err.Error(), "materialize_morpho_market: p_window must be a finite positive interval") {
-		t.Errorf("error %v; want the wrapper to reject the window before judging any input", err)
+	for _, w := range []string{"-1 day", "0", "infinity"} {
+		err := pool.QueryRow(ctx, `SELECT materialize_morpho_market(0, NULL, $1::interval)`, w).Scan(new(int64))
+		if err == nil || !strings.Contains(err.Error(), "materialize_morpho_market: p_window must be a finite positive interval") {
+			t.Errorf("window %s: error %v; want the wrapper to reject it before judging any input", w, err)
+		}
 	}
 }
