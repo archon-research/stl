@@ -4,8 +4,8 @@
 -- other position lands, since a registry defect has no append-only repair.
 ALTER TABLE position_projection_refusal DROP CONSTRAINT position_projection_refusal_reason_chk;
 ALTER TABLE position_projection_refusal ADD CONSTRAINT position_projection_refusal_reason_chk
-    CHECK (reason IN ('block_time_inverts_height', 'deal_type_drift', 'observation_drift',
-                      'holder_address_shared', 'holder_address_malformed', 'token_on_other_chain'));
+    CHECK (reason IN ('block_time_inverts_height', 'deal_type_drift', 'observation_drift', 'unkeyable_input'));
+COMMENT ON COLUMN position_projection_refusal.reason IS 'Roles: PK. block_time_inverts_height | deal_type_drift | observation_drift, per the table comment, or unkeyable_input: a projection wrapper withheld an input it cannot key, named in detail.';
 
 CREATE OR REPLACE VIEW morpho_market_withheld_pair AS
 SELECT c.user_id, c.morpho_market_id, d.reason, d.detail
@@ -18,19 +18,19 @@ JOIN public.morpho_market m ON m.id = c.morpho_market_id
 JOIN public.token lt ON lt.id = m.loan_token_id
 JOIN public.token ct ON ct.id = m.collateral_token_id
 CROSS JOIN LATERAL (VALUES
-    ('holder_address_shared', format('market %s on chain %s is held by %s "user" rows sharing address %s',
+    ('holder address shared', format('market %s on chain %s is held by %s "user" rows sharing address %s',
         encode(m.market_id, 'hex'), m.chain_id, c.holders_on_address, encode(u.address, 'hex')),
      c.holders_on_address > 1),
-    ('holder_address_malformed', format('market %s on chain %s holder %s is a %s-byte address',
+    ('holder address malformed', format('market %s on chain %s holder %s is a %s-byte address',
         encode(m.market_id, 'hex'), m.chain_id, encode(u.address, 'hex'), length(u.address)),
      length(u.address) <> 20),
-    ('token_on_other_chain', format('market %s on chain %s holder %s: loan token on chain %s, collateral token on chain %s',
+    ('token on another chain', format('market %s on chain %s holder %s: loan token on chain %s, collateral token on chain %s',
         encode(m.market_id, 'hex'), m.chain_id, encode(u.address, 'hex'), lt.chain_id, ct.chain_id),
      lt.chain_id <> m.chain_id OR ct.chain_id <> m.chain_id)
 ) AS d(reason, detail, applies)
 WHERE d.applies;
 
-COMMENT ON VIEW morpho_market_withheld_pair IS '[Operational] VEC-402: the (user, market) pairs position_morpho_market withholds, one row per reason: holder_address_shared, where several "user" rows share one address in one market and would render one position_id; holder_address_malformed, where the holder address is not 20 bytes and cannot render the 40-hex holder_id; token_on_other_chain, where a leg''s token is not on the market''s chain and the address-keyed legs would merge two tokens. Read from morpho_market_position_current, so a pair missing from that cache is not listed; the view applies the malformed-holder and token checks to every row itself.';
+COMMENT ON VIEW morpho_market_withheld_pair IS '[Operational] VEC-402: the (user, market) pairs position_morpho_market withholds, one row per reason: holder address shared, where several "user" rows share one address in one market and would render one position_id; holder address malformed, where the holder address is not 20 bytes and cannot render the 40-hex holder_id; token on another chain, where a leg''s token is not on the market''s chain and the address-keyed legs would merge two tokens. Read from morpho_market_position_current, so it assumes that cache is complete: a history load that bypassed its trigger must re-run its backfill (20260909_150100) first, or a shared address it misses is not withheld. position_morpho_market applies the malformed-holder and token checks to every row itself.';
 
 CREATE OR REPLACE VIEW position_morpho_market AS
 WITH obs AS (
@@ -184,12 +184,16 @@ BEGIN
     SELECT 'public.position_morpho_market',
            public.position_id(m.chain_id, m.protocol_id, encode(m.market_id, 'hex') || ':' || encode(lt.address, 'hex'),
                               encode(u.address, 'hex')),
-           c.block_number, c.block_version, c.processing_version, w.reason, w.detail, p_build_id, p_run_id
+           c.block_number, c.block_version, c.processing_version, 'unkeyable_input', w.reason || ': ' || w.detail,
+           p_build_id, p_run_id
     FROM public.morpho_market_withheld_pair w
     JOIN public.morpho_market_position_current c ON c.user_id = w.user_id AND c.morpho_market_id = w.morpho_market_id
     JOIN public.morpho_market m ON m.id = w.morpho_market_id
     JOIN public.token lt ON lt.id = m.loan_token_id
     JOIN public."user" u ON u.id = w.user_id
+    -- position_key() rejects a blank holder, and raising here would undo the run; such a pair stays withheld
+    -- and is counted in the warning below.
+    WHERE octet_length(u.address) > 0
     ON CONFLICT DO NOTHING;
     SELECT count(DISTINCT (user_id, morpho_market_id)) INTO v_withheld FROM public.morpho_market_withheld_pair;
     IF v_withheld > 0 THEN
@@ -199,6 +203,6 @@ BEGIN
 END
 $fn$;
 
-COMMENT ON FUNCTION materialize_morpho_market(integer, bigint, interval) IS '[Operational] VEC-402: appends Morpho market position observations into position_state via materialize_position_projection(position_morpho_market). Rejects an invalid p_window first, refuses to run on a negative amount from materialize_morpho_market_refusals() judged over the window, and judges again after the append in the same transaction, raising so a negative written during the run cannot land. Pairs the view withholds for a registry defect are recorded in position_projection_refusal at their cached latest observation, and every other position lands. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2). p_window is forwarded to the materializer, which bounds the batch it reads; against this view it filters rows without pruning chunks.';
+COMMENT ON FUNCTION materialize_morpho_market(integer, bigint, interval) IS '[Operational] VEC-402: appends Morpho market position observations into position_state via materialize_position_projection(position_morpho_market). Rejects an invalid p_window first, refuses to run on a negative amount from materialize_morpho_market_refusals() judged over the window, and judges again after the append in the same transaction, raising so a negative written during the run cannot land. Pairs the view withholds for a registry defect are recorded in position_projection_refusal as unkeyable_input, once per pair at the loan leg''s position_id and the cached latest observation, and every other position lands; a pair whose holder address is empty cannot render a position_id and is only counted in the warning. These do not add to position_projection_run.positions_refused, which the spine writes. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2). p_window is forwarded to the materializer, which bounds the batch it reads; against this view it filters rows without pruning chunks.';
 
 INSERT INTO migrations (filename) VALUES ('20260917_110000_materialize_morpho_market.sql') ON CONFLICT (filename) DO NOTHING;
