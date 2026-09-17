@@ -1859,8 +1859,8 @@ func TestProcessBlock_FeedOracle_NonUSDConversion(t *testing.T) {
 	}
 	repo.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
 		return map[int64]outbound.TokenInfo{
-			1: {Address: wethAddr.Bytes()},  // Token 1 = WETH → matches quoteCurrencyTokenAddr["ETH"]
-			2: {Address: weethAddr.Bytes()}, // Token 2 = weETH
+			1: {Address: wethAddr.Bytes()},  // mainnet WETH: the ETH reference feed
+			2: {Address: weethAddr.Bytes()}, // weETH: the ETH-quoted feed
 		}, nil
 	}
 	repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
