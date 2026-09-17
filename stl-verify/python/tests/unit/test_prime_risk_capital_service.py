@@ -137,8 +137,8 @@ def _repo_by_proxy(positions_by_proxy: dict[str, list], total_rc: Decimal | None
     """
     normalised = {address.lower(): positions for address, positions in positions_by_proxy.items()}
 
-    async def _positions(proxy):
-        return normalised.get(str(proxy).lower(), [])
+    async def _positions(proxies):
+        return [row for proxy in proxies for row in normalised.get(str(proxy).lower(), [])]
 
     repo = AsyncMock(spec=AllocationRepositoryPort)
     repo.list_receipt_token_positions.side_effect = _positions

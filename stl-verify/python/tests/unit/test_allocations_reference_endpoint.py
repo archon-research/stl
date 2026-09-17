@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.api.deps import get_reference_positions_service_factory
 from app.api.v1 import allocations
-from app.domain.entities.allocation import AnchorageCustodyHolding, EthAddress, ReceiptTokenPosition
+from app.domain.entities.allocation import AnchorageCustodyHolding, ReceiptTokenPosition
 from app.domain.entities.reference_position import ReferencePosition, ReferencePositionSnapshot
 from app.main import app
 from app.services.allocation_service import AllocationService
@@ -42,9 +42,7 @@ def _indexed_position(amount_usd: Decimal | None) -> ReceiptTokenPosition:
 
 
 def _stub_indexed(service: AsyncMock, *positions: ReceiptTokenPosition) -> None:
-    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
     service.list_direct_asset_holdings.return_value = []
-    service.primary_proxy_address.return_value = None
     service.list_receipt_token_positions.return_value = list(positions)
 
 
@@ -101,7 +99,6 @@ def reference_client(request):
     reference_service.get.return_value = request.param
 
     service = AsyncMock(spec=AllocationService)
-    service.prime_exists.return_value = True
     service.list_anchorage_custody_holdings.return_value = []
 
     async def _service_dep():
@@ -252,14 +249,14 @@ def test_reference_mode_stamps_reference_provenance_on_each_row(reference_client
 
 
 @pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
-def test_reference_mode_marks_every_row_prime_scoped(reference_client):
-    # Upstream reports per prime, so a client unioning a prime's proxies would
-    # multiply the position count without this.
+def test_no_row_carries_a_scope_to_read(reference_client):
+    """Every row is the prime's now, so the field that told the two apart — and
+    the per-proxy union a client did to work around it — is gone."""
     client, _ = reference_client
 
     body = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true").json()
 
-    assert body[0]["scope"] == "prime"
+    assert "scope" not in body[0]
 
 
 @pytest.mark.parametrize(
@@ -311,10 +308,8 @@ def test_both_propagates_a_read_failure_rather_than_degrading_to_indexed(referen
     # The merged view swallows a 404 by design. A failure is not a 404, and
     # degrading on one would publish the indexed half as the whole answer.
     client, service = reference_client
-    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
     service.list_receipt_token_positions.return_value = []
     service.list_direct_asset_holdings.return_value = []
-    service.primary_proxy_address.return_value = None
     app.dependency_overrides[get_reference_positions_service_factory] = lambda: lambda: _failing_reader()
 
     with pytest.raises(ValueError, match="boom"):
@@ -326,10 +321,8 @@ def test_both_does_not_degrade_on_a_non_404_http_error(reference_client):
     # The guard that re-raises anything but a 404 exists for this; without a
     # test it is unreachable code that a refactor could widen unnoticed.
     client, service = reference_client
-    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
     service.list_receipt_token_positions.return_value = []
     service.list_direct_asset_holdings.return_value = []
-    service.primary_proxy_address.return_value = None
     reader = AsyncMock()
     reader.get.side_effect = HTTPException(status_code=503, detail="warming up")
     app.dependency_overrides[get_reference_positions_service_factory] = lambda: lambda: reader
@@ -394,7 +387,7 @@ def test_source_reference_lists_the_monitor_positions(reference_client):
     response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=reference")
 
     assert response.status_code == 200
-    assert [row["scope"] for row in response.json()] == ["prime"]
+    assert [row["source"] for row in response.json()] == ["reference"]
 
 
 @pytest.mark.parametrize(
@@ -404,10 +397,8 @@ def test_source_reference_lists_the_monitor_positions(reference_client):
 )
 def test_both_marks_a_position_only_sky_reports(reference_client):
     client, service = reference_client
-    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
     service.list_receipt_token_positions.return_value = []
     service.list_direct_asset_holdings.return_value = []
-    service.primary_proxy_address.return_value = None
 
     response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
 
@@ -436,10 +427,8 @@ def test_both_carries_the_reference_only_rows_own_underlying(reference_client):
     # `source=reference` -- the enrichment is not special-cased away when the
     # indexed half has nothing to match it against.
     client, service = reference_client
-    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
     service.list_receipt_token_positions.return_value = []
     service.list_direct_asset_holdings.return_value = []
-    service.primary_proxy_address.return_value = None
 
     response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
 
@@ -562,15 +551,12 @@ def test_both_binds_one_indexed_row_to_a_single_reference_row_per_token(referenc
     [_positions(_reference_position(network="ethereum", chain_id=1, chain="mainnet"))],
     indirect=True,
 )
-def test_both_serves_the_custody_leg_when_a_non_primary_proxy_is_queried(reference_client):
-    # The merged view spans every proxy, so the prime-scoped leg belongs to it
-    # whichever proxy was asked. Gating it on "is this the primary proxy" — right
-    # for the proxy-scoped default — dropped it from the union entirely.
+def test_both_serves_the_custody_leg_whichever_identifier_was_queried(reference_client):
+    # The leg is the prime's, read once, so it belongs to the answer whichever
+    # of the prime's identifiers named it.
     client, service = reference_client
-    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
     service.list_receipt_token_positions.return_value = []
     service.list_direct_asset_holdings.return_value = []
-    service.primary_proxy_address.return_value = _OTHER_PROXY
     service.list_anchorage_custody_holdings.return_value = [_custody_holding()]
 
     response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
@@ -584,10 +570,8 @@ def test_both_serves_the_indexed_half_for_a_prime_with_no_reference_data(referen
     # The indexed rows are still true, and every row carrying its own provenance
     # is what says Sky contributed nothing.
     client, service = reference_client
-    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
     service.list_receipt_token_positions.return_value = []
     service.list_direct_asset_holdings.return_value = []
-    service.primary_proxy_address.return_value = None
 
     response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
 

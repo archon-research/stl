@@ -353,6 +353,11 @@ async def resolve_prime_scope(
     resolution exists to remove.
     """
     identity = await resolve_prime(identifier, resolver, request=request, principal=principal)
+    return await _scope_for(identity, resolver)
+
+
+async def _scope_for(identity: PrimeIdentity, resolver: PrimeResolver) -> PrimeScope:
+    """Widen a resolved identity to the prime's whole wallet set."""
     try:
         wallets = await resolver.list_proxies(identity.id)
     except ValueError as exc:
@@ -376,6 +381,31 @@ async def resolve_prime_scope(
             entry.chain for entry in alm_proxies_for_prime(identity.name) if not chain_is_served(entry.chain)
         ),
     )
+
+
+async def prime_proxy_filter(identifier: str | None, resolver: PrimeResolver) -> tuple[EthAddress, ...] | None:
+    """The ALM proxies a query FILTER names, or ``None`` when it names no prime.
+
+    A filter is not a path resource: a well-formed identifier matching no prime
+    is an empty result, never a 404, so the pair of answers cannot be read as an
+    existence oracle either. Malformed is still 422 and a failed lookup 503.
+
+    An identifier that resolves to nothing yields an EMPTY tuple, which the
+    repository contract reads as "matches nothing". ``None`` is returned only
+    when no prime was named at all: conflating the two would serve every prime's
+    rows to a caller who asked for one.
+    """
+    if identifier is None:
+        return None
+    try:
+        identity = await resolver.resolve(identifier)
+    except InvalidPrimeIdentifierError as exc:
+        raise ApiRejectionError("malformed prime id") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail="prime lookup unavailable") from exc
+    if identity is None:
+        return ()
+    return (await _scope_for(identity, resolver)).alm_proxies
 
 
 async def prime_scope(
@@ -577,10 +607,7 @@ def get_reference_positions_service_factory(
     """Build the stored-reference balance-sheet service on demand, for the same reason."""
 
     def build() -> ReferencePositionsService:
-        return ReferencePositionsService(
-            ReferencePositionRepository(request.app.state.engine),
-            AllocationRepository(request.app.state.engine, request.app.state.reference_effective_at),
-        )
+        return ReferencePositionsService(ReferencePositionRepository(request.app.state.engine))
 
     return build
 

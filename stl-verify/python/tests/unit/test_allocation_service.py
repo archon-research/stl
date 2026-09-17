@@ -72,10 +72,11 @@ async def test_list_receipt_token_positions_delegates_to_repository():
     repo.list_receipt_token_positions.return_value = [position]
     service = AllocationService(repo)
 
-    result = await service.list_receipt_token_positions(_VALID_ADDR)
+    scope = make_prime_scope()
+    result = await service.list_receipt_token_positions(scope)
 
     assert result == [position]
-    repo.list_receipt_token_positions.assert_awaited_once_with(_VALID_ADDR)
+    repo.list_receipt_token_positions.assert_awaited_once_with(scope.alm_proxies)
 
 
 @pytest.mark.asyncio
@@ -84,8 +85,7 @@ async def test_list_receipt_token_positions_returns_empty_for_unknown_prime():
     repo.list_receipt_token_positions.return_value = []
     service = AllocationService(repo)
 
-    unknown_addr = EthAddress("0x" + "de" * 20)
-    result = await service.list_receipt_token_positions(unknown_addr)
+    result = await service.list_receipt_token_positions(make_prime_scope(wallets=()))
 
     assert result == []
 
@@ -97,36 +97,38 @@ async def test_list_direct_asset_holdings_delegates_to_repository():
     repo.list_direct_asset_holdings.return_value = [holding]
     service = AllocationService(repo)
 
-    result = await service.list_direct_asset_holdings(_VALID_ADDR)
+    scope = make_prime_scope()
+    result = await service.list_direct_asset_holdings(scope)
 
     assert result == [holding]
-    repo.list_direct_asset_holdings.assert_awaited_once_with(_VALID_ADDR)
+    repo.list_direct_asset_holdings.assert_awaited_once_with(scope.alm_proxies)
 
 
 @pytest.mark.asyncio
-async def test_prime_exists_delegates_to_repository():
+async def test_anchorage_custody_is_read_once_on_the_resolved_prime():
+    """Custody is SHARED: keyed on the prime, never fanned out over its proxies."""
     repo = AsyncMock()
-    repo.prime_exists.return_value = True
+    repo.list_anchorage_custody_holdings.return_value = []
     service = AllocationService(repo)
 
-    result = await service.prime_exists(_VALID_ADDR)
+    scope = make_prime_scope()
+    await service.list_anchorage_custody_holdings(scope)
 
-    assert result is True
-    repo.prime_exists.assert_awaited_once_with(_VALID_ADDR)
+    repo.list_anchorage_custody_holdings.assert_awaited_once_with(scope.identity.id)
 
 
 @pytest.mark.asyncio
 async def test_list_allocation_activity_delegates_filters_to_repository():
     repo = AsyncMock()
     repo.list_allocation_activity.return_value = []
-    repo.list_prime_proxy_addresses.return_value = [_VALID_ADDR, _SIBLING_ADDR]
     service = AllocationService(repo)
+    scope = make_prime_scope()
 
     from_timestamp = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
     to_timestamp = datetime(2026, 1, 2, 0, 0, tzinfo=UTC)
 
     result = await service.list_allocation_activity(
-        prime_id=_VALID_ADDR,
+        proxy_addresses=scope.alm_proxies,
         chain_id=1,
         protocol_name="aave",
         action_type="in",
@@ -138,10 +140,9 @@ async def test_list_allocation_activity_delegates_filters_to_repository():
     )
 
     assert result == []
-    # Scoped to the prime's whole proxy set, resolved from the same rows
-    # /v1/primes is built from.
+    # Scoped to the prime's whole ALM proxy set, resolved once at the boundary.
     repo.list_allocation_activity.assert_awaited_once_with(
-        proxy_addresses=[_VALID_ADDR, _SIBLING_ADDR],
+        proxy_addresses=scope.alm_proxies,
         allowed_vaults=None,
         chain_id=1,
         protocol_name="aave",

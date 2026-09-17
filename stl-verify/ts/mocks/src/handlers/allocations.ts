@@ -23,6 +23,7 @@ import {
   seedReferenceAllocations,
 } from '../fixtures/allocations.ts';
 import { PRIMES } from '../fixtures/registry.ts';
+import type { PrimeName } from '../fixtures/registry.ts';
 import { decimalString, usdString } from '../fixtures/series.ts';
 import { LIST_DELAY_MS, SERIES_DELAY_MS, mock } from '../mock-api.ts';
 import { notFound, problemResponse, rejection } from '../problem.ts';
@@ -48,7 +49,8 @@ const ACTIVITY_LIMIT_DEFAULT = 100;
 const ACTIVITY_LIMIT_MAX = 1000;
 
 type ActivityFilters = {
-  primeId: string | null;
+  /** The prime the caller named, or null when they named none. */
+  primeName: PrimeName | null | undefined;
   chainId: number | null;
   protocolName: string | null;
   actionType: string | null;
@@ -61,7 +63,7 @@ function matchesFilters(
   filters: ActivityFilters,
 ): boolean {
   return (
-    (filters.primeId === null || sameHex(row.prime_address, filters.primeId)) &&
+    (filters.primeName === null || row.prime_name === filters.primeName) &&
     (filters.chainId === null || row.chain_id === filters.chainId) &&
     (filters.protocolName === null ||
       includesInsensitive(row.protocol_name, filters.protocolName)) &&
@@ -217,6 +219,19 @@ function signedFlowUsd(
   return 0;
 }
 
+/** The prime an identifier names: a prime name, or any of its proxy addresses.
+ *
+ * `null` when none was asked for, `undefined` when it names no prime — which
+ * matches no rows rather than every prime's, the distinction the feed's filter
+ * turns on.
+ */
+function primeNamed(identifier: string | null): PrimeName | null | undefined {
+  if (identifier === null) return null;
+  return PRIMES.find(
+    (prime) => prime.name === identifier || sameHex(prime.address, identifier),
+  )?.name;
+}
+
 export function allocationHandlers(): MockHandler[] {
   return [
     mock.get(
@@ -231,12 +246,14 @@ export function allocationHandlers(): MockHandler[] {
         if (!source.ok) {
           return response.untyped(problemResponse(source.problem));
         }
-        const proxy = PRIMES.find((prime) =>
-          sameHex(prime.address, params.prime_id),
+        const proxy = PRIMES.find(
+          (prime) =>
+            prime.name === params.prime_id ||
+            sameHex(prime.address, params.prime_id),
         );
 
-        // Existence first, so "this proxy holds nothing" (a real fixture: spark
-        // on base) stays distinguishable from "this address is not a prime".
+        // The identifier names a prime or it names nothing; the rows below are
+        // the prime's whole set either way.
         if (proxy === undefined) {
           return response.untyped(
             problemResponse(notFound(`Prime not found: ${params.prime_id}`)),
@@ -256,11 +273,11 @@ export function allocationHandlers(): MockHandler[] {
 
         if (source.value === 'both') {
           return response(200).json(
-            seedCompositeAllocations(nowMs, proxy.name, proxy.address),
+            seedCompositeAllocations(nowMs, proxy.name),
           );
         }
 
-        const rows = seedAllocations(nowMs)[proxy.address] ?? [];
+        const rows = seedAllocations(nowMs)[proxy.name] ?? [];
         return response(200).json([...rows]);
       },
     ),
@@ -298,7 +315,7 @@ export function allocationHandlers(): MockHandler[] {
       }
       const { bucketed, frequencyMs, fromMs, toMs } = resolved.value;
       const filters: ActivityFilters = {
-        primeId: query.get('prime_id'),
+        primeName: primeNamed(query.get('prime_id')),
         chainId: chainId.value,
         protocolName: query.get('protocol_name'),
         actionType: query.get('action_type'),

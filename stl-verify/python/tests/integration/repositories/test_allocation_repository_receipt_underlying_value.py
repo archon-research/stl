@@ -132,7 +132,7 @@ def receipt_token_ids(async_db_url: str, db_url: str) -> dict[str, int]:
 
 
 async def _position(repo: AllocationRepository, symbol: str, prime: EthAddress = _PRIME):
-    positions = await repo.list_receipt_token_positions(prime)
+    positions = await repo.list_receipt_token_positions([prime])
     return {p.symbol: p for p in positions}.get(symbol)
 
 
@@ -287,7 +287,7 @@ async def _warning_records(repo: AllocationRepository) -> list[logging.LogRecord
     target.addHandler(handler)
     target.setLevel(logging.WARNING)
     try:
-        await repo.list_receipt_token_positions(_PRIME)
+        await repo.list_receipt_token_positions([_PRIME])
     finally:
         target.removeHandler(handler)
         target.setLevel(previous_level)

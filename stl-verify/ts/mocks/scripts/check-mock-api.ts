@@ -365,7 +365,6 @@ async function checkCustodyLegIsPrimeScoped() {
 
   const custody = allocations.find((row) => row.category === 'custody');
   assert.ok(custody, 'the off-chain custody leg is missing');
-  assert.equal(custody.scope, 'prime');
   assert.equal(custody.chain_id, 0);
 }
 
@@ -380,8 +379,7 @@ async function checkPrimeFilterDoesNotLeak() {
   assert.ok(feed.data.length > 0, 'prime-filtered activity is empty');
   assert.ok(
     armWith(feed.data, 'action_type', 'prime-filtered activity').every(
-      (row) =>
-        row.prime_address.toLowerCase() === SPARK_MAINNET_PROXY.toLowerCase(),
+      (row) => row.prime_name === 'spark',
     ),
     'prime_id filter leaked another prime into the feed',
   );
@@ -1294,17 +1292,24 @@ async function checkReferenceTranchesSplitTotalCapital() {
   }
 }
 
-async function checkEmptyProxyIsNotAnError() {
-  const allocations = await request(
-    '/v1/primes/{prime_id}/allocations',
-    primeAt(SPARK_BASE_PROXY),
-    'allocations for a proxy that holds nothing',
-  );
+async function checkEveryIdentifierAnswersTheSamePrime() {
+  const [fromBase, fromMainnet] = await Promise.all([
+    request(
+      '/v1/primes/{prime_id}/allocations',
+      primeAt(SPARK_BASE_PROXY),
+      'allocations via a proxy that holds nothing itself',
+    ),
+    request(
+      '/v1/primes/{prime_id}/allocations',
+      primeAt(SPARK_MAINNET_PROXY),
+      'allocations via the mainnet proxy',
+    ),
+  ]);
 
   assert.deepEqual(
-    allocations,
-    [],
-    'a real proxy holding nothing answers an empty list, not a 404',
+    fromBase,
+    fromMainnet,
+    'a proxy holding nothing itself must still answer with its prime’s rows',
   );
 }
 
@@ -1644,7 +1649,10 @@ const checks: [string, () => Promise<void>][] = [
     'the reference tranches split total capital',
     checkReferenceTranchesSplitTotalCapital,
   ],
-  ['an empty proxy is not an error', checkEmptyProxyIsNotAnError],
+  [
+    'every identifier answers the same prime',
+    checkEveryIdentifierAnswersTheSamePrime,
+  ],
   ['an unknown prime is a 404', checkUnknownPrimeIsNotFound],
   ['an unknown asset is a 404', checkUnknownAssetIsNotFound],
   ['an inherited key is not a fixture', checkInheritedKeysAreNotFound],

@@ -31,7 +31,7 @@ def test_record_unpriced_holdings_sets_span_attribute_for_unpriced():
         "app.adapters.postgres.allocation_position_repository.trace.get_current_span",
         return_value=span,
     ):
-        AllocationRepository._record_unpriced_holdings(_PRIME, [priced, unpriced_a, unpriced_b])
+        AllocationRepository._record_unpriced_holdings([_PRIME], [priced, unpriced_a, unpriced_b])
 
     span.set_attribute.assert_called_once_with("allocations.direct_holdings.unpriced", 2)
 
@@ -44,7 +44,7 @@ def test_record_unpriced_holdings_noop_when_all_priced():
         "app.adapters.postgres.allocation_position_repository.trace.get_current_span",
         return_value=span,
     ):
-        AllocationRepository._record_unpriced_holdings(_PRIME, [priced])
+        AllocationRepository._record_unpriced_holdings([_PRIME], [priced])
 
     span.set_attribute.assert_not_called()
 
@@ -95,7 +95,7 @@ def test_record_stale_custody_sets_span_attribute_when_snapshot_is_stale():
         "app.adapters.postgres.allocation_position_repository.trace.get_current_span",
         return_value=span,
     ):
-        AllocationRepository._record_stale_custody(_PRIME, [stale])
+        AllocationRepository._record_stale_custody(1, [stale])
 
     span.set_attribute.assert_called_once()
     name, value = span.set_attribute.call_args.args
@@ -119,13 +119,13 @@ def test_record_stale_custody_logs_warning_with_alert_fields():
         ),
         patch("app.adapters.postgres.allocation_position_repository.logger") as mock_logger,
     ):
-        AllocationRepository._record_stale_custody(_PRIME, [stale])
+        AllocationRepository._record_stale_custody(1, [stale])
 
     mock_logger.warning.assert_called_once()
     message, kwargs = mock_logger.warning.call_args.args[0], mock_logger.warning.call_args.kwargs
     assert "stale" in message.lower()
     extra = kwargs["extra"]
-    assert extra["prime_id"] == str(_PRIME)
+    assert extra["prime_id"] == 1
     assert extra["stale_count"] == 1
     assert extra["oldest_snapshot_time"] == ANCHORAGE_FROZEN_AS_OF.isoformat()
 
@@ -142,7 +142,7 @@ def test_record_stale_custody_fires_just_over_one_hour():
         ),
         patch("app.adapters.postgres.allocation_position_repository.logger") as mock_logger,
     ):
-        AllocationRepository._record_stale_custody(_PRIME, [holding])
+        AllocationRepository._record_stale_custody(1, [holding])
 
     span.set_attribute.assert_called_once()
     mock_logger.warning.assert_called_once()
@@ -160,7 +160,7 @@ def test_record_stale_custody_silent_just_under_one_hour():
         ),
         patch("app.adapters.postgres.allocation_position_repository.logger") as mock_logger,
     ):
-        AllocationRepository._record_stale_custody(_PRIME, [holding])
+        AllocationRepository._record_stale_custody(1, [holding])
 
     span.set_attribute.assert_not_called()
     mock_logger.warning.assert_not_called()

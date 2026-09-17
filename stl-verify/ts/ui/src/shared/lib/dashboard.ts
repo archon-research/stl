@@ -118,7 +118,8 @@ export type PrimeGroup = {
   key: string;
   name: string;
   vaultAddress: string | null;
-  primaryProxyAddress: string;
+  /** What every prime-scoped read is addressed to: the prime's own name. */
+  primeId: string;
   proxyAddresses: string[];
 };
 
@@ -149,20 +150,11 @@ export function groupPrimesByVault(primes: Prime[]): PrimeGroup[] {
     const sortedByAddress = [...rows].sort((left, right) =>
       left.address.localeCompare(right.address),
     );
-    // `mainnet` is the prime's canonical chain for aggregate figures (e.g.
-    // risk-capital); fall back to a deterministic pick when no row is on it.
-    const mainnetRow = rows.find((row) => row.chain === 'mainnet');
-    // Seedless: `rows` is non-empty by construction, which is what makes this
-    // the lowest address rather than a possibly-absent first element.
-    const lowestByAddress = rows.reduce((lowest, row) =>
-      row.address.localeCompare(lowest.address) < 0 ? row : lowest,
-    );
-
     return {
       key,
       name: rows[0].name,
       vaultAddress: rows[0].prime_vault_address ?? null,
-      primaryProxyAddress: mainnetRow?.address ?? lowestByAddress.address,
+      primeId: rows[0].name,
       // Deduped because `/v1/primes` is `DISTINCT ON (proxy_address, chain_id)`,
       // so one address holding positions on two chains yields two rows. Passing
       // it twice to `getAllocationsForProxies` would fetch it twice and

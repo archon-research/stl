@@ -77,7 +77,10 @@ _FLOW_BUCKET_TS = datetime(2026, 1, 1, 0, 30, tzinfo=UTC)
 # valuing them overstates net flow as gross inflow throughput. Only receipt-token
 # flows drive the reconstructed balance series.
 _DIRECT_FLOW_PRIME_VAULT_HEX = "f2" * 20
-_DIRECT_FLOW_PROXY_HEX = "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1"
+# Distinct from every vault address above: an identifier resolves as a vault
+# before a proxy, so a proxy that doubles as another prime's vault would
+# answer with that prime's wallets.
+_DIRECT_FLOW_PROXY_HEX = "f3" * 20
 _DIRECT_FLOW_TX_IN = "2a" * 32
 _DIRECT_FLOW_TX_OUT = "2b" * 32
 
@@ -241,6 +244,9 @@ async def _seed(db_url: str) -> None:
                 "VALUES (gen_random_uuid(), 'flow_test', $1) RETURNING id",
                 bytes.fromhex(_FLOW_PRIME_VAULT_HEX),
             )
+            # The activity filter resolves a prime to its declared wallet set, so
+            # positions alone do not make this proxy reachable.
+            await declare_prime_proxy(conn, prime_id=flow_prime_id, proxy_hex=_FLOW_PROXY_HEX)
             for offset, (tx, direction, amount) in enumerate(
                 [
                     (_FLOW_TX_IN, "in", 100),
@@ -272,6 +278,7 @@ async def _seed(db_url: str) -> None:
                 "VALUES (gen_random_uuid(), 'direct_flow_test', $1) RETURNING id",
                 bytes.fromhex(_DIRECT_FLOW_PRIME_VAULT_HEX),
             )
+            await declare_prime_proxy(conn, prime_id=direct_flow_prime_id, proxy_hex=_DIRECT_FLOW_PROXY_HEX)
             for offset, (tx, direction, amount) in enumerate(
                 [
                     (_DIRECT_FLOW_TX_IN, "in", 250),

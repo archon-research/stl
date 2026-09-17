@@ -59,7 +59,7 @@ def client(async_db_url: str, tmp_path: Path):
 
 
 def _custody_rows(client: TestClient, proxy: str) -> list[dict]:
-    return [row for row in client.get(f"/v1/primes/{proxy}/allocations").json() if row["scope"] == "prime"]
+    return [row for row in client.get(f"/v1/primes/{proxy}/allocations").json() if row["protocol_name"] == "anchorage"]
 
 
 def test_the_undeclared_proxy_is_not_listed(client: TestClient) -> None:
@@ -69,12 +69,14 @@ def test_the_undeclared_proxy_is_not_listed(client: TestClient) -> None:
     assert _SPARK_OFF_CONTRACT_ALM not in addresses
 
 
-def test_the_custody_leg_is_served_under_exactly_one_proxy(client: TestClient) -> None:
+def test_the_custody_leg_is_counted_once_from_every_identifier(client: TestClient) -> None:
+    """It used to be served under one picked proxy so that a client unioning them
+    could not double-count it. The response is the prime's now, so every
+    identifier carries exactly one copy."""
     spark = [row["address"] for row in client.get("/v1/primes").json() if row["name"] == "spark"]
 
-    carrying = [address for address in spark if _custody_rows(client, address)]
-
-    assert carrying == [_SPARK_MAINNET_ALM]
+    assert spark
+    assert {len(_custody_rows(client, address)) for address in spark} == {1}
 
 
 def test_the_undeclared_proxy_cannot_serve_a_second_copy(client: TestClient) -> None:

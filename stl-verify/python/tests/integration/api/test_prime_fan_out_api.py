@@ -142,14 +142,17 @@ def test_risk_capital_covers_the_chains_it_aggregated(client: TestClient) -> Non
     assert {"mainnet", "avalanche-c"} <= {row["chain"] for row in body["prime_per_chain"]}
 
 
-def test_custody_leg_is_served_under_the_mainnet_proxy_only(client: TestClient) -> None:
-    carrying = [
-        row["address"]
-        for row in _spark_rows(client)
-        if any(alloc["scope"] == "prime" for alloc in client.get(f"/v1/primes/{row['address']}/allocations").json())
-    ]
+def test_custody_leg_is_counted_once_from_every_proxy(client: TestClient) -> None:
+    """Served under one picked proxy before, so a client unioning them could not
+    double-count it. Every proxy answers with the prime now, one copy each."""
 
-    assert carrying == [_SPARK_MAINNET_ALM]
+    def custody_rows(address: str) -> int:
+        rows = client.get(f"/v1/primes/{address}/allocations").json()
+        return len([row for row in rows if row["symbol"] == "BTC"])
+
+    copies = {custody_rows(row["address"]) for row in _spark_rows(client)}
+
+    assert copies == {1}
 
 
 def test_risk_capital_reports_the_same_encumbrance_ratio_from_every_proxy(client: TestClient) -> None:
@@ -212,27 +215,15 @@ def test_the_whole_response_is_identical_from_every_proxy(client: TestClient) ->
     assert len(bodies) == 1
 
 
-def test_custody_leg_moves_with_the_data_not_the_contract_pin(client: TestClient) -> None:
-    """Attribution is resolved from `allocation_position`, so it cannot double-serve.
-
-    The seeded prime's mainnet proxy carries the leg; asking as any other proxy of
-    the same prime — contract-known or not — must not produce a second copy.
-    """
+def test_an_address_that_names_no_prime_is_404(client: TestClient) -> None:
     unknown_to_contract = "0x" + "cd" * 20
-    served = [
-        row["address"]
-        for row in _spark_rows(client)
-        if any(alloc["scope"] == "prime" for alloc in client.get(f"/v1/primes/{row['address']}/allocations").json())
-    ]
 
-    assert served == [_SPARK_MAINNET_ALM]
     assert client.get(f"/v1/primes/{unknown_to_contract}/allocations").status_code == 404
 
 
-def test_non_primary_proxys_on_chain_holdings_survive_the_custody_drop(client: TestClient) -> None:
-    # Only the Anchorage custody row is scoped away from a non-primary proxy;
-    # avalanche's own on-chain holding (a direct, non-receipt-token asset) must
-    # still surface, proving the drop targets the custody row alone.
+def test_allocations_are_the_unions_across_the_primes_chains(client: TestClient) -> None:
+    """Asked from the avalanche proxy, the answer still carries mainnet's aUSDC:
+    the rows are the prime's, not the queried wallet's."""
     rows = client.get(f"/v1/primes/{_SPARK_AVALANCHE_ALM}/allocations").json()
 
-    assert [row["symbol"] for row in rows] == ["JAAA"]
+    assert {row["symbol"] for row in rows} == {"aUSDC", "JAAA", "BTC"}

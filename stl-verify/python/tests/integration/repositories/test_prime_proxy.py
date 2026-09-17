@@ -17,7 +17,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.reference_as_of import utc_now
-from app.domain.entities.allocation import EthAddress
 
 # Declared in the migration. The ALM/SubProxy split matters: the reads classify by
 # address, so a made-up one would be treated as ALM and the SubProxy exclusions
@@ -62,63 +61,6 @@ async def test_the_migration_declares_the_full_proxy_list(conn: asyncpg.Connecti
 
     assert len(rows) == 12
     assert {row["name"] for row in rows} == {"spark", "grove"}
-
-
-@pytest.mark.asyncio(loop_scope="module")
-@pytest.mark.parametrize("declared", [True, False])
-async def test_prime_exists_answers_from_the_declared_list(repository: AllocationRepository, declared: bool) -> None:
-    """A declared proxy exists whether or not it has positions; anything else does not."""
-    address = EthAddress("0x" + (_SPARK_MAINNET_ALM if declared else _UNDECLARED))
-
-    assert await repository.prime_exists(address) is declared
-
-
-@pytest.mark.asyncio(loop_scope="module")
-async def test_prime_exists_holds_for_a_declared_proxy_with_no_positions(
-    conn: asyncpg.Connection, repository: AllocationRepository
-) -> None:
-    """The semantics this table chose: declared is enough, data need not have arrived.
-
-    spark's arbitrum ALM proxy is declared and has no allocation_position rows in
-    this database, so it exercises the case that previously 404'd.
-    """
-    arbitrum_alm = "92afd6f2385a90e44da3a8b60fe36f6cbe1d8709"
-    assert (
-        await conn.fetchval(
-            "SELECT count(*) FROM allocation_position WHERE proxy_address = $1",
-            bytes.fromhex(arbitrum_alm),
-        )
-        == 0
-    )
-
-    assert await repository.prime_exists(EthAddress("0x" + arbitrum_alm)) is True
-
-
-@pytest.mark.asyncio(loop_scope="module")
-async def test_proxy_list_widens_to_every_declared_alm_proxy(repository: AllocationRepository) -> None:
-    """Asking with one proxy returns the prime's declared ALM set, minus SubProxies."""
-    proxies = {
-        str(proxy).removeprefix("0x")
-        for proxy in await repository.list_prime_proxy_addresses(EthAddress("0x" + _SPARK_MAINNET_ALM))
-    }
-
-    assert _SPARK_MAINNET_ALM in proxies
-    assert _SPARK_BASE_ALM in proxies
-    assert _SPARK_SUB_PROXY not in proxies
-
-
-@pytest.mark.asyncio(loop_scope="module")
-async def test_an_undeclared_address_widens_only_to_itself(repository: AllocationRepository) -> None:
-    """Never empty — downstream an empty filter is indistinguishable from no filter."""
-    proxies = await repository.list_prime_proxy_addresses(EthAddress("0x" + _UNDECLARED))
-
-    assert [str(proxy) for proxy in proxies] == ["0x" + _UNDECLARED]
-
-
-@pytest.mark.asyncio(loop_scope="module")
-async def test_primary_proxy_prefers_mainnet(repository: AllocationRepository) -> None:
-    """The prime-scoped rows attach to the mainnet ALM proxy when the prime has one."""
-    assert await repository.primary_proxy_address(EthAddress("0x" + _SPARK_MAINNET_ALM)) == "0x" + _SPARK_MAINNET_ALM
 
 
 @pytest.mark.asyncio(loop_scope="module")

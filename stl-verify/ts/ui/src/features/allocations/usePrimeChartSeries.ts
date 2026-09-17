@@ -113,7 +113,7 @@ function getFrequencyForRange(
  * figure it has no indexed equivalent for.
  */
 export function usePrimeChartSeries(
-  primaryProxyAddress: string | null,
+  primeId: string | null,
   rangePreset: RangePreset,
   timeRange: TimeRange,
   primeTotalAllocationUsd: number,
@@ -137,7 +137,7 @@ export function usePrimeChartSeries(
     // Any one of the prime's proxies: the activity and exposure endpoints
     // resolve it prime-wide server-side. Total-capital and debt read
     // prime-scoped rows, so one address answers for the whole prime there too.
-    primaryProxyAddress,
+    primeId,
     {
       fromTimestamp: timeRange.from_timestamp,
       toTimestamp: timeRange.to_timestamp,

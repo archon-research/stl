@@ -98,11 +98,10 @@ export function PrimeSelectionProvider({ children }: { children: ReactNode }) {
     [primeGroups, selectedPrimeId],
   );
 
-  const primaryProxyAddress = selectedPrimeGroup?.primaryProxyAddress ?? null;
-
   const selectedPrime = useMemo(
-    () => primes.find((prime) => prime.address === primaryProxyAddress) ?? null,
-    [primaryProxyAddress, primes],
+    () =>
+      primes.find((prime) => prime.name === selectedPrimeGroup?.name) ?? null,
+    [selectedPrimeGroup, primes],
   );
 
   // Resolving the default (first) prime preserves the rest of the URL: a deep

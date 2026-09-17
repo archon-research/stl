@@ -91,10 +91,10 @@ function position(seed: PositionSeed): Allocation {
   };
 }
 
-/** Rows one sweep left behind: a single instant, a single action, proxy scope. */
+/** Rows one sweep left behind: a single instant, a single action. */
 type SweptSeed = Omit<
   PositionSeed,
-  'latest_activity_at' | 'latest_activity_action' | 'scope'
+  'latest_activity_at' | 'latest_activity_action'
 >;
 
 function swept(sweptAt: string, rows: readonly SweptSeed[]): Allocation[] {
@@ -103,7 +103,6 @@ function swept(sweptAt: string, rows: readonly SweptSeed[]): Allocation[] {
       ...row,
       latest_activity_at: sweptAt,
       latest_activity_action: 'sweep',
-      scope: 'proxy',
     }),
   );
 }
@@ -224,7 +223,6 @@ function sparkMainnetAllocations(nowMs: number): Allocation[] {
       latest_activity_action: 'in',
       latest_activity_amount: '4640.274995',
       category: 'asset',
-      scope: 'proxy',
     }),
     // The custody leg stays a literal: off-chain BTC has no token-registry row
     // to read a chain, an address or a symbol off.
@@ -248,7 +246,6 @@ function sparkMainnetAllocations(nowMs: number): Allocation[] {
       latest_activity_action: null,
       latest_activity_amount: null,
       category: 'custody',
-      scope: 'prime',
     },
   ];
 }
@@ -325,13 +322,17 @@ export function receiptTokenUsdPerUnit(
 }
 
 /** Keyed by lower-cased proxy address; a proxy with no entry holds nothing. */
+/** Each prime's rows, the union across its proxies: the endpoint answers the
+ * whole prime whichever of its identifiers is asked for. */
 export function seedAllocations(
   nowMs: number,
-): Record<string, readonly Allocation[]> {
+): Record<PrimeName, readonly Allocation[]> {
   return {
-    [SPARK_MAINNET_PROXY]: sparkMainnetAllocations(nowMs),
-    [SPARK_AVALANCHE_PROXY]: sparkAvalancheAllocations(nowMs),
-    [GROVE_MAINNET_PROXY]: groveMainnetAllocations(nowMs),
+    spark: [
+      ...sparkMainnetAllocations(nowMs),
+      ...sparkAvalancheAllocations(nowMs),
+    ],
+    grove: groveMainnetAllocations(nowMs),
   };
 }
 
@@ -365,7 +366,6 @@ export function seedReferenceAllocations(
       .map((allocation): Allocation => ({
         ...allocation,
         balance: null,
-        scope: 'prime',
         source: 'reference',
         reference_synced_at: iso(nowMs - REFERENCE_SYNCED_AGO_MS),
       })),
@@ -411,7 +411,6 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       latest_activity_action: null,
       latest_activity_amount: null,
       category: 'allocation',
-      scope: 'prime',
       source: 'reference',
       reference_synced_at: syncedAt,
     },
@@ -433,7 +432,6 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       latest_activity_action: null,
       latest_activity_amount: null,
       category: 'allocation',
-      scope: 'prime',
       source: 'reference',
       reference_synced_at: syncedAt,
     },
@@ -451,9 +449,8 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
 export function seedCompositeAllocations(
   nowMs: number,
   primeName: PrimeName,
-  proxyAddress: string,
 ): Allocation[] {
-  const indexed = seedAllocations(nowMs)[proxyAddress] ?? [];
+  const indexed = seedAllocations(nowMs)[primeName] ?? [];
   const referenceRows = seedReferenceAllocations(nowMs, primeName) ?? [];
 
   const indexedIds = new Set(
@@ -501,10 +498,12 @@ type ActivityRowSeed = Omit<
   | 'created_at'
   | 'prime_name'
   | 'token_symbol'
->;
+  // The wallet the event happened on. Seed-only: the response names the prime,
+  // because the feed is the prime's whole set rather than one wallet's.
+> & { proxy_address: string };
 
 /** A proxy names its prime, so a row cannot label itself with the other's. */
-function primeNameOf(address: AllocationActivity['prime_address']): PrimeName {
+function primeNameOf(address: string): PrimeName {
   const prime = PRIMES.find((row) => row.address === address);
   if (prime === undefined) {
     throw new Error(`no PRIMES row for proxy ${address}`);
@@ -524,7 +523,7 @@ function primeNameOf(address: AllocationActivity['prime_address']): PrimeName {
  */
 const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
   {
-    prime_address: SPARK_MAINNET_PROXY,
+    proxy_address: SPARK_MAINNET_PROXY,
     protocol_name: 'SparkLend',
     token_id: 736,
     action_type: 'sweep',
@@ -534,7 +533,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
     log_index: 0,
   },
   {
-    prime_address: SPARK_MAINNET_PROXY,
+    proxy_address: SPARK_MAINNET_PROXY,
     protocol_name: null,
     token_id: 9,
     action_type: 'in',
@@ -545,7 +544,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
     log_index: 118,
   },
   {
-    prime_address: SPARK_MAINNET_PROXY,
+    proxy_address: SPARK_MAINNET_PROXY,
     protocol_name: 'SparkLend',
     token_id: 736,
     action_type: 'in',
@@ -555,7 +554,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
     log_index: 242,
   },
   {
-    prime_address: SPARK_MAINNET_PROXY,
+    proxy_address: SPARK_MAINNET_PROXY,
     protocol_name: 'Morpho Blue',
     token_id: 885660,
     action_type: 'in',
@@ -566,7 +565,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
     log_index: 57,
   },
   {
-    prime_address: SPARK_MAINNET_PROXY,
+    proxy_address: SPARK_MAINNET_PROXY,
     protocol_name: 'SparkLend',
     token_id: 338,
     action_type: 'out',
@@ -577,7 +576,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
     log_index: 91,
   },
   {
-    prime_address: SPARK_MAINNET_PROXY,
+    proxy_address: SPARK_MAINNET_PROXY,
     protocol_name: 'SparkLend',
     token_id: 723,
     action_type: 'in',
@@ -588,7 +587,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
     log_index: 12,
   },
   {
-    prime_address: SPARK_MAINNET_PROXY,
+    proxy_address: SPARK_MAINNET_PROXY,
     protocol_name: 'Aave V3',
     token_id: 34,
     action_type: 'out',
@@ -599,7 +598,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
     log_index: 204,
   },
   {
-    prime_address: SPARK_MAINNET_PROXY,
+    proxy_address: SPARK_MAINNET_PROXY,
     protocol_name: 'SparkLend',
     token_id: 269,
     action_type: 'in',
@@ -610,7 +609,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
     log_index: 33,
   },
   {
-    prime_address: SPARK_MAINNET_PROXY,
+    proxy_address: SPARK_MAINNET_PROXY,
     protocol_name: 'SparkLend',
     token_id: 735,
     action_type: 'sweep',
@@ -620,7 +619,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
     log_index: 0,
   },
   {
-    prime_address: GROVE_MAINNET_PROXY,
+    proxy_address: GROVE_MAINNET_PROXY,
     protocol_name: 'SparkLend',
     token_id: 736,
     action_type: 'in',
@@ -631,7 +630,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
     log_index: 66,
   },
   {
-    prime_address: SPARK_MAINNET_PROXY,
+    proxy_address: SPARK_MAINNET_PROXY,
     protocol_name: 'maple',
     token_id: 850711,
     action_type: 'in',
@@ -642,7 +641,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
     log_index: 147,
   },
   {
-    prime_address: SPARK_MAINNET_PROXY,
+    proxy_address: SPARK_MAINNET_PROXY,
     protocol_name: 'Morpho Blue',
     token_id: 892750,
     action_type: 'out',
@@ -653,7 +652,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
     log_index: 8,
   },
   {
-    prime_address: SPARK_AVALANCHE_PROXY,
+    proxy_address: SPARK_AVALANCHE_PROXY,
     protocol_name: 'Aave V3',
     token_id: 1302,
     action_type: 'sweep',
@@ -663,7 +662,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
     log_index: 0,
   },
   {
-    prime_address: SPARK_MAINNET_PROXY,
+    proxy_address: SPARK_MAINNET_PROXY,
     protocol_name: 'SparkLend',
     token_id: 736,
     action_type: 'out',
@@ -674,7 +673,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
     log_index: 175,
   },
   {
-    prime_address: GROVE_MAINNET_PROXY,
+    proxy_address: GROVE_MAINNET_PROXY,
     protocol_name: null,
     token_id: 12,
     action_type: 'in',
@@ -685,7 +684,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
     log_index: 24,
   },
   {
-    prime_address: SPARK_MAINNET_PROXY,
+    proxy_address: SPARK_MAINNET_PROXY,
     protocol_name: 'SparkLend',
     token_id: 338,
     action_type: 'sweep',
@@ -700,16 +699,18 @@ export function seedActivity(nowMs: number): AllocationActivity[] {
   // Annotated on the callback, not just on the function: a `.map()` result is
   // checked for assignability, which lets a field the document dropped stay in
   // the row. See the same annotation on every response-row `.map()` here.
-  return ACTIVITY_ROWS.map((row, index): AllocationActivity => ({
-    ...row,
-    chain_id: tokenById(row.token_id).chain_id,
-    prime_name: primeNameOf(row.prime_address),
-    token_symbol: tokenSymbol(row.token_id),
-    block_number: 25780912 - index * 110,
-    block_version: 0,
-    created_at: offsetIsoAgo(
-      nowMs,
-      LAST_SWEEP_AGO + index * ACTIVITY_ROW_SPACING,
-    ),
-  }));
+  return ACTIVITY_ROWS.map(
+    ({ proxy_address, ...row }, index): AllocationActivity => ({
+      ...row,
+      chain_id: tokenById(row.token_id).chain_id,
+      prime_name: primeNameOf(proxy_address),
+      token_symbol: tokenSymbol(row.token_id),
+      block_number: 25780912 - index * 110,
+      block_version: 0,
+      created_at: offsetIsoAgo(
+        nowMs,
+        LAST_SWEEP_AGO + index * ACTIVITY_ROW_SPACING,
+      ),
+    }),
+  );
 }

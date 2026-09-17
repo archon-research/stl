@@ -71,14 +71,12 @@ function warmPrime(group: PrimeGroup): void {
     warm(queryClient.ensureQueryData(allocationsQuery(proxy)));
   }
 
-  warm(
-    queryClient.ensureQueryData(riskCapitalQuery(group.primaryProxyAddress)),
-  );
+  warm(queryClient.ensureQueryData(riskCapitalQuery(group.primeId)));
   warm(
     queryClient.ensureQueryData(
       showsReference
-        ? latestReferenceDebtQuery(group.primaryProxyAddress)
-        : latestDebtSnapshotQuery(group.primaryProxyAddress),
+        ? latestReferenceDebtQuery(group.primeId)
+        : latestDebtSnapshotQuery(group.primeId),
     ),
   );
 }

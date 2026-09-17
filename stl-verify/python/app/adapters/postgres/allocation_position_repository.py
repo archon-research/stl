@@ -19,7 +19,7 @@ from app.adapters.postgres.reference_as_of import (
     ReferenceAsOf,
     ReferenceEffectiveAtProvider,
 )
-from app.domain.chain_names import MAINNET_CHAIN_ID, chain_name_for
+from app.domain.chain_names import chain_name_for
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
     ChainMetadata,
@@ -35,7 +35,7 @@ from app.domain.entities.time_series_bucket import (
     ExposureBucket,
     TotalCapitalBucket,
 )
-from app.domain.prime_registry import ProxyKind, classify_proxy, subproxy_addresses
+from app.domain.prime_registry import ProxyKind, classify_proxy
 
 # USDS (mainnet). A prime's treasury USDS held in its SubProxy wallet is its
 # total capital; this isolates that token from any other SubProxy holding.
@@ -309,40 +309,14 @@ class AllocationRepository:
             )
             raise ValueError(f"Database query failed while fetching primes: {exc}") from exc
 
-    async def prime_exists(self, prime_address: EthAddress) -> bool:
-        query = text(
-            """
-            SELECT 1
-            FROM prime_proxy
-            WHERE proxy_address = decode(:address_hex, 'hex')
-            LIMIT 1
-            """
-        )
-
-        try:
-            async with self._engine.connect() as conn:
-                row = (await conn.execute(query, {"address_hex": prime_address.hex})).fetchone()
-            return row is not None
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.error(
-                "Failed to check prime existence in database",
-                extra={
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                    "prime_address": str(prime_address),
-                },
-                exc_info=True,
-            )
-            raise ValueError(f"Database query failed while checking if prime {prime_address} exists: {exc}") from exc
-
-    async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:
+    async def list_receipt_token_positions(self, proxy_addresses: Sequence[EthAddress]) -> list[ReceiptTokenPosition]:
+        if not proxy_addresses:
+            return []
         try:
             async with self._engine.connect() as conn:
                 result = await conn.execute(
                     _RECEIPT_TOKEN_POSITIONS_SQL,
-                    self._reference.params(proxy_hex=prime_id.hex),
+                    self._reference.params(proxy_addrs=[a.to_bytes() for a in proxy_addresses]),
                 )
                 rows = result.fetchall()
             positions = [
@@ -375,7 +349,7 @@ class AllocationRepository:
                 )
                 for row in rows
             ]
-            self._record_receipt_valuation_gaps(prime_id, rows)
+            self._record_receipt_valuation_gaps(proxy_addresses, rows)
             return positions
         except asyncio.CancelledError:
             raise
@@ -385,7 +359,7 @@ class AllocationRepository:
             logger.error(
                 "Failed to fetch receipt token positions from database",
                 extra={
-                    "prime_id": str(prime_id),
+                    "proxy_addresses": [str(a) for a in proxy_addresses],
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
                 },
@@ -393,12 +367,15 @@ class AllocationRepository:
             )
             raise ValueError(f"Database query failed while fetching receipt token positions: {exc}") from exc
 
-    async def list_direct_asset_holdings(self, prime_id: EthAddress) -> list[DirectAssetHolding]:
+    async def list_direct_asset_holdings(self, proxy_addresses: Sequence[EthAddress]) -> list[DirectAssetHolding]:
         try:
             async with self._engine.connect() as conn:
                 result = await conn.execute(
                     _DIRECT_ASSET_HOLDINGS_SQL,
-                    self._reference.params(proxy_hex=prime_id.hex, uv_token_addrs=_UNDERLYING_VALUE_TOKEN_ADDRS),
+                    self._reference.params(
+                        proxy_addrs=[a.to_bytes() for a in proxy_addresses],
+                        uv_token_addrs=_UNDERLYING_VALUE_TOKEN_ADDRS,
+                    ),
                 )
                 holdings = [
                     DirectAssetHolding(
@@ -431,7 +408,7 @@ class AllocationRepository:
                     )
                     for row in result
                 ]
-            self._record_unpriced_holdings(prime_id, holdings)
+            self._record_unpriced_holdings(proxy_addresses, holdings)
             return holdings
         except asyncio.CancelledError:
             raise
@@ -441,7 +418,7 @@ class AllocationRepository:
             logger.error(
                 "Failed to fetch direct asset holdings from database",
                 extra={
-                    "prime_id": str(prime_id),
+                    "proxy_addresses": [str(a) for a in proxy_addresses],
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
                 },
@@ -449,7 +426,7 @@ class AllocationRepository:
             )
             raise ValueError(f"Database query failed while fetching direct asset holdings: {exc}") from exc
 
-    async def list_anchorage_custody_holdings(self, prime_id: EthAddress) -> list[AnchorageCustodyHolding]:
+    async def list_anchorage_custody_holdings(self, prime_id: int) -> list[AnchorageCustodyHolding]:
         """Return off-chain Anchorage BTC custody collateral for the prime.
 
         Scoped to the prime's latest snapshot cohort, corrections resolved, then
@@ -459,7 +436,7 @@ class AllocationRepository:
         """
         try:
             async with self._engine.connect() as conn:
-                result = await conn.execute(_ANCHORAGE_CUSTODY_HOLDINGS_SQL, {"proxy_hex": prime_id.hex})
+                result = await conn.execute(_ANCHORAGE_CUSTODY_HOLDINGS_SQL, {"prime_id": prime_id})
                 rows = result.fetchall()
             holdings = [
                 AnchorageCustodyHolding(
@@ -491,7 +468,7 @@ class AllocationRepository:
             raise ValueError(f"Database query failed while fetching anchorage custody holdings: {exc}") from exc
 
     @staticmethod
-    def _record_stale_custody(prime_id: EthAddress, holdings: list[AnchorageCustodyHolding]) -> None:
+    def _record_stale_custody(prime_id: int, holdings: list[AnchorageCustodyHolding]) -> None:
         """Surface Anchorage custody rows whose snapshot has gone stale.
 
         The feed polls every ~15 minutes, so a cohort older than an hour means
@@ -511,7 +488,7 @@ class AllocationRepository:
         logger.warning(
             "Anchorage custody snapshot is stale (upstream feed may be frozen)",
             extra={
-                "prime_id": str(prime_id),
+                "prime_id": prime_id,
                 "stale_count": len(stale),
                 "oldest_snapshot_time": oldest.isoformat(),
                 "stale_age_seconds": age_seconds,
@@ -519,7 +496,7 @@ class AllocationRepository:
         )
 
     @staticmethod
-    def _record_receipt_valuation_gaps(prime_id: EthAddress, rows: Sequence[Any]) -> None:
+    def _record_receipt_valuation_gaps(proxy_addresses: Sequence[EthAddress], rows: Sequence[Any]) -> None:
         """Surface receipt positions whose valuation degraded.
 
         Mirrors ``_record_unpriced_holdings`` for the receipt path, with two
@@ -541,7 +518,7 @@ class AllocationRepository:
             logger.warning(
                 "Receipt-token positions resolved to no USD value",
                 extra={
-                    "prime_id": str(prime_id),
+                    "proxy_addresses": [str(a) for a in proxy_addresses],
                     "unpriced_count": len(unpriced),
                     "total_count": len(rows),
                     "unpriced_symbols": unpriced,
@@ -553,7 +530,7 @@ class AllocationRepository:
             logger.warning(
                 "Receipt-token positions valued on the share-balance fallback (underlying_value missing)",
                 extra={
-                    "prime_id": str(prime_id),
+                    "proxy_addresses": [str(a) for a in proxy_addresses],
                     "balance_basis_count": len(balance_basis),
                     "total_count": len(rows),
                     "balance_basis_symbols": balance_basis,
@@ -561,7 +538,7 @@ class AllocationRepository:
             )
 
     @staticmethod
-    def _record_unpriced_holdings(prime_id: EthAddress, holdings: list[DirectAssetHolding]) -> None:
+    def _record_unpriced_holdings(proxy_addresses: Sequence[EthAddress], holdings: list[DirectAssetHolding]) -> None:
         """Surface direct holdings that resolved to no oracle price.
 
         A null ``amount_usd`` is legitimate for assets with no oracle feed (LP/
@@ -584,7 +561,7 @@ class AllocationRepository:
         logger.debug(
             "Direct asset holdings without an oracle price",
             extra={
-                "prime_id": str(prime_id),
+                "proxy_addresses": [str(a) for a in proxy_addresses],
                 "unpriced_count": len(unpriced),
                 "total_count": len(holdings),
                 "unpriced_symbols": [h.symbol for h in unpriced],
@@ -599,7 +576,7 @@ class AllocationRepository:
         logger.warning(
             "Allowlisted token resolved to no USD value (underlying_value or underlying oracle price missing)",
             extra={
-                "prime_id": str(prime_id),
+                "proxy_addresses": [str(a) for a in proxy_addresses],
                 "allowlisted_unpriced_symbols": [h.symbol for h in allowlisted_unpriced],
             },
         )
@@ -783,7 +760,6 @@ class AllocationRepository:
         return [
             AllocationActivityEvent(
                 chain_id=row.chain_id,
-                prime_address="0x" + row.prime_address,
                 prime_name=row.prime_name,
                 protocol_name=row.protocol_name,
                 token_id=row.token_id,
@@ -990,87 +966,6 @@ class AllocationRepository:
         self._record_empty_total_capital(subproxies, buckets)
         return buckets
 
-    async def list_prime_proxy_addresses(self, prime_address: EthAddress) -> list[EthAddress]:
-        """Return every ALM proxy of the prime that owns ``prime_address``.
-
-        Returns ``[prime_address]`` for an unknown address.
-        """
-        subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
-        query = text("""
-            SELECT DISTINCT encode(pp.proxy_address, 'hex') AS address
-            FROM prime_proxy pp
-            WHERE pp.prime_id = (
-                SELECT prime_id FROM prime_proxy
-                WHERE proxy_address = decode(:address_hex, 'hex')
-                LIMIT 1
-            )
-              AND pp.proxy_address NOT IN :subproxy_addrs
-            ORDER BY address
-        """).bindparams(bindparam("subproxy_addrs", expanding=True))
-
-        try:
-            async with self._engine.connect() as conn:
-                result = await conn.execute(query, {"address_hex": prime_address.hex, "subproxy_addrs": subproxies})
-                rows = result.fetchall()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.error(
-                "Failed to resolve a prime's proxy addresses",
-                extra={"prime_address": str(prime_address), "error_type": type(exc).__name__},
-                exc_info=True,
-            )
-            raise ValueError(f"Database query failed while resolving proxies for {prime_address}: {exc}") from exc
-
-        return [EthAddress(f"0x{row.address}") for row in rows] or [prime_address]
-
-    async def primary_proxy_address(self, prime_address: EthAddress) -> str | None:
-        """Return the proxy that carries this prime's prime-scoped rows, or ``None``.
-
-        Mainnet wins when present, else the lowest address.
-        """
-        subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
-        query = text(
-            """
-            SELECT encode(pp.proxy_address, 'hex') AS address
-            FROM prime_proxy pp
-            WHERE pp.prime_id = (
-                SELECT prime_id FROM prime_proxy
-                WHERE proxy_address = decode(:address_hex, 'hex')
-                LIMIT 1
-            )
-              AND pp.proxy_address NOT IN :subproxy_addrs
-            ORDER BY (pp.chain_id = :mainnet_chain_id) DESC, pp.proxy_address ASC
-            LIMIT 1
-            """
-        ).bindparams(bindparam("subproxy_addrs", expanding=True))
-        params = {
-            "address_hex": prime_address.hex,
-            "subproxy_addrs": subproxies,
-            "mainnet_chain_id": MAINNET_CHAIN_ID,
-        }
-
-        try:
-            async with self._engine.connect() as conn:
-                row = (await conn.execute(query, params)).fetchone()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.error(
-                "Failed to resolve the prime's primary proxy from database",
-                extra={
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                    "prime_address": str(prime_address),
-                },
-                exc_info=True,
-            )
-            raise ValueError(
-                f"Database query failed while resolving the primary proxy for prime {prime_address}: {exc}"
-            ) from exc
-
-        return "0x" + row.address if row is not None else None
-
     async def get_latest_total_capital_usd(self, subproxies: Sequence[EthAddress]) -> Decimal | None:
         """Return the prime's latest treasury USDS balance (Total Risk Capital), or None.
 
@@ -1264,7 +1159,9 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text(f"""
         JOIN receipt_token rt ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
         JOIN token ut         ON ut.id = rt.underlying_token_id
         JOIN protocol pr      ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
-        WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+        -- Whole-prime: the set is the prime's ALM proxies, and `proxy_address` is
+        -- a segmentby column, so one scan answers what N queries used to.
+        WHERE ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[]))
     )
     SELECT
         p.chain_id,
@@ -1347,7 +1244,7 @@ _DIRECT_ASSET_HOLDINGS_SQL = text(f"""
             ap.direction AS latest_activity_action,
             ap.tx_amount AS latest_activity_amount
         FROM allocation_position_current ap
-        WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+        WHERE ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[]))
         -- The cache still holds a row per (chain, token), and nothing forces a
         -- position's chain onto its token row, so the token_id dedup stays.
         -- Newer-wins order: rationale on _RECEIPT_TOKEN_POSITIONS_SQL.
@@ -1486,16 +1383,10 @@ _DIRECT_ASSET_HOLDINGS_SQL = text(f"""
 # per-package sum ($250M under BTC); it only diverges — correctly, no double-
 # count — once a package carries a second asset type.
 _ANCHORAGE_CUSTODY_HOLDINGS_SQL = text("""
-    WITH target_prime AS (
-        SELECT prime_id
-        FROM prime_proxy
-        WHERE proxy_address = decode(:proxy_hex, 'hex')
-        LIMIT 1
-    ),
-    latest_poll AS (
+    WITH latest_poll AS (
         SELECT MAX(snapshot_time) AS snapshot_time
         FROM anchorage_package_snapshot
-        WHERE prime_id = (SELECT prime_id FROM target_prime)
+        WHERE prime_id = :prime_id
     ),
     current_cohort AS (
         SELECT DISTINCT ON (aps.package_id, aps.asset_type, aps.custody_type)
@@ -1508,7 +1399,7 @@ _ANCHORAGE_CUSTODY_HOLDINGS_SQL = text("""
             aps.asset_weighted_value,
             aps.snapshot_time
         FROM anchorage_package_snapshot aps
-        WHERE aps.prime_id = (SELECT prime_id FROM target_prime)
+        WHERE aps.prime_id = :prime_id
           AND aps.snapshot_time = (SELECT snapshot_time FROM latest_poll)
           AND aps.active
         ORDER BY aps.package_id, aps.asset_type, aps.custody_type,
@@ -1648,7 +1539,6 @@ WHERE p.balance > 0
 _ALLOCATION_ACTIVITY_SQL = text(f"""
 SELECT
     ap.chain_id,
-    encode(ap.proxy_address, 'hex') AS prime_address,
     p.name AS prime_name,
     protocol_match.protocol_name,
     ap.token_id,
