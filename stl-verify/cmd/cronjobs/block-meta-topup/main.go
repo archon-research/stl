@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
@@ -35,8 +36,7 @@ const queueBaseName = "block-meta-topup"
 
 // defaultMaxBlocks bounds one tick. At the loader's measured throughput a tick of this size finishes
 // well inside the hourly interval, and a chain that has been bootstrapped never reaches it: the delta
-// between ticks is the blocks referenced in an hour. MAX_BLOCKS tunes it; 0 is unbounded and is only
-// correct for a run a person is watching.
+// between ticks is the blocks referenced in an hour. MAX_BLOCKS tunes it and must be positive.
 const defaultMaxBlocks = 20000
 
 var (
@@ -75,15 +75,25 @@ func run(ctx context.Context) error {
 
 	return temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
-	}, temporal.CronjobConfig{
+	}, cronjobConfig(taskQueue, cfg))
+}
+
+func cronjobConfig(taskQueue string, cfg blockmetacfg.Config) temporal.CronjobConfig {
+	return temporal.CronjobConfig{
 		Name:            taskQueue,
 		IntervalEnv:     "TOPUP_INTERVAL",
 		IntervalDefault: "1h",
-		OpenDatabase:    postgres.PoolOpener(postgres.DefaultDBConfig(cfg.DSN)),
+		// Both ceilings stay inside the hourly interval, so a slow tick fails before the next one is due.
+		ActivityTimeouts: temporal.ActivityTimeouts{
+			StartToClose:    45 * time.Minute,
+			ScheduleToClose: 55 * time.Minute,
+			Heartbeat:       30 * time.Second,
+		},
+		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(cfg.DSN)),
 		Setup: func(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
 			return setup(ctx, cfg, deps)
 		},
-	})
+	}
 }
 
 // setup proves the archive grants and builds the runner once, at startup. The loader does the same:
@@ -93,6 +103,9 @@ func setup(ctx context.Context, cfg blockmetacfg.Config, deps temporal.Dependenc
 	maxBlocks, err := blockmetacfg.PositiveEnv("MAX_BLOCKS", defaultMaxBlocks)
 	if err != nil {
 		return nil, err
+	}
+	if maxBlocks == 0 {
+		return nil, fmt.Errorf("MAX_BLOCKS must be positive on a scheduled tick; an unbounded pass is block-meta-loader's job")
 	}
 
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{})

@@ -109,7 +109,8 @@ func New(cfg Config, repo outbound.BlockMetaRepository, reader outbound.S3Reader
 	return &Service{cfg: cfg, repo: repo, reader: reader, logger: logger, metrics: metrics}, nil
 }
 
-// Run fills block_meta for cfg.ChainID until no referenced block is missing. Returns rows upserted.
+// Run fills block_meta for cfg.ChainID until no referenced block is missing or cfg.MaxBlocks are read.
+// Returns rows upserted.
 // The pending set is enumerated once into a work list and paged with a keyset cursor, so the six-table
 // union is not re-run per batch; cancellation is checked between batches so a SIGTERM stops it promptly.
 // A block newly referenced mid-run is picked up by the next run, which is what a backfill needs.
@@ -128,10 +129,15 @@ func (s *Service) Run(ctx context.Context) (int64, error) {
 		}
 		page := s.pageSize(read)
 		if page == 0 {
-			// Capped, not drained. The misses collected so far are whatever fell in this run's window,
-			// not what the archive is missing, so this run reports none of them: an absent object sorts
-			// first and would otherwise fail every tick with the same fragment forever, and a retryable
-			// error would re-run the activity and read past the cap this exists to impose.
+			pending, err := work.Next(ctx, 1)
+			if err != nil {
+				return total, fmt.Errorf("checking for blocks past the cap: %w", err)
+			}
+			if len(pending) == 0 {
+				break
+			}
+			// Capped with blocks pending: an absent object sorts first and would fail every tick with the
+			// same fragment, so a capped run reports none of the misses it saw.
 			s.logger.Warn("block_meta run reached its cap; blocks remain pending",
 				"chain", s.cfg.ChainID, "read", read, "cap", s.cfg.MaxBlocks, "missesSeen", len(misses))
 			s.metrics.recordCapped(ctx, s.cfg.ChainID)

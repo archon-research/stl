@@ -56,6 +56,7 @@ type mockBlockMetaRepo struct {
 	upsertErr error
 	openErr   error
 	nextErr   error
+	failCall  int // when set, Next fails on this call number (1-based) with nextErr
 	calls     int
 	opened    int
 	closed    int
@@ -78,10 +79,10 @@ func (m *mockBlockMetaRepo) OpenWorkList(_ context.Context, _ int64, _ int64) (o
 }
 
 func (w *mockWorkList) Next(_ context.Context, limit int) ([]outbound.BlockRef, error) {
-	if w.repo.nextErr != nil {
+	w.repo.calls++
+	if w.repo.nextErr != nil && (w.repo.failCall == 0 || w.repo.failCall == w.repo.calls) {
 		return nil, w.repo.nextErr
 	}
-	w.repo.calls++
 	var out []outbound.BlockRef
 	for _, b := range w.snap {
 		if b.Number > w.after.Number || (b.Number == w.after.Number && b.Version > w.after.Version) {
@@ -193,6 +194,68 @@ func TestRun_StopsAtTheBlockCapAndTheNextRunResumes(t *testing.T) {
 }
 
 // Zero is unbounded, which is what a first pass over a chain needs.
+// readerMissing streams every block except the one given, which is absent from the archive.
+func readerMissing(block int64) *mockS3Reader {
+	return &mockS3Reader{streamFn: func(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+		parsed, ok := s3key.Parse(key)
+		if !ok {
+			return nil, fmt.Errorf("unparseable key %q", key)
+		}
+		if parsed.BlockNumber == block {
+			return nil, outbound.ErrObjectNotFound
+		}
+		return streamTimestampByBlock(ctx, bucket, key)
+	}}
+}
+
+// A run whose cap equals what is pending has drained the list, not been capped, so its misses fail it.
+func TestRun_ACapThatExactlyDrainsTheListStillReportsMisses(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
+		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0},
+	}}
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 2, MaxBlocks: 3}, repo, readerMissing(20), testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := svc.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "20/0") {
+		t.Fatalf("Run returned %v; a drained list with an absent block must fail naming it", err)
+	}
+}
+
+// A run that stops with blocks still pending is capped, and does not report the misses it saw.
+func TestRun_ACapWithBlocksStillPendingDoesNotReportMisses(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
+		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0}, {Number: 40, Version: 0},
+	}}
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 2, MaxBlocks: 3}, repo, readerMissing(20), testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	total, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v; a capped run with blocks pending must not fail on the misses it saw", err)
+	}
+	if total != 2 {
+		t.Errorf("upserted %d, want 2 (three read under the cap, one absent)", total)
+	}
+}
+
+func TestRun_AFailedCheckPastTheCapSurfaces(t *testing.T) {
+	repo := &mockBlockMetaRepo{
+		universe: []outbound.BlockRef{{Number: 10, Version: 0}, {Number: 20, Version: 0}},
+		nextErr:  errors.New("connection reset"),
+		failCall: 2,
+	}
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 2, MaxBlocks: 2},
+		repo, &mockS3Reader{streamFn: streamTimestampByBlock}, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := svc.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "past the cap") {
+		t.Fatalf("Run returned %v; a failed check past the cap must fail the run", err)
+	}
+}
+
 func TestRun_ZeroCapIsUnbounded(t *testing.T) {
 	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
 		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0},

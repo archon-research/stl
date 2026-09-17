@@ -3,10 +3,7 @@
 package main
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -16,12 +13,11 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockmetacfg"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -49,45 +45,6 @@ const (
 	absentBucket  = testBucket + "-absent"
 )
 
-func uploadBlock(t *testing.T, ctx context.Context, client *s3.Client, blockNum int64, version int, hexTimestamp string) {
-	t.Helper()
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write(fmt.Appendf(nil, `{"timestamp":%q}`, hexTimestamp)); err != nil {
-		t.Fatalf("gzip write: %v", err)
-	}
-	if err := gz.Close(); err != nil {
-		t.Fatalf("gzip close: %v", err)
-	}
-	if _, err := client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(testBucket),
-		Key:    aws.String(s3key.Build(blockNum, version, s3key.Block)),
-		Body:   bytes.NewReader(buf.Bytes()),
-	}); err != nil {
-		t.Fatalf("put block %d/%d: %v", blockNum, version, err)
-	}
-}
-
-// seedReferencedBlocks gives the work list something to enumerate: protocol_event rows referencing
-// blocks that block_meta lacks.
-func seedReferencedBlocks(t *testing.T, ctx context.Context, pool *pgxpool.Pool, blocks ...int64) {
-	t.Helper()
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO chain (chain_id, name) VALUES (1, 'ethereum') ON CONFLICT DO NOTHING;
-		INSERT INTO protocol (chain_id, address, name) VALUES (1, '\x7001', 'itest') ON CONFLICT DO NOTHING;`); err != nil {
-		t.Fatalf("seed chain/protocol: %v", err)
-	}
-	for _, b := range blocks {
-		if _, err := pool.Exec(ctx, `
-			INSERT INTO protocol_event
-				(chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data)
-			VALUES (1, (SELECT id FROM protocol WHERE address='\x7001'), $1, 0, '\x09'::bytea, 0, '\x02'::bytea, 'Borrow', '{}'::jsonb)
-			ON CONFLICT DO NOTHING`, b); err != nil {
-			t.Fatalf("seed referenced block %d: %v", b, err)
-		}
-	}
-}
-
 // This drives the deployed wiring — blockmetacfg.Load's env parsing and bucket guard, the real S3 reader
 // built the way the binary builds it, register's activity wiring, and the workflow — against a real
 // database and LocalStack. run() itself only resolves the queue and hands off to RunWorker, which
@@ -98,14 +55,14 @@ func TestBlockMetaLoad_FillsReferencedBlocks(t *testing.T) {
 
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
-	seedReferencedBlocks(t, ctx, pool, 500, 501)
+	testutil.SeedReferencedBlocks(t, ctx, pool, 500, 501)
 
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
 	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(testBucket)}); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
-	uploadBlock(t, ctx, s3Client, 500, 0, "0x67c02710")
-	uploadBlock(t, ctx, s3Client, 501, 0, "0x67c02720")
+	testutil.UploadBlockHeader(t, ctx, s3Client, testBucket, 500, 0, "0x67c02710")
+	testutil.UploadBlockHeader(t, ctx, s3Client, testBucket, 501, 0, "0x67c02720")
 
 	t.Setenv("BUILD_GIT_HASH", "integration-test")
 	// Off, so this test is about the fill path. The margin's own behaviour is below.
@@ -186,14 +143,14 @@ func TestBlockMetaLoad_HeadMarginHoldsBackTheNewestBlocks(t *testing.T) {
 
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
-	seedReferencedBlocks(t, ctx, pool, 500, 501)
+	testutil.SeedReferencedBlocks(t, ctx, pool, 500, 501)
 
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
 	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(testBucket)}); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
-	uploadBlock(t, ctx, s3Client, 500, 0, "0x67c02710")
-	uploadBlock(t, ctx, s3Client, 501, 0, "0x67c02720")
+	testutil.UploadBlockHeader(t, ctx, s3Client, testBucket, 500, 0, "0x67c02710")
+	testutil.UploadBlockHeader(t, ctx, s3Client, testBucket, 501, 0, "0x67c02720")
 
 	t.Setenv("BUILD_GIT_HASH", "integration-test")
 	t.Setenv("CHAIN_ID", "1")
@@ -272,5 +229,18 @@ func TestBlockMetaLoad_RefusesToStartWithoutArchiveAccess(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), absentBucket) {
 		t.Errorf("error %q does not name the bucket it could not use", err)
+	}
+}
+
+// The Deployment, task queue and OTel service name are one string per chain.
+func TestTaskQueueIsPrefixedPerChain(t *testing.T) {
+	for chainID, want := range map[string]string{"1": queueBaseName, "8453": "base-" + queueBaseName, "43114": "avalanche-" + queueBaseName} {
+		t.Run(chainID, func(t *testing.T) {
+			t.Setenv("CHAIN_ID", chainID)
+			got, err := chainutil.TaskQueueName(queueBaseName)
+			if err != nil || got != want {
+				t.Errorf("TaskQueueName(%q) on chain %s = %q, %v; want %q", queueBaseName, chainID, got, err, want)
+			}
+		})
 	}
 }

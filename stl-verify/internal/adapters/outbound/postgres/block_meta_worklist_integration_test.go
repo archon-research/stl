@@ -1030,7 +1030,7 @@ func TestTheHeadMarginTrimsOnlyTheRunApplyingIt(t *testing.T) {
 
 // The sweep must not reach its own run. Ordering hides it on the chain being opened -- that slice is
 // cleared first -- so this run's rows sit on another chain, where only the sweep can touch them.
-func TestTheSweepSpareItsOwnRunsRows(t *testing.T) {
+func TestTheSweepSparesItsOwnRunsRows(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()

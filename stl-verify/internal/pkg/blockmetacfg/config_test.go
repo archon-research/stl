@@ -12,8 +12,6 @@ const (
 	baseRawBucket     = "stl-sentinelstaging-base-raw-89d540d0"
 )
 
-// The task queue is also the Deployment name and the OTel service name, so a
-// chain that produced the wrong one would idle on a queue nobody starts runs on.
 func validEnv() map[string]string {
 	return map[string]string{
 		"CHAIN_ID":     "1",

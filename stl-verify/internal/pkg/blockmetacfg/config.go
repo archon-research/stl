@@ -28,13 +28,9 @@ type Config struct {
 	HeadMargin  int64
 }
 
-const (
-
-	// defaultHeadMargin keeps the newest blocks out of a run, because the archive trails the
-	// indexers at the head. A starting value covering ordinary lag, not a measured one;
-	// HEAD_MARGIN tunes it per chain and 0 disables it.
-	defaultHeadMargin = int64(300)
-)
+// defaultHeadMargin keeps the newest blocks out of a run, because the archive trails the indexers at the
+// head. HEAD_MARGIN tunes it per chain and 0 disables it.
+const defaultHeadMargin = int64(300)
 
 // Load reads the deployment's environment. It runs at registration rather
 // than per run, so a misconfigured deployment is a worker that will not start

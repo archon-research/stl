@@ -453,10 +453,8 @@ func (w *blockWorkList) Next(ctx context.Context, limit int) ([]outbound.BlockRe
 		w.after = out[len(out)-1]
 		return out, nil
 	}
-	// An empty page is the end of the list, or the list going missing: the sweep reclaims slices of
-	// runs older than a day, and a run that outlives that is one whose slice another run may take. The
-	// rows stay put until Close, so a drained slice still holds every row it enumerated; a short one
-	// means this run would otherwise report the blocks it never reached as nothing left to do.
+	// An empty page is the end of the list or a slice swept under this run. Rows stay until Close, so a
+	// short slice means blocks this run never reached.
 	if err := w.requireWholeSlice(ctx); err != nil {
 		return nil, err
 	}
