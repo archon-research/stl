@@ -71,6 +71,10 @@ var convertedAppendOnlyTables = []string{
 	// ARCT-385 (#854): the posm registry row and the ERC-721 Transfer stream.
 	"uniswap_v4_position_manager",
 	"uniswap_v4_position_nft_transfer",
+	// VEC-812: the asset register, a future FK parent, so the owner keeps UPDATE for the
+	// integrity probe and append-only is the reference_table_immutable() trigger
+	// (asset_register_integration_test.go asserts both halves).
+	"asset",
 }
 
 // TestConvertedTablesAreAppendOnly asserts the DB-level half of the append-only rule:
