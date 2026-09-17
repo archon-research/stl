@@ -1088,9 +1088,9 @@ class AllocationRepository:
             FROM allocation_position ap
             JOIN token t ON t.id = ap.token_id
             WHERE ap.proxy_address IN :subproxy_addrs
+              AND t.chain_id = ap.chain_id
               AND t.address = decode(:usds_hex, 'hex')
-            -- Stays on the history: it needs prime_id, which the cache does not
-            -- carry. Newer-wins order per _RECEIPT_TOKEN_POSITIONS_SQL.
+            -- Newer-wins order per _RECEIPT_TOKEN_POSITIONS_SQL.
             ORDER BY ap.block_number DESC, ap.block_version DESC, ap.created_at DESC,
                      ap.log_index DESC, ap.direction DESC, ap.tx_hash DESC,
                      ap.processing_version DESC

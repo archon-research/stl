@@ -42,10 +42,9 @@ def chain_name_for(chain_id: int | None) -> str | None:
     position exists on a chain this vocabulary has not been taught, and each
     caller decides what that is worth. A row whose chain is a label answers a
     null field; one whose chain keys a figure into an audited total cannot, and
-    says so instead (``prime_risk_capital_service._chain_of``). A ``None`` id
-    is the same answer one step earlier — reference rows carry one for a
-    network STL has no id for, and 0 is unavailable because it already means
-    off-chain custody.
+    says so instead. A ``None`` id is the same answer one step earlier —
+    reference rows carry one for a network STL has no id for, and 0 is
+    unavailable because it already means off-chain custody.
     """
     return None if chain_id is None else CHAIN_ID_TO_NAME.get(chain_id)
 

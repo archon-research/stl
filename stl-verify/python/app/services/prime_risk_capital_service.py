@@ -195,7 +195,6 @@ def _chain_row(chain: str, contributions: "Sequence[_ProxyTotals]") -> ChainRisk
 class _ProxyTotals:
     """One wallet's contribution, before folding into the prime-level result."""
 
-    proxy_address: str
     chain: str
     exposure: Decimal
     modeled_exposure: Decimal
@@ -283,11 +282,6 @@ class PrimeRiskCapitalService:
 
         exposure, modeled_exposure, required, per_allocation = _assemble_allocations(positions, model_chains, results)
         return _ProxyTotals(
-            # Lowercased so the prime-scoped lists built from these are byte-identical
-            # whichever proxy was queried: EthAddress preserves the caller's casing,
-            # while siblings come from the contract already lowercased. prime_id keeps
-            # the caller's casing — it is proxy-scoped and documented as an echo.
-            proxy_address=str(proxy_address).lower(),
             chain=chain,
             exposure=exposure,
             modeled_exposure=modeled_exposure,
