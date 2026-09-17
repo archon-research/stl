@@ -18,9 +18,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/db/migrator"
 )
 
-// VEC-405: position_maple_loan places each maple_loan_state cycle at the surviving block_meta block at
-// or before its synced_at, collapses cycles sharing a block, and closes a loan from its absence at a
-// cycle whose pool reports a principal_out equal to the loans it returned.
+// VEC-405: position_maple_loan places each loan cycle at the surviving block at or before it, and closes a
+// loan from its absence at a cycle whose pool's principal_out equals the loans that cycle returned.
 
 const mapleTolerance = "10 minutes"
 
@@ -189,6 +188,31 @@ func (f *mapleFixture) mustRun(t *testing.T) int64 {
 		t.Fatalf("materialize_maple_loan: %v", err)
 	}
 	return n
+}
+
+// runCollectingWarnings runs on its own connection and returns the WARNINGs the run raised.
+func (f *mapleFixture) runCollectingWarnings(t *testing.T) []string {
+	t.Helper()
+	cfg := f.pool.Config().ConnConfig.Copy()
+	var warnings []string
+	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
+		if n.Severity == "WARNING" && strings.HasPrefix(n.Message, "materialize_maple_loan:") {
+			warnings = append(warnings, n.Message)
+		}
+	}
+	conn, err := pgx.ConnectConfig(f.ctx, cfg)
+	if err != nil {
+		t.Fatalf("connecting: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(f.ctx); err != nil {
+			t.Error(err)
+		}
+	}()
+	if _, err := conn.Exec(f.ctx, `SELECT materialize_maple_loan(p_build_id => 0, p_max_skew => $1::interval)`, mapleTolerance); err != nil {
+		t.Fatalf("materialize_maple_loan: %v", err)
+	}
+	return warnings
 }
 
 // mustRefuse runs and returns the refusal, failing unless it contains want.
@@ -497,7 +521,6 @@ func TestMapleLoanPlacement(t *testing.T) {
 	})
 
 	t.Run("a block added later closer to a cycle re-places it as a second observation", func(t *testing.T) {
-		// The limit the wrapper's COMMENT states: idempotent only for a fixed block_meta.
 		f.reset(t)
 		f.block(t, 1, 100, 0, "2026-06-16T08:30:00Z")
 		f.cycle(t, "a", "2026-06-16T08:35:00Z", "500", 1)
@@ -713,6 +736,51 @@ func TestMapleLoanClose(t *testing.T) {
 		}
 	})
 
+	t.Run("a pool reprocess at another instant does not hide a complete cycle", func(t *testing.T) {
+		seed(t)
+		f.fetch(t, inst[0], all(), nil)
+		f.fetch(t, inst[1], without("gone"), nil)
+		f.poolCycle(t, "p1", inst[0], 800, 2)
+		f.mustRun(t)
+		if z := f.zeros(t, "gone"); len(z) != 1 {
+			t.Errorf("%d closes; want 1, since inst[1] is still complete", len(z))
+		}
+	})
+
+	t.Run("a loan left open past a day with no complete pool cycle is warned about by name", func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 300, 600)
+		f.blocks(t, 8453, 500, "2026-06-16T08:00:00Z", 300, 600)
+		f.fetch(t, "2026-06-16T08:05:00Z", all(), nil)
+		// principal_out also counts 1000 the loan query never returns, so no later cycle is complete.
+		for _, ts := range []string{"2026-06-17T09:05:00Z", "2026-06-17T09:15:00Z"} {
+			for loan, owed := range without("gone") {
+				f.cycle(t, loan, ts, fmt.Sprint(owed), 1)
+			}
+			f.poolCycle(t, "p1", ts, 300+1000, 1)
+			f.poolCycle(t, "p2", ts, 300, 1)
+			f.poolCycle(t, "p8453", ts, 700, 1)
+		}
+		warnings := f.runCollectingWarnings(t)
+		if len(warnings) != 1 || !strings.Contains(warnings[0], fmt.Sprintf("loan %d (chain 1) open at 500", f.loans["gone"])) {
+			t.Errorf("warnings %q; want one naming loan %d open at 500", warnings, f.loans["gone"])
+		}
+		if z := f.zeros(t, "gone"); len(z) != 0 {
+			t.Errorf("closed without a complete cycle: %+v", z)
+		}
+	})
+
+	t.Run("a closed loan raises no stall warning", func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 300, 600)
+		f.blocks(t, 8453, 500, "2026-06-16T08:00:00Z", 300, 600)
+		f.fetch(t, "2026-06-16T08:05:00Z", all(), nil)
+		f.fetch(t, "2026-06-17T09:05:00Z", without("gone"), nil)
+		if warnings := f.runCollectingWarnings(t); len(warnings) != 0 {
+			t.Errorf("warnings %q; want none once the loan closed", warnings)
+		}
+	})
+
 	t.Run("completeness reads each loan's highest processing_version", func(t *testing.T) {
 		seed(t)
 		f.fetch(t, inst[0], all(), nil)
@@ -788,6 +856,24 @@ func TestMapleLoanClose(t *testing.T) {
 		}
 		if z := f.zeros(t, "gone"); len(z) != 1 || z[0].bn != 1001 {
 			t.Errorf("closes %+v; want one at block 1001", z)
+		}
+	})
+
+	t.Run("the next block after a sighting is looked up on the loan's own chain", func(t *testing.T) {
+		f.reset(t)
+		// Chain 8453 has a block at 08:07, before chain 1's next block at 08:20.
+		f.block(t, 1, 1000, 0, "2026-06-16T08:00:00Z")
+		f.block(t, 1, 1001, 0, "2026-06-16T08:20:00Z")
+		f.block(t, 8453, 500, 0, "2026-06-16T08:00:00Z")
+		f.block(t, 8453, 501, 0, "2026-06-16T08:07:00Z")
+		f.fetch(t, "2026-06-16T08:05:00Z", all(), nil)
+		f.fetch(t, "2026-06-16T08:08:00Z", without("gone"), nil)
+		f.fetch(t, "2026-06-16T08:25:00Z", without("gone"), nil)
+		if _, err := f.runWith(t, "1 hour"); err != nil {
+			t.Fatal(err)
+		}
+		if z := f.zeros(t, "gone"); len(z) != 1 || z[0].bn != 1001 {
+			t.Errorf("closes %+v; want one at chain 1's next block 1001", z)
 		}
 	})
 
@@ -931,15 +1017,98 @@ func TestMapleLoanRefusals(t *testing.T) {
 		}
 	})
 
-	t.Run("a bounded run ignores offenders older than its window, and an unbounded run does not", func(t *testing.T) {
+	seedOldOffenders := func(t *testing.T) {
 		f.reset(t)
 		f.block(t, 1, 1, 0, "2020-01-01T00:00:00Z")
-		f.cycle(t, "a", "2020-06-01T00:00:00Z", "500", 1)
+		f.cycle(t, "a", "2020-01-01T00:05:00Z", "500", 1)
+		f.poolCycle(t, "p1", "2020-06-01T00:00:00Z", 0, 1)
 		f.cycleState(t, "a", "2020-06-01T00:10:00Z", "Repaid", "1")
+	}
+
+	t.Run("a bounded run ignores stale pool cycles and non-Active states older than its window", func(t *testing.T) {
+		seedOldOffenders(t)
 		if _, err := pool.Exec(ctx, `SELECT materialize_maple_loan(0, NULL, INTERVAL '1 hour')`); err != nil {
-			t.Errorf("a one-hour window refused on a six-year-old row: %v", err)
+			t.Errorf("a one-hour window refused on six-year-old rows: %v", err)
 		}
+	})
+
+	t.Run("an unbounded run refuses the same old offenders", func(t *testing.T) {
+		seedOldOffenders(t)
 		f.mustRefuse(t, mapleTolerance, "stale by up to")
+		f.exec(t, `DELETE FROM maple_pool_state`)
+		f.exec(t, `DELETE FROM maple_loan_state WHERE state = 'Active'`)
+		f.mustRefuse(t, "10 years", "Repaid x1")
+	})
+
+	t.Run("a chain with both unplaceable and stale cycles names both", func(t *testing.T) {
+		f.reset(t)
+		f.block(t, 1, 100, 0, "2026-06-16T08:00:00Z")
+		f.cycle(t, "a", "2026-06-16T07:00:00Z", "500", 1)
+		f.cycle(t, "a", "2026-06-16T13:00:00Z", "500", 1)
+		msg := f.mustRefuse(t, mapleTolerance, "1 cycle(s) that no surviving block precedes")
+		if !strings.Contains(msg, "1 cycle(s) stale by up to") {
+			t.Errorf("refusal %q names the unplaceable cycle but hides the stale one", msg)
+		}
+	})
+
+	t.Run("a pool cycle is checked against the blocks of its loan's chain, not the pool's", func(t *testing.T) {
+		f.reset(t)
+		f.exec(t, `UPDATE maple_loan SET maple_pool_id = $1 WHERE id = $2`, f.pools["p8453"], f.loans["a"])
+		t.Cleanup(func() {
+			f.exec(t, `UPDATE maple_loan SET maple_pool_id = $1 WHERE id = $2`, f.pools["p1"], f.loans["a"])
+		})
+		f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 21, 60)
+		f.blocks(t, 8453, 500, "2026-06-16T08:00:00Z", 400, 120)
+		f.cycle(t, "a", "2026-06-16T08:10:00Z", "500", 1)
+		f.poolCycle(t, "p8453", "2026-06-16T13:00:00Z", 0, 1)
+		f.mustRefuse(t, mapleTolerance, "chain 1: 1 cycle(s) stale by up to")
+		appended(t)
+	})
+
+	t.Run("an inversion superseded by a block_meta reprocess is not refused", func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 3000, "2026-06-16T08:00:00Z", 10, 120)
+		f.blockPV(t, 1, 2500, 0, 0, "2026-06-16T08:19:00Z")
+		f.blockPV(t, 1, 2500, 0, 1, "2026-06-16T07:50:00Z")
+		f.cycle(t, "a", "2026-06-16T08:18:30Z", "500", 1)
+		if _, err := f.run(t); err != nil {
+			t.Fatalf("a reprocessed header time must replace the inverted one: %v", err)
+		}
+	})
+
+	t.Run("the wrapper takes the materializer's lock before its checks", func(t *testing.T) {
+		// Refusable data: under a different key the checks would run and refuse instead of waiting.
+		f.reset(t)
+		f.cycle(t, "a", "2026-06-16T09:00:00Z", "500", 1)
+		holder, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := holder.Rollback(ctx); err != nil {
+				t.Error(err)
+			}
+		}()
+		if _, err := holder.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('materialize_position_projection.public.position_maple_loan', 0))`); err != nil {
+			t.Fatal(err)
+		}
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Release()
+		if _, err := conn.Exec(ctx, `SET lock_timeout = '200ms'`); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := conn.Exec(ctx, `RESET lock_timeout`); err != nil {
+				t.Error(err)
+			}
+		}()
+		_, err = conn.Exec(ctx, `SELECT materialize_maple_loan()`)
+		if err == nil || !strings.Contains(err.Error(), "lock timeout") {
+			t.Errorf("want the wrapper to block on the held materializer lock, got %v", err)
+		}
 	})
 
 	t.Run("a non-Active state inside the window is refused, listing states in order", func(t *testing.T) {
@@ -1023,7 +1192,7 @@ func TestMapleLoanRefusals(t *testing.T) {
 		{"a short borrower address", "borrower", `\x0badc0de`, "4-byte borrower address"},
 		{"an oversize borrower address", "borrower", `\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaff`, "21-byte borrower address"},
 	} {
-		t.Run(c.name+" is refused by name, with or without a cycle", func(t *testing.T) {
+		t.Run(c.name+" is refused by name", func(t *testing.T) {
 			f.reset(t)
 			loanAddr, borrower := `decode(md5('loan-bad') || 'a1b2c3d4', 'hex')`, `decode(md5('borrower-bad') || 'a1b2c3d4', 'hex')`
 			if c.column == "loan" {
@@ -1045,6 +1214,7 @@ func TestMapleLoanRefusals(t *testing.T) {
 				f.exec(t, `DELETE FROM maple_loan WHERE id = $1`, badID)
 				f.exec(t, `DELETE FROM "user" WHERE chain_id = 1 AND address = `+borrower)
 			})
+			// The check reads maple_loan alone, so a loan with no cycle yet is refused too.
 			f.mustRefuse(t, mapleTolerance, c.want)
 			f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 10, 120)
 			f.exec(t, `INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed)
@@ -1159,7 +1329,7 @@ func TestMapleLoanWrapper(t *testing.T) {
 		}
 	})
 
-	t.Run("re-applying the migration over the branch's first signature leaves one callable function", func(t *testing.T) {
+	t.Run("re-applying the migration over a one-argument signature leaves one callable function", func(t *testing.T) {
 		f.reset(t)
 		f.exec(t, `CREATE FUNCTION public.materialize_maple_loan(p_build_id integer DEFAULT 0) RETURNS bigint
 		           LANGUAGE sql AS 'SELECT 0::bigint'`)
