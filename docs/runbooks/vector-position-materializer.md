@@ -20,6 +20,32 @@ Generic run failures, restarts and duration are covered by the shared cronjob al
 `vector-cronjobs.yaml` under `service_name="position-materializer"`; only the two alerts below are
 specific to this service.
 
+The alerts label a projection two ways: `VectorPositionMaterializerViewFailing` carries the function
+(`materializer="materialize_morpho_market"`), `VectorPositionMaterializerWithholdingPositions` the view
+(`projection="public.position_morpho_market"`).
+
+## Before the first run
+
+The deployment ships at `replicas: 0`. Before bumping it to 1:
+
+1. Every entry in `POSITION_PROJECTIONS` exists in the target database. The worker checks this at
+   startup and exits naming the missing ones; `materialize_morpho_market` and `materialize_morpho_vault`
+   ship with #624 and #626.
+2. Time one projection by hand and watch its transaction. The shared function writes temp tables, so
+   the call holds a transaction id, and with it the vacuum horizon for every table in the database,
+   for its whole duration:
+
+   ```sql
+   -- session A
+   BEGIN; SELECT materialize_morpho_vault(0); ROLLBACK;
+   -- session B, while A runs
+   SELECT pid, backend_xid, backend_xmin, now() - xact_start AS age
+     FROM pg_stat_activity WHERE backend_xid IS NOT NULL;
+   ```
+
+   That duration is how long autovacuum cannot clean rows deleted after the call started. Decide
+   whether it is acceptable before the scheduled run makes it hourly.
+
 ---
 
 ## VectorPositionMaterializerSilentlyEmpty
@@ -72,7 +98,9 @@ backfill command exists or is needed — the full projection *is* the backfill.
 
 **What it means.** A projection is withholding positions rather than failing. Its run succeeds, the
 other positions land, and these sit at whatever was last stored, which every downstream reader treats
-as current. `position_projection_run.positions_refused` is the per-run count the alert reads.
+as current. `position_projection_run.positions_refused` is the per-run count the alert reads, taken from
+the latest run each projection had under the running pod's writer run, so a projection removed from
+`POSITION_PROJECTIONS` stops reporting once the pod restarts.
 
 **Which positions.** The refusal table holds one row per refused observation for the life of the
 refusal, and the two classes need different questions asked of them.
@@ -115,14 +143,17 @@ projection, so every other view in that run did write; only this one did not. Th
 you do not have to find it in logs. Check `position_projection_refusal` and `positions_refused` in
 `position_projection_run` too: a run can succeed while withholding individual positions.
 
-**The four ways a run fails, and what each one means.**
+A configured wrapper that does not exist does not reach this alert: the worker exits at startup with
+`configured materializers not in the database`, and the shared cronjob alerts report the restarts.
+Fix `POSITION_PROJECTIONS`, or deploy the wrapper's migration.
+
+**The ways a run fails, and what each one means.**
 
 | error | cause | fix |
 | --- | --- | --- |
 | `violates the position_state column contract: X (is Y / MISSING)` | the view lost a column or changed its type | fix the view; the contract is the ten columns in the migration header |
 | `double-emits a logical observation key` | the view produces two rows for one `(position, block, block_version, processing_version)` | dedupe the view; usually a join fanning out |
 | `emits position_ids owned by another projection` | two views claim the same position — their `instrument_key` forms disagree, or the fan-out overlaps | decide which view owns it; do **not** work around it, this is the guard doing its job |
-| `function materialize_x(p_build_id => integer, p_run_id => bigint) does not exist` | a configured entry names no wrapper, or a deployed wrapper does not take `p_run_id` | fix `POSITION_PROJECTIONS`, or ship the wrapper's own migration |
 | `p_view (oid N) does not name an existing relation` | a wrapper's own view was dropped | restore the view |
 
 **A warning rather than an error** — `re-emits stored observations with a changed block_timestamp` or

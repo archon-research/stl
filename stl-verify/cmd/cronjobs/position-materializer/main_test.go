@@ -3,6 +3,7 @@ package main
 import (
 	"slices"
 	"testing"
+	"time"
 )
 
 func TestParseProjections(t *testing.T) {
@@ -32,5 +33,33 @@ func TestParseProjections(t *testing.T) {
 				t.Fatalf("parseProjections(%q) = %v; want %v", tc.raw, got, tc.want)
 			}
 		})
+	}
+}
+
+// The first tick is the full-history bootstrap, one statement per projection. At the shared 10m
+// StartToClose Temporal would start a second attempt while the first query kept running, and the
+// schedule keeps the timeouts it was created with, so the default could not be raised by a redeploy.
+func TestMaterializeActivityTimeouts_AccommodateTheBootstrap(t *testing.T) {
+	if materializeActivityTimeouts.StartToClose < 6*time.Hour {
+		t.Errorf("StartToClose = %s, want at least 6h for the full-history first run", materializeActivityTimeouts.StartToClose)
+	}
+	if materializeActivityTimeouts.ScheduleToClose < materializeActivityTimeouts.StartToClose {
+		t.Errorf("ScheduleToClose (%s) is below StartToClose (%s)", materializeActivityTimeouts.ScheduleToClose, materializeActivityTimeouts.StartToClose)
+	}
+	// Without a heartbeat the activity's context is never cancelled when Temporal gives up on it,
+	// so the database query keeps running beside the next attempt.
+	if materializeActivityTimeouts.Heartbeat <= 0 || materializeActivityTimeouts.Heartbeat >= materializeActivityTimeouts.StartToClose {
+		t.Errorf("Heartbeat = %s, want positive and shorter than StartToClose", materializeActivityTimeouts.Heartbeat)
+	}
+	if materializeActivityTimeouts.MaximumAttempts <= 0 || materializeActivityTimeouts.MaximumAttempts > 5 {
+		t.Errorf("MaximumAttempts = %d, want 1..5", materializeActivityTimeouts.MaximumAttempts)
+	}
+}
+
+// The sizing above only matters if the worker is built with it.
+func TestCronjobConfig_UsesTheMaterializeTimeouts(t *testing.T) {
+	cfg := cronjobConfig("position-materializer", "postgres://u:p@localhost:5432/d", []string{"materialize_a"})
+	if cfg.ActivityTimeouts != materializeActivityTimeouts {
+		t.Errorf("ActivityTimeouts = %+v, want materializeActivityTimeouts %+v", cfg.ActivityTimeouts, materializeActivityTimeouts)
 	}
 }

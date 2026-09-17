@@ -1064,6 +1064,8 @@ data:
   # Explicit list of materialize_<projection>() wrappers, never discovery. Each
   # wrapper runs its projection's own pre-flight refusals before the shared
   # materializer appends to position_state (docs/runbooks/vector-position-materializer.md).
+  # The worker refuses to start if a listed wrapper is not in the database: these two
+  # ship with #624 and #626, which must be deployed before replicas go to 1.
   # Morpho only for now. Sky maps block_timestamp to synced_at, a sync clock, so an
   # out-of-order retry inverts instant against height, and Aave's created_at defaults to
   # now() so its legacy rows carry wall clock. Both join once their views read block_meta

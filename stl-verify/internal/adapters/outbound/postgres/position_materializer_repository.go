@@ -77,14 +77,14 @@ func (r *PositionMaterializerRepository) Materialize(ctx context.Context, materi
 	})
 }
 
-// RefusedByProjection reads each projection's positions_refused from its latest run row.
-// position_projection_run is keyed (projection, created_at), so the newest row per projection
-// is one index scan; a projection that has never run is absent rather than zero.
-func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context) (map[string]int64, error) {
+// RefusedByProjection reads positions_refused from the latest run row of each projection runID
+// wrote. A projection with no run under runID is absent rather than zero.
+func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context, runID int64) (map[string]int64, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT DISTINCT ON (projection) projection, positions_refused
 		  FROM position_projection_run
-		 ORDER BY projection, created_at DESC`)
+		 WHERE run_id = $1
+		 ORDER BY projection, created_at DESC`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("reading positions_refused: %w", err)
 	}
@@ -103,6 +103,27 @@ func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context
 		return nil, fmt.Errorf("iterating positions_refused: %w", err)
 	}
 	return out, nil
+}
+
+// MissingMaterializers returns the configured names with no public function that accepts p_build_id
+// and p_run_id by name, which is how materializeOnce calls them.
+func (r *PositionMaterializerRepository) MissingMaterializers(ctx context.Context, materializers []string) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT m
+		  FROM unnest($1::text[]) WITH ORDINALITY AS c(m, ord)
+		 WHERE NOT EXISTS (
+		       SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+		        WHERE n.nspname = 'public' AND p.proname = c.m
+		          AND p.proargnames @> ARRAY['p_build_id', 'p_run_id'])
+		 ORDER BY ord`, materializers)
+	if err != nil {
+		return nil, fmt.Errorf("looking up materializer functions: %w", err)
+	}
+	missing, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("reading missing materializer functions: %w", err)
+	}
+	return missing, nil
 }
 
 // positionStateCaches are the trigger-fed caches derived from position_state. Named here rather

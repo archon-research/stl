@@ -1,14 +1,13 @@
 // Package position_materializer runs the position projections on a schedule.
-// Each invocation calls the shared materialize_position_projection() database
-// wrapper once per configured projection; the contract validation, recency
-// guard, and classification upsert all live in that function (VEC-402), so this
-// service is the scheduler around it.
+// Each invocation calls one materialize_<projection>() wrapper per configured
+// projection; the wrappers and the shared materialize_position_projection() own
+// the validation and the append (VEC-402), so this service is the scheduler.
 //
-// The write path is the full-projection upsert: every run re-projects and
-// re-upserts each view's whole history, so the FIRST scheduled run is also the
-// history bootstrap — there is no separate bootstrap job. The incremental
-// (trigger-fed) write path and compression are VEC-566 and replace the write
-// path under this same runner.
+// Every run re-projects each view's whole history and appends only observation
+// keys position_state does not hold: nothing is updated, so a rerun appends
+// nothing. The FIRST scheduled run is therefore the history bootstrap. Its cost
+// grows with each source table's history on every run; p_window does not change
+// that, because the shared function applies it above the views' DISTINCT ON.
 package position_materializer
 
 import (
@@ -78,6 +77,20 @@ func NewService(materializers []string, materializer outbound.PositionMaterializ
 		logger:        logger.With("component", "position-materializer"),
 		telemetry:     telemetry,
 	}, nil
+}
+
+// CheckConfigured fails when a configured materializer does not exist, so a list naming a wrapper
+// whose migration has not shipped stops the worker at startup instead of failing every tick.
+func (s *Service) CheckConfigured(ctx context.Context) error {
+	missing, err := s.materializer.MissingMaterializers(ctx, s.materializers)
+	if err != nil {
+		return fmt.Errorf("checking configured materializers: %w", err)
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("configured materializers not in the database (or not taking p_build_id and p_run_id): %s",
+			strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 // RunOnce runs every configured projection materializer once, sequentially.
@@ -151,7 +164,7 @@ func (s *Service) publishCacheRows(ctx context.Context) {
 // A failure here does not fail the run: the projections did their work and the rows are committed.
 // It is logged, and a read that keeps failing shows up as the gauge going absent.
 func (s *Service) publishWithheld(ctx context.Context) {
-	refused, err := s.materializer.RefusedByProjection(ctx)
+	refused, err := s.materializer.RefusedByProjection(ctx, s.runID)
 	if err != nil {
 		s.logger.Error("reading withheld positions failed; the projections themselves succeeded", "error", err)
 		return

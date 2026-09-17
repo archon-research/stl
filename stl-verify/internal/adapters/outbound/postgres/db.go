@@ -172,26 +172,23 @@ func buildPoolConfig(cfg DBConfig) (*pgxpool.Config, error) {
 	return poolConfig, nil
 }
 
-// attachNoticeLogger surfaces server notices. Without a handler pgx discards them,
-// so a RAISE WARNING reaches nothing: the position materializer signals a withheld
-// position that way, and those warnings were invisible in every deployed service.
+// attachNoticeLogger logs server warnings. Without a handler pgx discards them, so a RAISE WARNING
+// reaches nothing: the position materializer signals a withheld position that way. Every service's
+// pool gets this, so lower severities are dropped, and the unlocalized severity is compared because
+// Severity follows the server's lc_messages. RAISE EXCEPTION arrives as a query error, not a notice.
 func attachNoticeLogger(poolConfig *pgxpool.Config) {
 	poolConfig.ConnConfig.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
-		if n == nil {
+		if n == nil || n.SeverityUnlocalized != "WARNING" {
 			return
 		}
-		attrs := []any{"severity", n.Severity, "code", n.Code, "message", n.Message}
+		attrs := []any{"severity", n.SeverityUnlocalized, "code", n.Code, "message", n.Message}
 		if n.Detail != "" {
 			attrs = append(attrs, "detail", n.Detail)
 		}
 		if n.Hint != "" {
 			attrs = append(attrs, "hint", n.Hint)
 		}
-		if n.Severity == "WARNING" || n.Severity == "EXCEPTION" {
-			slog.Warn("postgres notice", attrs...)
-			return
-		}
-		slog.Info("postgres notice", attrs...)
+		slog.Warn("postgres notice", attrs...)
 	}
 }
 

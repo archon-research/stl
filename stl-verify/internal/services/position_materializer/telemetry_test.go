@@ -129,3 +129,31 @@ func TestRecordCacheRows_NilTelemetryIsANoOp(t *testing.T) {
 	var tel *Telemetry
 	tel.RecordCacheRows(context.Background(), "position_current", 42) // must not panic
 }
+
+// An unseeded counter first appears at its first value, so increase() misses the 0->1 after every
+// pod start: ViewFailing could not fire on a process's first error, and SilentlyEmpty fired for 6h
+// after a restart whose first run appended rows. Every configured materializer starts at zero.
+func TestNewTelemetry_SeedsEveryConfiguredMaterializer(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	if _, err := NewTelemetryWithProvider(mp, "materialize_a", "materialize_b"); err != nil {
+		t.Fatalf("NewTelemetryWithProvider: %v", err)
+	}
+
+	runs := map[string]int64{}
+	for _, dp := range testutil.CollectSumDataPoints(t, reader, "position_materializer.projection_runs.total") {
+		runs[testutil.AttrValue(dp, "materializer")+"/"+testutil.AttrValue(dp, "status")] = dp.Value
+	}
+	for _, key := range []string{"materialize_a/ok", "materialize_a/error", "materialize_b/ok", "materialize_b/error"} {
+		if v, ok := runs[key]; !ok || v != 0 {
+			t.Errorf("projection_runs %s = %d (present %v); want a seeded 0", key, v, ok)
+		}
+	}
+	rows := testutil.CollectCounterByAttr(t, reader, "position_materializer.rows_changed.total", "materializer")
+	for _, m := range []string{"materialize_a", "materialize_b"} {
+		if v, ok := rows[m]; !ok || v != 0 {
+			t.Errorf("rows_changed %s = %d (present %v); want a seeded 0", m, v, ok)
+		}
+	}
+}

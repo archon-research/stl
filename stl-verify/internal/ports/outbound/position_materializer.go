@@ -19,11 +19,16 @@ type PositionMaterializer interface {
 	// views in different orders would deadlock).
 	Materialize(ctx context.Context, materializer string, buildID int, runID int64) (int64, error)
 
-	// RefusedByProjection returns each projection's positions_refused from its most recent
-	// run. The shared function withholds a position rather than failing the run when its new
-	// observations conflict, so a projection can report success indefinitely while a position
-	// stays frozen at a stale value. This is the count that makes that visible.
-	RefusedByProjection(ctx context.Context) (map[string]int64, error)
+	// RefusedByProjection returns positions_refused from the most recent run of each projection that
+	// runID materialized. The shared function withholds a position rather than failing the run when
+	// its new observations conflict, so a projection can report success indefinitely while a position
+	// stays frozen at a stale value. Scoped to one writer run, so a retired projection or one run by
+	// hand does not keep publishing its last level.
+	RefusedByProjection(ctx context.Context, runID int64) (map[string]int64, error)
+
+	// MissingMaterializers returns the names in materializers that do not resolve to a public
+	// function accepting p_build_id and p_run_id by name.
+	MissingMaterializers(ctx context.Context, materializers []string) ([]string, error)
 
 	// CacheRowEstimates returns the estimated row count of each trigger-fed cache derived from
 	// position_state, keyed by table name. db/migrations/AGENTS.md requires a row-growth tripwire

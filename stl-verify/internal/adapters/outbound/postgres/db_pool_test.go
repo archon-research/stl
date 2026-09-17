@@ -1,8 +1,13 @@
 package postgres
 
 import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
@@ -111,5 +116,41 @@ func TestBuildPoolConfig_LogsServerNotices(t *testing.T) {
 	}
 	if poolConfig.ConnConfig.OnNotice == nil {
 		t.Fatal("ConnConfig.OnNotice is nil, so every server WARNING is discarded")
+	}
+}
+
+// Only warnings are logged, judged on the unlocalized severity: the handler is on every service's
+// pool, so NOTICE-level chatter must not reach the logs, and a server with a non-English lc_messages
+// must still log a WARNING as a warning.
+func TestNoticeLogger_LogsOnlyWarnings(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	poolConfig, err := buildPoolConfig(DBConfig{URL: "postgres://u:p@localhost:5432/d?sslmode=disable"})
+	if err != nil {
+		t.Fatalf("buildPoolConfig() error: %v", err)
+	}
+	onNotice := poolConfig.ConnConfig.OnNotice
+	onNotice(nil, &pgconn.Notice{Severity: "AVERTISSEMENT", SeverityUnlocalized: "WARNING", Message: "withheld 3 positions"})
+	onNotice(nil, &pgconn.Notice{Severity: "NOTICE", SeverityUnlocalized: "NOTICE", Message: "relation exists, skipping"})
+
+	var lines []map[string]any
+	for _, l := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+		if len(l) == 0 {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(l, &m); err != nil {
+			t.Fatalf("log line %q: %v", l, err)
+		}
+		lines = append(lines, m)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("logged %d lines, want only the warning: %v", len(lines), lines)
+	}
+	if lines[0]["level"] != "WARN" || lines[0]["message"] != "withheld 3 positions" || lines[0]["severity"] != "WARNING" {
+		t.Errorf("logged %v; want the warning at WARN with severity WARNING", lines[0])
 	}
 }

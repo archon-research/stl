@@ -15,6 +15,9 @@ type mockMaterializer struct {
 	refusedErr error
 	cacheRows  map[string]int64
 	cacheErr   error
+	refusedRun int64
+	missing    []string
+	missingErr error
 }
 
 func (m *mockMaterializer) Materialize(ctx context.Context, view string, buildID int, runID int64) (int64, error) {
@@ -22,8 +25,13 @@ func (m *mockMaterializer) Materialize(ctx context.Context, view string, buildID
 	return m.fn(ctx, view, buildID, runID)
 }
 
-func (m *mockMaterializer) RefusedByProjection(context.Context) (map[string]int64, error) {
+func (m *mockMaterializer) RefusedByProjection(_ context.Context, runID int64) (map[string]int64, error) {
+	m.refusedRun = runID
 	return m.refused, m.refusedErr
+}
+
+func (m *mockMaterializer) MissingMaterializers(context.Context, []string) ([]string, error) {
+	return m.missing, m.missingErr
 }
 
 func (m *mockMaterializer) CacheRowEstimates(context.Context) (map[string]int64, error) {
@@ -173,4 +181,52 @@ func TestTelemetry_NilSafeAndConstructible(t *testing.T) {
 	}
 	tel.RecordRun(context.Background(), "v", "ok", 5)
 	tel.RecordRun(context.Background(), "v", "error", 0)
+}
+
+// The withheld level is read for this process's writer run only. Read across every run, a projection
+// retired with a non-zero level republished that level every tick and its alert never cleared.
+func TestRunOnce_ReadsTheWithheldLevelForItsOwnRun(t *testing.T) {
+	mm := &mockMaterializer{fn: func(context.Context, string, int, int64) (int64, error) { return 0, nil }}
+	s, err := NewService([]string{"materialize_a"}, mm, 0, 8823, nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := s.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if mm.refusedRun != 8823 {
+		t.Errorf("withheld level read for run %d; want this process's run 8823", mm.refusedRun)
+	}
+}
+
+// A configured wrapper that does not exist fails at startup naming it, rather than on every tick.
+func TestCheckConfigured(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		missing []string
+		err     error
+		want    string
+	}{
+		{"all present", nil, nil, ""},
+		{"one missing", []string{"materialize_b"}, nil, "materialize_b"},
+		{"lookup fails", nil, errors.New("connection refused"), "connection refused"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			mm := &mockMaterializer{missing: c.missing, missingErr: c.err}
+			s, err := NewService([]string{"materialize_a", "materialize_b"}, mm, 0, 1, nil, nil)
+			if err != nil {
+				t.Fatalf("NewService: %v", err)
+			}
+			err = s.CheckConfigured(context.Background())
+			if c.want == "" {
+				if err != nil {
+					t.Errorf("CheckConfigured = %v; want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("CheckConfigured = %v; want an error naming %q", err, c.want)
+			}
+		})
+	}
 }

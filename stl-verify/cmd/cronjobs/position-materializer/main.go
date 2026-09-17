@@ -1,15 +1,13 @@
 // Package main implements a Temporal cronjob worker that materializes the
-// position projections (VEC-402). On each scheduled run it calls the shared
-// materialize_position_projection() database function once per configured
-// projection through its materialize_<projection>() wrapper; contract validation, the recency guard, and the
-// classification upsert live in that function.
+// position projections (VEC-402). On each scheduled run it calls one
+// materialize_<projection>() wrapper per configured projection, which validates
+// its inputs and appends through the shared materialize_position_projection().
 //
-// The write path is the full-projection upsert, so the first scheduled run is
-// also the history bootstrap — deploy gated at replicas 0 and bump once the
-// projection list is confirmed (see k8s/base/position-materializer). The
-// incremental write path + compression (VEC-566) replace the write path under
-// this same runner; the dedicated stl_materialize role (VEC-562) replaces the
-// interim credentials.
+// Every run re-projects each view's whole history and appends only unseen
+// observation keys, so the first scheduled run is also the history bootstrap:
+// deploy gated at replicas 0 and bump once the projection list is confirmed (see
+// k8s/base/position-materializer). The dedicated stl_materialize role (VEC-562)
+// replaces the interim credentials.
 package main
 
 import (
@@ -21,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
@@ -66,20 +65,25 @@ func run() int {
 
 	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
-	}, temporal.CronjobConfig{
-		Name:              serviceName,
-		IntervalEnv:       "MATERIALIZE_INTERVAL",
-		IntervalDefault:   "1h",
-		IntervalOffsetEnv: "MATERIALIZE_SCHEDULE_OFFSET",
-		OpenDatabase:      postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
-		Setup: func(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
-			return setupRunner(ctx, deps, materializers)
-		},
-	}); err != nil {
+	}, cronjobConfig(serviceName, dbURL, materializers)); err != nil {
 		slog.Error("position-materializer cronjob exited with error", "error", err)
 		return 1
 	}
 	return 0
+}
+
+func cronjobConfig(serviceName, dbURL string, materializers []string) temporal.CronjobConfig {
+	return temporal.CronjobConfig{
+		Name:              serviceName,
+		IntervalEnv:       "MATERIALIZE_INTERVAL",
+		IntervalDefault:   "1h",
+		IntervalOffsetEnv: "MATERIALIZE_SCHEDULE_OFFSET",
+		ActivityTimeouts:  materializeActivityTimeouts,
+		OpenDatabase:      postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
+		Setup: func(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
+			return setupRunner(ctx, deps, materializers)
+		},
+	}
 }
 
 // Build metadata, populated from VCS in init() (GitBranch is set at link time).
@@ -116,12 +120,23 @@ func parseProjections(raw string) ([]string, error) {
 	return materializers, nil
 }
 
+// materializeActivityTimeouts sizes one tick against the first run, which appends every configured
+// view's whole history in one statement per view. Set before the first pod starts: the schedule's
+// action keeps the timeouts it was created with, and a redeploy reconciles only its interval. The
+// heartbeat is what cancels the activity's context, and so its database query, when Temporal gives up.
+var materializeActivityTimeouts = temporal.ActivityTimeouts{
+	StartToClose:    6 * time.Hour,
+	ScheduleToClose: 12 * time.Hour,
+	MaximumAttempts: 3,
+	Heartbeat:       time.Minute,
+}
+
 var materializerName = regexp.MustCompile(`^materialize_[a-z][a-z0-9_]*$`)
 
 const sharedMaterializer = "materialize_position_projection"
 
 func setupRunner(ctx context.Context, deps temporal.Dependencies, materializers []string) (temporal.Runner, error) {
-	telemetry, err := position_materializer.NewTelemetry()
+	telemetry, err := position_materializer.NewTelemetry(materializers...)
 	if err != nil {
 		return nil, fmt.Errorf("creating position materializer telemetry: %w", err)
 	}
@@ -138,6 +153,9 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, materializers 
 	service, err := position_materializer.NewService(materializers, repo, int(buildReg.BuildID()), int64(runID), deps.Logger, telemetry)
 	if err != nil {
 		return nil, fmt.Errorf("creating position materializer service: %w", err)
+	}
+	if err := service.CheckConfigured(ctx); err != nil {
+		return nil, err
 	}
 
 	return temporal.RunnerFunc(service.RunOnce), nil

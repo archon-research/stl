@@ -12,6 +12,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
+	"go.opentelemetry.io/otel"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
 var sharedDSN string
@@ -77,10 +79,28 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 	// Every sibling integration test that registers a build does the same.
 	t.Setenv("BUILD_GIT_HASH", "integration-test")
 
+	// The run counters must exist at zero for every configured materializer before any run, or the
+	// alerts reading increase() miss a process's first error. Read through the global provider, which
+	// is what setupRunner builds its telemetry on.
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	prevMP := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() { otel.SetMeterProvider(prevMP); _ = mp.Shutdown(context.Background()) })
+
 	runner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool, Logger: slog.Default()},
 		[]string{"materialize_itest_refusing", "materialize_itest"})
 	if err != nil {
 		t.Fatalf("setupRunner: %v", err)
+	}
+	seeded := map[string]int64{}
+	for _, dp := range testutil.CollectSumDataPoints(t, reader, "position_materializer.projection_runs.total") {
+		seeded[testutil.AttrValue(dp, "materializer")+"/"+testutil.AttrValue(dp, "status")] = dp.Value
+	}
+	for _, key := range []string{"materialize_itest_refusing/error", "materialize_itest/error"} {
+		if v, ok := seeded[key]; !ok || v != 0 {
+			t.Errorf("before any run, projection_runs %s = %d (present %v); want a seeded 0", key, v, ok)
+		}
 	}
 
 	err = runner.Run(ctx)
@@ -147,21 +167,26 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 		t.Errorf("observations after an idempotent rerun = %d; want 1", rows)
 	}
 
-	// A misconfigured entry must fail the run loudly as an unknown function, not skip.
-	badRunner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool, Logger: slog.Default()},
-		[]string{"materialize_itest", "materialize_no_such"})
-	if err != nil {
-		t.Fatalf("setupRunner(bad): %v", err)
+	// A configured wrapper that does not exist, or does not take the provenance arguments by name,
+	// stops the worker at startup naming it, rather than failing every tick.
+	if _, err := pool.Exec(ctx, `CREATE FUNCTION materialize_itest_positional(integer, bigint) RETURNS bigint
+		LANGUAGE sql AS $fn$ SELECT 0::bigint $fn$`); err != nil {
+		t.Fatalf("create positional wrapper: %v", err)
 	}
-	err = badRunner.Run(ctx)
-	if err == nil || !strings.Contains(err.Error(), "materialize_no_such") {
-		t.Errorf("bad entry: got %v; want a loud failure naming materialize_no_such", err)
+	_, err = setupRunner(ctx, temporal.Dependencies{Pool: pool, Logger: slog.Default()},
+		[]string{"materialize_itest", "materialize_no_such", "materialize_itest_positional"})
+	if err == nil || !strings.Contains(err.Error(), "materialize_no_such, materialize_itest_positional") {
+		t.Errorf("bad entries: got %v; want a startup failure naming materialize_no_such and materialize_itest_positional", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "materialize_itest,") {
+		t.Errorf("bad entries: %v also names materialize_itest, which exists", err)
 	}
 }
 
 // The withheld level is read with SQL, so it needs to run against a real position_projection_run:
-// the query takes the newest row per projection, and a projection that has never run must be absent
-// rather than reported as zero, or an alert cannot tell a healthy projection from a missing one.
+// the query takes the newest row per projection written by one writer run, and a projection with no
+// row under that run is absent rather than zero. Rows from another run -- a retired projection, or one
+// run by hand -- must not be reported, or their last level is republished every tick.
 func TestPositionMaterializer_RefusedByProjection(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
@@ -169,23 +194,28 @@ func TestPositionMaterializer_RefusedByProjection(t *testing.T) {
 
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO position_projection_run
-		    (projection, created_at, build_id, block_timestamp, rows_emitted, rows_appended, positions_refused)
-		VALUES ('public.position_a', '2026-09-01T00:00:00Z', 0, NULL, 10, 10, 0),
-		       ('public.position_a', '2026-09-01T01:00:00Z', 0, NULL, 10,  0, 4),
-		       ('public.position_b', '2026-09-01T00:30:00Z', 0, NULL,  5,  5, 0)`); err != nil {
+		    (projection, created_at, build_id, run_id, block_timestamp, rows_emitted, rows_appended, positions_refused)
+		VALUES ('public.position_a',       '2026-09-01T00:00:00Z', 0, 42, NULL, 10, 10, 0),
+		       ('public.position_a',       '2026-09-01T01:00:00Z', 0, 42, NULL, 10,  0, 4),
+		       ('public.position_a',       '2026-09-01T02:00:00Z', 0, 41, NULL, 10,  0, 9),
+		       ('public.position_b',       '2026-09-01T00:30:00Z', 0, 42, NULL,  5,  5, 0),
+		       ('public.position_retired', '2026-09-01T00:30:00Z', 0, 41, NULL,  5,  0, 7)`); err != nil {
 		t.Fatalf("seeding runs: %v", err)
 	}
 
 	repo := postgres.NewPositionMaterializerRepository(pool, slog.Default())
-	got, err := repo.RefusedByProjection(ctx)
+	got, err := repo.RefusedByProjection(ctx, 42)
 	if err != nil {
 		t.Fatalf("RefusedByProjection: %v", err)
 	}
 	if got["public.position_a"] != 4 {
-		t.Errorf("position_a = %d, want 4 from its newest run, not 0 from the older one", got["public.position_a"])
+		t.Errorf("position_a = %d, want 4 from its newest row under run 42, not 0 from the older one or 9 from run 41", got["public.position_a"])
 	}
 	if got["public.position_b"] != 0 {
 		t.Errorf("position_b = %d, want 0", got["public.position_b"])
+	}
+	if _, ok := got["public.position_retired"]; ok {
+		t.Error("a projection written only by another run is reported, so its level would never clear")
 	}
 	if _, ok := got["public.position_never_run"]; ok {
 		t.Error("a projection with no run row is reported; it must be absent so absence stays distinguishable")

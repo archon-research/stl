@@ -7,6 +7,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 )
 
 const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/position_materializer"
@@ -21,13 +23,16 @@ type Telemetry struct {
 	cacheRows        metric.Int64Gauge
 }
 
-// NewTelemetry creates a Telemetry using the global meter provider.
-func NewTelemetry() (*Telemetry, error) {
-	return NewTelemetryWithProvider(otel.GetMeterProvider())
+// NewTelemetry creates a Telemetry using the global meter provider, seeding the counters of every
+// configured materializer.
+func NewTelemetry(materializers ...string) (*Telemetry, error) {
+	return NewTelemetryWithProvider(otel.GetMeterProvider(), materializers...)
 }
 
-// NewTelemetryWithProvider creates a Telemetry with a custom meter provider.
-func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
+// NewTelemetryWithProvider creates a Telemetry with a custom meter provider. The run and row counters
+// are seeded at zero for each materializer: an alert reading increase() cannot see a series that
+// first appears at its first value.
+func NewTelemetryWithProvider(mp metric.MeterProvider, materializers ...string) (*Telemetry, error) {
 	meter := mp.Meter(instrumentationName)
 
 	t := &Telemetry{}
@@ -52,9 +57,16 @@ func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
 	}
 	if t.rowsChanged, err = meter.Int64Counter(
 		"position_materializer.rows_changed.total",
-		metric.WithDescription("position_state rows inserted or changed per projection run (guarded upsert; a no-op rerun records 0)"),
+		metric.WithDescription("position_state rows appended per projection run (a rerun that finds nothing new records 0)"),
 	); err != nil {
 		return nil, fmt.Errorf("creating rowsChanged counter: %w", err)
+	}
+	ctx := context.Background()
+	for _, m := range materializers {
+		view := attribute.String("materializer", m)
+		telemetry.SeedCounter(ctx, t.projectionRuns, view, attribute.String("status", "ok"))
+		telemetry.SeedCounter(ctx, t.projectionRuns, view, attribute.String("status", "error"))
+		telemetry.SeedCounter(ctx, t.rowsChanged, view)
 	}
 	return t, nil
 }
