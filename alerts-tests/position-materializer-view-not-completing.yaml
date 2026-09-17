@@ -1,6 +1,6 @@
 # Unit tests for VectorPositionMaterializerViewNotCompleting: a view cancelled on every tick
 # completes nothing while ViewFailing (status="error") stays quiet. Counters are seeded at 0,
-# ticks are hourly, and the rule reads a 3h window.
+# ticks are hourly, and the rule reads a 3h window (left-open, so a step at exactly 3h back is outside it).
 rule_files:
   - ../alerts/vector-cronjobs.yaml
 
@@ -34,9 +34,9 @@ tests:
     interval: 1m
     input_series:
       - series: 'position_materializer_projection_runs_total{k8s_namespace_name="vector", cluster="c1", materializer="materialize_morpho_vault", status="canceled"}'
-        values: '0x59 1x180'
+        values: '0x119 1x120'
       - series: 'position_materializer_projection_runs_total{k8s_namespace_name="vector", cluster="c1", materializer="materialize_morpho_vault", status="ok"}'
-        values: '0x119 1x60 2x60'
+        values: '0x179 1x60'
     alert_rule_test:
       - eval_time: 3h59m
         alertname: VectorPositionMaterializerViewNotCompleting
