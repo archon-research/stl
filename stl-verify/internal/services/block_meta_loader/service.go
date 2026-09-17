@@ -129,19 +129,7 @@ func (s *Service) Run(ctx context.Context) (int64, error) {
 		}
 		page := s.pageSize(read)
 		if page == 0 {
-			pending, err := work.Next(ctx, 1)
-			if err != nil {
-				return total, fmt.Errorf("checking for blocks past the cap: %w", err)
-			}
-			if len(pending) == 0 {
-				break
-			}
-			// Capped with blocks pending: an absent object sorts first and would fail every tick with the
-			// same fragment, so a capped run reports none of the misses it saw.
-			s.logger.Warn("block_meta run reached its cap; blocks remain pending",
-				"chain", s.cfg.ChainID, "read", read, "cap", s.cfg.MaxBlocks, "missesSeen", len(misses))
-			s.metrics.recordCapped(ctx, s.cfg.ChainID)
-			return total, nil
+			return total, s.finishAtCap(ctx, work, read, misses)
 		}
 		refs, err := work.Next(ctx, page)
 		if err != nil {
@@ -171,14 +159,36 @@ func (s *Service) Run(ctx context.Context) (int64, error) {
 		s.logger.Info("block_meta batch", "chain", s.cfg.ChainID, "upserted", n, "total", total)
 	}
 
-	// Misses are carried to the end rather than returned at the first one: the list is paged in
-	// ascending order, so stopping mid-page would leave every later block unloaded. What could be
-	// read is committed, and the run still fails naming them.
-	if len(misses) > 0 {
-		return total, fmt.Errorf("chain %d: %d referenced block(s) absent from the archive: %s",
-			s.cfg.ChainID, len(misses), strings.Join(cappedMisses(misses), ", "))
+	return total, s.missesError(misses)
+}
+
+// missesError fails a drained run naming its absent blocks. They are carried to the end, not returned at
+// the first, because the list pages ascending and stopping would leave every later block unloaded.
+func (s *Service) missesError(misses []string) error {
+	if len(misses) == 0 {
+		return nil
 	}
-	return total, nil
+	return fmt.Errorf("chain %d: %d referenced block(s) absent from the archive: %s",
+		s.cfg.ChainID, len(misses), strings.Join(cappedMisses(misses), ", "))
+}
+
+// finishAtCap ends a run that read its cap. With blocks still pending it is capped and reports none of
+// its misses, since an absent object sorts first and would fail every tick; a drained list reports them.
+func (s *Service) finishAtCap(ctx context.Context, work outbound.BlockWorkList, read int64, misses []string) error {
+	pending, err := work.Next(ctx, 1)
+	if err != nil {
+		return fmt.Errorf("checking for blocks past the cap: %w", err)
+	}
+	if len(pending) == 0 {
+		return s.missesError(misses)
+	}
+	s.logger.Warn("block_meta run reached its cap; blocks remain pending",
+		"chain", s.cfg.ChainID, "read", read, "cap", s.cfg.MaxBlocks, "missesSeen", len(misses))
+	s.metrics.recordCapped(ctx, s.cfg.ChainID)
+	if int64(len(misses)) == read {
+		s.metrics.recordCappedWithoutProgress(ctx, s.cfg.ChainID)
+	}
+	return nil
 }
 
 // pageSize is how many blocks the next page may hold: the batch size, or what is left of the run's

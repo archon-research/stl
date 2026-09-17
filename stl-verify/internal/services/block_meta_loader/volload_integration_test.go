@@ -3,8 +3,6 @@
 package block_meta_loader
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -16,7 +14,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -61,21 +58,7 @@ func TestVolume_RealDataEndToEnd(t *testing.T) {
 
 	// Real gzipped objects in real S3, one per block.
 	for i := range blocks {
-		var buf bytes.Buffer
-		gz := gzip.NewWriter(&buf)
-		if _, err := gz.Write(fmt.Appendf(nil, `{"timestamp":"0x%x"}`, 0x67c00000+i)); err != nil {
-			t.Fatalf("gzip: %v", err)
-		}
-		if err := gz.Close(); err != nil {
-			t.Fatalf("gzip close: %v", err)
-		}
-		if _, err := s3Client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String(bucket),
-			Key:    aws.String(s3key.Build(int64(1000000+i), 0, s3key.Block)),
-			Body:   bytes.NewReader(buf.Bytes()),
-		}); err != nil {
-			t.Fatalf("put block %d: %v", 1000000+i, err)
-		}
+		testutil.UploadBlockHeader(t, ctx, s3Client, bucket, int64(1000000+i), 0, fmt.Sprintf("0x%x", 0x67c00000+i))
 	}
 
 	var chunks int

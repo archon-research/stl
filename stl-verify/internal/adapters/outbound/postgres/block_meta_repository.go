@@ -68,13 +68,17 @@ type workListArm struct {
 
 // armSQL builds one arm. parent is empty for a table carrying chain_id natively; otherwise the arm
 // joins parent on parentRef = table.parentKey and takes chain from there. Every row is stamped with
-// the enumerating run, which is the only writer that may delete it.
+// the enumerating run, and a block block_meta already holds is never written.
 func armSQL(table, parent, parentKey, parentRef string) string {
 	const shape = `
 		INSERT INTO block_meta_worklist (chain_id, run_id, block_number, block_version)
 		SELECT %s.chain_id, $2, t.block_number, t.block_version
 		  FROM %s t%s
 		 WHERE %s.chain_id = $1 AND %%s
+		   AND NOT EXISTS (SELECT 1 FROM block_meta m
+		                    WHERE m.chain_id = $1
+		                      AND m.block_number = t.block_number
+		                      AND m.block_version = t.block_version)
 		ON CONFLICT DO NOTHING`
 	src, join := "t", ""
 	if parent != "" {
@@ -322,9 +326,7 @@ func (r *BlockMetaRepository) enumerateArms(ctx context.Context, chainID int64) 
 	return nil
 }
 
-// removeAlreadyLoaded subtracts what block_meta already holds. Subtracting here rather than inside
-// every arm keeps block_meta out of six plans, and it is a plain table, so this is one relation-level
-// pass instead of six.
+// removeAlreadyLoaded drops blocks another run loaded while this run's windows were enumerating.
 func (r *BlockMetaRepository) removeAlreadyLoaded(ctx context.Context, chainID int64) error {
 	if _, err := r.pool.Exec(ctx, `
 		DELETE FROM block_meta_worklist w

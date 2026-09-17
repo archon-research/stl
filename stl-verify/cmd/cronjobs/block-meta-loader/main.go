@@ -52,8 +52,6 @@ func main() {
 	}
 }
 
-// exitCode decides what a finished run is worth to the supervisor. It is a function rather than an
-// inline branch in main so the decision is testable without exiting the test binary.
 var (
 	GitCommit string
 	GitBranch string

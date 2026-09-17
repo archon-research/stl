@@ -134,6 +134,43 @@ func TestWorkListExcludesBlocksAlreadyLoaded(t *testing.T) {
 	}
 }
 
+// A block block_meta already holds is never written to the work list, rather than written and deleted.
+// Only the same chain, number and version counts as loaded.
+func TestEnumerationSkipsBlocksAlreadyLoaded(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp) VALUES
+			(1, 900000, 0, TIMESTAMPTZ '2026-01-01'),
+			(1, 925000, 1, TIMESTAMPTZ '2026-01-01'),
+			(8453, 925000, 0, TIMESTAMPTZ '2026-01-01')`); err != nil {
+		t.Fatalf("load blocks: %v", err)
+	}
+
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("build the repository: %v", err)
+	}
+	if err := repo.enumerateArms(ctx, 1); err != nil {
+		t.Fatalf("enumerate: %v", err)
+	}
+	var loaded, otherVersionOrChain int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE block_number = 900000), count(*) FILTER (WHERE block_number = 925000)
+		  FROM block_meta_worklist WHERE run_id = $1`, runID).Scan(&loaded, &otherVersionOrChain); err != nil {
+		t.Fatalf("read the enumerated slice: %v", err)
+	}
+	if otherVersionOrChain != 1 {
+		t.Errorf("block 925000/0 on chain 1 enumerated %d times, want 1: another version or chain loaded is not this block", otherVersionOrChain)
+	}
+	if loaded != 0 {
+		t.Errorf("block 900000 is in block_meta and was written to the work list %d time(s)", loaded)
+	}
+}
+
 func TestWorkListHoldsNoOpenTransactionWhilePaging(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)

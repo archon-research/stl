@@ -19,8 +19,9 @@ const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/
 //
 // recordPaged is nil-receiver-safe, so the service runs unchanged where telemetry is not wired.
 type loaderMetrics struct {
-	worklistRowsPaged metric.Int64Counter
-	runsCapped        metric.Int64Counter
+	worklistRowsPaged    metric.Int64Counter
+	runsCapped           metric.Int64Counter
+	runsCappedNoProgress metric.Int64Counter
 }
 
 func newLoaderMetrics(chainID int64) (*loaderMetrics, error) {
@@ -45,11 +46,21 @@ func newLoaderMetrics(chainID int64) (*loaderMetrics, error) {
 		return nil, fmt.Errorf("creating block_meta.runs.capped counter: %w", err)
 	}
 
-	m := &loaderMetrics{worklistRowsPaged: paged, runsCapped: capped}
+	// Absent blocks sort first and are never loaded, so a run capped on them alone repeats every tick.
+	noProgress, err := meter.Int64Counter(
+		"block_meta.runs.capped_without_progress",
+		metric.WithDescription("Capped runs in which every block read was absent from the archive"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating block_meta.runs.capped_without_progress counter: %w", err)
+	}
+
+	m := &loaderMetrics{worklistRowsPaged: paged, runsCapped: capped, runsCappedNoProgress: noProgress}
 	// Seeded so the series exists from process start: the tripwire reads a rate, and an unseeded
 	// counter first appears at its first real increment (telemetry.SeedCounter carries the why).
 	telemetry.SeedCounter(context.Background(), paged, chainAttr(chainID))
 	telemetry.SeedCounter(context.Background(), capped, chainAttr(chainID))
+	telemetry.SeedCounter(context.Background(), noProgress, chainAttr(chainID))
 	return m, nil
 }
 
@@ -70,4 +81,12 @@ func (m *loaderMetrics) recordCapped(ctx context.Context, chainID int64) {
 		return
 	}
 	m.runsCapped.Add(ctx, 1, metric.WithAttributes(chainAttr(chainID)))
+}
+
+// recordCappedWithoutProgress counts a capped run whose every read was absent. Nil-receiver-safe.
+func (m *loaderMetrics) recordCappedWithoutProgress(ctx context.Context, chainID int64) {
+	if m == nil {
+		return
+	}
+	m.runsCappedNoProgress.Add(ctx, 1, metric.WithAttributes(chainAttr(chainID)))
 }

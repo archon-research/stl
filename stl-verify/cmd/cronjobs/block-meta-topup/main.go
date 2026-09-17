@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -87,6 +88,7 @@ func cronjobConfig(taskQueue string, cfg blockmetacfg.Config) temporal.CronjobCo
 		ActivityTimeouts: temporal.ActivityTimeouts{
 			StartToClose:    45 * time.Minute,
 			ScheduleToClose: 55 * time.Minute,
+			MaximumAttempts: 2,
 			Heartbeat:       30 * time.Second,
 		},
 		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(cfg.DSN)),
@@ -105,7 +107,7 @@ func setup(ctx context.Context, cfg blockmetacfg.Config, deps temporal.Dependenc
 		return nil, err
 	}
 	if maxBlocks == 0 {
-		return nil, fmt.Errorf("MAX_BLOCKS must be positive on a scheduled tick; an unbounded pass is block-meta-loader's job")
+		return nil, errors.New("MAX_BLOCKS must be positive on a scheduled tick; an unbounded pass is block-meta-loader's job")
 	}
 
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{})

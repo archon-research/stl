@@ -3,10 +3,7 @@
 package block_meta_loader
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"strconv"
@@ -17,7 +14,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -49,28 +45,6 @@ func newLocalStackReader(t *testing.T, ctx context.Context, logger *slog.Logger)
 
 // uploadBlock uploads a gzipped block JSON carrying the given hex timestamp to the
 // key the loader will read for (blockNum, version).
-func uploadBlock(t *testing.T, ctx context.Context, client *s3.Client, bucket string, blockNum int64, version int, hexTimestamp string) {
-	t.Helper()
-	key := s3key.Build(blockNum, version, s3key.Block)
-	blockJSON := fmt.Sprintf(`{"timestamp":%q}`, hexTimestamp)
-
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write([]byte(blockJSON)); err != nil {
-		t.Fatalf("gzip write: %v", err)
-	}
-	if err := gz.Close(); err != nil {
-		t.Fatalf("gzip close: %v", err)
-	}
-	if _, err := client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-		Body:   bytes.NewReader(buf.Bytes()),
-	}); err != nil {
-		t.Fatalf("put block %s: %v", key, err)
-	}
-}
-
 // hexSeconds parses an on-chain hex timestamp to its epoch-second value.
 func hexSeconds(t *testing.T, hexTimestamp string) int64 {
 	t.Helper()
@@ -148,14 +122,14 @@ func newLoaderFixture(t *testing.T, ctx context.Context) loaderFixture {
 	}
 
 	event(fixtureChn, protocolID, 100, 0, "01", "02")
-	uploadBlock(t, ctx, s3Client, bucket, 100, 0, b100Hex)
+	testutil.UploadBlockHeader(t, ctx, s3Client, bucket, 100, 0, b100Hex)
 
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO borrower (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash)
 		VALUES ($1, $2, $3, 200, 0, 1, 1, 'Borrow', '\x03'::bytea)`, userID, protocolID, tokenID); err != nil {
 		t.Fatalf("seed borrower block 200: %v", err)
 	}
-	uploadBlock(t, ctx, s3Client, bucket, 200, 0, b200Hex)
+	testutil.UploadBlockHeader(t, ctx, s3Client, bucket, 200, 0, b200Hex)
 
 	// Block 300 is referenced but already loaded, at two processing_versions. Its object is
 	// deliberately absent: a loader that re-fetched it would fail hard on the missing key.
@@ -172,7 +146,7 @@ func newLoaderFixture(t *testing.T, ctx context.Context) loaderFixture {
 		VALUES ((SELECT id FROM prime WHERE name = 'spark'), 'ETH-A', 0, 500, 0, now())`); err != nil {
 		t.Fatalf("seed prime_debt block 500: %v", err)
 	}
-	uploadBlock(t, ctx, s3Client, bucket, 500, 0, b500Hex)
+	testutil.UploadBlockHeader(t, ctx, s3Client, bucket, 500, 0, b500Hex)
 
 	// Block 400 is referenced only on Base. Its object is deliberately absent, so a broken chain
 	// filter fails hard rather than passing silently.
@@ -186,8 +160,8 @@ func newLoaderFixture(t *testing.T, ctx context.Context) loaderFixture {
 	// Block 600 at two reorg versions, which with BatchSize 2 straddles a batch boundary.
 	event(fixtureChn, protocolID, 600, 0, "08", "02")
 	event(fixtureChn, protocolID, 600, 1, "09", "02")
-	uploadBlock(t, ctx, s3Client, bucket, 600, 0, b600v0Hex)
-	uploadBlock(t, ctx, s3Client, bucket, 600, 1, b600v1Hex)
+	testutil.UploadBlockHeader(t, ctx, s3Client, bucket, 600, 0, b600v0Hex)
+	testutil.UploadBlockHeader(t, ctx, s3Client, bucket, 600, 1, b600v1Hex)
 
 	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
 	repo, err := postgres.NewBlockMetaRepository(pool, logger, buildID, runID)

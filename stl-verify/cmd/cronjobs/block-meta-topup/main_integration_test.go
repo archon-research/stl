@@ -17,7 +17,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockmetacfg"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -34,14 +33,24 @@ func TestMain(m *testing.M) {
 	}))
 }
 
-// The bucket name has to satisfy the chain guard; absentBucket satisfies it and is never created.
+// bucketPrefix satisfies the chain guard, which keys on DEPLOY_ENV and the chain slug.
 const (
 	testDeployEnv = "staging"
-	testBucket    = "stl-sentinelstaging-ethereum-raw-itest"
-	absentBucket  = testBucket + "-absent"
+	bucketPrefix  = "stl-sentinelstaging-ethereum-raw-"
 )
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// archiveBucket creates this test's own bucket and returns a client for it.
+func archiveBucket(t *testing.T, ctx context.Context) (*s3.Client, string) {
+	t.Helper()
+	client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
+	bucket := testutil.S3TestBucketName(t, bucketPrefix)
+	if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	return client, bucket
+}
 
 func setTopupEnv(t *testing.T, bucket string) {
 	t.Helper()
@@ -83,14 +92,11 @@ func TestTopup_EachTickIsBoundedAndTheNextResumes(t *testing.T) {
 	defer cleanup()
 	testutil.SeedReferencedBlocks(t, ctx, pool, 500, 501, 502)
 
-	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(testBucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
+	client, bucket := archiveBucket(t, ctx)
 	for i, b := range []int64{500, 501, 502} {
-		testutil.UploadBlockHeader(t, ctx, s3Client, testBucket, b, 0, []string{"0x67c02710", "0x67c02720", "0x67c02730"}[i])
+		testutil.UploadBlockHeader(t, ctx, client, bucket, b, 0, []string{"0x67c02710", "0x67c02720", "0x67c02730"}[i])
 	}
-	setTopupEnv(t, testBucket)
+	setTopupEnv(t, bucket)
 	t.Setenv("MAX_BLOCKS", "2")
 
 	runner, err := setup(ctx, loadConfig(t), temporal.Dependencies{Pool: pool, Logger: discardLogger()})
@@ -121,23 +127,15 @@ func TestTopup_EachTickIsBoundedAndTheNextResumes(t *testing.T) {
 	}
 }
 
-// An unbounded pass is the on-demand loader's job, so a scheduled tick refuses MAX_BLOCKS=0.
-func TestTopup_RefusesAnUnboundedTick(t *testing.T) {
-	setTopupEnv(t, testBucket)
-	t.Setenv("MAX_BLOCKS", "0")
-	_, err := setup(context.Background(), loadConfig(t), temporal.Dependencies{Logger: discardLogger()})
-	if err == nil || !strings.Contains(err.Error(), "MAX_BLOCKS") {
-		t.Fatalf("setup returned %v; MAX_BLOCKS=0 must be refused", err)
-	}
-}
-
-func TestTopup_RefusesANegativeOrUnparseableCap(t *testing.T) {
-	for _, v := range []string{"-1", "many"} {
+// An unbounded or unreadable cap is refused before the archive is probed, naming the variable.
+func TestTopup_RefusesACapThatIsNotPositive(t *testing.T) {
+	for _, v := range []string{"0", "-1", "many"} {
 		t.Run(v, func(t *testing.T) {
-			setTopupEnv(t, testBucket)
+			setTopupEnv(t, testutil.S3TestBucketName(t, bucketPrefix))
 			t.Setenv("MAX_BLOCKS", v)
-			if _, err := setup(context.Background(), loadConfig(t), temporal.Dependencies{Logger: discardLogger()}); err == nil {
-				t.Fatalf("MAX_BLOCKS=%q was accepted", v)
+			_, err := setup(context.Background(), loadConfig(t), temporal.Dependencies{Logger: discardLogger()})
+			if err == nil || !strings.Contains(err.Error(), "MAX_BLOCKS") {
+				t.Fatalf("setup returned %v; MAX_BLOCKS=%q must be refused naming the variable", err, v)
 			}
 		})
 	}
@@ -147,13 +145,14 @@ func TestTopup_RefusesANegativeOrUnparseableCap(t *testing.T) {
 func TestTopup_RefusesToStartWithoutArchiveAccess(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
-	if _, err := s3Client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(absentBucket)}); err == nil {
-		t.Fatalf("%s exists, so a passing probe here would prove nothing", absentBucket)
+	absent := testutil.S3TestBucketName(t, bucketPrefix)
+	client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
+	if _, err := client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(absent)}); err == nil {
+		t.Fatalf("%s exists, so a passing probe here would prove nothing", absent)
 	}
-	setTopupEnv(t, absentBucket)
+	setTopupEnv(t, absent)
 	_, err := setup(ctx, loadConfig(t), temporal.Dependencies{Logger: discardLogger()})
-	if err == nil || !strings.Contains(err.Error(), absentBucket) {
+	if err == nil || !strings.Contains(err.Error(), absent) {
 		t.Fatalf("setup returned %v; it must refuse an archive it cannot read, naming the bucket", err)
 	}
 }
@@ -166,17 +165,33 @@ func TestTopup_ATickThatCannotLoadFails(t *testing.T) {
 	defer cleanup()
 	testutil.SeedReferencedBlocks(t, ctx, pool, 900)
 
-	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(testBucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
-	setTopupEnv(t, testBucket)
+	_, bucket := archiveBucket(t, ctx)
+	setTopupEnv(t, bucket)
 	runner, err := setup(ctx, loadConfig(t), temporal.Dependencies{Pool: pool, Logger: discardLogger()})
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 	if err := runner.Run(ctx); err == nil || !strings.Contains(err.Error(), "900/0") {
 		t.Fatalf("tick returned %v; a block absent from the archive must fail it", err)
+	}
+}
+
+// A tick that cannot open its writer run fails rather than loading rows no run owns.
+func TestTopup_ATickWithoutADatabaseFails(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+
+	_, bucket := archiveBucket(t, ctx)
+	setTopupEnv(t, bucket)
+	runner, err := setup(ctx, loadConfig(t), temporal.Dependencies{Pool: pool, Logger: discardLogger()})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	pool.Close()
+	if err := runner.Run(ctx); err == nil || !strings.Contains(err.Error(), "registering build") {
+		t.Fatalf("tick returned %v; a closed pool must fail opening the writer run", err)
 	}
 }
 
@@ -189,60 +204,29 @@ func TestTopup_RunRefusesAnUnknownChain(t *testing.T) {
 }
 
 func TestTopup_RunRefusesAnIncompleteConfiguration(t *testing.T) {
-	setTopupEnv(t, testBucket)
+	setTopupEnv(t, testutil.S3TestBucketName(t, bucketPrefix))
 	t.Setenv("S3_BUCKET", "")
 	if err := run(context.Background()); err == nil || !strings.Contains(err.Error(), "loading configuration") {
 		t.Fatalf("run returned %v; a deployment with no bucket must fail loading configuration", err)
 	}
 }
 
-// A tick that cannot open its writer run fails rather than loading rows no run owns.
-func TestTopup_ATickWithoutADatabaseFails(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
-	defer cleanup()
-
-	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(testBucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
-	setTopupEnv(t, testBucket)
-	runner, err := setup(ctx, loadConfig(t), temporal.Dependencies{Pool: pool, Logger: discardLogger()})
-	if err != nil {
-		t.Fatalf("setup: %v", err)
-	}
-	pool.Close()
-	if err := runner.Run(ctx); err == nil {
-		t.Fatal("a tick against a closed pool succeeded")
-	}
-}
-
-// The Deployment, task queue and OTel service name are one string per chain.
-func TestTaskQueueIsPrefixedPerChain(t *testing.T) {
-	for chainID, want := range map[string]string{"1": queueBaseName, "8453": "base-" + queueBaseName, "43114": "avalanche-" + queueBaseName} {
-		t.Run(chainID, func(t *testing.T) {
-			t.Setenv("CHAIN_ID", chainID)
-			got, err := chainutil.TaskQueueName(queueBaseName)
-			if err != nil || got != want {
-				t.Errorf("TaskQueueName(%q) on chain %s = %q, %v; want %q", queueBaseName, chainID, got, err, want)
-			}
-		})
-	}
-}
-
-// A tick runs longer than the 10-minute cronjob default, so it gets its own ceiling and a heartbeat; the
-// ceiling stays inside the interval so one tick cannot run into the next.
+// A tick runs longer than the 10-minute cronjob default, so it gets its own ceilings, a heartbeat and a
+// short retry budget, all inside the interval so one tick cannot run into the next.
 func TestTopup_ATickHasItsOwnCeilingAndAHeartbeat(t *testing.T) {
-	c := cronjobConfig("block-meta-topup", blockmetacfg.Config{DSN: "unused"}).ActivityTimeouts
-	interval, err := time.ParseDuration(cronjobConfig("block-meta-topup", blockmetacfg.Config{}).IntervalDefault)
+	c := cronjobConfig("block-meta-topup", blockmetacfg.Config{})
+	interval, err := time.ParseDuration(c.IntervalDefault)
 	if err != nil {
 		t.Fatalf("parse interval: %v", err)
 	}
-	if c.StartToClose <= 10*time.Minute || c.ScheduleToClose < c.StartToClose || c.ScheduleToClose >= interval {
-		t.Errorf("timeouts %+v: want StartToClose above the 10m default and StartToClose <= ScheduleToClose < %s", c, interval)
+	a := c.ActivityTimeouts
+	if a.StartToClose <= 10*time.Minute || a.ScheduleToClose < a.StartToClose || a.ScheduleToClose >= interval {
+		t.Errorf("timeouts %+v: want StartToClose above the 10m default and StartToClose <= ScheduleToClose < %s", a, interval)
 	}
-	if c.Heartbeat <= 0 {
+	if a.Heartbeat <= 0 {
 		t.Error("no heartbeat: a worker that dies mid-tick is only noticed when the ceiling expires")
+	}
+	if a.MaximumAttempts < 1 || a.MaximumAttempts > 2 {
+		t.Errorf("MaximumAttempts = %d; a retry past the second would start with almost none of ScheduleToClose left", a.MaximumAttempts)
 	}
 }

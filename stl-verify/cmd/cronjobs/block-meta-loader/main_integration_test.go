@@ -17,7 +17,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockmetacfg"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -229,18 +228,5 @@ func TestBlockMetaLoad_RefusesToStartWithoutArchiveAccess(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), absentBucket) {
 		t.Errorf("error %q does not name the bucket it could not use", err)
-	}
-}
-
-// The Deployment, task queue and OTel service name are one string per chain.
-func TestTaskQueueIsPrefixedPerChain(t *testing.T) {
-	for chainID, want := range map[string]string{"1": queueBaseName, "8453": "base-" + queueBaseName, "43114": "avalanche-" + queueBaseName} {
-		t.Run(chainID, func(t *testing.T) {
-			t.Setenv("CHAIN_ID", chainID)
-			got, err := chainutil.TaskQueueName(queueBaseName)
-			if err != nil || got != want {
-				t.Errorf("TaskQueueName(%q) on chain %s = %q, %v; want %q", queueBaseName, chainID, got, err, want)
-			}
-		})
 	}
 }
