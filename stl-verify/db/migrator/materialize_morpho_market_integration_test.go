@@ -4,9 +4,15 @@ package migrator_test
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/archon-research/stl/stl-verify/db/migrator"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -23,19 +29,134 @@ const (
 // positive quantity to 0. A market whose collateral token is its loan token emits the loan leg only.
 // Tests that leave the source rows unchanged share one database; a test that adds source rows seeds its own.
 
+// morphoMarketTemplate is one fully migrated database, built once per test binary, that every test in this
+// file clones: a refusal is judged over the whole table, so these tests cannot share a database, and a
+// clone copies files instead of applying every migration again.
+var morphoMarketTemplate struct {
+	once sync.Once
+	name string
+	err  error
+}
+
+// morphoMarketDatabase gives a test its own clone of the migrated template, with policy jobs off.
+func morphoMarketDatabase(ctx context.Context, t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	morphoMarketTemplate.once.Do(func() {
+		morphoMarketTemplate.name, morphoMarketTemplate.err = buildMorphoMarketTemplate(ctx)
+	})
+	if morphoMarketTemplate.err != nil {
+		t.Fatalf("build the migrated template: %v", morphoMarketTemplate.err)
+	}
+	name := testutil.SanitizeTestName(t.Name())
+	admin, err := pgxpool.New(ctx, sharedDSN)
+	if err != nil {
+		t.Fatalf("connect for clone: %v", err)
+	}
+	defer admin.Close()
+	// Postgres refuses to copy a template another backend is attached to, so a transient session (autovacuum,
+	// a sibling clone) is evicted and the copy retried.
+	var cloneErr error
+	for range 40 {
+		if _, cloneErr = admin.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s TEMPLATE %s", name, morphoMarketTemplate.name)); cloneErr == nil {
+			break
+		}
+		_, _ = admin.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`, morphoMarketTemplate.name)
+		time.Sleep(50 * time.Millisecond)
+	}
+	if cloneErr != nil {
+		t.Fatalf("clone the template into %s: %v", name, cloneErr)
+	}
+	t.Cleanup(func() {
+		drop, err := pgxpool.New(context.Background(), sharedDSN)
+		if err != nil {
+			return
+		}
+		defer drop.Close()
+		_, _ = drop.Exec(context.Background(), fmt.Sprintf("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s'", name))
+		_, _ = drop.Exec(context.Background(), fmt.Sprintf("DROP DATABASE IF EXISTS %s", name))
+	})
+	pool := testutil.ConnectPool(t, morphoMarketDSN(t, name))
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+func buildMorphoMarketTemplate(ctx context.Context) (string, error) {
+	const name = "morpho_market_template"
+	admin, err := pgxpool.New(ctx, sharedDSN)
+	if err != nil {
+		return "", fmt.Errorf("connect: %w", err)
+	}
+	defer admin.Close()
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
+		return "", fmt.Errorf("create: %w", err)
+	}
+	u, err := url.Parse(sharedDSN)
+	if err != nil {
+		return "", fmt.Errorf("parse DSN: %w", err)
+	}
+	u.Path = "/" + name
+	if err := migrateMorphoMarketTemplate(ctx, u.String()); err != nil {
+		return "", err
+	}
+	// Closed before this, not after: CREATE DATABASE ... TEMPLATE refuses a database with sessions on it.
+	if _, err := admin.Exec(ctx, "ALTER DATABASE "+name+" IS_TEMPLATE true ALLOW_CONNECTIONS false"); err != nil {
+		return "", fmt.Errorf("mark the template clonable: %w", err)
+	}
+	return name, nil
+}
+
+func migrateMorphoMarketTemplate(ctx context.Context, dsn string) error {
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("connect to template: %w", err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS timescaledb"); err != nil {
+		return fmt.Errorf("enable timescaledb: %w", err)
+	}
+	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
+		return fmt.Errorf("apply migrations: %w", err)
+	}
+	if err := testutil.DisableScheduledJobs(ctx, pool); err != nil {
+		return fmt.Errorf("disable jobs: %w", err)
+	}
+	return nil
+}
+
+func morphoMarketDSN(t *testing.T, name string) string {
+	t.Helper()
+	u, err := url.Parse(sharedDSN)
+	if err != nil {
+		t.Fatalf("parse DSN: %v", err)
+	}
+	u.Path = "/" + name
+	return u.String()
+}
+
 // materializeMorphoMarketFixture gives a test its own migrated database, seeds the fixture and runs the projection
 // once, returning what it reported written. Scheduled jobs are off, so a policy run cannot take locks mid-test.
 func materializeMorphoMarketFixture(t *testing.T) (context.Context, *pgxpool.Pool, int64) {
 	t.Helper()
+	ctx, pool, _ := morphoMarketSeedOnly(t)
+	var written int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(&written); err != nil {
+		t.Fatalf("materialize_morpho_market: %v", err)
+	}
+	return ctx, pool, written
+}
+
+// morphoMarketSeedOnly gives a test its own migrated database with the fixture seeded and nothing projected.
+func morphoMarketSeedOnly(t *testing.T) (context.Context, *pgxpool.Pool, int64) {
+	t.Helper()
 	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	t.Cleanup(cleanup)
+	pool := morphoMarketDatabase(ctx, t)
 	seed := `
 DO $$
 DECLARE pid bigint; ltid bigint; ctid bigint;
         uaid bigint; ubid bigint; ucid bigint; udid bigint; mid bigint;
         ueid bigint; ufid bigint; ugid bigint; uhid bigint; uiid bigint; ujid bigint; mid2 bigint;
         ukid bigint; ulid bigint; umid bigint; unid bigint; uoid bigint;
+        bpid bigint; bltid bigint; bctid bigint; upid bigint; bmid bigint;
 BEGIN
   INSERT INTO chain (chain_id, name) VALUES (1, 'ethereum') ON CONFLICT (chain_id) DO NOTHING;
   INSERT INTO protocol (chain_id, address, name) VALUES (1, '\xff', 'morpho') RETURNING id INTO pid;
@@ -137,15 +258,24 @@ BEGIN
   -- netting first makes it a leading zero, which closure drops.
   INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
     VALUES (ulid, mid2, 100, 0, '2026-01-01T00:00:00Z', 0, 0, 100, 0, 100);
+  -- P: the same market id and token addresses on Base, under Base's own protocol row. Its identity
+  -- differs from A's market only in chain_id and protocol_id, so a view taking either from anywhere
+  -- but the market renders a wrong position_id.
+  INSERT INTO chain (chain_id, name) VALUES (8453, 'base') ON CONFLICT (chain_id) DO NOTHING;
+  INSERT INTO protocol (chain_id, address, name) VALUES (8453, '\xff', 'morpho-base') RETURNING id INTO bpid;
+  INSERT INTO token ("chain_id", address, symbol, decimals) VALUES (8453, '\xdead', 'USDC', 6) RETURNING id INTO bltid;
+  INSERT INTO token ("chain_id", address, symbol, decimals) VALUES (8453, '\xbeef', 'WETH', 18) RETURNING id INTO bctid;
+  INSERT INTO "user" (chain_id, address) VALUES (8453, '\x9999999999999999999999999999999999999999') RETURNING id INTO upid;
+  INSERT INTO morpho_market
+    (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, oracle_address, irm_address, lltv, created_at_block)
+    VALUES (8453, bpid, '\x1234', bltid, bctid, '\x00', '\x01', 0.86, 1) RETURNING id INTO bmid;
+  INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+    VALUES (upid, bmid, 100, 0, '2026-01-01T00:00:00Z', 0, 0, 0, 70, 0);
 END $$;`
 	if _, err := pool.Exec(ctx, seed); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	var written int64
-	if err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(&written); err != nil {
-		t.Fatalf("materialize_morpho_market: %v", err)
-	}
-	return ctx, pool, written
+	return ctx, pool, 0
 }
 
 // Row shape:
@@ -155,8 +285,9 @@ END $$;`
 //	I coll (open + close + reopen = 3) + H loan in M2 (1; collateral netted in) + J loan (pv 0 and 1 = 2) = 6
 //	K loan in M2 (1) + L loan in M2 (0, a dropped leading zero) + M loan in M2 (1) = 2
 //	N loan (open + close = 2) + O loan (open + flip + close = 3) = 5
+//	P loan on Base (1) = 1
 //
-// Total 25 over 15 distinct positions: the 12 above plus M-loan-M2, N-loan and O-loan. L nets to zero
+// Total 26 over 16 distinct positions: the 12 above plus M-loan-M2, N-loan, O-loan and P-loan. L nets to zero
 // on its first observation, so it has none.
 func morphoMarketProjectionShape(ctx context.Context, t *testing.T, pool *pgxpool.Pool, written int64) {
 	var rows, distinctPositions, collisions, badLen int
@@ -168,14 +299,14 @@ func morphoMarketProjectionShape(ctx context.Context, t *testing.T, pool *pgxpoo
 		FROM position_state`).Scan(&rows, &distinctPositions, &collisions, &badLen); err != nil {
 		t.Fatalf("position_state summary: %v", err)
 	}
-	if rows != 25 {
-		t.Errorf("position_state rows = %d, want 25", rows)
+	if rows != 26 {
+		t.Errorf("position_state rows = %d, want 26", rows)
 	}
-	if written != 25 {
-		t.Errorf("materialize returned %d, want 25", written)
+	if written != 26 {
+		t.Errorf("materialize returned %d, want 26", written)
 	}
-	if distinctPositions != 15 {
-		t.Errorf("distinct position_id = %d, want 15", distinctPositions)
+	if distinctPositions != 16 {
+		t.Errorf("distinct position_id = %d, want 16", distinctPositions)
 	}
 	if collisions != 0 {
 		t.Errorf("PK collisions = %d, want 0", collisions)
@@ -251,8 +382,8 @@ func morphoMarketIsIdempotent(ctx context.Context, t *testing.T, pool *pgxpool.P
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&rows); err != nil {
 		t.Fatalf("re-count: %v", err)
 	}
-	if rows != 25 {
-		t.Errorf("after re-run: position_state=%d, want 25 (the rerun must append nothing)", rows)
+	if rows != 26 {
+		t.Errorf("after re-run: position_state=%d, want 26 (the rerun must append nothing)", rows)
 	}
 }
 
@@ -276,7 +407,7 @@ func TestMaterializeMorphoMarketNegativeSourceAmountAborts(t *testing.T) {
 				SELECT u.id, m.id, 900, 0, '2026-02-01T00:00:00Z', 0, 0, $1::numeric, $2::numeric, $3::numeric
 				FROM "user" u, morpho_market m
 				WHERE u.chain_id = 1 AND u.address = '\xf2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2'
-				  AND m.market_id = $4`, c.collateral, c.supply, c.borrow, c.mkt); err != nil {
+				  AND m.chain_id = 1 AND m.market_id = $4`, c.collateral, c.supply, c.borrow, c.mkt); err != nil {
 				t.Fatalf("seed: %v", err)
 			}
 			var n int64
@@ -337,126 +468,42 @@ func morphoMarketForwardsTheWriterRun(ctx context.Context, t *testing.T, pool *p
 	}
 }
 
-// chain_id and protocol_id come from the MARKET. Both feed the position_id hash, so a wrong constant
-// forks every identity in a table that grants no UPDATE, and no count-based assertion would notice.
+// chain_id and protocol_id come from the MARKET. Both feed the position_id hash, so a wrong value forks
+// every identity in a table that grants no UPDATE. Market 1234 exists on chain 1 and on Base with the same
+// token addresses, so a constant, or either field taken from elsewhere, gives one of the two the wrong pair.
 func morphoMarketTakesChainAndProtocolFromTheMarket(ctx context.Context, t *testing.T, pool *pgxpool.Pool, _ int64) {
-	var mismatched int
-	if err := pool.QueryRow(ctx, `
-		SELECT count(*) FROM position_state s
-		WHERE s.projection = 'public.position_morpho_market'
-		  AND NOT EXISTS (
-		      SELECT 1 FROM morpho_market m
-		       WHERE m.chain_id = s.chain_id AND m.protocol_id = s.protocol_id
-		         AND s.instrument_key LIKE encode(m.market_id, 'hex') || ':%')`).Scan(&mismatched); err != nil {
-		t.Fatal(err)
-	}
-	var total int
-	if err := pool.QueryRow(ctx, `
-		SELECT count(*) FROM position_state WHERE projection = 'public.position_morpho_market'`).Scan(&total); err != nil {
-		t.Fatal(err)
-	}
-	if total == 0 {
-		t.Fatal("the projection stored nothing, so the assertion below would pass vacuously")
-	}
-	if mismatched != 0 {
-		t.Errorf("%d of %d rows carry a chain_id/protocol_id pair that is not their own market's", mismatched, total)
-	}
-}
-
-// holder_id is the depositor's address alone while chain_id comes from the market, so two "user" rows
-// sharing an address render one position_id and interleave two holders' histories under closure.
-func TestMaterializeMorphoMarketRefusesOneAddressOnSeveralChains(t *testing.T) {
-	ctx, pool, _ := materializeMorphoMarketFixture(t)
-	if _, err := pool.Exec(ctx, `INSERT INTO chain (chain_id, name) VALUES (8453, 'base') ON CONFLICT (chain_id) DO NOTHING`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO "user" (chain_id, address) VALUES (8453, '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')`); err != nil {
-		t.Fatalf("seed the twin holder: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
-		SELECT u.id, m.id, 950, 0, '2026-02-01T00:00:00Z', 0, 0, 0, 10, 0
-		FROM "user" u, morpho_market m
-		WHERE u.chain_id = 8453 AND u.address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND m.market_id = '\x1234'`); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	var written int64
-	err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(&written)
-	if err == nil {
-		t.Fatalf("the run stored %d rows; two holders on one address must refuse", written)
-	}
-	if !strings.Contains(err.Error(), "refusing to run") || !strings.Contains(err.Error(), `"user" rows sharing address`) {
-		t.Errorf("error %q does not name the shared holder address", err.Error())
-	}
-	if strings.Contains(err.Error(), "refusing to run: ;") {
-		t.Errorf("error %q opens with an empty negative-amount list", err.Error())
-	}
-}
-
-// A holder address that is not 20 bytes aborts on position_state's 40-hex CHECK naming no row.
-func TestMaterializeMorphoMarketRefusesAMalformedHolder(t *testing.T) {
-	ctx, pool, _ := materializeMorphoMarketFixture(t)
-	if _, err := pool.Exec(ctx, `INSERT INTO "user" (chain_id, address) VALUES (1, '\xbeefcafe')`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
-		SELECT u.id, m.id, 960, 0, '2026-02-01T00:00:00Z', 0, 0, 0, 10, 0
-		FROM "user" u, morpho_market m
-		WHERE u.chain_id = 1 AND u.address = '\xbeefcafe' AND m.market_id = '\x1234'`); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(new(int64))
-	if err == nil {
-		t.Fatal("a 4-byte holder address must refuse by name")
-	}
-	if !strings.Contains(err.Error(), "4-byte address") {
-		t.Errorf("error %q does not name the malformed holder", err.Error())
-	}
-}
-
-// token is unique on (chain_id, address), so two token rows sharing an address are on different chains
-// and are different tokens. Splitting the legs on the address would merge them into one quantity, so a
-// market that takes a token from another chain is refused by name.
-func TestMaterializeMorphoMarketRefusesATokenOnAnotherChain(t *testing.T) {
-	for _, leg := range []string{"loan", "collateral"} {
-		t.Run(leg, func(t *testing.T) {
-			ctx, pool, _ := materializeMorphoMarketFixture(t)
-			loan, coll := "1", "8453"
-			if leg == "loan" {
-				loan, coll = "8453", "1"
-			}
-			if _, err := pool.Exec(ctx, `
-				INSERT INTO chain (chain_id, name) VALUES (8453, 'base') ON CONFLICT (chain_id) DO NOTHING;
-				INSERT INTO token (chain_id, address, symbol, decimals) VALUES (8453, '\xdead', 'USDC', 6);
-				INSERT INTO morpho_market (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, lltv, oracle_address, irm_address, created_at_block)
-				SELECT 1, p.id, '\x9abc', lt.id, ct.id, 0, '\x00', '\x00', 1
-				FROM protocol p, token lt, token ct
-				WHERE p.chain_id = 1 AND p.address = '\xff'
-				  AND lt.chain_id = `+loan+` AND lt.address = '\xdead' AND ct.chain_id = `+coll+` AND ct.address = '\xdead';
-				INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
-				SELECT u.id, m.id, 970, 0, '2026-02-01T00:00:00Z', 0, 0, 40, 100, 0
-				FROM "user" u, morpho_market m
-				WHERE u.chain_id = 1 AND u.address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND m.market_id = '\x9abc'`); err != nil {
-				t.Fatalf("seed: %v", err)
-			}
-			var written int64
-			err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(&written)
-			if err == nil {
-				t.Fatalf("the run stored %d rows; a %s token from chain 8453 in a chain-1 market must refuse", written, leg)
-			}
-			if want := "market 9abc takes its " + leg + " token from chain 8453 but is on chain 1"; !strings.Contains(err.Error(), want) {
-				t.Errorf("error %q does not contain %q", err.Error(), want)
-			}
-			var rows int
-			if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state WHERE block_number = 970`).Scan(&rows); err != nil {
+	for _, c := range []struct {
+		holder, protocolAddrChain string
+		chain                     int
+	}{
+		{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "1", 1},
+		{"9999999999999999999999999999999999999999", "8453", 8453},
+	} {
+		rows, err := pool.Query(ctx, `
+			SELECT DISTINCT s.chain_id, s.protocol_id = (SELECT id FROM protocol WHERE chain_id = $2 AND address = '\xff')
+			  FROM position_state s WHERE s.holder_id = $1 AND s.instrument_key = '1234:dead'`,
+			c.holder, c.protocolAddrChain)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pairs int
+		for rows.Next() {
+			var chain int
+			var ownProtocol bool
+			if err := rows.Scan(&chain, &ownProtocol); err != nil {
 				t.Fatal(err)
 			}
-			if rows != 0 {
-				t.Errorf("stored %d rows at the offending block; want none", rows)
+			pairs++
+			if chain != c.chain || !ownProtocol {
+				t.Errorf("holder %s stored chain_id %d with its own market's protocol %v; want chain %d and that market's protocol", c.holder, chain, ownProtocol, c.chain)
 			}
-		})
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if pairs != 1 {
+			t.Errorf("holder %s has %d distinct (chain_id, protocol) pairs on 1234:dead; want exactly 1", c.holder, pairs)
+		}
 	}
 }
 
@@ -483,32 +530,7 @@ func morphoMarketForwardsTheWindow(ctx context.Context, t *testing.T, pool *pgxp
 	}
 }
 
-// Every other width case is SHORT, so <> 20 weakened to < 20 passes them all. 21 bytes is the case
-// above the bound: it renders 42 hex characters and fails the same 40-hex CHECK.
-func TestMaterializeMorphoMarketRefusesAnOversizeHolder(t *testing.T) {
-	ctx, pool, _ := materializeMorphoMarketFixture(t)
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO "user" (chain_id, address) VALUES (1, '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaff')`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
-		SELECT u.id, m.id, 961, 0, '2026-02-01T00:00:00Z', 0, 0, 0, 10, 0
-		FROM "user" u, morpho_market m
-		WHERE u.chain_id = 1 AND u.address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaff' AND m.market_id = '\x1234'`); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(new(int64))
-	if err == nil {
-		t.Fatal("a 21-byte holder address must refuse by name")
-	}
-	if !strings.Contains(err.Error(), "21-byte address") {
-		t.Errorf("error %q does not name the oversize holder", err.Error())
-	}
-}
-
-// These leave the source rows unchanged, so they share one database. Subtests that run the projection again
-// come after the ones that count what the first run wrote.
+// These only read what the first run wrote, so they share one database.
 func TestMaterializeMorphoMarketOnTheSeed(t *testing.T) {
 	ctx, pool, written := materializeMorphoMarketFixture(t)
 	for _, c := range []struct {
@@ -518,6 +540,19 @@ func TestMaterializeMorphoMarketOnTheSeed(t *testing.T) {
 		{"ProjectionShape", morphoMarketProjectionShape},
 		{"PerPosition", morphoMarketPerPosition},
 		{"TakesChainAndProtocolFromTheMarket", morphoMarketTakesChainAndProtocolFromTheMarket},
+	} {
+		t.Run(c.name, func(t *testing.T) { c.run(ctx, t, pool, written) })
+	}
+}
+
+// These run the projection again, so they get their own database and cannot move a count the read-only
+// group asserts.
+func TestMaterializeMorphoMarketRerunsOnTheSeed(t *testing.T) {
+	ctx, pool, written := materializeMorphoMarketFixture(t)
+	for _, c := range []struct {
+		name string
+		run  func(context.Context, *testing.T, *pgxpool.Pool, int64)
+	}{
 		{"IsIdempotent", morphoMarketIsIdempotent},
 		{"ForwardsTheWriterRun", morphoMarketForwardsTheWriterRun},
 		{"ForwardsTheWindow", morphoMarketForwardsTheWindow},
@@ -535,7 +570,7 @@ func seedMorphoMarketRow(ctx context.Context, t *testing.T, pool *pgxpool.Pool, 
 		INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets, build_id)
 		SELECT u.id, m.id, $1, 0, $2::timestamptz, 0, 0, $3::numeric, $4::numeric, $5::numeric, $6
 		FROM "user" u, morpho_market m
-		WHERE u.chain_id = 1 AND u.address = '\xf2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2' AND m.market_id = $7`,
+		WHERE u.chain_id = 1 AND u.address = '\xf2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2' AND m.chain_id = 1 AND m.market_id = $7`,
 		bn, ts, collateral, supply, borrow, buildID, market); err != nil {
 		t.Fatalf("seed block %d: %v", bn, err)
 	}
@@ -616,7 +651,7 @@ func TestMaterializeMorphoMarketRefusesANegativeAmountCorrectedOnlyElsewhere(t *
 					INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets, build_id)
 					SELECT u.id, m.id, 900, $1, '2026-02-01T00:00:00Z', 0, 0, 0, 70, 0, $2
 					FROM "user" u, morpho_market m
-					WHERE u.chain_id = 1 AND u.address = $3::bytea AND m.market_id = $4::bytea`, c.bv, build, c.user, c.market); err != nil {
+					WHERE u.chain_id = 1 AND u.address = $3::bytea AND m.chain_id = 1 AND m.market_id = $4::bytea`, c.bv, build, c.user, c.market); err != nil {
 					t.Fatalf("seed the other observation: %v", err)
 				}
 			}
@@ -653,7 +688,7 @@ func TestMaterializeMorphoMarketJudgesNegativeAmountsInTheWindow(t *testing.T) {
 		INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
 		SELECT u.id, m.id, 990, 0, now() - interval '1 hour', 0, 0, 0, -5, 0
 		FROM "user" u, morpho_market m
-		WHERE u.chain_id = 1 AND u.address = '\xf3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3' AND m.market_id = '\x1234'`); err != nil {
+		WHERE u.chain_id = 1 AND u.address = '\xf3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3' AND m.chain_id = 1 AND m.market_id = '\x1234'`); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT materialize_morpho_market(0, NULL, interval '1 day')`).Scan(new(int64)); err == nil || !strings.Contains(err.Error(), "bn=990") {
@@ -661,28 +696,15 @@ func TestMaterializeMorphoMarketJudgesNegativeAmountsInTheWindow(t *testing.T) {
 	}
 }
 
-// Each refusal class keeps its own five, so six negative amounts on a lower market id do not hide a shared
-// holder address.
-func TestMaterializeMorphoMarketNamesEveryRefusalClass(t *testing.T) {
+// The refusal names at most five negative amounts, so a run with many does not produce an unbounded message.
+func TestMaterializeMorphoMarketNamesAtMostFiveNegativeAmounts(t *testing.T) {
 	ctx, pool, _ := materializeMorphoMarketFixture(t)
 	for bn := 901; bn <= 906; bn++ {
 		seedMorphoMarketRow(ctx, t, pool, `\x1234`, bn, "2026-02-01T00:00:00Z", "-1", "0", "0", 0)
 	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO chain (chain_id, name) VALUES (8453, 'base') ON CONFLICT (chain_id) DO NOTHING;
-		INSERT INTO "user" (chain_id, address) VALUES (8453, '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
-		INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
-		SELECT u.id, m.id, 950, 0, '2026-02-01T00:00:00Z', 0, 0, 0, 10, 0
-		FROM "user" u, morpho_market m
-		WHERE u.address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND m.market_id = '\x5678'`); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
 	err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(new(int64))
 	if err == nil {
 		t.Fatal("the run succeeded; want a refusal")
-	}
-	if !strings.Contains(err.Error(), `market 5678 is held by 2 "user" rows sharing address`) {
-		t.Errorf("error %q hides the shared holder address behind the negative amounts", err.Error())
 	}
 	if n := strings.Count(err.Error(), "has a negative source amount"); n != 5 {
 		t.Errorf("error names %d negative amounts; want 5 of the 6", n)
@@ -698,5 +720,275 @@ func TestMaterializeMorphoMarketRejectsAnInvalidWindowFirst(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "materialize_morpho_market: p_window must be a finite positive interval") {
 			t.Errorf("window %s: error %v; want the wrapper to reject it before judging any input", w, err)
 		}
+	}
+}
+
+// morphoMarketWithheld runs the projection, which must succeed, and returns the rows stored and the
+// refusal rows recorded for one holder address, with the reasons recorded for it.
+func morphoMarketWithheld(ctx context.Context, t *testing.T, pool *pgxpool.Pool, holderHex string) (stored, recorded int, reasons string) {
+	t.Helper()
+	if err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(new(int64)); err != nil {
+		t.Fatalf("a registry defect in one pair must not stop the run: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM position_state WHERE holder_id = $1),
+		       (SELECT count(*) FROM position_projection_refusal WHERE detail LIKE '%' || $1 || '%'),
+		       (SELECT coalesce(string_agg(DISTINCT reason, ',' ORDER BY reason), '') FROM position_projection_refusal WHERE detail LIKE '%' || $1 || '%')`,
+		holderHex).Scan(&stored, &recorded, &reasons); err != nil {
+		t.Fatalf("read the outcome: %v", err)
+	}
+	return stored, recorded, reasons
+}
+
+// morphoMarketOthersLanded asserts the rest of the seed still landed around a withheld pair.
+func morphoMarketOthersLanded(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	var others int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM position_state WHERE holder_id = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'`).Scan(&others); err != nil {
+		t.Fatal(err)
+	}
+	if others != 2 {
+		t.Errorf("holder bb has %d stored rows; want its 2, the rest of the batch lands around a withheld pair", others)
+	}
+}
+
+func seedMorphoMarketHolder(ctx context.Context, t *testing.T, pool *pgxpool.Pool, chain int, addressHex, market string, bn int) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		INSERT INTO chain (chain_id, name) VALUES (8453, 'base') ON CONFLICT (chain_id) DO NOTHING;
+		INSERT INTO "user" (chain_id, address) VALUES (%d, '\x%s');
+		INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+		SELECT u.id, m.id, %d, 0, '2026-02-01T00:00:00Z', 0, 0, 0, 10, 0
+		FROM "user" u, morpho_market m
+		WHERE u.chain_id = %d AND u.address = '\x%s' AND m.chain_id = 1 AND m.market_id = '%s'`,
+		chain, addressHex, bn, chain, addressHex, market)); err != nil {
+		t.Fatalf("seed holder %s: %v", addressHex, err)
+	}
+}
+
+// holder_id is the address alone while chain_id comes from the market, so two "user" rows sharing an address
+// render one position_id. Both holders are withheld and recorded, and every other position lands: a registry
+// defect has no append-only repair, so refusing the whole run would stop every Morpho position for good.
+func TestMaterializeMorphoMarketWithholdsOneAddressOnSeveralChains(t *testing.T) {
+	ctx, pool, _ := morphoMarketSeedOnly(t)
+	seedMorphoMarketHolder(ctx, t, pool, 8453, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", `\x1234`, 950)
+	stored, recorded, reasons := morphoMarketWithheld(ctx, t, pool, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if stored != 0 || recorded == 0 || reasons != "holder_address_shared" {
+		t.Errorf("shared address: stored %d rows, recorded %d refusals with reasons %q; want 0 stored and holder_address_shared recorded", stored, recorded, reasons)
+	}
+	morphoMarketOthersLanded(ctx, t, pool)
+}
+
+// Only holder_id carries position_state's 40-hex check, so a holder that is not 20 bytes, short or long, would
+// abort the run on that CHECK naming no row.
+func TestMaterializeMorphoMarketWithholdsAMalformedHolder(t *testing.T) {
+	for _, c := range []struct{ name, address string }{
+		{"4 bytes", "beefcafe"},
+		// Every other width case is short, so <> 20 weakened to < 20 would pass them all.
+		{"21 bytes", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaff"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx, pool, _ := morphoMarketSeedOnly(t)
+			seedMorphoMarketHolder(ctx, t, pool, 1, c.address, `\x1234`, 960)
+			stored, recorded, reasons := morphoMarketWithheld(ctx, t, pool, c.address)
+			if stored != 0 || recorded == 0 || reasons != "holder_address_malformed" {
+				t.Errorf("stored %d rows, recorded %d refusals with reasons %q; want 0 stored and holder_address_malformed recorded", stored, recorded, reasons)
+			}
+			morphoMarketOthersLanded(ctx, t, pool)
+		})
+	}
+}
+
+// The view judges holder width on every row it reads, not through morpho_market_position_current, so a holder
+// the cache does not list (a history load that bypassed its trigger) is still withheld rather than aborting the
+// run on position_state's CHECK.
+func TestMaterializeMorphoMarketWithholdsAMalformedHolderMissingFromTheCache(t *testing.T) {
+	ctx, pool, _ := morphoMarketSeedOnly(t)
+	seedMorphoMarketHolder(ctx, t, pool, 1, "beefcafe", `\x1234`, 960)
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM morpho_market_position_current c USING "user" u
+		 WHERE u.id = c.user_id AND u.address = '\xbeefcafe'`); err != nil {
+		t.Fatalf("drop the holder from the cache: %v", err)
+	}
+	var stored int
+	if err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(new(int64)); err != nil {
+		t.Fatalf("a malformed holder missing from the cache aborted the run: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state WHERE holder_id = 'beefcafe'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 0 {
+		t.Errorf("stored %d rows for the malformed holder; want 0", stored)
+	}
+	morphoMarketOthersLanded(ctx, t, pool)
+}
+
+// token is unique on (chain_id, address), so a market taking a token from another chain would merge two
+// different tokens into one quantity. Its holders are withheld, and the rest of the batch lands.
+func TestMaterializeMorphoMarketWithholdsATokenOnAnotherChain(t *testing.T) {
+	for _, leg := range []string{"loan", "collateral"} {
+		t.Run(leg, func(t *testing.T) {
+			ctx, pool, _ := morphoMarketSeedOnly(t)
+			loan, coll := "1", "8453"
+			if leg == "loan" {
+				loan, coll = "8453", "1"
+			}
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO chain (chain_id, name) VALUES (8453, 'base') ON CONFLICT (chain_id) DO NOTHING;
+				INSERT INTO token (chain_id, address, symbol, decimals) VALUES (8453, '\xcafe', 'USDC', 6) ON CONFLICT DO NOTHING;
+				INSERT INTO token (chain_id, address, symbol, decimals) VALUES (1, '\xcafe', 'USDC', 6) ON CONFLICT DO NOTHING;
+				INSERT INTO morpho_market (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, lltv, oracle_address, irm_address, created_at_block)
+				SELECT 1, p.id, '\x9abc', lt.id, ct.id, 0, '\x00', '\x00', 1
+				FROM protocol p, token lt, token ct
+				WHERE p.chain_id = 1 AND p.address = '\xff'
+				  AND lt.chain_id = `+loan+` AND lt.address = '\xcafe' AND ct.chain_id = `+coll+` AND ct.address = '\xcafe';
+				INSERT INTO "user" (chain_id, address) VALUES (1, '\x7777777777777777777777777777777777777777');
+				INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+				SELECT u.id, m.id, 970, 0, '2026-02-01T00:00:00Z', 0, 0, 40, 100, 0
+				FROM "user" u, morpho_market m
+				WHERE u.chain_id = 1 AND u.address = '\x7777777777777777777777777777777777777777' AND m.market_id = '\x9abc'`); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			stored, recorded, reasons := morphoMarketWithheld(ctx, t, pool, "7777777777777777777777777777777777777777")
+			if stored != 0 || recorded == 0 || reasons != "token_on_other_chain" {
+				t.Errorf("stored %d rows, recorded %d refusals with reasons %q; want 0 stored and token_on_other_chain recorded", stored, recorded, reasons)
+			}
+			morphoMarketOthersLanded(ctx, t, pool)
+		})
+	}
+}
+
+// The refusal check and the spine's read are separate statements under READ COMMITTED, so a negative amount
+// committed between them was invisible to the check and visible to the append, and abs() stored it as a
+// plausible magnitude in a table with no UPDATE. The spine's advisory lock holds the run between the two while
+// the row commits, which is the window a live indexer writes into.
+func TestMaterializeMorphoMarketRefusesANegativeWrittenDuringTheRun(t *testing.T) {
+	ctx, pool, _ := morphoMarketSeedOnly(t)
+	holder, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Release()
+	lockTx, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lockTx.Rollback(ctx) }()
+	if _, err := lockTx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('materialize_position_projection.public.position_morpho_market', 0))`); err != nil {
+		t.Fatalf("take the spine's lock: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(new(int64)) }()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted)`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the run never reached the spine's lock")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO "user" (chain_id, address) VALUES (1, '\x6666666666666666666666666666666666666666');
+		INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+		SELECT u.id, m.id, 700001, 0, '2026-02-01T00:00:00Z', 0, 0, 0, -70, 0
+		FROM "user" u, morpho_market m
+		WHERE u.chain_id = 1 AND u.address = '\x6666666666666666666666666666666666666666' AND m.chain_id = 1 AND m.market_id = '\x1234'`); err != nil {
+		t.Fatalf("commit the negative mid-run: %v", err)
+	}
+	if err := lockTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	runErr := <-done
+	if runErr == nil || !strings.Contains(runErr.Error(), "bn=700001") {
+		t.Errorf("run error %v; want a refusal naming the negative committed mid-run", runErr)
+	}
+	var stored int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state WHERE block_number = 700001`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 0 {
+		t.Errorf("stored %d rows from the negative committed mid-run; want none", stored)
+	}
+}
+
+// Both functions carry an empty search_path and qualify every call, so a same-named function in a schema on
+// the caller's path (here one named after the connecting role, which "$user" would reach) cannot stand in for
+// the refusal check and let a negative amount through.
+func TestMaterializeMorphoMarketIgnoresAShadowingRefusalCheck(t *testing.T) {
+	ctx, pool, _ := morphoMarketSeedOnly(t)
+	if _, err := pool.Exec(ctx, `
+		DO $s$ BEGIN
+		  EXECUTE format('CREATE SCHEMA %I', current_user);
+		  EXECUTE format($f$CREATE FUNCTION %I.materialize_morpho_market_refusals(timestamptz) RETURNS text
+		                   LANGUAGE sql AS 'SELECT NULL::text'$f$, current_user);
+		END $s$`); err != nil {
+		t.Fatalf("plant the shadowing function: %v", err)
+	}
+	seedMorphoMarketRow(ctx, t, pool, `\x1234`, 900, "2026-02-01T00:00:00Z", "0", "-4242", "0", 0)
+	err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(new(int64))
+	if err == nil || !strings.Contains(err.Error(), "has a negative source amount") {
+		t.Errorf("run error %v; want the real refusal check to refuse the negative amount", err)
+	}
+	var config []string
+	if err := pool.QueryRow(ctx, `
+		SELECT array_agg(DISTINCT c ORDER BY c) FROM pg_proc, unnest(proconfig) c
+		 WHERE proname IN ('materialize_morpho_market', 'materialize_morpho_market_refusals') AND c LIKE 'search_path=%'`).Scan(&config); err != nil {
+		t.Fatal(err)
+	}
+	if len(config) != 1 || config[0] != `search_path=""` {
+		t.Errorf("search_path settings are %v; want only an empty search_path", config)
+	}
+}
+
+// The view's COMMENT is the catalogue's word for a direct reader, so it must say that an uncorrected negative
+// IS emitted, and the refusal check's must say which legs abs() reaches.
+func TestMaterializeMorphoMarketCommentsNameTheUnsafeHalf(t *testing.T) {
+	ctx, pool, _ := morphoMarketSeedOnly(t)
+	var view, refusals string
+	if err := pool.QueryRow(ctx, `
+		SELECT obj_description('position_morpho_market'::regclass, 'pg_class'),
+		       obj_description('materialize_morpho_market_refusals(timestamptz)'::regprocedure, 'pg_proc')`).Scan(&view, &refusals); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(view, "one with no higher processing_version IS emitted") {
+		t.Errorf("view COMMENT does not say an uncorrected negative is emitted: %q", view)
+	}
+	if !strings.Contains(refusals, "A negative collateral reaches the collateral leg raw") {
+		t.Errorf("refusal COMMENT does not say which legs abs() reaches: %q", refusals)
+	}
+}
+
+// A "user" row carries its own chain_id, so a holder recorded on chain 1 holding in the Base market must still
+// be keyed on Base: the chain comes from the market, and taking it from the holder would fork the identity.
+func TestMaterializeMorphoMarketKeysTheChainOnTheMarketNotTheHolder(t *testing.T) {
+	ctx, pool, _ := morphoMarketSeedOnly(t)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO "user" (chain_id, address) VALUES (1, '\x8888888888888888888888888888888888888888');
+		INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+		SELECT u.id, m.id, 100, 0, '2026-01-01T00:00:00Z', 0, 0, 0, 90, 0
+		FROM "user" u, morpho_market m
+		WHERE u.chain_id = 1 AND u.address = '\x8888888888888888888888888888888888888888' AND m.chain_id = 8453 AND m.market_id = '\x1234'`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(new(int64)); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	var chain int
+	if err := pool.QueryRow(ctx, `
+		SELECT chain_id FROM position_state WHERE holder_id = '8888888888888888888888888888888888888888'`).Scan(&chain); err != nil {
+		t.Fatalf("read the stored row: %v", err)
+	}
+	if chain != 8453 {
+		t.Errorf("holder on chain 1 in the Base market stored chain_id %d; want 8453, the market's", chain)
 	}
 }
