@@ -167,12 +167,10 @@ classify_result() {
 
     if [[ $exit_code -eq 0 ]]; then
         echo "SURVIVED"
-    elif [[ "$test_output" == *"apply migrations"* ]]; then
-        echo "HARNESS_ERROR"
-    elif [[ "$test_output" == *"build failed"* || "$test_output" == *"cannot load package"* ]]; then
-        echo "HARNESS_ERROR"
     elif [[ "$test_output" == *"--- FAIL:"* ]]; then
         echo "KILLED"
+    elif [[ "$test_output" == *"build failed"* || "$test_output" == *"cannot load package"* ]]; then
+        echo "HARNESS_ERROR"
     else
         echo "HARNESS_ERROR"
     fi
