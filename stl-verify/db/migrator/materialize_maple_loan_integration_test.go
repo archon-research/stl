@@ -1194,3 +1194,39 @@ func TestMapleLoanForwardsTheWindow(t *testing.T) {
 		t.Errorf("the run recorded window %q; want the 36 hours the wrapper was called with", *window)
 	}
 }
+
+// The close test pairs each cycle with the next one on its chain; a self-join on chain alone compares
+// every pair. cycle is materialized and feeds instant, last_seen and placed once each, so exactly three
+// scans: zero means the plan was not read, a fourth means the per-cycle rows are derived twice.
+func TestMapleLoanPairsCyclesInOnePass(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	rows, err := pool.Query(ctx, `EXPLAIN (COSTS OFF) SELECT * FROM position_maple_loan`)
+	if err != nil {
+		t.Fatalf("explaining position_maple_loan: %v", err)
+	}
+	defer rows.Close()
+	var plan []string
+	scans := map[string]int{}
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("scanning a plan line: %v", err)
+		}
+		plan = append(plan, line)
+		for _, cte := range []string{"cycle", "instant"} {
+			if strings.Contains(line, "CTE Scan on "+cte+" ") || strings.HasSuffix(line, "CTE Scan on "+cte) {
+				scans[cte]++
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading the plan: %v", err)
+	}
+	if scans["instant"] != 0 || scans["cycle"] != 3 {
+		t.Errorf("the plan scans instant %d and cycle %d times; want 0 and exactly 3, so each cycle is paired with its successor by lead() in one pass, not a self-join:\n%s",
+			scans["instant"], scans["cycle"], strings.Join(plan, "\n"))
+	}
+}

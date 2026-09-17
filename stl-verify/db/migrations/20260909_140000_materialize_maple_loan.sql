@@ -37,12 +37,14 @@ WITH canonical AS (
     -- silently drop a loan's whole history. Delisting a loan does not unmake its past observations.
     JOIN maple_loan l ON l.id = s.maple_loan_id
 ), instant AS (
-    -- One row per sync cycle, carrying the loans it reported and its position in the chain's sequence,
-    -- so the close test below is set containment rather than a scan of cycle per loan per peer.
+    -- One row per sync cycle, carrying the loans it and the next cycle reported, so the close test below
+    -- is set containment. lead(), not a self-join on rn: that compared every pair of cycles on a chain.
     SELECT chain_id, synced_at,
            array_agg(DISTINCT maple_loan_id) AS loan_ids,
            row_number() OVER (PARTITION BY chain_id ORDER BY synced_at) AS rn,
-           count(*)     OVER (PARTITION BY chain_id)                    AS cycles_on_chain
+           count(*)     OVER (PARTITION BY chain_id)                    AS cycles_on_chain,
+           lead(synced_at) OVER (PARTITION BY chain_id ORDER BY synced_at) AS next_synced_at,
+           lead(array_agg(DISTINCT maple_loan_id)) OVER (PARTITION BY chain_id ORDER BY synced_at) AS next_loan_ids
     FROM cycle
     GROUP BY chain_id, synced_at
 ), last_seen AS (
@@ -53,11 +55,10 @@ WITH canonical AS (
     -- Absence IS the close signal and a false zero is permanent here, so the cycle this loan
     -- vanished from must still carry every peer it had; counting peers instead let an origination
     -- refill what a partial fetch emptied. Two limits below, both irreducible from this source.
-    SELECT ls.maple_loan_id, nxt.synced_at, 0::numeric AS principal_owed, 0 AS processing_version,
+    SELECT ls.maple_loan_id, cur.next_synced_at AS synced_at, 0::numeric AS principal_owed, 0 AS processing_version,
            ls.chain_id, ls.protocol_id, ls.loan_address, ls.borrower_user_id
     FROM last_seen ls
     JOIN instant cur ON cur.chain_id = ls.chain_id AND cur.synced_at = ls.last_synced_at
-    JOIN instant nxt ON nxt.chain_id = ls.chain_id AND nxt.rn = cur.rn + 1
     -- Two cycles must follow the last sighting, so a loan absent from the newest cycle alone is not
     -- closed: that cycle may still be arriving.
     WHERE cur.cycles_on_chain - cur.rn >= 2
@@ -65,7 +66,7 @@ WITH canonical AS (
       -- leaves no cycle row at all, which is indistinguishable from the fetch having stopped.
       AND array_remove(cur.loan_ids, ls.maple_loan_id) <> '{}'
       -- And every one of those peers is still reported at the vanishing cycle.
-      AND array_remove(cur.loan_ids, ls.maple_loan_id) <@ nxt.loan_ids
+      AND array_remove(cur.loan_ids, ls.maple_loan_id) <@ cur.next_loan_ids
 ), placed AS (
     -- Many cycles share a block at a 10-minute cadence, so they collapse here and the earliest
     -- synced_at is the stable pick: a later arrival must not move an already-emitted observation.
