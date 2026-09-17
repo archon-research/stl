@@ -1086,6 +1086,26 @@ SPARK_SP_USDT_SPARK_SAVINGS: Final[Asset] = Asset(
 """
 
 
+SPARK_RLUSD: Final[Asset] = Asset(
+    token=Token.RLUSD,
+    network=Network.ETHEREUM_MAINNET,
+    protocol=Protocol.RIPPLE,
+    address=EvmAddress("0x8292Bb45bf1Ee4d140127049757C2E0fF06317eD"),
+    underlying_assets=(Token.RLUSD,),
+    underlying_asset_address=EvmAddress("0x8292Bb45bf1Ee4d140127049757C2E0fF06317eD"),
+    categories={AssetCategory.CASH_STABLECOIN},
+)
+"""RLUSD held directly by the Spark ALM proxy on Ethereum Mainnet; first
+transfer into the proxy in block 25845641 (2026-08-27).
+
+The underlying is the held token itself, the Spark direct-holding convention
+(SPARK_MAINNET_ETHENA_USDE), not the USDC-funding convention GROVE_RLUSD takes
+from its Atlas Underlying Asset Address document.
+
+:ambiguity: Atlas provenance pending — no Spark RLUSD Instance Configuration
+Document is referenced in this spec, so no ``:source_uuid:`` is recorded."""
+
+
 SPARK_USTB: Final[Asset] = Asset(
     token=Token.USTB,
     network=Network.ETHEREUM_MAINNET,

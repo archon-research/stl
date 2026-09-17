@@ -33,6 +33,7 @@ import {
   getPrimeGroupKey,
   getProtocolLabel,
   groupPrimesByVault,
+  latestAllocationCoverage,
   parseNumericValue,
   riskModelCaptionSuffix,
   sortAllocations,
@@ -290,6 +291,28 @@ describe('formatWadValue', () => {
     expect(formatWadValue(input)).toBe(expected);
   });
 
+  it.each([
+    ['-1500000000000000000', '-1.5'],
+    // Below one wad, so the whole part is `0n` and stringifies unsigned: the
+    // sign survives only in the prefix. An implementation that negates the
+    // remainder instead passes every other case here and renders this `0.5`.
+    ['-500000000000000000', '-0.5'],
+    ['-1234500000000', '-0.000001'],
+    ['-1000000500000000000000000', '-1M'],
+    ['-1.5E+18', '-1.5'],
+  ])(
+    'carries the sign of the negative wad %o through as %o',
+    (input, expected) => {
+      expect(formatWadValue(input)).toBe(expected);
+    },
+  );
+
+  it('drops the sign of a magnitude that truncates away entirely', () => {
+    // "-0" would claim a direction the figure does not have. The guard is
+    // `formatTokenAmount`'s zero branch, not the sign handling above it.
+    expect(formatWadValue('-1')).toBe('0');
+  });
+
   it('expands a positive exponent rather than reading only its leading digit', () => {
     expect(formatWadValue('2.5707140E+27')).toBe('2.57B');
   });
@@ -505,6 +528,46 @@ describe('toChartSeries', () => {
   });
 });
 
+describe('latestAllocationCoverage', () => {
+  it('reports null for a fully-priced bucket', () => {
+    const coverage = latestAllocationCoverage([
+      { priced_entity_count: 58, entity_count: 58 },
+    ]);
+
+    expect(coverage).toBeNull();
+  });
+
+  it('names the counts for a partially-priced bucket', () => {
+    const coverage = latestAllocationCoverage([
+      { priced_entity_count: 49, entity_count: 58 },
+    ]);
+
+    expect(coverage).toEqual({ pricedEntityCount: 49, entityCount: 58 });
+  });
+
+  // series=flow reports both fields null.
+  it('reports null when the bucket carries no counts', () => {
+    const coverage = latestAllocationCoverage([
+      { priced_entity_count: null, entity_count: null },
+    ]);
+
+    expect(coverage).toBeNull();
+  });
+
+  it('reads only the most recent bucket, oldest-first', () => {
+    const coverage = latestAllocationCoverage([
+      { priced_entity_count: 1, entity_count: 10 },
+      { priced_entity_count: 58, entity_count: 58 },
+    ]);
+
+    expect(coverage).toBeNull();
+  });
+
+  it('reports null for no buckets', () => {
+    expect(latestAllocationCoverage([])).toBeNull();
+  });
+});
+
 describe('sortByBucketStart', () => {
   it('orders buckets oldest first regardless of arrival order', () => {
     const buckets = [
@@ -576,12 +639,6 @@ describe('groupPrimesByVault', () => {
     expect(
       groupPrimesByVault([mainnetRow, baseRow, avalancheRow]),
     ).toHaveLength(1);
-  });
-
-  it('counts the distinct chains a prime allocates on', () => {
-    const [group] = groupPrimesByVault([mainnetRow, baseRow, avalancheRow]);
-
-    expect(group?.chainCount).toBe(3);
   });
 
   it('dedupes one address that appears on two chains', () => {
@@ -806,8 +863,8 @@ describe('getProtocolLabel', () => {
 
   it('prefers a registry protocol name over the static label table', () => {
     expect(
-      getProtocolLabel('spark', [makeProtocolRow({ name: 'Spark Lend v3' })]),
-    ).toBe('Spark Lend v3');
+      getProtocolLabel('spark', [makeProtocolRow({ name: 'Sparklend' })]),
+    ).toBe('Sparklend');
   });
 
   it('falls back to the static label table', () => {
@@ -840,6 +897,18 @@ describe('findProtocolMetadata', () => {
     const row = makeProtocolRow({ name: 'SparkLend' });
 
     expect(findProtocolMetadata('spark', [row])).toBe(row);
+  });
+
+  it.each([
+    ['psm3', 'no row is named for it, chain notwithstanding'],
+    ['aave', 'several rows are merely named after it'],
+  ])('returns null for %o: %s', (protocol) => {
+    const aaveRows = [
+      makeProtocolRow({ name: 'Aave V2' }),
+      makeProtocolRow({ id: 2, name: 'Aave V3' }),
+    ];
+
+    expect(findProtocolMetadata(protocol, aaveRows, 1)).toBeNull();
   });
 });
 

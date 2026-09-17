@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
@@ -42,6 +44,7 @@ const (
 	statusDeadLettered     = "dead_lettered"
 	statusTransientError   = "transient_error"
 	statusDLQPublishFailed = "dlq_publish_failed"
+	statusShutdownReleased = "shutdown_released"
 )
 
 // Metric labels for processing latency.
@@ -53,31 +56,13 @@ const (
 // ChainExpectation defines what data is expected for a specific chain.
 // If a data type is expected but missing from cache, the message will error
 // and go to DLQ rather than retry infinitely.
-type ChainExpectation struct {
-	// ExpectReceipts indicates receipts data is required for this chain.
-	ExpectReceipts bool
-	// ExpectTraces indicates traces data is required for this chain.
-	ExpectTraces bool
-	// ExpectBlobs indicates blobs data is required for this chain.
-	ExpectBlobs bool
-}
+type ChainExpectation = chainutil.BlockDataExpectation
 
-// DefaultChainExpectations returns the default expectations for known chains. These
-// MUST mirror what each chain's watcher actually caches, since the backup reads from
-// that cache: receipts are always fetched, but traces only when the watcher runs
-// without --enable-traces=false. Today only the ethereum watcher fetches traces; every
-// other chain's watcher sets --enable-traces=false (avalanche and arbitrum have no
-// trace_block on Alchemy at all; base/optimism/unichain support it but the watcher
-// still does not fetch it). Blobs are not fetched anywhere (--enable-blobs is false).
+// DefaultChainExpectations returns the default expectations for known chains.
+// The declaration is shared: it is what each chain's watcher caches, so the
+// block-republisher produces the same set this worker reads.
 func DefaultChainExpectations() map[int64]ChainExpectation {
-	return map[int64]ChainExpectation{
-		1:     {ExpectReceipts: true, ExpectTraces: true, ExpectBlobs: false},  // Ethereum Mainnet
-		43114: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Avalanche C-Chain
-		8453:  {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Base
-		10:    {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Optimism
-		130:   {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Unichain
-		42161: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Arbitrum
-	}
+	return chainutil.DefaultChainExpectations()
 }
 
 // Config holds configuration for the backup service.
@@ -91,7 +76,10 @@ type Config struct {
 	// Workers is the number of concurrent message processors.
 	Workers int
 
-	// BatchSize is how many messages to fetch at once (max 10).
+	// BatchSize is how many messages one receive may put in flight (max 10).
+	// SQS starts one visibility clock for all of them, so anything above Workers
+	// leaves the surplus queued against a clock that is already running. Zero
+	// uses Workers.
 	BatchSize int
 
 	// ChainExpectations maps chain IDs to their data expectations.
@@ -107,6 +95,16 @@ type Config struct {
 	// when CACHE_MISS_MAX_RETRIES is unset in the environment.
 	CacheMissMaxRetries int
 
+	// HandlerTimeout bounds one message's processing, shutdown or not. It MUST
+	// stay under the queue's visibility timeout, which NewService validates.
+	// Zero uses sqsutil.DefaultHandlerTimeout.
+	HandlerTimeout time.Duration
+
+	// DrainTimeout is the grace a message already being processed at SIGTERM
+	// gets to finish; past it it is released to the successor. Zero uses
+	// sqsutil.DefaultDrainTimeout.
+	DrainTimeout time.Duration
+
 	// Metrics is the metrics recorder (optional).
 	Metrics outbound.BackupMetricsRecorder
 
@@ -116,10 +114,11 @@ type Config struct {
 
 // ConfigDefaults returns sensible defaults for the backup service.
 func ConfigDefaults() Config {
+	const workers = 4
 	return Config{
 		ChainID:             1,
-		Workers:             4,
-		BatchSize:           10,
+		Workers:             workers,
+		BatchSize:           workers,
 		CacheMissMaxRetries: 3,
 		Logger:              slog.Default(),
 	}
@@ -150,6 +149,9 @@ type Service struct {
 	closeOnce         sync.Once
 	stopCh            chan struct{}
 	wg                sync.WaitGroup
+
+	heldMu         sync.Mutex
+	heldForRelease []outbound.SQSMessage
 }
 
 // NewService creates a new backup service. The blockchain client is required:
@@ -188,7 +190,7 @@ func NewService(
 		config.Workers = defaults.Workers
 	}
 	if config.BatchSize <= 0 {
-		config.BatchSize = defaults.BatchSize
+		config.BatchSize = config.Workers
 	}
 	if config.Logger == nil {
 		config.Logger = defaults.Logger
@@ -198,6 +200,10 @@ func NewService(
 	chainExpectations := config.ChainExpectations
 	if chainExpectations == nil {
 		chainExpectations = DefaultChainExpectations()
+	}
+
+	if err := validateVisibility(config, consumer); err != nil {
+		return nil, err
 	}
 
 	return &Service{
@@ -214,7 +220,24 @@ func NewService(
 	}, nil
 }
 
+// A misconfigured visibility timeout duplicates every message the pool
+// processes, so the worker refuses to start rather than serve on.
+func validateVisibility(config Config, consumer outbound.SQSConsumer) error {
+	return sqsutil.ValidateVisibilityTimeout(consumer.VisibilityTimeout(), config.HandlerTimeout, inFlightPerReceive(config))
+}
+
+// The pool works through a batch in rounds, so a round is what one visibility
+// clock has to cover. The fetcher polls again before the buffer drains, so this
+// bound holds only because one chain is one FIFO group (sns.EventSink): SQS
+// delivers no more of a group while a message of it is in flight.
+func inFlightPerReceive(config Config) int {
+	workers := max(config.Workers, 1)
+	return (config.BatchSize + workers - 1) / workers
+}
+
 // Run starts the backup service and blocks until the context is cancelled.
+// This binary runs Run directly rather than under lifecycle.Run, so the pod's
+// grace period is the only shutdown ceiling (TestShutdownPathFitsThePodGracePeriod).
 func (s *Service) Run(ctx context.Context) error {
 	s.logger.Info("starting raw data backup service",
 		"bucket", s.config.Bucket,
@@ -239,46 +262,89 @@ func (s *Service) Run(ctx context.Context) error {
 		go s.worker(ctx, i, msgCh)
 	}
 
-	// Message fetcher loop
 	for {
 		select {
 		case <-ctx.Done():
 			s.logger.Info("context cancelled, stopping message fetcher")
-			closeMsgCh()
-			s.wg.Wait()
-			return ctx.Err()
+			return s.stopFetching(ctx, closeMsgCh, ctx.Err())
 		case <-s.stopCh:
 			s.logger.Info("stop signal received, stopping message fetcher")
-			closeMsgCh()
-			s.wg.Wait()
-			return nil
+			return s.stopFetching(ctx, closeMsgCh, nil)
 		default:
 		}
 
-		// Fetch messages from SQS
-		messages, err := s.consumer.ReceiveMessages(ctx, s.config.BatchSize)
-		if err != nil {
-			if ctx.Err() != nil {
-				closeMsgCh()
-				s.wg.Wait()
-				return ctx.Err()
-			}
-			s.logger.Error("failed to receive messages", "error", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		// Send messages to workers
-		for _, msg := range messages {
-			select {
-			case msgCh <- msg:
-			case <-ctx.Done():
-				closeMsgCh()
-				s.wg.Wait()
-				return ctx.Err()
-			}
+		if !s.fetchAndDispatch(ctx, msgCh) {
+			return s.stopFetching(ctx, closeMsgCh, ctx.Err())
 		}
 	}
+}
+
+func (s *Service) fetchAndDispatch(ctx context.Context, msgCh chan<- outbound.SQSMessage) (keepFetching bool) {
+	messages, err := s.consumer.ReceiveMessages(ctx, s.config.BatchSize)
+	if err != nil {
+		if ctx.Err() != nil {
+			s.logger.Info("shutdown cancelled the poll, stopping message fetcher", "error", err)
+			return false
+		}
+		s.logger.Error("failed to receive messages", "error", err)
+		time.Sleep(5 * time.Second)
+		return true
+	}
+
+	if undispatched := s.dispatch(ctx, msgCh, messages); len(undispatched) > 0 {
+		s.logger.Info("shutdown interrupted the dispatch, stopping message fetcher",
+			"heldForRelease", len(undispatched))
+		s.holdForRelease(undispatched...)
+		return false
+	}
+	return true
+}
+
+func (s *Service) stopFetching(ctx context.Context, closeMsgCh func(), reason error) error {
+	closeMsgCh()
+	s.wg.Wait()
+	sqsutil.ReleaseMessages(ctx, s.consumer, s.logger, s.config.ChainID, s.takeHeldMessages())
+	return reason
+}
+
+func (s *Service) holdForRelease(messages ...outbound.SQSMessage) {
+	if len(messages) == 0 {
+		return
+	}
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+	s.heldForRelease = append(s.heldForRelease, messages...)
+}
+
+func (s *Service) takeHeldMessages() []outbound.SQSMessage {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+	held := s.heldForRelease
+	s.heldForRelease = nil
+	return held
+}
+
+// Outside shutdown a message stays hidden on purpose: that is the retry pacing.
+func (s *Service) releaseIfShuttingDown(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage) {
+	if ctx.Err() == nil {
+		return
+	}
+	sqsutil.ReleaseMessages(ctx, s.consumer, logger, s.config.ChainID, []outbound.SQSMessage{msg})
+}
+
+func (s *Service) dispatch(
+	ctx context.Context,
+	msgCh chan<- outbound.SQSMessage,
+	messages []outbound.SQSMessage,
+) (undispatched []outbound.SQSMessage) {
+	for i, msg := range messages {
+		select {
+		case msgCh <- msg:
+		case <-ctx.Done():
+			return messages[i:]
+		}
+	}
+	return nil
 }
 
 // Stop signals the service to stop.
@@ -288,26 +354,52 @@ func (s *Service) Stop() {
 	})
 }
 
-// worker processes messages from the channel.
 func (s *Service) worker(ctx context.Context, id int, msgCh <-chan outbound.SQSMessage) {
 	defer s.wg.Done()
 	logger := s.logger.With("worker", id)
 
 	for msg := range msgCh {
-		start := time.Now()
-		status, err := s.processMessage(ctx, msg)
-		s.recordLatency(ctx, start, err)
-		s.handleResult(ctx, logger, msg, status, err)
+		if ctx.Err() != nil {
+			s.holdForRelease(msg)
+			continue
+		}
+		s.processAndSettle(ctx, logger, msg)
 	}
 }
 
-// recordLatency records the per-message processing latency, labelled by outcome.
-func (s *Service) recordLatency(ctx context.Context, start time.Time, err error) {
-	if s.metrics == nil {
+func (s *Service) processAndSettle(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage) {
+	start := time.Now()
+	budget := sqsutil.DrainBudget{Work: s.handlerTimeout(), Drain: s.drainTimeout()}
+	status, outcome := sqsutil.RunDrainableValue(ctx, budget, func(wctx context.Context) (string, error) {
+		return s.processMessage(wctx, msg)
+	})
+	s.recordLatency(ctx, start, outcome)
+	s.handleResult(ctx, logger, msg, status, outcome)
+}
+
+func (s *Service) handlerTimeout() time.Duration {
+	if s.config.HandlerTimeout > 0 {
+		return s.config.HandlerTimeout
+	}
+	return sqsutil.DefaultHandlerTimeout
+}
+
+func (s *Service) drainTimeout() time.Duration {
+	if s.config.DrainTimeout > 0 {
+		return s.config.DrainTimeout
+	}
+	return sqsutil.DefaultDrainTimeout
+}
+
+// Abandoned work is skipped: its elapsed time is the drain budget, not the
+// message's cost, and would drag p99 up on every rollout (alert
+// VectorBackupWorkerLatencyHigh).
+func (s *Service) recordLatency(ctx context.Context, start time.Time, outcome sqsutil.DrainOutcome) {
+	if s.metrics == nil || outcome.Abandoned {
 		return
 	}
 	status := latencyStatusSuccess
-	if err != nil {
+	if outcome.Err != nil {
 		status = latencyStatusError
 	}
 	s.metrics.RecordProcessingLatency(ctx, time.Since(start), status)
@@ -322,24 +414,40 @@ func (s *Service) recordLatency(ctx context.Context, start time.Time, err error)
 // On success, status carries the specific outcome (statusSuccess,
 // statusAlreadyBackedUp, statusRPCFallback) so the metric distinguishes a cache
 // hit from a no-op re-delivery and from an RPC self-heal.
-func (s *Service) handleResult(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage, status string, err error) {
-	if err == nil {
-		s.recordProcessed(ctx, status)
-		s.deleteMessage(ctx, logger, msg)
+func (s *Service) handleResult(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage, status string, outcome sqsutil.DrainOutcome) {
+	if outcome.Err == nil {
+		if outcome.BudgetExceeded {
+			logger.Warn("handler returned nil after exceeding its timeout budget; deleting anyway",
+				"messageID", msg.MessageID,
+			)
+		}
+		s.settleProcessed(ctx, logger, msg, status)
 		return
 	}
 
-	if errors.Is(err, ErrPermanent) {
-		s.deadLetterMessage(ctx, logger, msg, err)
+	if errors.Is(outcome.Err, ErrPermanent) {
+		s.deadLetterMessage(ctx, logger, msg, outcome.Err)
 		return
 	}
 
-	// Transient: keep the message on the queue so SQS redelivers it.
-	logger.Error("transient failure processing message, leaving for redelivery",
-		"messageID", msg.MessageID,
-		"error", err,
-	)
-	s.recordProcessed(ctx, statusTransientError)
+	s.keepForRedelivery(ctx, logger, msg, outcome)
+}
+
+func (s *Service) keepForRedelivery(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage, outcome sqsutil.DrainOutcome) {
+	if outcome.Abandoned {
+		logger.Info("shutdown drain expired, handing the message to the successor",
+			"messageID", msg.MessageID,
+		)
+		s.recordProcessed(ctx, statusShutdownReleased)
+	} else {
+		logger.Error("transient failure processing message, leaving for redelivery",
+			"messageID", msg.MessageID,
+			"error", outcome.Err,
+		)
+		s.recordProcessed(ctx, statusTransientError)
+	}
+
+	s.releaseIfShuttingDown(ctx, logger, msg)
 }
 
 // deadLetterMessage publishes a permanently failed message to the DLQ and, if
@@ -347,13 +455,16 @@ func (s *Service) handleResult(ctx context.Context, logger *slog.Logger, msg out
 // message is preserved (not deleted) so it can be redelivered and retried.
 func (s *Service) deadLetterMessage(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage, cause error) {
 	groupID := strconv.FormatInt(s.config.ChainID, 10)
-	if pubErr := s.deadLetter.Publish(ctx, msg.Body, groupID); pubErr != nil {
+	settleCtx, cancel := sqsutil.CleanupContext(ctx)
+	defer cancel()
+	if pubErr := s.deadLetter.Publish(settleCtx, msg.Body, groupID); pubErr != nil {
 		logger.Error("failed to publish permanent failure to dead-letter queue, preserving message",
 			"messageID", msg.MessageID,
 			"cause", cause,
 			"error", pubErr,
 		)
 		s.recordProcessed(ctx, statusDLQPublishFailed)
+		s.releaseIfShuttingDown(ctx, logger, msg)
 		return
 	}
 
@@ -361,18 +472,27 @@ func (s *Service) deadLetterMessage(ctx context.Context, logger *slog.Logger, ms
 		"messageID", msg.MessageID,
 		"cause", cause,
 	)
-	s.recordProcessed(ctx, statusDeadLettered)
-	s.deleteMessage(ctx, logger, msg)
+	s.settleProcessed(ctx, logger, msg, statusDeadLettered)
 }
 
-// deleteMessage removes a message from the main queue, logging on failure.
-func (s *Service) deleteMessage(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage) {
-	if err := s.consumer.DeleteMessage(ctx, msg.ReceiptHandle); err != nil {
-		logger.Error("failed to delete message",
-			"messageID", msg.MessageID,
-			"error", err,
-		)
+// A refused delete leaves the message for redelivery, so the block is processed
+// again and the DLQ publish repeated; counting it now would report a block the
+// worker never settled and keep VectorBackupWorkerStalled quiet while it loops.
+func (s *Service) settleProcessed(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage, status string) {
+	if err := s.deleteMessage(ctx, logger, msg); err != nil {
+		return
 	}
+	s.recordProcessed(ctx, status)
+}
+
+// Through sqsutil so this loop's deletes reach sqs.message.settles.total too;
+// it is the only worker that settles outside ProcessMessages.
+func (s *Service) deleteMessage(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage) error {
+	err := sqsutil.DeleteMessage(ctx, s.consumer, logger, s.config.ChainID, msg)
+	if err != nil {
+		s.releaseIfShuttingDown(ctx, logger, msg)
+	}
+	return err
 }
 
 // recordProcessed increments the processed-blocks counter with the given status.

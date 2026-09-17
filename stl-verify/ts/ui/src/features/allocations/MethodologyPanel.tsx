@@ -25,6 +25,7 @@ import {
   tokensQuery,
 } from '../../shared/lib/queries';
 import type { DataSource } from '../../shared/types/allocation';
+import type { Undefinable } from '../../shared/types/optional';
 import { LazyRegion, lazyChunk } from '../../shared/ui/LazyRegion';
 
 const NO_SOURCES: DataSource[] = [];
@@ -56,10 +57,11 @@ const metadataBodyClassName = css({
 type MethodologyPanelProps = {
   isOpen: boolean;
   onToggle: () => void;
+} & Undefinable<{
   selectedTokenAddress?: string | null;
   selectedTokenSymbol?: string | null;
   selectedChainId?: number | null;
-};
+}>;
 
 const METHODOLOGY_MARKDOWN = `## Internal Data (STL)
 - Onchain allocation positions from Ethereum mainnet
@@ -134,9 +136,9 @@ export function MethodologyPanel({
     <div
       className={css({
         borderRadius: 'lg',
-        // The scale has no 1px step: a hairline is a device-pixel rule
-        // rather than a spacing decision.
-        border: '[1px solid token(colors.border.hairline)]',
+        borderWidth: 'hairline',
+        borderStyle: 'solid',
+        borderColor: 'border.hairline',
         bg: 'surface.default',
         overflow: 'hidden',
       })}
@@ -151,9 +153,9 @@ export function MethodologyPanel({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          borderBottom: isOpen
-            ? '[1px solid token(colors.border.hairline)]'
-            : 'none',
+          borderBottomWidth: isOpen ? 'hairline' : 'none',
+          borderBottomStyle: 'solid',
+          borderBottomColor: 'border.hairline',
           bg: 'surface.subtle',
           cursor: 'pointer',
           fontSize: 'sm',
@@ -369,7 +371,9 @@ export function MethodologyPanel({
                 className={css({
                   overflowX: 'auto',
                   borderRadius: 'md',
-                  border: '[1px solid token(colors.border.hairline)]',
+                  borderWidth: 'hairline',
+                  borderStyle: 'solid',
+                  borderColor: 'border.hairline',
                 })}
               >
                 <table
@@ -392,8 +396,9 @@ export function MethodologyPanel({
                             textAlign: 'left',
                             fontWeight: 'semibold',
                             color: 'text.muted',
-                            borderBottom:
-                              '[1px solid token(colors.border.hairline)]',
+                            borderBottomWidth: 'hairline',
+                            borderBottomStyle: 'solid',
+                            borderBottomColor: 'border.hairline',
                           })}
                         >
                           {h}
@@ -410,8 +415,9 @@ export function MethodologyPanel({
                         <td
                           className={css({
                             padding: '3',
-                            borderBottom:
-                              '[1px solid token(colors.border.hairline)]',
+                            borderBottomWidth: 'hairline',
+                            borderBottomStyle: 'solid',
+                            borderBottomColor: 'border.hairline',
                             fontWeight: 'semibold',
                             color: 'text.strong',
                           })}
@@ -421,8 +427,9 @@ export function MethodologyPanel({
                         <td
                           className={css({
                             padding: '3',
-                            borderBottom:
-                              '[1px solid token(colors.border.hairline)]',
+                            borderBottomWidth: 'hairline',
+                            borderBottomStyle: 'solid',
+                            borderBottomColor: 'border.hairline',
                             color: 'text.default',
                           })}
                         >
@@ -431,8 +438,9 @@ export function MethodologyPanel({
                         <td
                           className={css({
                             padding: '3',
-                            borderBottom:
-                              '[1px solid token(colors.border.hairline)]',
+                            borderBottomWidth: 'hairline',
+                            borderBottomStyle: 'solid',
+                            borderBottomColor: 'border.hairline',
                             color: 'text.default',
                           })}
                         >
@@ -441,8 +449,9 @@ export function MethodologyPanel({
                         <td
                           className={css({
                             padding: '3',
-                            borderBottom:
-                              '[1px solid token(colors.border.hairline)]',
+                            borderBottomWidth: 'hairline',
+                            borderBottomStyle: 'solid',
+                            borderBottomColor: 'border.hairline',
                           })}
                         >
                           <Badge
@@ -468,7 +477,9 @@ export function MethodologyPanel({
                   className={css({
                     mt: '4',
                     pt: '4',
-                    borderTop: '[1px solid token(colors.border.hairline)]',
+                    borderTopWidth: 'hairline',
+                    borderTopStyle: 'solid',
+                    borderTopColor: 'border.hairline',
                     display: 'grid',
                     gap: '2',
                   })}

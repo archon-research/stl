@@ -175,27 +175,27 @@ type cryptoConverted struct {
 }
 
 // SaveBlock persists all of a block's curve rows in one pgx.Batch within tx.
-func (r *CurveRepository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.BlockWrites) (stateRows int64, err error) {
+func (r *CurveRepository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.BlockWrites) (stateRows outbound.StateRowCounts, err error) {
 	swaps, err := convertSwaps(w.Swaps)
 	if err != nil {
-		return 0, err
+		return outbound.StateRowCounts{}, err
 	}
 	liqs, err := convertLiquidity(w.Liquidity)
 	if err != nil {
-		return 0, err
+		return outbound.StateRowCounts{}, err
 	}
 	stables, err := convertStableStates(w.StableStates)
 	if err != nil {
-		return 0, err
+		return outbound.StateRowCounts{}, err
 	}
 	cryptos, err := convertCryptoStates(w.CryptoStates)
 	if err != nil {
-		return 0, err
+		return outbound.StateRowCounts{}, err
 	}
 
 	batch := &pgx.Batch{}
 	if err := queueCurveBatch(batch, swaps, liqs, stables, cryptos, w.ParameterEvents, w.LpTokenEvents, r.buildID); err != nil {
-		return 0, err
+		return outbound.StateRowCounts{}, err
 	}
 
 	stateRows, err = sendCurveBatch(ctx, tx, batch, swaps, liqs, stables, cryptos, w.ParameterEvents, w.LpTokenEvents)
@@ -476,10 +476,6 @@ func queueCurveBatch(
 	return nil
 }
 
-// sendCurveBatch executes the queued batch and drains every result in queue
-// order, returning the count of state rows inserted (only stableswap/cryptoswap
-// states count). The batch reader is always closed before returning so the
-// caller may issue further queries on tx.
 func sendCurveBatch(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -490,7 +486,7 @@ func sendCurveBatch(
 	cryptos []cryptoConverted,
 	parameterEvents []*entity.CurveParameterEvent,
 	lpTokenEvents []*entity.CurveLpTokenEvent,
-) (stateRows int64, err error) {
+) (stateRows outbound.StateRowCounts, err error) {
 	br := tx.SendBatch(ctx, batch)
 	defer func() {
 		if closeErr := br.Close(); closeErr != nil && err == nil {
@@ -515,7 +511,8 @@ func sendCurveBatch(
 		if readErr != nil {
 			return stateRows, fmt.Errorf("batch stableswap %d: %w", i, readErr)
 		}
-		stateRows += tag.RowsAffected()
+		stateRows.Attempted++
+		stateRows.Persisted += tag.RowsAffected()
 	}
 
 	for i := range cryptos {
@@ -523,7 +520,8 @@ func sendCurveBatch(
 		if readErr != nil {
 			return stateRows, fmt.Errorf("batch cryptoswap %d: %w", i, readErr)
 		}
-		stateRows += tag.RowsAffected()
+		stateRows.Attempted++
+		stateRows.Persisted += tag.RowsAffected()
 	}
 
 	for i := range parameterEvents {

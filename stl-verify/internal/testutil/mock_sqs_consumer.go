@@ -36,6 +36,10 @@ func (m *MockSQSConsumer) DeleteMessage(ctx context.Context, receiptHandle strin
 	return nil
 }
 
+func (m *MockSQSConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
+	return nil, nil
+}
+
 func (m *MockSQSConsumer) Close() error {
 	if m.CloseFn != nil {
 		return m.CloseFn()

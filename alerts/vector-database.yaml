@@ -41,7 +41,7 @@
 # through `sum by` so the Alertmanager Slack template's `Cluster:` header fills.
 #
 # Severity → routing (per the alerting routing spec): every rule here is a
-# `warning` — no page, prod #at_stl_alerts / staging #at_stl_staging_alerts,
+# `warning` — no page, prod #at_stl_prod_alerts / staging #at_stl_staging_alerts,
 # [WARNING], 4h repeat. The infrastructure repo's TigerData rules watch the
 # instance and page on memory (>85%); nothing there watches connection count or
 # disk, so for every class-53 code except 53200 these counters are the only

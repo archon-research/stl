@@ -456,11 +456,10 @@ func TestIntegration_SingleBlockBackup(t *testing.T) {
 
 	// Create and start the backup service
 	svc, err := NewService(Config{
-		ChainID:   chainID,
-		Bucket:    infra.BucketName,
-		Workers:   2,
-		BatchSize: 10,
-		Logger:    infra.Logger,
+		ChainID: chainID,
+		Bucket:  infra.BucketName,
+		Workers: 2,
+		Logger:  infra.Logger,
 	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, &stubBlockchainClient{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -558,10 +557,9 @@ func TestIntegration_MultipleBlocksProcessedConcurrently(t *testing.T) {
 
 	// Create service with multiple workers - only expect block data
 	svc, err := NewService(Config{
-		ChainID:   chainID,
-		Bucket:    infra.BucketName,
-		Workers:   4,
-		BatchSize: 10,
+		ChainID: chainID,
+		Bucket:  infra.BucketName,
+		Workers: 4,
 		ChainExpectations: map[int64]ChainExpectation{
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
@@ -631,10 +629,9 @@ func TestIntegration_IdempotentWrites(t *testing.T) {
 
 	// Create service
 	svc, err := NewService(Config{
-		ChainID:   chainID,
-		Bucket:    infra.BucketName,
-		Workers:   1,
-		BatchSize: 10,
+		ChainID: chainID,
+		Bucket:  infra.BucketName,
+		Workers: 1,
 		ChainExpectations: map[int64]ChainExpectation{
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
@@ -734,10 +731,9 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
-		ChainID:   chainID,
-		Bucket:    infra.BucketName,
-		Workers:   2,
-		BatchSize: 10,
+		ChainID: chainID,
+		Bucket:  infra.BucketName,
+		Workers: 2,
 		ChainExpectations: map[int64]ChainExpectation{
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
@@ -852,10 +848,9 @@ func TestIntegration_LargeBlockData(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
-		ChainID:   chainID,
-		Bucket:    infra.BucketName,
-		Workers:   1,
-		BatchSize: 10,
+		ChainID: chainID,
+		Bucket:  infra.BucketName,
+		Workers: 1,
 		ChainExpectations: map[int64]ChainExpectation{
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
@@ -915,10 +910,9 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
-		ChainID:   chainID,
-		Bucket:    infra.BucketName,
-		Workers:   2,
-		BatchSize: 10,
+		ChainID: chainID,
+		Bucket:  infra.BucketName,
+		Workers: 2,
 		ChainExpectations: map[int64]ChainExpectation{
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
@@ -994,10 +988,9 @@ func TestIntegration_RaceConditionIdempotency(t *testing.T) {
 
 	// Create service with many workers to increase race likelihood
 	svc, err := NewService(Config{
-		ChainID:   chainID,
-		Bucket:    infra.BucketName,
-		Workers:   8, // Many workers to maximize race chances
-		BatchSize: 10,
+		ChainID: chainID,
+		Bucket:  infra.BucketName,
+		Workers: 8, // Many workers to maximize race chances
 		ChainExpectations: map[int64]ChainExpectation{
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
@@ -1100,10 +1093,9 @@ func TestIntegration_PartialWriteFailure(t *testing.T) {
 	// Note: NOT setting receipts, traces, or blobs - they'll be nil/missing
 
 	svc, err := NewService(Config{
-		ChainID:   chainID,
-		Bucket:    infra.BucketName,
-		Workers:   1,
-		BatchSize: 10,
+		ChainID: chainID,
+		Bucket:  infra.BucketName,
+		Workers: 1,
 		ChainExpectations: map[int64]ChainExpectation{
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
@@ -1177,7 +1169,6 @@ func TestIntegration_CacheMiss_RPCFallbackBacksUp(t *testing.T) {
 		ChainID:             chainID,
 		Bucket:              infra.BucketName,
 		Workers:             1,
-		BatchSize:           10,
 		CacheMissMaxRetries: 0, // fail fast to the RPC fallback
 		ChainExpectations: map[int64]ChainExpectation{
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
@@ -1258,7 +1249,6 @@ func TestIntegration_CacheMiss_RPCNullPermanent(t *testing.T) {
 		ChainID:             chainID,
 		Bucket:              infra.BucketName,
 		Workers:             1,
-		BatchSize:           10,
 		CacheMissMaxRetries: 0,
 		ChainExpectations: map[int64]ChainExpectation{
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
@@ -1333,7 +1323,6 @@ func TestIntegration_TransientRedisError(t *testing.T) {
 		ChainID:             chainID,
 		Bucket:              infra.BucketName,
 		Workers:             1,
-		BatchSize:           10,
 		CacheMissMaxRetries: 0,
 		ChainExpectations: map[int64]ChainExpectation{
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
@@ -1446,10 +1435,9 @@ func TestIntegration_ChainIDMismatch(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
-		ChainID:   serviceChainID,
-		Bucket:    infra.BucketName,
-		Workers:   1,
-		BatchSize: 10,
+		ChainID: serviceChainID,
+		Bucket:  infra.BucketName,
+		Workers: 1,
 		ChainExpectations: map[int64]ChainExpectation{
 			eventChainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
@@ -1532,10 +1520,9 @@ func TestIntegration_GzipContentIntegrity(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
-		ChainID:   chainID,
-		Bucket:    infra.BucketName,
-		Workers:   1,
-		BatchSize: 10,
+		ChainID: chainID,
+		Bucket:  infra.BucketName,
+		Workers: 1,
 		ChainExpectations: map[int64]ChainExpectation{
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
@@ -1614,10 +1601,9 @@ func TestIntegration_ChainExpectationsMismatch(t *testing.T) {
 
 	// Create service with explicit chain expectations
 	svc, err := NewService(Config{
-		ChainID:   chainID,
-		Bucket:    infra.BucketName,
-		Workers:   1,
-		BatchSize: 10,
+		ChainID: chainID,
+		Bucket:  infra.BucketName,
+		Workers: 1,
 		ChainExpectations: map[int64]ChainExpectation{
 			1: {
 				ExpectReceipts: true,
@@ -1711,10 +1697,9 @@ func TestIntegration_ChainExpectationsMetSuccessfully(t *testing.T) {
 
 	// Create service with chain expectations
 	svc, err := NewService(Config{
-		ChainID:   chainID,
-		Bucket:    infra.BucketName,
-		Workers:   1,
-		BatchSize: 10,
+		ChainID: chainID,
+		Bucket:  infra.BucketName,
+		Workers: 1,
 		ChainExpectations: map[int64]ChainExpectation{
 			1: {
 				ExpectReceipts: true,
@@ -1799,10 +1784,9 @@ func TestIntegration_UnknownChainNoExpectations(t *testing.T) {
 
 	// Create service with expectations only for chain 1
 	svc, err := NewService(Config{
-		ChainID:   chainID,
-		Bucket:    infra.BucketName,
-		Workers:   1,
-		BatchSize: 10,
+		ChainID: chainID,
+		Bucket:  infra.BucketName,
+		Workers: 1,
 		ChainExpectations: map[int64]ChainExpectation{
 			1: { // Only chain 1 has expectations
 				ExpectReceipts: true,

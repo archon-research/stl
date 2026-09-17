@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -23,6 +24,7 @@ type UserRepository struct {
 	pool      *pgxpool.Pool
 	logger    *slog.Logger
 	batchSize int
+	runID     buildregistry.RunID
 }
 
 // NewUserRepository creates a new PostgreSQL User repository.
@@ -31,7 +33,7 @@ type UserRepository struct {
 //
 // Note: This function does not verify that the database connection is alive.
 // Use a separate health check or call pool.Ping() if connection validation is needed.
-func NewUserRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (*UserRepository, error) {
+func NewUserRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int, runID buildregistry.RunID) (*UserRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -45,6 +47,7 @@ func NewUserRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (
 		pool:      pool,
 		logger:    logger,
 		batchSize: batchSize,
+		runID:     runID,
 	}, nil
 }
 
@@ -70,8 +73,8 @@ func (r *UserRepository) GetOrCreateUsers(ctx context.Context, tx pgx.Tx, users 
 	batch := &pgx.Batch{}
 	for _, u := range sorted {
 		batch.Queue(
-			`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata)
-			 VALUES ($1, $2, $3, NOW(), NOW(), $4)
+			`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata, run_id)
+			 VALUES ($1, $2, $3, NOW(), NOW(), $4, $5)
 			 ON CONFLICT (chain_id, address) DO UPDATE SET
 			     first_seen_block = LEAST("user".first_seen_block, EXCLUDED.first_seen_block),
 			     updated_at = CASE
@@ -79,7 +82,7 @@ func (r *UserRepository) GetOrCreateUsers(ctx context.Context, tx pgx.Tx, users 
 			         ELSE "user".updated_at
 			     END
 			 RETURNING id`,
-			u.ChainID, u.Address.Bytes(), u.FirstSeenBlock, u.Metadata,
+			u.ChainID, u.Address.Bytes(), u.FirstSeenBlock, u.Metadata, r.runID,
 		)
 	}
 
@@ -101,8 +104,8 @@ func (r *UserRepository) GetOrCreateUser(ctx context.Context, tx pgx.Tx, user en
 	// whichever worker wins the INSERT race, the loser's LEAST() merge still produces
 	// the correct minimum first_seen_block.
 	err := tx.QueryRow(ctx,
-		`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata)
-		 VALUES ($1, $2, $3, NOW(), NOW(), $4)
+		`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata, run_id)
+		 VALUES ($1, $2, $3, NOW(), NOW(), $4, $5)
 		 ON CONFLICT (chain_id, address) DO UPDATE SET
 		     first_seen_block = LEAST("user".first_seen_block, EXCLUDED.first_seen_block),
 		     updated_at = CASE
@@ -110,7 +113,7 @@ func (r *UserRepository) GetOrCreateUser(ctx context.Context, tx pgx.Tx, user en
 		         ELSE "user".updated_at
 		     END
 		 RETURNING id`,
-		user.ChainID, user.Address.Bytes(), user.FirstSeenBlock, user.Metadata).Scan(&userID)
+		user.ChainID, user.Address.Bytes(), user.FirstSeenBlock, user.Metadata, r.runID).Scan(&userID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get or create user: %w", err)
 	}

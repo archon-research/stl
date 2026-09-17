@@ -25,6 +25,7 @@ type PrimeDebtRepository struct {
 	txm     *TxManager
 	logger  *slog.Logger
 	buildID buildregistry.BuildID
+	runID   buildregistry.RunID
 }
 
 // NewPrimeDebtRepository creates a new PrimeDebtRepository.
@@ -33,6 +34,7 @@ func NewPrimeDebtRepository(
 	txm *TxManager,
 	logger *slog.Logger,
 	buildID buildregistry.BuildID,
+	runID buildregistry.RunID,
 ) *PrimeDebtRepository {
 	if logger == nil {
 		logger = slog.Default()
@@ -42,6 +44,7 @@ func NewPrimeDebtRepository(
 		txm:     txm,
 		logger:  logger.With("component", "prime-debt-repo"),
 		buildID: buildID,
+		runID:   runID,
 	}
 }
 
@@ -101,8 +104,8 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		const q = `
-			INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, build_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, build_id, run_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			ON CONFLICT (prime_id, block_number, block_version, processing_version, synced_at) DO NOTHING
 		`
 
@@ -116,6 +119,7 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 				d.BlockVersion,
 				d.SyncedAt,
 				int(r.buildID),
+				r.runID,
 			)
 		}
 

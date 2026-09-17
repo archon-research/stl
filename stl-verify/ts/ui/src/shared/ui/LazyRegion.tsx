@@ -150,7 +150,7 @@ const regionErrorFallback =
       {...copy}
       error={error}
       onReset={resetError}
-      resetKey={resetKey}
+      resetKey={resetKey ?? null}
     />
   );
 

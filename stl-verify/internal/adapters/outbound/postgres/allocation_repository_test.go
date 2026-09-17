@@ -220,14 +220,14 @@ func TestBuildInsertArgs_UnderlyingValueUsesAssetDecimals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildInsertArgs: %v", err)
 	}
-	underlying := args[14].(pgtype.Numeric) // $15
+	underlying := args[15].(pgtype.Numeric) // $16
 	if !underlying.Valid {
 		t.Fatal("underlying_value must be non-NULL")
 	}
 	if underlying.Exp != -6 {
 		t.Fatalf("underlying_value Exp = %d, want -6 (asset decimals, not share decimals)", underlying.Exp)
 	}
-	if got := args[15].(*int64); got == nil || *got != 77 { // $16
+	if got := args[16].(*int64); got == nil || *got != 77 { // $17
 		t.Fatalf("underlying_token_id = %v, want 77", got)
 	}
 }
@@ -297,13 +297,13 @@ func TestBuildInsertArgs_TransferParties(t *testing.T) {
 			if err != nil {
 				t.Fatalf("buildInsertArgs: %v", err)
 			}
-			gotFrom, ok := args[16].([]byte) // $17
-			if !ok {
-				t.Fatalf("expected args[16] to be []byte, got %T", args[16])
-			}
-			gotTo, ok := args[17].([]byte) // $18
+			gotFrom, ok := args[17].([]byte) // $18
 			if !ok {
 				t.Fatalf("expected args[17] to be []byte, got %T", args[17])
+			}
+			gotTo, ok := args[18].([]byte) // $19
+			if !ok {
+				t.Fatalf("expected args[18] to be []byte, got %T", args[18])
 			}
 			if !bytes.Equal(gotFrom, tt.wantFrom) {
 				t.Errorf("from_address = %x, want %x", gotFrom, tt.wantFrom)
@@ -328,10 +328,10 @@ func TestBuildInsertArgs_NilUnderlyingWritesBothNull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildInsertArgs: %v", err)
 	}
-	if args[14].(pgtype.Numeric).Valid {
+	if args[15].(pgtype.Numeric).Valid {
 		t.Fatal("underlying_value must be NULL when no valuation")
 	}
-	if args[15].(*int64) != nil {
+	if args[16].(*int64) != nil {
 		t.Fatal("underlying_token_id must be NULL when no valuation")
 	}
 }

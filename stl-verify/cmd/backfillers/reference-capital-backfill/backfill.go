@@ -11,11 +11,11 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/skydata"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/reference_capital_backfill"
 )
 
@@ -129,9 +129,9 @@ func (a *backfillActivities) Backfill(ctx context.Context, daysAgo int) ([]strin
 }
 
 func newBackfillActivities(ctx context.Context, deps temporal.Dependencies) (*backfillActivities, error) {
-	buildReg, err := buildregistry.New(ctx, deps.Pool)
+	buildReg, runID, err := writerrun.Open(ctx, deps.Pool)
 	if err != nil {
-		return nil, fmt.Errorf("registering build: %w", err)
+		return nil, err
 	}
 
 	txm, err := postgres.NewTxManager(deps.Pool, deps.Logger)
@@ -153,7 +153,7 @@ func newBackfillActivities(ctx context.Context, deps temporal.Dependencies) (*ba
 	}
 
 	primeRepo := postgres.NewPrimeRepository(deps.Pool)
-	sheetRepo := postgres.NewPrimeBalanceSheetRepository(deps.Pool, txm, deps.Logger)
+	sheetRepo := postgres.NewPrimeBalanceSheetRepository(deps.Pool, txm, deps.Logger, runID)
 	buildID := int(buildReg.BuildID())
 	logger := deps.Logger
 	if logger == nil {

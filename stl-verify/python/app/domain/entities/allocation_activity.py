@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
+from app.domain.entities.allocation import ActivityDirection
+
 
 @dataclass(frozen=True)
 class AllocationActivityEvent:
@@ -13,7 +15,7 @@ class AllocationActivityEvent:
     protocol_name: str | None
     token_id: int
     token_symbol: str | None
-    action_type: str
+    action_type: ActivityDirection
     tx_amount: Decimal
     balance: Decimal
     tx_hash: str | None

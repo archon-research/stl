@@ -104,7 +104,7 @@ it with `jq`, which rejects JSONC.
   `422`, so the handlers that need a miss to fail — both `/v1/tokens/{chain_id}/{token_address}`
   reads, `/v1/risk/{chain_id}/{token_address}/breakdown`, `/v1/risk/rrc`, and all
   five per-prime reads (`allocations`, `risk-capital`, `exposure`,
-  `total-capital`, `debt`, which also `400`s on `reference` without `aggregate`)
+  `total-capital`, `debt`, which also `400`s on `reference` without `aggregation_method`)
   — answer through `response.untyped(...)`. That records the gap in the document
   rather than pretending every id resolves. Closing it belongs in the Python
   response models. A 404 there means "not a prime": a real proxy that holds

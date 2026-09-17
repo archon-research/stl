@@ -162,7 +162,7 @@ STL Verify should feel like an operations desk built for sustained concentration
 
 The visual system favors practical rhythm over decorative flourish. High-value metrics, filters, and tables are separated through spacing cadence and tonal layers, while interaction states stay quiet until users need to act. The interface rejects ornamental gradients, novelty controls, and high-chroma noise that competes with risk signals.
 
-Token provenance for this spec comes from `@archon-research/design-system/panda-preset`, which owns the surface, border, text, interactive, `bg.*`, `categorical.*`, `chart.*`, `overlay.*`, `zIndex`, shadow, and scrollbar semantic ramps. `stl-verify/ts/ui/panda.config.ts` has **no `theme.extend` block at all**: it shadows nothing, and the one token it used to add locally (`bg.neutral`) now ships in the preset. Every hex in the frontmatter below is a resolved value read out of `npx panda cssgen` output, not a hand-maintained copy; regenerate and re-read after any preset upgrade.
+Token provenance for this spec comes from `@archon-research/design-system/panda-preset`, which owns the surface, border, text, interactive, `bg.*`, `categorical.*`, `chart.*`, `overlay.*`, `zIndex`, `borderWidths`, shadow, and scrollbar semantic ramps. `stl-verify/ts/ui/panda.config.ts` has **no `theme.extend` block at all**: it shadows nothing, and the one token it used to add locally (`bg.neutral`) now ships in the preset. Every hex in the frontmatter below is a resolved value read out of `npx panda cssgen` output, not a hand-maintained copy; regenerate and re-read after any preset upgrade.
 
 **Do not re-add local overrides of preset tokens.** A local copy silently reverts upstream token fixes: the previous config redefined `surface.default` to `gray.950` in dark mode, which made a raised panel the darkest thing on the page and inverted the elevation ramp.
 
@@ -226,14 +226,16 @@ Two forms, and the distinction matters: props the package owns (`buildChartTheme
 ### Overlays and layering
 `overlay.backdrop` (scrims) and `overlay.tooltip` (always-dark floating fills, paired with `text.inverse`) come from the preset, as does `shadows.overlay` for floating-overlay elevation. Layer with the preset's `zIndex` scale — `dropdown`/`sticky`/`overlay`/`modal`/`popover`/`toast`/`tooltip` — never a hand-picked number.
 
+Border widths come from the preset's `borderWidths` scale — `none` (0), `hairline` (1px), `strong` (2px), `accent` (3px) — never a raw length. Under `strictTokens` a raw `'1px'` is a type error, so the scale is enforced rather than merely recommended. Two sites still size a *decorative rule* with an arbitrary `[1px]` width/height (`RiskDetailDrawer`, `SettingsMenu`); those are lengths, not border widths, and the spacing scale's smallest step is 2px, so no token expresses them.
+
 ### Named Rules
 **The Signal Budget Rule.** In styles this app writes, accent blue is used only when an element is actionable, selected, or needs immediate operator attention. A row hover is not one of those — that is `surface.hover`. Preset recipes make their own call; do not "correct" them from the outside.
 
 ## Typography
 
-**Display Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif  
-**Body Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif  
-**Label Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif  
+**Display Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif
+**Body Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif
+**Label Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif
 **Mono Font** (`fonts.mono`, used for every on-chain address and hash): `ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace`
 
 **Character:** Utility-first and technically neutral. Typography supports quick parsing with minimal personality overhead.
@@ -349,7 +351,6 @@ Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears
 
 `npm run doctor` (`uikit-cli doctor --codegen`) runs in `ts-ci.yml` after codegen. It has three checks: an unresolved-token scan over colour-ish declarations, a roleless-`colorPalette` scan, and a "`staticCss` is wired at all" gate. Everything else in the silently-dropped-CSS class is held by the conventions above, not by a tool.
 
-The roleless-`colorPalette` check ships with the 0.10.0 CLI. Until this repo's `@archon-research/uikit-cli` pin moves off 0.9.0, a local `npm run doctor` reports two checks, not three — the table below describes the 0.10.0 target state.
 
 | mechanism | caught |
 | --- | --- |

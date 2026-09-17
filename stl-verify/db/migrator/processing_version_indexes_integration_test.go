@@ -277,6 +277,18 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 				{`"timestamp"`, "timestamptz", ts},
 			},
 		},
+		{
+			tableName:     "asset_price",
+			indexName:     "idx_asset_price_pv_lookup",
+			indexFragment: `(asset_id, source_id, "timestamp", processing_version DESC)`,
+			segmentby:     "asset_id",
+			orderby:       `"timestamp" DESC,processing_version DESC`,
+			keyColumns: []processingVersionKeyColumn{
+				{"asset_id", "bigint", "1"},
+				{"source_id", "smallint", "1"},
+				{`"timestamp"`, "timestamptz", ts},
+			},
+		},
 	}
 }
 
@@ -762,8 +774,8 @@ func upsertFixturePrime(t *testing.T, ctx context.Context, pool *pgxpool.Pool) i
 
 	var id int64
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO prime (name, vault_address)
-		VALUES ('pv-plan-cache-fixture', '\xdeadbeef00000000000000000000000000000001')
+		INSERT INTO prime (external_id, name, vault_address)
+		VALUES (gen_random_uuid(), 'pv-plan-cache-fixture', '\xdeadbeef00000000000000000000000000000001')
 		ON CONFLICT (name) DO UPDATE SET vault_address = EXCLUDED.vault_address
 		RETURNING id`).Scan(&id); err != nil {
 		t.Fatalf("upsert fixture prime: %v", err)
@@ -913,5 +925,12 @@ func processingVersionSeedStatements() []string {
 			INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, processing_version, build_id)
 			SELECT 1, 1, %s, 1, 0, 0
 			FROM generate_series(1, $1) AS g`, tsExpr),
+		// asset_price chunks by 30 days, not 1 day, so the shared 5-day
+		// spread would land in one chunk. Stride one chunk interval every fifth
+		// row instead; the probe timestamp (2035-01-03) sits inside the first.
+		`
+			INSERT INTO asset_price (asset_id, source_id, timestamp, price_usd, processing_version, build_id)
+			SELECT 1, 1, timestamptz '2035-01-01 00:00:00+00' + ((g % 5) * interval '30 days') + (g * interval '1 second'), 1, 0, 0
+			FROM generate_series(1, $1) AS g`,
 	}
 }

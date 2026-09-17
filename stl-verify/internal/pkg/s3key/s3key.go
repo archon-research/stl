@@ -6,6 +6,7 @@
 package s3key
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -99,4 +100,131 @@ func validDataType(dt DataType) bool {
 		return true
 	}
 	return false
+}
+
+// HeightPrefix is the key prefix every object for one height shares, for a
+// listing narrowed to that height. The trailing underscore is what keeps a
+// longer height sharing the partition — 10 against 1 — out of the listing.
+func HeightPrefix(blockNumber int64) string {
+	return fmt.Sprintf("%s/%d_", partition.GetPartition(blockNumber), blockNumber)
+}
+
+// PartitionPrefix is the key prefix every object in one partition shares, for a
+// listing of the whole partition.
+func PartitionPrefix(partitionStr string) string {
+	return partitionStr + "/"
+}
+
+// ErrUnrecognisedKey marks an object whose name carries no
+// {blockNumber}_{version}_ stem. Nothing under an archive prefix should look
+// like that, and a caller cannot tell whether such an object occupies a version,
+// so it stops rather than plan around a slot it cannot read.
+var ErrUnrecognisedKey = errors.New("archive key carries no {blockNumber}_{version}_ stem")
+
+// Occupancy is what a listing holds at one height: the highest version any
+// object carries, and the data types stored under that version that this binary
+// recognises. An object of a type added after this binary shipped occupies its
+// version without appearing in DataTypes.
+type Occupancy struct {
+	Version   int
+	DataTypes map[DataType]bool
+}
+
+// slot is the height and version an object occupies, whatever it stores there.
+type slot struct {
+	Partition   string
+	BlockNumber int64
+	Version     int
+	DataType    DataType
+}
+
+// parseSlot reads the {blockNumber}_{version}_ stem every archived object's name
+// starts with. What follows decides DataType only: a suffix this binary does not
+// know leaves it empty, because occupancy is the stem's business and the version
+// is taken either way.
+func parseSlot(key string) (slot, bool) {
+	slash := strings.LastIndex(key, "/")
+	if slash < 0 {
+		return slot{}, false
+	}
+	parts := strings.SplitN(key[slash+1:], "_", 3)
+	if len(parts) != 3 || parts[2] == "" {
+		return slot{}, false
+	}
+
+	blockNumber, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || blockNumber < 0 {
+		return slot{}, false
+	}
+	version, err := strconv.Atoi(parts[1])
+	if err != nil || version < 0 {
+		return slot{}, false
+	}
+
+	found := slot{Partition: key[:slash], BlockNumber: blockNumber, Version: version}
+	if stem, ok := strings.CutSuffix(parts[2], suffix); ok && validDataType(DataType(stem)) {
+		found.DataType = DataType(stem)
+	}
+	return found, true
+}
+
+// Occupancies folds listed keys into what each height holds. A key filed under a
+// partition that is not its own height's is ignored; one this package cannot
+// read at all fails, naming the key.
+func Occupancies(keys []string) (map[int64]Occupancy, error) {
+	index := make(map[int64]Occupancy)
+	for _, key := range keys {
+		parsed, ok := parseSlot(key)
+		if !ok {
+			return nil, fmt.Errorf("%q: %w", key, ErrUnrecognisedKey)
+		}
+		if parsed.Partition != partition.GetPartition(parsed.BlockNumber) {
+			continue
+		}
+
+		top, seen := index[parsed.BlockNumber]
+		switch {
+		case !seen || parsed.Version > top.Version:
+			index[parsed.BlockNumber] = Occupancy{Version: parsed.Version, DataTypes: dataTypeSet(parsed.DataType)}
+		case parsed.Version == top.Version && parsed.DataType != "":
+			top.DataTypes[parsed.DataType] = true
+		}
+	}
+	return index, nil
+}
+
+func dataTypeSet(dataType DataType) map[DataType]bool {
+	set := make(map[DataType]bool, 1)
+	if dataType != "" {
+		set[dataType] = true
+	}
+	return set
+}
+
+// FirstCorrectionVersion is the lowest version a correction may occupy: version
+// 0 is the slot being corrected.
+const FirstCorrectionVersion = 1
+
+// HighestVersion returns the highest version the given keys carry for
+// blockNumber, and whether any of them names that height at all. An object at a
+// version occupies the slot whatever it stores there, so a height archived only
+// halfway, or holding a type this binary does not know, still counts as taken.
+func HighestVersion(keys []string, blockNumber int64) (int, bool, error) {
+	index, err := Occupancies(keys)
+	if err != nil {
+		return 0, false, err
+	}
+	top, found := index[blockNumber]
+	return top.Version, found, nil
+}
+
+// NextVersion returns the version a correction for a height must be written
+// under: one past the highest version the archive already holds, and the first
+// correction slot where it holds nothing. Never 0 — that slot carries the data
+// being corrected.
+func NextVersion(highest int, found bool) int {
+	if !found {
+		return FirstCorrectionVersion
+	}
+	return max(highest+1, FirstCorrectionVersion)
 }

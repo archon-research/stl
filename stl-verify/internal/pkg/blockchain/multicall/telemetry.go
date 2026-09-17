@@ -1,10 +1,14 @@
 // telemetry.go provides OpenTelemetry instrumentation for the multicall client.
 //
 // multicall.batch.size: histogram of calls per Execute(). _count is the number
-// of multicalls (= batched S3 PUTs/sec when archiving batches per Execute),
-// _sum is the number of individual SC calls (= current per-call S3 PUTs/sec),
-// and the bucket distribution gives the worst-case burst a single Execute can
-// produce.
+// of multicalls sent to the node (a narrowed batch's halves included, so it
+// runs ahead of the archive, which writes once per batch the service asked
+// for), _sum is the number of individual SC calls, and the bucket distribution
+// gives the worst-case burst a single Execute can produce.
+//
+// multicall.batches.narrowed: batches the node could not answer whole and that
+// Narrowing re-issued in halves, by reason. No alert is attached: one trapping
+// mainnet contract keeps it permanently non-zero; watch its rate instead.
 package multicall
 
 import (
@@ -29,8 +33,9 @@ var batchSizeBuckets = []float64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000}
 // Telemetry records multicall metrics. The zero value is unusable; build with
 // NewTelemetry or NewTelemetryWithProvider.
 type Telemetry struct {
-	batchSize metric.Int64Histogram
-	chainAttr attribute.KeyValue
+	batchSize       metric.Int64Histogram
+	batchesNarrowed metric.Int64Counter
+	chainAttr       attribute.KeyValue
 }
 
 // NewTelemetry builds Telemetry against the global meter provider. chain is the
@@ -52,10 +57,25 @@ func NewTelemetryWithProvider(mp metric.MeterProvider, chain string) (*Telemetry
 	if err != nil {
 		return nil, fmt.Errorf("registering multicall.batch.size histogram: %w", err)
 	}
-	return &Telemetry{batchSize: batchSize, chainAttr: attribute.String("chain", chain)}, nil
+	batchesNarrowed, err := meter.Int64Counter(
+		"multicall.batches.narrowed",
+		metric.WithDescription("Multicall batches the node could not answer whole and that were re-issued in halves, by reason"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("registering multicall.batches.narrowed counter: %w", err)
+	}
+	return &Telemetry{
+		batchSize:       batchSize,
+		batchesNarrowed: batchesNarrowed,
+		chainAttr:       attribute.String("chain", chain),
+	}, nil
 }
 
 // RecordBatch records one multicall Execute holding size individual calls.
 func (t *Telemetry) RecordBatch(ctx context.Context, size int) {
 	t.batchSize.Record(ctx, int64(size), metric.WithAttributes(t.chainAttr))
+}
+
+func (t *Telemetry) recordNarrowed(ctx context.Context, reason narrowReason) {
+	t.batchesNarrowed.Add(ctx, 1, metric.WithAttributes(t.chainAttr, attribute.String("reason", string(reason))))
 }

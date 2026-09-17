@@ -8,9 +8,12 @@ handler).
 
 ## Tooling & commands
 
-- Hooks (lefthook): oxlint, oxfmt — both invoked through `uikit-cli`, never the
-  oxlint/oxfmt binaries by name (they are transitive deps of `uikit-cli`, not
-  declared ones).
+- Hooks (lefthook): pre-commit runs oxlint and oxfmt — both invoked through
+  `uikit-cli`, never the oxlint/oxfmt binaries by name (they are transitive deps
+  of `uikit-cli`, not declared ones). Pre-push runs `type:check`, but only when
+  the push actually carries TypeScript. A clone that predates a new hook may not
+  pick it up on its own — lefthook's sync is not reliable across hook types — so
+  run `make install-hooks` after pulling one.
 - CI (`ts-ci.yml`): `lint` + `format:check`, then panda codegen, `doctor`, the
   `test:*` regression scripts (incl. `test:mocks`), the openapi-types sync check,
   `type:check`, `build` — **source of truth**.
@@ -48,6 +51,15 @@ handler).
     `@knipignore` (see `mocks/src/problem.ts`) rather than a config line.
 - `@types/node` tracks the major in `.node-version`; bumping one without the
   other type-checks the node-side code against a runtime nobody runs.
+- `exactOptionalPropertyTypes` is **on** in both workspaces, so a new optional
+  property has to say whether it accepts an explicit `undefined`
+  (`foo?: string | undefined`) or only absence (`foo?: string`). Three or more
+  such members on one type take `Undefinable<T>`
+  (`ui/src/shared/types/optional.ts`), wrapping the optional members only.
+- `skipLibCheck` stays **on** deliberately: off, it reports 30 errors and none
+  is ours (`ts-evaluator`, `@pandacss/types`, `@ark-ui/react`, `pkg-types`,
+  `@tanstack/router-core`), so it would only ever fail on a dependency bump.
+  Noted here because the tsconfigs are strict JSON — a `check-json` hook.
 - On a fresh `npm ci`, run `npm run prepare -w ui` (panda codegen) before `npm run type:check`/`build`, else `#styled-system/*` imports fail.
 - Node ships with an older npm than `engines.npm` requires; run `corepack enable npm` once so npm resolves to the pinned version (`packageManager`).
 

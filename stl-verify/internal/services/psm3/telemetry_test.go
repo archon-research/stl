@@ -10,6 +10,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -186,4 +187,30 @@ func exerciseAll(t *testing.T, tel *Telemetry) {
 	tel.RecordSweep(ctx, time.Second, nil)
 	tel.RecordSweep(ctx, time.Second, errors.New("e"))
 	tel.RecordSnapshot(ctx, 1, sweepState())
+}
+
+// Guards the startup seed: VectorPSM3IndexerStalled reads
+// psm3_sweeps_total{status="success"} with rate()==0 and must be computable
+// from process start. See telemetry.SeedCounter.
+func TestNewTelemetry_SeedsSweepStatusSeriesAtZero(t *testing.T) {
+	_, reader := newRecordingTelemetry(t)
+
+	dps := testutil.CollectSumDataPoints(t, reader, "psm3.sweeps.total")
+	got := map[string]int64{}
+	for _, dp := range dps {
+		if chain := testutil.AttrValue(dp, "chain"); chain != "base" {
+			t.Errorf("psm3.sweeps.total chain attr = %q, want %q", chain, "base")
+		}
+		got[testutil.AttrValue(dp, "status")] = dp.Value
+	}
+	for _, status := range []string{"success", "error"} {
+		v, ok := got[status]
+		if !ok {
+			t.Errorf("psm3.sweeps.total missing status=%q series before any sweep", status)
+			continue
+		}
+		if v != 0 {
+			t.Errorf("psm3.sweeps.total{status=%q} = %d, want 0", status, v)
+		}
+	}
 }

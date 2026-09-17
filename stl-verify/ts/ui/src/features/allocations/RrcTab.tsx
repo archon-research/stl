@@ -3,6 +3,7 @@ import {
   ErrorState,
   SkeletonStack,
 } from '@archon-research/design-system';
+import { isHttpRequestError } from '@archon-research/http-client-react';
 import { useQuery } from '@tanstack/react-query';
 import { useMemo } from 'react';
 
@@ -137,7 +138,7 @@ function ResultRow({
           gap: '4',
           p: '3',
           borderRadius: 'sm',
-          borderWidth: '1px',
+          borderWidth: 'hairline',
           borderStyle: 'solid',
         }),
         // Accent is what DESIGN.md spends on a selection; the transparent border
@@ -282,6 +283,14 @@ export function RrcTab({
 
   const rrc = rrcResult.data ?? null;
   const isLoading = canLoadRrc && rrcResult.isPending;
+  // A 404 is this endpoint's by-design answer, not a failure: it fires when no
+  // model in the registry applies to the position's asset (a protocol the
+  // lending reader deliberately leaves out for want of a quantitative model),
+  // when the only applicable model has no data yet, or when the asset id is
+  // unknown. All three mean "nothing to compute here", so they get the note
+  // panel; the critical panel stays for the statuses that mean an outage.
+  const hasNoModel =
+    isHttpRequestError(rrcResult.error) && rrcResult.error.status === 404;
   const errorMessage = toQueryErrorMessage(rrcResult.error);
 
   // Which model the prime's reported requirement comes from, and Sky's figures
@@ -367,7 +376,7 @@ export function RrcTab({
           className={css({
             borderRadius: 'md',
             borderStyle: 'solid',
-            borderWidth: '1px',
+            borderWidth: 'hairline',
             borderColor: 'border.subtle',
             bg: 'surface.subtle',
             p: '4',
@@ -417,6 +426,14 @@ export function RrcTab({
     );
   }
 
+  if (hasNoModel) {
+    return (
+      <TabNotePanel
+        message={`Verify has no risk model for ${selectedReceiptToken.protocol_name ?? 'this protocol'} positions yet, so required risk capital is unavailable for this position.`}
+      />
+    );
+  }
+
   return (
     <div className={css({ display: 'grid', gap: '4' })}>
       {errorMessage ? (
@@ -446,7 +463,7 @@ export function RrcTab({
           className={css({
             borderRadius: 'md',
             borderStyle: 'solid',
-            borderWidth: '1px',
+            borderWidth: 'hairline',
             borderColor: 'border.subtle',
             bg: 'surface.subtle',
             p: '4',

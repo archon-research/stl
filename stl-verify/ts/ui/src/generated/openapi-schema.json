@@ -1,84 +1,26 @@
 {
   "components": {
     "schemas": {
-      "AllocationActivityBucketResponse": {
-        "description": "Allocation activity aggregated into a single time bucket.",
-        "properties": {
-          "bucket_start": {
-            "description": "Inclusive start of the time bucket (UTC).",
-            "format": "date-time",
-            "title": "Bucket Start",
-            "type": "string"
-          },
-          "event_count": {
-            "description": "Number of activity events in the bucket.",
-            "examples": [
-              42
-            ],
-            "title": "Event Count",
-            "type": "integer"
-          },
-          "net_flow_usd": {
-            "description": "Signed net flow valued in USD (inflows positive, outflows negative). Only receipt-token flows are valued: each is converted to underlying units at its row's share ratio (underlying_value / balance), borrowing the nearest same-token row's ratio when the row's own is unavailable and falling back to the raw tx_amount only when the token has no valued row at all, then priced at the receipt token's latest underlying oracle price. Rows whose recorded underlying diverges from the registry's are refused and contribute 0, as do direct holdings. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards.",
-            "examples": [
-              "1234567.89"
-            ],
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Net Flow Usd",
-            "type": "string"
-          },
-          "total_tx_amount": {
-            "description": "Sum of `tx_amount` across the bucket's events, serialized as a JSON string.",
-            "examples": [
-              "1234567890000000000000"
-            ],
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Total Tx Amount",
-            "type": "string"
-          }
-        },
-        "required": [
-          "bucket_start",
-          "event_count",
-          "total_tx_amount",
-          "net_flow_usd"
-        ],
-        "title": "AllocationActivityBucketResponse",
-        "type": "object"
-      },
-      "AllocationActivityEnvelope": {
-        "description": "Allocation activity response: raw events or aggregated time buckets.",
+      "AggregatedAllocationActivityEnvelope": {
+        "description": "The `mode=aggregated` arm of `AllocationActivityEnvelope`: count/sum buckets.",
         "properties": {
           "data": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/AllocationActivityResponse"
-                },
-                "type": "array"
-              },
-              {
-                "items": {
-                  "$ref": "#/components/schemas/AllocationActivityBucketResponse"
-                },
-                "type": "array"
-              }
-            ],
-            "description": "Events when `mode=raw`, count/sum buckets when `mode=aggregated`.",
-            "title": "Data"
+            "description": "Event counts and tx-amount sums per time bucket, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/AllocationActivityBucketResponse"
+            },
+            "title": "Data",
+            "type": "array"
           },
           "mode": {
-            "description": "`raw` for events, `aggregated` for time buckets.",
-            "enum": [
-              "raw",
-              "aggregated"
-            ],
+            "const": "aggregated",
+            "description": "Always `aggregated` on this arm: count/sum time buckets.",
             "title": "Mode",
             "type": "string"
           },
           "window": {
-            "$ref": "#/components/schemas/TimeSeriesWindow",
-            "description": "The window and resolution applied to this response."
+            "$ref": "#/components/schemas/ResampledTimeSeriesWindow",
+            "description": "The window and frequency applied to this response."
           }
         },
         "required": [
@@ -86,14 +28,220 @@
           "window",
           "data"
         ],
-        "title": "AllocationActivityEnvelope",
+        "title": "AggregatedAllocationActivityEnvelope",
         "type": "object"
+      },
+      "AggregatedPrimeDebtEnvelope": {
+        "description": "The `mode=aggregated` arm of `PrimeDebtEnvelope`: gap-filled value buckets.",
+        "properties": {
+          "data": {
+            "description": "Last observed debt per time bucket, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/PrimeDebtBucketResponse"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "mode": {
+            "const": "aggregated",
+            "description": "Always `aggregated` on this arm: gap-filled time buckets.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/Provenance",
+            "default": "indexed",
+            "description": "Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; `reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` on every bucket, leaving either null where that provenance reported nothing. Raw snapshots are always `indexed`."
+          },
+          "window": {
+            "$ref": "#/components/schemas/ResampledTimeSeriesWindow",
+            "description": "The window and frequency applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "AggregatedPrimeDebtEnvelope",
+        "type": "object"
+      },
+      "AggregatedProtocolEventsEnvelope": {
+        "description": "The `mode=aggregated` arm of `ProtocolEventsEnvelope`: per-bucket counts.",
+        "properties": {
+          "data": {
+            "description": "Event counts per time bucket, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/ProtocolEventBucketResponse"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "mode": {
+            "const": "aggregated",
+            "description": "Always `aggregated` on this arm: per-bucket event counts.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/ResampledTimeSeriesWindow",
+            "description": "The window and frequency applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "AggregatedProtocolEventsEnvelope",
+        "type": "object"
+      },
+      "AggregationMethod": {
+        "description": "Resampling method applied to a resampled response.\n\n``start-period``, ``period-mean`` and ``period-median`` are reserved names,\nnot accepted values.",
+        "enum": [
+          "end-period"
+        ],
+        "title": "AggregationMethod",
+        "type": "string"
+      },
+      "AllocationActivityBucketResponse": {
+        "description": "Allocation activity aggregated into a single time bucket.",
+        "properties": {
+          "balance_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Position value in USD read from each bucket's own recorded state, present only when `series=balance`. Unlike `net_flow_usd` this needs no client-side reconstruction and no anchor, so it is valid for a window that does not end at now. It is also a different measure: true mark-to-market rather than cost basis, so a share-price move on a receipt token appears here even in a bucket with no transaction, and yield accrual is included. Valued as COALESCE(underlying_value, balance) x the registry underlying's latest oracle price, refusing any row whose own underlying diverges from the registry's. Null on `series=flow`. Totals only the positions this bucket can price -- compare `priced_entity_count` with `entity_count` before treating it as complete.",
+            "examples": [
+              "3280541138.58"
+            ],
+            "title": "Balance Usd"
+          },
+          "bucket_start": {
+            "description": "Inclusive start of the time bucket (UTC).",
+            "format": "date-time",
+            "title": "Bucket Start",
+            "type": "string"
+          },
+          "entity_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How many positions the bucket knows about, present only when `series=balance`. Equal to `priced_entity_count` when the total is complete, and greater when some position could not be priced -- pricing is all-or-nothing per token, so one token without an enabled oracle makes every position in it unpriceable. Counts only positions observed at or before this bucket, so a leading bucket reports 0 rather than treating a position that does not exist yet as missing. Null on `series=flow`.",
+            "examples": [
+              58
+            ],
+            "title": "Entity Count"
+          },
+          "event_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Number of activity events in the bucket. Null on `series=balance`, which does not compute it.",
+            "examples": [
+              42
+            ],
+            "title": "Event Count"
+          },
+          "net_flow_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Signed net flow valued in USD (inflows positive, outflows negative). Only receipt-token flows are valued: each is converted to underlying units at its row's share ratio (underlying_value / balance), borrowing the nearest same-token row's ratio when the row's own is unavailable and falling back to the raw tx_amount only when the token has no valued row at all, then priced at the receipt token's latest underlying oracle price. Rows whose recorded underlying diverges from the registry's are refused and contribute 0, as do direct holdings. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards. Null on `series=balance`, which does not compute it.",
+            "examples": [
+              "1234567.89"
+            ],
+            "title": "Net Flow Usd"
+          },
+          "priced_entity_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How many of the bucket's positions `balance_usd` accounts for, present only when `series=balance`. A position counts when its most recent recorded state could be priced; one carrying only an older price, superseded by a newer state that cannot be priced, does not. Null on `series=flow`.",
+            "examples": [
+              31
+            ],
+            "title": "Priced Entity Count"
+          },
+          "total_tx_amount": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sum of `tx_amount` across the bucket's events, serialized as a JSON string. Null on `series=balance`, which does not compute it.",
+            "examples": [
+              "1234567890000000000000"
+            ],
+            "title": "Total Tx Amount"
+          }
+        },
+        "required": [
+          "bucket_start"
+        ],
+        "title": "AllocationActivityBucketResponse",
+        "type": "object"
+      },
+      "AllocationActivityEnvelope": {
+        "description": "Allocation activity response: raw events or aggregated time buckets.",
+        "discriminator": {
+          "mapping": {
+            "aggregated": "#/components/schemas/AggregatedAllocationActivityEnvelope",
+            "raw": "#/components/schemas/RawAllocationActivityEnvelope"
+          },
+          "propertyName": "mode"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RawAllocationActivityEnvelope"
+          },
+          {
+            "$ref": "#/components/schemas/AggregatedAllocationActivityEnvelope"
+          }
+        ],
+        "title": "AllocationActivityEnvelope"
       },
       "AllocationActivityResponse": {
         "description": "Allocation activity event record for timeline feeds.",
         "properties": {
           "action_type": {
-            "description": "One of `in`, `out`, `sweep`.",
+            "description": "Direction of the event.",
+            "enum": [
+              "in",
+              "out",
+              "sweep"
+            ],
             "examples": [
               "in"
             ],
@@ -342,13 +490,18 @@
           "latest_activity_action": {
             "anyOf": [
               {
+                "enum": [
+                  "in",
+                  "out",
+                  "sweep"
+                ],
                 "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "description": "Direction of the most recent activity (`in`, `out`, `sweep`), or `null`.",
+            "description": "Direction of the most recent activity, or `null`.",
             "examples": [
               "out"
             ],
@@ -564,7 +717,7 @@
                 "type": "null"
               }
             ],
-            "description": "The ALM proxy holding this position, as upstream reports it. Populated on reference rows only \u2014 the same (`network`, `receipt_token_address`/`held_token_address`) can legitimately recur under a prime's different proxy wallets, and this is what distinguishes those rows. `null` on an indexed row, which is already scoped to a single queried proxy.",
+            "description": "The ALM proxy holding this position, as upstream reports it. Populated on reference rows only, and `null` there where several of a prime's proxies hold the position: upstream reports those per wallet and they are served as one summed row. Also `null` on an indexed row, which is already scoped to a single queried proxy.",
             "examples": [
               "0x1234567890abcdef1234567890abcdef12345678"
             ],
@@ -654,6 +807,11 @@
           "model": {
             "anyOf": [
               {
+                "enum": [
+                  "suraf",
+                  "gap_sweep",
+                  "core_model"
+                ],
                 "type": "string"
               },
               {
@@ -802,6 +960,91 @@
         "title": "AllocationRiskCapitalResponse",
         "type": "object"
       },
+      "ApiErrorResponse": {
+        "description": "The body of every ``422`` on the surface, as an RFC 9457 problem detail.\n\nThe extension members below are populated on a max-points rejection and absent\notherwise, so a client can branch on ``type`` and read only what that type\npromises.",
+        "properties": {
+          "detail": {
+            "description": "Human-readable explanation of this occurrence. Never the only signal.",
+            "title": "Detail",
+            "type": "string"
+          },
+          "errors": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/FieldError"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The parameters that failed, one entry each. `invalid_request` only.",
+            "title": "Errors"
+          },
+          "max_points": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Ceiling the request exceeded. Max-points rejections only.",
+            "title": "Max Points"
+          },
+          "point_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Observations the request would return. Max-points rejections only.",
+            "title": "Point Count"
+          },
+          "status": {
+            "default": 422,
+            "description": "HTTP status of the response carrying this body.",
+            "title": "Status",
+            "type": "integer"
+          },
+          "suggestions": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RejectionSuggestions"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Ways out of the rejection. Max-points rejections only."
+          },
+          "title": {
+            "description": "Short static label for the `type`. Same across every occurrence of one type.",
+            "examples": [
+              "Too many points"
+            ],
+            "title": "Title",
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/RejectionType",
+            "description": "Stable, machine-readable rejection identifier."
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "detail"
+        ],
+        "title": "ApiErrorResponse",
+        "type": "object"
+      },
       "BadDebtResponse": {
         "description": "Estimated bad debt for a receipt-token position at a given collateral gap.",
         "example": {
@@ -942,11 +1185,23 @@
       },
       "CoreModelDetails": {
         "additionalProperties": false,
-        "description": "CORE model-specific output embedded in an RrcResult.\n\n``crr_el_pct`` is the expected-loss CRR used as the primary capital\ncharge (0-100 scale, e.g. ``Decimal(\"12.5\")`` means 12.5%).\n``hhi`` is the Herfindahl-Hirschman Index of borrower concentration\nexpressed as a percentage; ``None`` when liquidation analysis was\nnot run or the market had fewer than two borrowers.",
+        "description": "CORE model-specific output embedded in an RrcResult.\n\n``crr_el_pct`` is the expected-loss CRR used as the primary capital\ncharge (0-100 scale, e.g. ``Decimal(\"12.5\")`` means 12.5%).\n``hhi`` is the Herfindahl-Hirschman Index of borrower concentration\nexpressed as a percentage; ``None`` when liquidation analysis was\nnot run or the market had fewer than two borrowers.\n\nA direct 1:1 market result (SparkLend) leaves ``coverage_pct`` and\n``markets`` as ``None``. A Morpho vault share aggregates over the vault's\nBlue markets instead: ``crr_*_pct`` are allocation-weighted averages over\nthe covered markets plus idle liquidity at zero risk \u2014 exact for expected\nloss (linear in allocations), indicative for ES/VaR (quantiles are not\nadditive, and cross-market dependence is not modeled). ``coverage_pct`` is\nthe share of vault assets whose market has a computed result (idle counts\nas covered), ``markets`` carries the per-market slices, ``hhi`` is\n``None``, and ``forecast_step``/``n_mc`` are the minimum across slices.",
         "properties": {
           "copula_type": {
             "title": "Copula Type",
             "type": "string"
+          },
+          "coverage_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage Pct"
           },
           "crr_el_pct": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -979,6 +1234,20 @@
             ],
             "title": "Hhi"
           },
+          "markets": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/CoreModelMarketAllocation"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Markets"
+          },
           "n_mc": {
             "title": "N Mc",
             "type": "integer"
@@ -1005,6 +1274,56 @@
           "copula_type"
         ],
         "title": "CoreModelDetails",
+        "type": "object"
+      },
+      "CoreModelMarketAllocation": {
+        "additionalProperties": false,
+        "description": "One Blue market slice behind an aggregated Morpho vault-share result.\n\n``allocation_pct`` is this market's share of the vault's total assets on a\n0-100 scale. ``computed_at`` is when this market's CORE result was\ncomputed \u2014 slices of one aggregate can have different staleness.",
+        "properties": {
+          "allocation_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Allocation Pct",
+            "type": "string"
+          },
+          "computed_at": {
+            "format": "date-time",
+            "title": "Computed At",
+            "type": "string"
+          },
+          "crr_el_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr El Pct",
+            "type": "string"
+          },
+          "crr_es_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr Es Pct",
+            "type": "string"
+          },
+          "crr_var_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr Var Pct",
+            "type": "string"
+          },
+          "market_key": {
+            "title": "Market Key",
+            "type": "string"
+          },
+          "n_mc": {
+            "title": "N Mc",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "market_key",
+          "allocation_pct",
+          "crr_el_pct",
+          "crr_es_pct",
+          "crr_var_pct",
+          "n_mc",
+          "computed_at"
+        ],
+        "title": "CoreModelMarketAllocation",
         "type": "object"
       },
       "DataSourceResponse": {
@@ -1158,8 +1477,8 @@
             "description": "Provenance the series was answered from. `indexed` is STL's priced receipt-token exposure; `reference` is Sky's Star monitor as observed by STL's syncer; `both` fills `exposure_usd` and `reference_exposure_usd` on every bucket."
           },
           "window": {
-            "$ref": "#/components/schemas/TimeSeriesWindow",
-            "description": "The window and resolution applied to this response."
+            "$ref": "#/components/schemas/ResampledTimeSeriesWindow",
+            "description": "The window and frequency applied to this response."
           }
         },
         "required": [
@@ -1168,6 +1487,39 @@
           "data"
         ],
         "title": "ExposureEnvelope",
+        "type": "object"
+      },
+      "FieldError": {
+        "description": "One parameter's rejection, so a client branches per field instead of on prose.",
+        "properties": {
+          "code": {
+            "description": "Machine-readable reason code for this field.",
+            "examples": [
+              "datetime_parsing"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "field": {
+            "description": "Dotted path to the parameter, as `location.name`.",
+            "examples": [
+              "query.to_timestamp"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable reason. The submitted value is redacted out of it.",
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "code",
+          "message"
+        ],
+        "title": "FieldError",
         "type": "object"
       },
       "GapSweepDetails": {
@@ -1198,17 +1550,27 @@
         "title": "GapSweepDetails",
         "type": "object"
       },
-      "HTTPValidationError": {
+      "NarrowerWindow": {
+        "description": "A window to retry the same request over, keyed like the query parameters.\n\nScaled by the requested window's average density, so it is exact only for evenly\nspaced observations: a series clustered in this span is rejected again, with a\nfurther-narrowed suggestion.",
         "properties": {
-          "detail": {
-            "items": {
-              "$ref": "#/components/schemas/ValidationError"
-            },
-            "title": "Detail",
-            "type": "array"
+          "from_timestamp": {
+            "description": "Lower bound to retry with (UTC).",
+            "format": "date-time",
+            "title": "From Timestamp",
+            "type": "string"
+          },
+          "to_timestamp": {
+            "description": "Upper bound to retry with \u2014 the requested one (UTC).",
+            "format": "date-time",
+            "title": "To Timestamp",
+            "type": "string"
           }
         },
-        "title": "HTTPValidationError",
+        "required": [
+          "from_timestamp",
+          "to_timestamp"
+        ],
+        "title": "NarrowerWindow",
         "type": "object"
       },
       "PrimeDebtBucketResponse": {
@@ -1261,51 +1623,22 @@
       },
       "PrimeDebtEnvelope": {
         "description": "Prime debt response: raw snapshots or aggregated time buckets.",
-        "properties": {
-          "data": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/PrimeDebtSnapshotResponse"
-                },
-                "type": "array"
-              },
-              {
-                "items": {
-                  "$ref": "#/components/schemas/PrimeDebtBucketResponse"
-                },
-                "type": "array"
-              }
-            ],
-            "description": "Snapshots when `mode=raw`, value buckets when `mode=aggregated`.",
-            "title": "Data"
+        "discriminator": {
+          "mapping": {
+            "aggregated": "#/components/schemas/AggregatedPrimeDebtEnvelope",
+            "raw": "#/components/schemas/RawPrimeDebtEnvelope"
           },
-          "mode": {
-            "description": "`raw` for snapshots, `aggregated` for time buckets.",
-            "enum": [
-              "raw",
-              "aggregated"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
-          "source": {
-            "$ref": "#/components/schemas/Provenance",
-            "default": "indexed",
-            "description": "Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; `reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` on every bucket, leaving either null where that provenance reported nothing. Raw snapshots are always `indexed`."
-          },
-          "window": {
-            "$ref": "#/components/schemas/TimeSeriesWindow",
-            "description": "The window and resolution applied to this response."
-          }
+          "propertyName": "mode"
         },
-        "required": [
-          "mode",
-          "window",
-          "data"
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RawPrimeDebtEnvelope"
+          },
+          {
+            "$ref": "#/components/schemas/AggregatedPrimeDebtEnvelope"
+          }
         ],
-        "title": "PrimeDebtEnvelope",
-        "type": "object"
+        "title": "PrimeDebtEnvelope"
       },
       "PrimeDebtSnapshotResponse": {
         "description": "A single observed prime-debt position at a point in time.",
@@ -1624,6 +1957,11 @@
           "model": {
             "anyOf": [
               {
+                "enum": [
+                  "suraf",
+                  "gap_sweep",
+                  "core_model"
+                ],
                 "type": "string"
               },
               {
@@ -2064,46 +2402,22 @@
       },
       "ProtocolEventsEnvelope": {
         "description": "Protocol events response: raw rows or aggregated time buckets.",
-        "properties": {
-          "data": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/ProtocolEventResponse"
-                },
-                "type": "array"
-              },
-              {
-                "items": {
-                  "$ref": "#/components/schemas/ProtocolEventBucketResponse"
-                },
-                "type": "array"
-              }
-            ],
-            "description": "Events when `mode=raw`, count buckets when `mode=aggregated`.",
-            "title": "Data"
+        "discriminator": {
+          "mapping": {
+            "aggregated": "#/components/schemas/AggregatedProtocolEventsEnvelope",
+            "raw": "#/components/schemas/RawProtocolEventsEnvelope"
           },
-          "mode": {
-            "description": "`raw` for events, `aggregated` for time buckets.",
-            "enum": [
-              "raw",
-              "aggregated"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
-          "window": {
-            "$ref": "#/components/schemas/TimeSeriesWindow",
-            "description": "The window and resolution applied to this response."
-          }
+          "propertyName": "mode"
         },
-        "required": [
-          "mode",
-          "window",
-          "data"
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RawProtocolEventsEnvelope"
+          },
+          {
+            "$ref": "#/components/schemas/AggregatedProtocolEventsEnvelope"
+          }
         ],
-        "title": "ProtocolEventsEnvelope",
-        "type": "object"
+        "title": "ProtocolEventsEnvelope"
       },
       "ProtocolResponse": {
         "description": "A protocol (lender, AMM, etc.) that STL classifies positions against.",
@@ -2183,6 +2497,193 @@
           "reference_upstream_reachable"
         ],
         "title": "ProvenanceAvailabilityResponse",
+        "type": "object"
+      },
+      "RawAllocationActivityEnvelope": {
+        "description": "The `mode=raw` arm of `AllocationActivityEnvelope`: activity event rows.",
+        "properties": {
+          "data": {
+            "description": "Activity events, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/AllocationActivityResponse"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "mode": {
+            "const": "raw",
+            "description": "Always `raw` on this arm: activity event rows.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/TimeSeriesWindow",
+            "description": "The window applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "RawAllocationActivityEnvelope",
+        "type": "object"
+      },
+      "RawPrimeDebtEnvelope": {
+        "description": "The `mode=raw` arm of `PrimeDebtEnvelope`: observed debt snapshots.",
+        "properties": {
+          "data": {
+            "description": "Observed debt snapshots, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/PrimeDebtSnapshotResponse"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "mode": {
+            "const": "raw",
+            "description": "Always `raw` on this arm: observed debt snapshots.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/Provenance",
+            "default": "indexed",
+            "description": "Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; `reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` on every bucket, leaving either null where that provenance reported nothing. Raw snapshots are always `indexed`."
+          },
+          "window": {
+            "$ref": "#/components/schemas/TimeSeriesWindow",
+            "description": "The window applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "RawPrimeDebtEnvelope",
+        "type": "object"
+      },
+      "RawProtocolEventsEnvelope": {
+        "description": "The `mode=raw` arm of `ProtocolEventsEnvelope`: decoded event rows.",
+        "properties": {
+          "data": {
+            "description": "Decoded events, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/ProtocolEventResponse"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "mode": {
+            "const": "raw",
+            "description": "Always `raw` on this arm: decoded event rows.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/TimeSeriesWindow",
+            "description": "The window applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "RawProtocolEventsEnvelope",
+        "type": "object"
+      },
+      "RejectionSuggestions": {
+        "description": "The ways out of a max-points rejection, each a complete set of query parameters.\n\nGrouped and keyed to match the request so a client merges one of them into the\nparameters it sent, with no key to rename or trim. The two are alternatives, not\na set: taking both narrows a window that the frequency alone would have served\nin full.",
+        "properties": {
+          "narrower_window": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NarrowerWindow"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Absent once the scaled span rounds below a second."
+          },
+          "resampled": {
+            "$ref": "#/components/schemas/ResampledRetry",
+            "description": "Grid that fits the window as asked."
+          }
+        },
+        "required": [
+          "resampled"
+        ],
+        "title": "RejectionSuggestions",
+        "type": "object"
+      },
+      "RejectionType": {
+        "description": "Every ``type`` the surface can put on a 422, closed so a client can be exhaustive.\n\nAn enum rather than a free string: this is the member a caller branches on, and\npublishing the closed set is what lets a generated TS client fail to compile when\na new rejection appears rather than fall through its `switch`. ``INVALID_REQUEST``\ncovers every rejection FastAPI raises before a route is reached \u2014 the branch is the\nsame either way, and which parameter failed is in ``errors``.",
+        "enum": [
+          "invalid_request",
+          "invalid_time_range",
+          "timestamp_out_of_range",
+          "window_too_large",
+          "frequency_too_fine",
+          "frequency_requires_aggregation_method",
+          "max_points_exceeded"
+        ],
+        "title": "RejectionType",
+        "type": "string"
+      },
+      "ResampledRetry": {
+        "description": "A frequency to retry the same window on, keyed like the query parameters.\n\nFits the window as asked, so unlike ``narrower_window`` it needs no second round\ntrip and returns the whole span the caller requested.",
+        "properties": {
+          "aggregation_method": {
+            "$ref": "#/components/schemas/AggregationMethod",
+            "description": "Method to cut on that grid. A frequency without one is itself a rejection."
+          },
+          "frequency": {
+            "$ref": "#/components/schemas/TimeSeriesFrequency",
+            "description": "Grid to resample onto."
+          }
+        },
+        "required": [
+          "frequency",
+          "aggregation_method"
+        ],
+        "title": "ResampledRetry",
+        "type": "object"
+      },
+      "ResampledTimeSeriesWindow": {
+        "description": "The window echo for a resampled response, naming the grid it sits on.\n\nA default-frequency response carries the points at their stored frequency,\nso it echoes the bare window above \u2014 a frequency there would name a grid the\npoints are not on, and a `null` would still put the key on the wire.",
+        "properties": {
+          "frequency": {
+            "$ref": "#/components/schemas/TimeSeriesFrequency",
+            "description": "Resampled grid the points sit on."
+          },
+          "frequency_ms": {
+            "description": "`frequency` in milliseconds.",
+            "title": "Frequency Ms",
+            "type": "integer"
+          },
+          "from_timestamp": {
+            "description": "Inclusive lower bound applied (UTC).",
+            "format": "date-time",
+            "title": "From Timestamp",
+            "type": "string"
+          },
+          "to_timestamp": {
+            "description": "Inclusive upper bound applied (UTC).",
+            "format": "date-time",
+            "title": "To Timestamp",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from_timestamp",
+          "to_timestamp",
+          "frequency",
+          "frequency_ms"
+        ],
+        "title": "ResampledTimeSeriesWindow",
         "type": "object"
       },
       "RiskBreakdownItemResponse": {
@@ -2621,8 +3122,8 @@
         "title": "SurafDetails",
         "type": "object"
       },
-      "TimeSeriesResolution": {
-        "description": "Allowed ISO-8601 durations for time-series downsampling.",
+      "TimeSeriesFrequency": {
+        "description": "Allowed ISO-8601 durations for time-series resampling.",
         "enum": [
           "PT1M",
           "PT5M",
@@ -2631,26 +3132,17 @@
           "PT6H",
           "P1D"
         ],
-        "title": "TimeSeriesResolution",
+        "title": "TimeSeriesFrequency",
         "type": "string"
       },
       "TimeSeriesWindow": {
-        "description": "The resolved window and resolution actually applied to a request.\n\nEchoing this back lets consumers distinguish an empty result caused by the\nwindow from one caused by the absence of data.",
+        "description": "The resolved window applied to a request.\n\nEchoing this back lets consumers distinguish an empty result caused by the\nwindow from one caused by the absence of data.",
         "properties": {
           "from_timestamp": {
             "description": "Inclusive lower bound applied (UTC).",
             "format": "date-time",
             "title": "From Timestamp",
             "type": "string"
-          },
-          "interval_ms": {
-            "description": "Resolution width in milliseconds.",
-            "title": "Interval Ms",
-            "type": "integer"
-          },
-          "resolution": {
-            "$ref": "#/components/schemas/TimeSeriesResolution",
-            "description": "Resolution applied (relevant when aggregated)."
           },
           "to_timestamp": {
             "description": "Inclusive upper bound applied (UTC).",
@@ -2661,9 +3153,7 @@
         },
         "required": [
           "from_timestamp",
-          "to_timestamp",
-          "resolution",
-          "interval_ms"
+          "to_timestamp"
         ],
         "title": "TimeSeriesWindow",
         "type": "object"
@@ -3054,8 +3544,8 @@
             "description": "Provenance the series was answered from. `indexed` is the on-chain SubProxy treasury; `reference` is Sky's Star monitor as observed by STL's syncer; `both` fills `total_capital_usd` and `reference_total_capital_usd` on every bucket, leaving either null where that provenance reported nothing."
           },
           "window": {
-            "$ref": "#/components/schemas/TimeSeriesWindow",
-            "description": "The window and resolution applied to this response."
+            "$ref": "#/components/schemas/ResampledTimeSeriesWindow",
+            "description": "The window and frequency applied to this response."
           }
         },
         "required": [
@@ -3064,46 +3554,6 @@
           "data"
         ],
         "title": "TotalCapitalEnvelope",
-        "type": "object"
-      },
-      "ValidationError": {
-        "properties": {
-          "ctx": {
-            "title": "Context",
-            "type": "object"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "loc": {
-            "items": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                }
-              ]
-            },
-            "title": "Location",
-            "type": "array"
-          },
-          "msg": {
-            "title": "Message",
-            "type": "string"
-          },
-          "type": {
-            "title": "Error Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "loc",
-          "msg",
-          "type"
-        ],
-        "title": "ValidationError",
         "type": "object"
       }
     }
@@ -3117,7 +3567,7 @@
   "paths": {
     "/v1/allocations/activity": {
       "get": {
-        "description": "Retrieve allocation activity events with optional filters, inside a `{mode, window, data}` envelope. All filters are optional and combine with logical AND. `protocol_name` and `token_symbol` use case-insensitive substring matching; the rest are exact matches. Results are time-windowed (default last 24h) and ordered newest first. Set `aggregate=true` for per-bucket event counts and tx-amount sums.",
+        "description": "Retrieve allocation activity events with optional filters, inside a `{mode, window, data}` envelope. All filters are optional and combine with logical AND. `protocol_name` and `token_symbol` use case-insensitive substring matching; the rest are exact matches. Results are time-windowed (default last 24h) and ordered newest first. Set `aggregation_method=end-period` for per-bucket event counts and tx-amount sums.",
         "operationId": "list_allocation_activity_v1_allocations_activity_get",
         "parameters": [
           {
@@ -3261,6 +3711,22 @@
             }
           },
           {
+            "description": "Which aggregated series to return. `flow` (default) keeps the existing behaviour: event counts, tx-amount sums and signed USD net flow, from which a client reconstructs a balance by anchoring at the current total. `balance` returns `balance_usd` read directly from each bucket's recorded state \u2014 substantially cheaper, valid for windows that do not end at now, and mark-to-market rather than cost basis. Ignored unless `aggregation_method=end-period`.",
+            "in": "query",
+            "name": "series",
+            "required": false,
+            "schema": {
+              "default": "flow",
+              "description": "Which aggregated series to return. `flow` (default) keeps the existing behaviour: event counts, tx-amount sums and signed USD net flow, from which a client reconstructs a balance by anchoring at the current total. `balance` returns `balance_usd` read directly from each bucket's recorded state \u2014 substantially cheaper, valid for windows that do not end at now, and mark-to-market rather than cost basis. Ignored unless `aggregation_method=end-period`.",
+              "enum": [
+                "flow",
+                "balance"
+              ],
+              "title": "Series",
+              "type": "string"
+            }
+          },
+          {
             "description": "Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`.",
             "in": "query",
             "name": "from_timestamp",
@@ -3299,33 +3765,39 @@
             }
           },
           {
-            "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
+            "description": "ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always validated against the window's floor, and rejected without an `aggregation_method` to cut on it. Defaults to the finest frequency the window allows.",
             "in": "query",
-            "name": "resolution",
+            "name": "frequency",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "$ref": "#/components/schemas/TimeSeriesResolution"
+                  "$ref": "#/components/schemas/TimeSeriesFrequency"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
-              "title": "Resolution"
+              "description": "ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always validated against the window's floor, and rejected without an `aggregation_method` to cut on it. Defaults to the finest frequency the window allows.",
+              "title": "Frequency"
             }
           },
           {
-            "description": "When true, return time-bucketed aggregates instead of raw rows.",
+            "description": "Resampling method for the returned grid. Supplying it returns a resampled series; omitting it returns the series at its stored frequency. `end-period` is the only accepted value.",
             "in": "query",
-            "name": "aggregate",
+            "name": "aggregation_method",
             "required": false,
             "schema": {
-              "default": false,
-              "description": "When true, return time-bucketed aggregates instead of raw rows.",
-              "title": "Aggregate",
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/AggregationMethod"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Resampling method for the returned grid. Supplying it returns a resampled series; omitting it returns the series at its stored frequency. `end-period` is the only accepted value.",
+              "title": "Aggregation Method"
             }
           }
         ],
@@ -3344,11 +3816,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Allocation activity feed",
@@ -3375,6 +3847,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List supported chains",
@@ -3397,6 +3879,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List registered data sources",
@@ -3423,6 +3915,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List all primes",
@@ -3505,11 +4007,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List a prime's current allocations",
@@ -3520,16 +4022,16 @@
     },
     "/v1/primes/{prime_id}/debt": {
       "get": {
-        "description": "Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregate=true` for the last debt value per time bucket (gap-filled). Pass `source=reference` (with `aggregate=true`) for Sky's own reported debt instead of the on-chain per-ilk figure, or `source=both` to carry each in its own field on every bucket; `source` reports which provenance answered.",
+        "description": "Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregation_method=end-period` for the last debt value per time bucket (gap-filled). Pass `source=reference` (with `aggregation_method=end-period`) for Sky's own reported debt instead of the on-chain per-ilk figure, or `source=both` to carry each in its own field on every bucket; `source` reports which provenance answered.",
         "operationId": "list_prime_debt_snapshots_v1_primes__prime_id__debt_get",
         "parameters": [
           {
-            "description": "Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses \u2014 this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`.",
+            "description": "Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses \u2014 this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`. Results are whole-prime: passing a proxy address returns the entire prime, including the chains that proxy has nothing to do with.",
             "in": "path",
             "name": "prime_id",
             "required": true,
             "schema": {
-              "description": "Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses \u2014 this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`.",
+              "description": "Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses \u2014 this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`. Results are whole-prime: passing a proxy address returns the entire prime, including the chains that proxy has nothing to do with.",
               "title": "Prime Id",
               "type": "string"
             }
@@ -3587,33 +4089,39 @@
             }
           },
           {
-            "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
+            "description": "ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always validated against the window's floor, and rejected without an `aggregation_method` to cut on it. Defaults to the finest frequency the window allows.",
             "in": "query",
-            "name": "resolution",
+            "name": "frequency",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "$ref": "#/components/schemas/TimeSeriesResolution"
+                  "$ref": "#/components/schemas/TimeSeriesFrequency"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
-              "title": "Resolution"
+              "description": "ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always validated against the window's floor, and rejected without an `aggregation_method` to cut on it. Defaults to the finest frequency the window allows.",
+              "title": "Frequency"
             }
           },
           {
-            "description": "When true, return time-bucketed aggregates instead of raw rows.",
+            "description": "Resampling method for the returned grid. Supplying it returns a resampled series; omitting it returns the series at its stored frequency. `end-period` is the only accepted value.",
             "in": "query",
-            "name": "aggregate",
+            "name": "aggregation_method",
             "required": false,
             "schema": {
-              "default": false,
-              "description": "When true, return time-bucketed aggregates instead of raw rows.",
-              "title": "Aggregate",
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/AggregationMethod"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Resampling method for the returned grid. Supplying it returns a resampled series; omitting it returns the series at its stored frequency. `end-period` is the only accepted value.",
+              "title": "Aggregation Method"
             }
           },
           {
@@ -3670,11 +4178,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List prime debt snapshots",
@@ -3685,7 +4193,7 @@
     },
     "/v1/primes/{prime_id}/exposure": {
       "get": {
-        "description": "Return the prime's priced receipt-token exposure over time, gap-filled (LOCF) into buckets. Per bucket, each receipt-token position's carried-forward balance is valued at the latest underlying oracle price and summed (the current `balance * price` exposure extended over time). Direct (non-receipt-token) holdings are excluded, matching the risk-capital exposure basis. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.",
+        "description": "Return the prime's priced receipt-token exposure over time, gap-filled (LOCF) into buckets. Per bucket, each receipt-token position's carried-forward balance is valued at the latest underlying oracle price and summed (the current `balance * price` exposure extended over time). Direct (non-receipt-token) holdings are excluded, matching the risk-capital exposure basis. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `frequency` for longer ranges.",
         "operationId": "list_prime_exposure_v1_primes__prime_id__exposure_get",
         "parameters": [
           {
@@ -3752,33 +4260,40 @@
             }
           },
           {
-            "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
+            "description": "ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always validated against the window's floor, and rejected without an `aggregation_method` to cut on it. Defaults to the finest frequency the window allows.",
             "in": "query",
-            "name": "resolution",
+            "name": "frequency",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "$ref": "#/components/schemas/TimeSeriesResolution"
+                  "$ref": "#/components/schemas/TimeSeriesFrequency"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
-              "title": "Resolution"
+              "description": "ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always validated against the window's floor, and rejected without an `aggregation_method` to cut on it. Defaults to the finest frequency the window allows.",
+              "title": "Frequency"
             }
           },
           {
-            "description": "When true, return time-bucketed aggregates instead of raw rows.",
+            "description": "Resampling method for the returned grid. This route only serves a resampled series, so omitting it applies `end-period`, the only accepted value.",
             "in": "query",
-            "name": "aggregate",
+            "name": "aggregation_method",
             "required": false,
             "schema": {
-              "default": false,
-              "description": "When true, return time-bucketed aggregates instead of raw rows.",
-              "title": "Aggregate",
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/AggregationMethod"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "end-period",
+              "description": "Resampling method for the returned grid. This route only serves a resampled series, so omitting it applies `end-period`, the only accepted value.",
+              "title": "Aggregation Method"
             }
           },
           {
@@ -3835,11 +4350,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Prime exposure time series",
@@ -3919,11 +4434,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Self-computed prime risk capital",
@@ -3937,7 +4452,7 @@
     },
     "/v1/primes/{prime_id}/total-capital": {
       "get": {
-        "description": "Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Wherever the response carries Sky's figures (`source=reference` or `source=both`) each bucket also carries `assets_usd` (the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.",
+        "description": "Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Wherever the response carries Sky's figures (`source=reference` or `source=both`) each bucket also carries `assets_usd` (the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `frequency` for longer ranges.",
         "operationId": "list_prime_total_capital_v1_primes__prime_id__total_capital_get",
         "parameters": [
           {
@@ -4004,33 +4519,40 @@
             }
           },
           {
-            "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
+            "description": "ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always validated against the window's floor, and rejected without an `aggregation_method` to cut on it. Defaults to the finest frequency the window allows.",
             "in": "query",
-            "name": "resolution",
+            "name": "frequency",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "$ref": "#/components/schemas/TimeSeriesResolution"
+                  "$ref": "#/components/schemas/TimeSeriesFrequency"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
-              "title": "Resolution"
+              "description": "ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always validated against the window's floor, and rejected without an `aggregation_method` to cut on it. Defaults to the finest frequency the window allows.",
+              "title": "Frequency"
             }
           },
           {
-            "description": "When true, return time-bucketed aggregates instead of raw rows.",
+            "description": "Resampling method for the returned grid. This route only serves a resampled series, so omitting it applies `end-period`, the only accepted value.",
             "in": "query",
-            "name": "aggregate",
+            "name": "aggregation_method",
             "required": false,
             "schema": {
-              "default": false,
-              "description": "When true, return time-bucketed aggregates instead of raw rows.",
-              "title": "Aggregate",
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/AggregationMethod"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "end-period",
+              "description": "Resampling method for the returned grid. This route only serves a resampled series, so omitting it applies `end-period`, the only accepted value.",
+              "title": "Aggregation Method"
             }
           },
           {
@@ -4087,11 +4609,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Prime total-capital (treasury) time series",
@@ -4103,7 +4625,7 @@
     },
     "/v1/protocol-events": {
       "get": {
-        "description": "List decoded protocol events with optional filters. Use `tx_hash` to fetch all events for a single transaction or `protocol_name` to scope to one protocol. Results are time-windowed (default last 24h) and returned newest first inside a `{mode, window, data}` envelope. Set `aggregate=true` to get per-bucket event counts.",
+        "description": "List decoded protocol events with optional filters. Use `tx_hash` to fetch all events for a single transaction or `protocol_name` to scope to one protocol. Results are time-windowed (default last 24h) and returned newest first inside a `{mode, window, data}` envelope. Set `aggregation_method=end-period` for per-bucket event counts.",
         "operationId": "list_protocol_events_v1_protocol_events_get",
         "parameters": [
           {
@@ -4195,33 +4717,39 @@
             }
           },
           {
-            "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
+            "description": "ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always validated against the window's floor, and rejected without an `aggregation_method` to cut on it. Defaults to the finest frequency the window allows.",
             "in": "query",
-            "name": "resolution",
+            "name": "frequency",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "$ref": "#/components/schemas/TimeSeriesResolution"
+                  "$ref": "#/components/schemas/TimeSeriesFrequency"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
-              "title": "Resolution"
+              "description": "ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always validated against the window's floor, and rejected without an `aggregation_method` to cut on it. Defaults to the finest frequency the window allows.",
+              "title": "Frequency"
             }
           },
           {
-            "description": "When true, return time-bucketed aggregates instead of raw rows.",
+            "description": "Resampling method for the returned grid. Supplying it returns a resampled series; omitting it returns the series at its stored frequency. `end-period` is the only accepted value.",
             "in": "query",
-            "name": "aggregate",
+            "name": "aggregation_method",
             "required": false,
             "schema": {
-              "default": false,
-              "description": "When true, return time-bucketed aggregates instead of raw rows.",
-              "title": "Aggregate",
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/AggregationMethod"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Resampling method for the returned grid. Supplying it returns a resampled series; omitting it returns the series at its stored frequency. `end-period` is the only accepted value.",
+              "title": "Aggregation Method"
             }
           }
         ],
@@ -4240,11 +4768,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List protocol events",
@@ -4271,6 +4799,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List supported protocols",
@@ -4293,6 +4831,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Provenance coverage per prime",
@@ -4313,6 +4861,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Readiness probe",
@@ -4418,11 +4976,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Risk capital (RRC) at default stress",
@@ -4460,11 +5018,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Risk capital (RRC) with scenario overrides",
@@ -4475,7 +5033,7 @@
     },
     "/v1/risk/{chain_id}/{token_address}/bad-debt": {
       "get": {
-        "description": "Estimate USD bad debt for the receipt-token position at `(chain_id, token_address)` when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`).\n\n`token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.\n\nErrors:\n- `404` if the receipt token is not found.\n- `422` if `chain_id` < 1, `token_address` is malformed, or `gap_pct` is outside `[0, 1]`.\n- `503` (`share_data_*`) if the allocation-share lookup fails.",
+        "description": "Estimate USD bad debt for the receipt-token position at `(chain_id, token_address)` when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`). The position resolves to the receipt token's largest current holder, so the estimate is that prime's and the caller needs access to it.\n\n`token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.\n\nErrors:\n- `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.\n- `422` if `chain_id` < 1, `token_address` is malformed, or `gap_pct` is outside `[0, 1]`.\n- `503` (`share_data_*`) if the allocation-share lookup fails.",
         "operationId": "get_bad_debt_by_address_v1_risk__chain_id___token_address__bad_debt_get",
         "parameters": [
           {
@@ -4545,11 +5103,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Estimate bad debt at a collateral gap (by chain id and receipt-token address)",
@@ -4560,7 +5118,7 @@
     },
     "/v1/risk/{chain_id}/{token_address}/breakdown": {
       "get": {
-        "description": "Return the full risk-enriched collateral breakdown for the receipt-token position at `(chain_id, token_address)`.\n\n`token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.\n\nPass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share); omit it for the pool-level breakdown.\n\nErrors:\n- `404` if the receipt token is not found.\n- `422` if `chain_id` < 1, `token_address` is malformed, or `prime_id` is malformed.\n- `503` (`share_data_*`) if the allocation-share lookup fails.",
+        "description": "Return the full risk-enriched collateral breakdown for the receipt-token position at `(chain_id, token_address)`.\n\n`token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.\n\nPass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share). Omitted, the position resolves to the receipt token's largest current holder, so the response is that prime's breakdown and the caller needs access to it.\n\nErrors:\n- `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.\n- `422` if `chain_id` < 1, `token_address` is malformed, or `prime_id` is malformed.\n- `503` (`share_data_*`) if the allocation-share lookup fails.",
         "operationId": "get_risk_breakdown_by_address_v1_risk__chain_id___token_address__breakdown_get",
         "parameters": [
           {
@@ -4629,11 +5187,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Risk-enriched collateral breakdown (by chain id and receipt-token address)",
@@ -4645,7 +5203,7 @@
     "/v1/risk/{receipt_token_id}/bad-debt": {
       "get": {
         "deprecated": true,
-        "description": "Estimate USD bad debt for a receipt-token position when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`).\n\n**Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/bad-debt`.\n\nErrors:\n- `404` if the receipt token is not found.\n- `422` if `gap_pct` is outside `[0, 1]`.\n- `503` (`share_data_*`) if the allocation-share lookup fails.",
+        "description": "Estimate USD bad debt for a receipt-token position when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`). The position resolves to the receipt token's largest current holder, so the estimate is that prime's and the caller needs access to it.\n\n**Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/bad-debt`.\n\nErrors:\n- `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.\n- `422` if `gap_pct` is outside `[0, 1]`.\n- `503` (`share_data_*`) if the allocation-share lookup fails.",
         "operationId": "get_bad_debt_v1_risk__receipt_token_id__bad_debt_get",
         "parameters": [
           {
@@ -4695,11 +5253,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Estimate bad debt at a collateral gap (deprecated)",
@@ -4712,7 +5270,7 @@
     "/v1/risk/{receipt_token_id}/breakdown": {
       "get": {
         "deprecated": true,
-        "description": "Return the full risk-enriched collateral breakdown for a receipt-token position: one row per backing token with amount, USD value, price, liquidation threshold, and bonus.\n\nPass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share); omit it for the pool-level breakdown.\n\n**Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/breakdown`.\n\nErrors:\n- `404` if the receipt token is not found.\n- `422` if `prime_id` is malformed.\n- `503` (`share_data_*`) if the allocation-share lookup fails.",
+        "description": "Return the full risk-enriched collateral breakdown for a receipt-token position: one row per backing token with amount, USD value, price, liquidation threshold, and bonus.\n\nPass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share). Omitted, the position resolves to the receipt token's largest current holder, so the response is that prime's breakdown and the caller needs access to it.\n\n**Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/breakdown`.\n\nErrors:\n- `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.\n- `422` if `prime_id` is malformed.\n- `503` (`share_data_*`) if the allocation-share lookup fails.",
         "operationId": "get_risk_breakdown_v1_risk__receipt_token_id__breakdown_get",
         "parameters": [
           {
@@ -4761,11 +5319,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Risk-enriched collateral breakdown (deprecated)",
@@ -4786,6 +5344,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Liveness probe",
@@ -4875,11 +5443,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "List tokens",
@@ -4938,11 +5506,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Get a token by chain id and address",
@@ -5001,11 +5569,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Get latest token price by chain id and address",
@@ -5045,11 +5613,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Get a token by id (deprecated)",
@@ -5089,11 +5657,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Get latest token price (deprecated)",
@@ -5138,11 +5706,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request rejected; branch on `type`."
           }
         },
         "summary": "Get all events for a transaction",

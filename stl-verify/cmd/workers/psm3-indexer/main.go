@@ -17,7 +17,6 @@ import (
 
 	psm3Adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
@@ -29,10 +28,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/psm3"
 )
 
-// Build-time variables - can be set via ldflags, otherwise populated from Go's build info.
 var (
 	GitCommit string
 	GitBranch string
@@ -40,7 +39,7 @@ var (
 )
 
 func init() {
-	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
+	buildinfo.Populate(&GitCommit, &GitBranch, &BuildTime)
 }
 
 func main() {
@@ -53,7 +52,7 @@ func main() {
 		cancel()
 	}()
 
-	err := run(ctx, os.Args[1:])
+	err := run(ctx, os.Args[1:], lifecycle.ForceExitAfter(lifecycle.ShutdownTailBudget))
 	cancel()
 	if err != nil {
 		slog.Error("psm3-indexer exited with error", "error", err)
@@ -63,7 +62,7 @@ func main() {
 
 // run is the entry point for the psm3-indexer.
 // It is extracted from main() to allow integration testing.
-func run(ctx context.Context, args []string) error {
+func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	fs := flag.NewFlagSet("psm3-indexer", flag.ContinueOnError)
 	dbURL := fs.String("db", env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"), "PostgreSQL connection string")
 	rpcURL := fs.String("rpc", env.Get("ETH_RPC_URL", ""), "Ethereum JSON-RPC endpoint (e.g. https://base-mainnet.g.alchemy.com/v2/<key>)")
@@ -195,9 +194,9 @@ func run(ctx context.Context, args []string) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	buildReg, err := buildregistry.New(ctx, pool)
+	buildReg, runID, err := writerrun.Open(ctx, pool)
 	if err != nil {
-		return fmt.Errorf("registering build: %w", err)
+		return err
 	}
 
 	logger.Info("starting psm3-indexer",
@@ -237,7 +236,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("tx manager: %w", err)
 	}
-	reservesRepo := postgres.NewPSM3ReservesRepository(txm, logger, buildReg.BuildID())
+	reservesRepo := postgres.NewPSM3ReservesRepository(txm, logger, buildReg.BuildID(), runID)
 
 	// PSM3 service telemetry (emits psm3_* metrics labelled by chain)
 	svcTelemetry, err := psm3.NewTelemetry(chainName)
@@ -251,7 +250,7 @@ func run(ctx context.Context, args []string) error {
 			SweepEveryNBlocks: *sweepBlocks,
 			ChainID:           chainID,
 			PSM3Address:       psm3Cfg.PSM3,
-			MaxMessages:       10,
+			MaxMessages:       1,
 			PollInterval:      100 * time.Millisecond,
 			Logger:            logger,
 			Telemetry:         svcTelemetry,
@@ -270,5 +269,5 @@ func run(ctx context.Context, args []string) error {
 		"chainID", chainID,
 	)
 
-	return lifecycle.Run(ctx, logger, svc)
+	return lifecycle.RunWithTimeoutGuard(ctx, logger, onShutdownTimeout, svc)
 }

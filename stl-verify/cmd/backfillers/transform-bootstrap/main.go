@@ -34,6 +34,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 )
 
 func main() {
@@ -74,6 +75,10 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("opening database: %w", err)
 	}
 	defer pool.Close()
+
+	if _, _, err := writerrun.Open(ctx, pool); err != nil {
+		return err
+	}
 
 	return runBootstrap(ctx, pool, from, *step, *only, logger)
 }

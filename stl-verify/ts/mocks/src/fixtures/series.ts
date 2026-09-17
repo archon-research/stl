@@ -3,14 +3,14 @@
  *
  * These are the fixtures **not** stored as literal rows. Staging's captures were
  * 96–97 buckets each, and a literal copy would answer every window and
- * `resolution` with the same 96 buckets — so `resolution=PT1H` would silently
+ * `frequency` with the same 96 buckets — so `frequency=PT1H` would silently
  * return 5-minute data and the UI's range switcher would look like it worked
  * while returning nonsense. Instead each series keeps the two real endpoints of
  * its 24h capture and interpolates the requested grid between them.
  *
  * A bucket's value is a function of **its own instant**, never of anything the
  * request asked for. Keying off the index — or off the newest bucket of this
- * response, which is where the window and the resolution leak in — would make
+ * response, which is where the window and the frequency leak in — would make
  * the same `bucket_start` return a different number at a different `limit` or
  * range, so paging or rescaling a chart would redraw it. `clock.ts` owns the
  * anchor the instants are measured from.

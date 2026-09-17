@@ -10,6 +10,11 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
+// ShutdownFlushTimeout bounds the final telemetry flush: with an unreachable
+// collector the exporters block process exit for their own defaults (10-30s
+// each). It is deferred, so it shares lifecycle.ShutdownTailBudget.
+const ShutdownFlushTimeout = 10 * time.Second
+
 // OTELConfig holds the common parameters for OTEL initialization.
 type OTELConfig struct {
 	ServiceName    string
@@ -103,10 +108,7 @@ func InitOTEL(ctx context.Context, config OTELConfig) (func(context.Context), er
 	}
 
 	return func(ctx context.Context) {
-		// Bound the final flush: with an unreachable collector the exporters
-		// would otherwise block process exit for their internal defaults
-		// (10-30s each).
-		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, ShutdownFlushTimeout)
 		defer cancel()
 		for _, fn := range shutdowns {
 			if err := fn(ctx); err != nil {

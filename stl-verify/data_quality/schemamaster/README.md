@@ -13,7 +13,7 @@ Tables checked but skipped (not governed by this register yet):
 - `migrations` — the migrator's own bookkeeping table (never governed).
 - `ref_*` — the reference layer (#515; renamed from `*_ref` by 20260722_120000); column-level cataloguing is a follow-up.
 - `curve_*` — the Curve DEX layer, added after this snapshot; cataloguing is a follow-up. The conformance check flagged these as unregistered, exactly as designed.
-- `uniswap_v3_*` — the Uniswap V3 DEX layer (VEC-261), same situation as `curve_*`; column-level cataloguing is a follow-up alongside it.
+- `uniswap_v3_*` and `uniswap_v4_*` — the Uniswap V3 (VEC-261) and V4 (VEC-475) DEX layers, same situation as `curve_*`; column-level cataloguing is a follow-up alongside them.
 - the enrichment master and resolver layer — curated append-only SCD2 masters and instrument/code resolvers, not part of the raw-to-canonical transform layer this register governs. Their columns (natural keys `processing_version`, `valid_from`, and the classification/attribute columns) are introduced by the enrichment layer, not the transform vocabulary, and are catalogued by each table's own migration `COMMENT`s. The masters carry no surrogate key: identity is the natural key `(id, processing_version)`, resolved via each `*_current` view. The specific tables are the entries in `ignore_tables` in the register itself (the authoritative list — deliberately not re-enumerated here so prose and JSON cannot drift): the security, entity, and position masters, bridges and resolvers. Each was added to `ignore_tables` by the PR that created it, for the same reason: it sits outside the transform vocabulary. Because the table is created and ignored in the same PR, there is no window in which it is a live base table the check would flag as `unregistered_table`. The per-protocol projection *views* (e.g. `position_morpho_market`) are a separate case: the check only scans live `BASE TABLE`s, so views are never seen at all.
   `position_state` (VEC-402) is **governed**, not ignored: it is an operational position table, and its rows are computed from other governed
   tables rather than ingested, so it is registered `type: derived` — per-column and nullability checks apply in full, while the required-key
@@ -29,6 +29,21 @@ Governed tables, with optional per-table governance (`type`, `owner`, `transform
 
 `transform_defer` (optional, on a `raw_pipeline` table) is a reason string marking a transform target that is intentionally not built yet (a later bucket), e.g. `"VEC-494: bucket 3 (no natural PK)"`. `CheckTransformCoverage` enforces that every `raw_pipeline` table is either **built** (has a `transformed._sources` row) or **deferred** (`transform_defer` set), never neither and never both; and that every `_sources` row maps back to a governed `raw_pipeline` table; it also flags a `transform_defer` left on a non-`raw_pipeline` table (so a defer reason cannot linger after a table's `type` changes). So a new `raw_pipeline` table cannot be added and left silently un-transformed. The integration test reads the live `_sources` rows.
 
+The combined master (VEC-617, ADR-0007) is **governed, not ignored**, unlike the frozen
+standalone masters above: `sec_node` and `sec_edge` are `dimension`, the five governed
+vocabularies (`rel_type_vocabulary`, `weight_basis_vocabulary`, `change_reason_vocabulary`,
+`concept_class_vocabulary`, `node_status_vocabulary`) are `config`. ADR-0007 §10 requires it —
+its tables are classified here from birth so ADR-0006 §1's governance and conformance tests
+apply to them like every other governed table. Three consequences worth knowing before editing
+those entries: the store's audit spine adds canonical columns the ingest vocabulary had no name
+for (`record_id`, `ingest_xid`, `actor`, `change_reason_code`, `supersedes_record_id`,
+`content_hash`, `input_lineage`, …); `src_kinds` / `dst_kinds` / `cluster_key` are canonically
+`ARRAY`, which is what `information_schema.data_type` reports for a `text[]` column; and three entries in
+`overrides` carry the deliberate type divergences — `sec_node.id` is opaque `text` against
+canonical `id`=`int8`, and both stores' `valid_from` is a UTC `date` against canonical
+`timestamptz`, because graph validity is calendar-dated (ADR-0007 §3) and joins the block-time
+dimension at the block's UTC date.
+
 A few `maple_*` entries (`maple_ftl_loan`, `maple_ftl_loan_state`, `maple_loan_meta`, `maple_pool_meta`, `maple_sky_strategy_meta`) are intentionally left untyped for now, so the required-key pass (gated on `type`) skips them, and because `CheckTransformCoverage` only walks `raw_pipeline` tables they are outside transform coverage too until typed (the gap stays visible until then); they still get the per-column, table-coverage, and nullability checks. Typing them is pending per-table classification.
 
 ### `transforms`
@@ -42,7 +57,7 @@ How a governed table obtains a canonical key it lacks natively (the transform la
 - `parent`/`key`/`ref` — single-hop FK join to the config parent.
 - `then_parent`/`then_key`/`then_ref` — a second hop (e.g. sky strategy → pool → protocol).
 - `const` — a literal.
-- `block_time` — the `(chain_id, block_number, block_version)` block-time dimension.
+- `block_time` — `block_timestamp` is not stored on the raw table; it is resolved by joining the `block_meta` dimension on `(chain_id, block_number, block_version)`.
 
 Every join is verified 0-unresolved on the live schema.
 

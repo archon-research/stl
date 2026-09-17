@@ -82,7 +82,7 @@ spec:
         },
         {
           "type": "stat",
-          "title": "Watcher block polls / min",
+          "title": "Watcher block fetches / min",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
           "gridPos": { "h": 4, "w": 5, "x": 0, "y": 1 },
           "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
@@ -97,7 +97,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[5m]))",
+            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=~\"batch|eth_getBlockByHash|eth_getBlockByNumber|eth_getBlockReceipts|trace_block\", chain=~\"$chain\"}[5m]))",
             "refId": "A",
             "legendFormat": "all chains"
           }]
@@ -195,7 +195,7 @@ spec:
         },
         {
           "type": "timeseries",
-          "title": "eth_getBlockByNumber rate per chain — VectorWatcherNoBlocks fires at 0 for 1m",
+          "title": "Block fetch rate per chain — VectorWatcherNoBlocks fires at 0 for 1m",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
           "fieldConfig": {
@@ -209,7 +209,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[1m]))",
+            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=~\"batch|eth_getBlockByHash|eth_getBlockByNumber|eth_getBlockReceipts|trace_block\", chain=~\"$chain\"}[1m]))",
             "refId": "A",
             "legendFormat": "{{chain}}"
           }]
@@ -365,7 +365,7 @@ spec:
         },
         {
           "type": "timeseries",
-          "title": "Indexer errors/s per chain — ErrorsHigh alerts fire > 0.1 for 15m",
+          "title": "Indexer errors/s per chain — diagnostic breakdown; the ErrorRatioHigh alerts fire on error/total > 0.5 with total > 0.02, for 15m",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
           "fieldConfig": {
@@ -373,8 +373,7 @@ spec:
               "unit": "reqps",
               "custom": { "fillOpacity": 10, "lineWidth": 2 },
               "thresholds": { "mode": "absolute", "steps": [
-                { "color": "green", "value": null },
-                { "color": "red", "value": 0.1 }
+                { "color": "green", "value": null }
               ] }
             }
           },
@@ -483,7 +482,7 @@ spec:
         },
         {
           "type": "stat",
-          "title": "Watcher block polls / min",
+          "title": "Watcher block fetches / min",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
           "gridPos": { "h": 4, "w": 5, "x": 0, "y": 1 },
           "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
@@ -498,7 +497,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[5m]))",
+            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=~\"batch|eth_getBlockByHash|eth_getBlockByNumber|eth_getBlockReceipts|trace_block\", chain=~\"$chain\"}[5m]))",
             "refId": "A",
             "legendFormat": "all chains"
           }]
@@ -596,7 +595,7 @@ spec:
         },
         {
           "type": "timeseries",
-          "title": "eth_getBlockByNumber rate per chain — VectorWatcherNoBlocks fires at 0 for 1m",
+          "title": "Block fetch rate per chain — VectorWatcherNoBlocks fires at 0 for 1m",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
           "fieldConfig": {
@@ -610,7 +609,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[1m]))",
+            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=~\"batch|eth_getBlockByHash|eth_getBlockByNumber|eth_getBlockReceipts|trace_block\", chain=~\"$chain\"}[1m]))",
             "refId": "A",
             "legendFormat": "{{chain}}"
           }]
@@ -766,7 +765,7 @@ spec:
         },
         {
           "type": "timeseries",
-          "title": "Indexer errors/s per chain — ErrorsHigh alerts fire > 0.1 for 15m",
+          "title": "Indexer errors/s per chain — diagnostic breakdown; the ErrorRatioHigh alerts fire on error/total > 0.5 with total > 0.02, for 15m",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
           "fieldConfig": {
@@ -774,8 +773,7 @@ spec:
               "unit": "reqps",
               "custom": { "fillOpacity": 10, "lineWidth": 2 },
               "thresholds": { "mode": "absolute", "steps": [
-                { "color": "green", "value": null },
-                { "color": "red", "value": 0.1 }
+                { "color": "green", "value": null }
               ] }
             }
           },

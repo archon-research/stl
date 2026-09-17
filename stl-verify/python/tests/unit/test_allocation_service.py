@@ -142,6 +142,7 @@ async def test_list_allocation_activity_delegates_filters_to_repository():
     # /v1/primes is built from.
     repo.list_allocation_activity.assert_awaited_once_with(
         proxy_addresses=[_VALID_ADDR, _SIBLING_ADDR],
+        allowed_vaults=None,
         chain_id=1,
         protocol_name="aave",
         action_type="in",

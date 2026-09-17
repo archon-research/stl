@@ -11,11 +11,23 @@ from app.adapters.postgres.morpho_liquidation_params_repository import (
     MorphoLiquidationParamsRepository,
 )
 from app.risk_engine.crypto_lending.lif import compute_lif
-from tests.integration.seed import insert_user, store_test_ids
+from tests.integration.seed import insert_morpho_adapter, insert_user, store_test_ids
+
+_V1_VAULT_ADDRESS = b"\xde\xad\xbe\xef" + b"\x00" * 16
+_V2_VAULT_ADDRESS = b"\x5a" * 20
+_V2_ADAPTER_ADDRESS = b"\x5b" * 20
+_V2_REMOVED_ADAPTER_ADDRESS = b"\x5d" * 20
 
 
-async def _insert_morpho_vault(conn: asyncpg.Connection, protocol_id: int, chain_id: int, asset_token_id: int) -> int:
-    address = b"\xde\xad\xbe\xef" + b"\x00" * 16
+async def _insert_morpho_vault(
+    conn: asyncpg.Connection,
+    protocol_id: int,
+    chain_id: int,
+    asset_token_id: int,
+    *,
+    address: bytes = _V1_VAULT_ADDRESS,
+    vault_version: int = 1,
+) -> int:
     await insert_user(conn, address)
     vault_id = cast(
         int,
@@ -23,7 +35,7 @@ async def _insert_morpho_vault(conn: asyncpg.Connection, protocol_id: int, chain
             """
             INSERT INTO morpho_vault
                 (chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block)
-            VALUES ($1, $2, $3, 'Test Vault', 'TV', $4, 1, 1000)
+            VALUES ($1, $2, $3, 'Test Vault', 'TV', $4, $5, 1000)
             ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
             RETURNING id
             """,
@@ -31,6 +43,7 @@ async def _insert_morpho_vault(conn: asyncpg.Connection, protocol_id: int, chain
             protocol_id,
             address,
             asset_token_id,
+            vault_version,
         ),
     )
     return vault_id
@@ -112,9 +125,8 @@ async def _seed_data(db_url: str) -> None:
 
         vault_id = await _insert_morpho_vault(conn, protocol_id, chain_id=1, asset_token_id=usdc_id)
 
-        vault_address = b"\xde\xad\xbe\xef" + b"\x00" * 16
         user_id = cast(
-            int, await conn.fetchval('SELECT id FROM "user" WHERE address = $1 AND chain_id = 1', vault_address)
+            int, await conn.fetchval('SELECT id FROM "user" WHERE address = $1 AND chain_id = 1', _V1_VAULT_ADDRESS)
         )
 
         # Store LLTV in WAD format (18 decimals) to match Go indexer behaviour.
@@ -141,11 +153,31 @@ async def _seed_data(db_url: str) -> None:
         await _insert_market_position(conn, user_id, weth_market_id)
         await _insert_market_position(conn, user_id, cbbtc_market_id)
 
+        # VaultV2: its member adapter holds the WETH-market position; a removed
+        # adapter holds the cbBTC-market one, which must not resolve.
+        v2_vault_id = await _insert_morpho_vault(
+            conn, protocol_id, chain_id=1, asset_token_id=usdc_id, address=_V2_VAULT_ADDRESS, vault_version=3
+        )
+        await insert_morpho_adapter(
+            conn, vault_id=v2_vault_id, address=_V2_ADAPTER_ADDRESS, asset_token_id=usdc_id, block=1000
+        )
+        await _insert_market_position(conn, await insert_user(conn, _V2_ADAPTER_ADDRESS), weth_market_id)
+        await insert_morpho_adapter(
+            conn,
+            vault_id=v2_vault_id,
+            address=_V2_REMOVED_ADAPTER_ADDRESS,
+            asset_token_id=usdc_id,
+            block=1000,
+            removed_at_block=1001,
+        )
+        await _insert_market_position(conn, await insert_user(conn, _V2_REMOVED_ADAPTER_ADDRESS), cbbtc_market_id)
+
         await store_test_ids(
             conn,
             {
                 "protocol_id": protocol_id,
                 "vault_id": vault_id,
+                "v2_vault_id": v2_vault_id,
                 "weth_id": weth_id,
                 "cbbtc_id": cbbtc_id,
             },
@@ -191,6 +223,26 @@ async def test_returns_lltv_as_threshold_and_lif_as_bonus(repository, test_ids: 
     assert cbbtc.liquidation_threshold == Decimal("0.77")
     expected_cbbtc_lif = compute_lif(Decimal("0.77"))
     assert abs(cbbtc.liquidation_bonus - expected_cbbtc_lif) < Decimal("0.0001")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_v2_vault_resolves_markets_through_member_adapters(repository, test_ids: dict[str, int]) -> None:
+    result = await repository.get_params(
+        backed_asset_id=test_ids["v2_vault_id"],
+        token_ids=[test_ids["weth_id"], test_ids["cbbtc_id"]],
+    )
+
+    assert result[test_ids["weth_id"]].liquidation_threshold == Decimal("0.86")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_v2_vault_ignores_removed_adapter_markets(repository, test_ids: dict[str, int]) -> None:
+    result = await repository.get_params(
+        backed_asset_id=test_ids["v2_vault_id"],
+        token_ids=[test_ids["weth_id"], test_ids["cbbtc_id"]],
+    )
+
+    assert test_ids["cbbtc_id"] not in result
 
 
 @pytest.mark.asyncio(loop_scope="module")

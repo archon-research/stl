@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -149,6 +150,11 @@ type serviceFixture struct {
 
 func newServiceForTest(t *testing.T) *serviceFixture {
 	t.Helper()
+	return newServiceForTestWithConsumer(t, stubConsumer{})
+}
+
+func newServiceForTestWithConsumer(t *testing.T, consumer outbound.SQSConsumer) *serviceFixture {
+	t.Helper()
 	chain := newFakeChain(t)
 	repo := newStubFluidRepo()
 	tokenRepo := newStubTokenRepo()
@@ -159,7 +165,7 @@ func newServiceForTest(t *testing.T) *serviceFixture {
 
 	svc, err := NewService(
 		Config{SQSConsumerConfig: shared.SQSConsumerConfig{ChainID: 1, Logger: testLogger()}, Metrics: metrics},
-		stubConsumer{}, cache, querier, chain.multicaller(), txm, repo, tokenRepo, &stubProtocolRepo{},
+		consumer, cache, querier, chain.multicaller(), txm, repo, tokenRepo, &stubProtocolRepo{},
 	)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -640,6 +646,21 @@ func TestStartStop_Lifecycle(t *testing.T) {
 	}
 	if err := f.svc.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
+	}
+}
+
+func TestStart_RefusesAVisibilityTimeoutAReceiveCanOutrun(t *testing.T) {
+	f := newServiceForTestWithConsumer(t, stubConsumer{visibilityTimeout: 30 * time.Second})
+
+	err := f.svc.Start(context.Background())
+	if err == nil {
+		_ = f.svc.Stop()
+		t.Fatal("Start accepted a 30s visibility timeout; a booted worker never crashloops on it, because " +
+			"ProcessMessages revalidates on every poll and RunLoop only logs what it returns, so the pod reports " +
+			"Ready and spins logging forever while the queue never drains")
+	}
+	if !strings.Contains(err.Error(), "visibility timeout") {
+		t.Errorf("Start error = %q, want it to name the visibility timeout", err)
 	}
 }
 

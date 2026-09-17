@@ -252,3 +252,43 @@ def test_every_shipped_market_builds_a_runner_config(monkeypatch):
     configs = RunnerConfig.resolve("all")
     assert configs
     assert all("PROTOCOL" in c.params for c in configs)
+
+
+def test_per_market_env_var_overrides_one_market_only(tmp_path, monkeypatch):
+    # The prod-behind-staging case: config says live, one environment pins a
+    # single market back to parquet without touching its neighbours.
+    cfg = {
+        "sparklend_usdt": {"PROTOCOL": "SPARKLEND", "LOAN_TOKEN": "USDT", "PRICE_SOURCE": "postgres"},
+        "syrup_usdt": {"PROTOCOL": "SYRUP", "LOAN_TOKEN": "USDT", "PRICE_SOURCE": "postgres"},
+    }
+    p = tmp_path / "market_configs.json"
+    p.write_text(json.dumps(cfg))
+    monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_SYRUP_USDT_PRICE_SOURCE": "parquet"}))
+    configs = {c.market_key: c for c in RunnerConfig.resolve("all", market_configs_path=p)}
+    assert configs["syrup_usdt"].price_source == "parquet"
+    assert configs["sparklend_usdt"].price_source == "postgres"
+
+
+def test_per_market_env_var_beats_the_global_one(market_configs_path, monkeypatch):
+    monkeypatch.setattr(
+        os,
+        "environ",
+        _env(
+            {
+                "CORE_MODEL_POSITION_SOURCE": "parquet",
+                "CORE_MODEL_SPARKLEND_USDT_POSITION_SOURCE": "postgres",
+            }
+        ),
+    )
+    assert _one("sparklend_usdt", market_configs_path).position_source == "postgres"
+
+
+def test_per_market_env_var_maps_dashes_to_underscores(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_MORPHO_CBBTC_USDC_ORDERBOOK_SOURCE": "postgres"}))
+    assert _one("morpho_cbbtc-usdc", market_configs_path).orderbook_source == "postgres"
+
+
+def test_invalid_per_market_source_is_rejected(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_SPARKLEND_USDT_PRICE_SOURCE": "csv"}))
+    with pytest.raises(ValueError, match="PRICE_SOURCE"):
+        _one("sparklend_usdt", market_configs_path)

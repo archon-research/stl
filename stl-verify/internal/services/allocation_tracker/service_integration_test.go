@@ -16,7 +16,6 @@ import (
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -36,8 +35,6 @@ import (
 func TestIntegration_SubProxyAndAlmProxy_AreIndexedAndQueryable(t *testing.T) {
 	ctx := context.Background()
 
-	t.Setenv("BUILD_GIT_HASH", "test-integration-subproxy")
-
 	pool, _, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
@@ -49,21 +46,18 @@ func TestIntegration_SubProxyAndAlmProxy_AreIndexedAndQueryable(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	buildReg, err := buildregistry.New(ctx, pool)
-	if err != nil {
-		t.Fatalf("buildregistry: %v", err)
-	}
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
 
 	txm, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1, runID)
 	if err != nil {
 		t.Fatalf("token repo: %v", err)
 	}
-	allocRepo := postgres.NewAllocationRepository(pool, txm, tokenRepo, logger, buildReg.BuildID())
-	supplyRepo := postgres.NewTokenTotalSupplyRepository(pool, txm, tokenRepo, logger, buildReg.BuildID())
+	allocRepo := postgres.NewAllocationRepository(pool, txm, tokenRepo, logger, buildID, runID)
+	supplyRepo := postgres.NewTokenTotalSupplyRepository(pool, txm, tokenRepo, logger, buildID, runID)
 
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
@@ -187,8 +181,6 @@ func TestIntegration_SubProxyAndAlmProxy_AreIndexedAndQueryable(t *testing.T) {
 func TestIntegration_SweepPosition_UsesZeroTxHash(t *testing.T) {
 	ctx := context.Background()
 
-	t.Setenv("BUILD_GIT_HASH", "test-integration-sweep-zero-hash")
-
 	pool, _, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
@@ -199,20 +191,17 @@ func TestIntegration_SweepPosition_UsesZeroTxHash(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	buildReg, err := buildregistry.New(ctx, pool)
-	if err != nil {
-		t.Fatalf("buildregistry: %v", err)
-	}
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
 	txm, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1, runID)
 	if err != nil {
 		t.Fatalf("token repo: %v", err)
 	}
-	allocRepo := postgres.NewAllocationRepository(pool, txm, tokenRepo, logger, buildReg.BuildID())
-	supplyRepo := postgres.NewTokenTotalSupplyRepository(pool, txm, tokenRepo, logger, buildReg.BuildID())
+	allocRepo := postgres.NewAllocationRepository(pool, txm, tokenRepo, logger, buildID, runID)
+	supplyRepo := postgres.NewTokenTotalSupplyRepository(pool, txm, tokenRepo, logger, buildID, runID)
 
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
@@ -322,8 +311,6 @@ func TestIntegration_SweepPosition_UsesZeroTxHash(t *testing.T) {
 func TestIntegration_UsdcTransferToSubProxy_IsIgnored(t *testing.T) {
 	ctx := context.Background()
 
-	t.Setenv("BUILD_GIT_HASH", "test-integration-usdc-ignored")
-
 	pool, _, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
@@ -334,20 +321,17 @@ func TestIntegration_UsdcTransferToSubProxy_IsIgnored(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	buildReg, err := buildregistry.New(ctx, pool)
-	if err != nil {
-		t.Fatalf("buildregistry: %v", err)
-	}
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
 	txm, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1, runID)
 	if err != nil {
 		t.Fatalf("token repo: %v", err)
 	}
-	allocRepo := postgres.NewAllocationRepository(pool, txm, tokenRepo, logger, buildReg.BuildID())
-	supplyRepo := postgres.NewTokenTotalSupplyRepository(pool, txm, tokenRepo, logger, buildReg.BuildID())
+	allocRepo := postgres.NewAllocationRepository(pool, txm, tokenRepo, logger, buildID, runID)
+	supplyRepo := postgres.NewTokenTotalSupplyRepository(pool, txm, tokenRepo, logger, buildID, runID)
 
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {

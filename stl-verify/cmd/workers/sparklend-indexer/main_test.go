@@ -36,7 +36,7 @@ func baseCfg() cliConfig {
 		alchemyURL:        "https://eth-mainnet.g.alchemy.com/v2/test-key",
 		s3Bucket:          "stl-sentinelstaging-ethereum-raw",
 		deployEnv:         "staging",
-		maxMessages:       10,
+		maxMessages:       1,
 		waitTime:          20,
 		visibilityTimeout: 300,
 		chainID:           1,

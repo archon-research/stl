@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/big"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/activity"
 	temporalsdk "go.temporal.io/sdk/temporal"
@@ -701,7 +705,7 @@ func TestBackfillWorkflow_ExposesPartialCountsAfterFailure(t *testing.T) {
 func TestReplayPartition_NamesThePartitionOnAnEarlyFailure(t *testing.T) {
 	// A nil pool fails the first step, buildReplayService, which is the earliest
 	// of those paths.
-	activities := &backfillActivities{logger: slog.Default(), archiveDrain: func() {}}
+	activities := &backfillActivities{logger: slog.Default(), archiveWait: func() {}}
 
 	_, err := activities.ReplayPartition(context.Background(), partitionWork{
 		Range:     blockRange{From: 1000, To: 1999},
@@ -721,7 +725,7 @@ func TestReplayPartition_NamesThePartitionOnAnEarlyFailure(t *testing.T) {
 // on a later attempt, so leaving it retryable spends the partition's whole 2h
 // envelope on a verdict the first millisecond already reached.
 func TestReplayPartition_ConstructorValidationIsNotRetried(t *testing.T) {
-	activities := &backfillActivities{logger: slog.Default(), archiveDrain: func() {}}
+	activities := &backfillActivities{logger: slog.Default(), archiveWait: func() {}}
 
 	_, err := activities.ReplayPartition(context.Background(), partitionWork{Partition: "1000-1999"})
 
@@ -736,11 +740,11 @@ func TestReplayPartition_ConstructorValidationIsNotRetried(t *testing.T) {
 // that is unreachable right now is exactly what the retry envelope is for.
 func TestReplayPartition_AnUnreachableDatabaseStaysRetryable(t *testing.T) {
 	activities := &backfillActivities{
-		logger:       slog.Default(),
-		pool:         unreachablePool(t),
-		multicaller:  testutil.NewMockMulticaller(),
-		cfg:          config{chainID: mainnetChainID},
-		archiveDrain: func() {},
+		logger:      slog.Default(),
+		pool:        unreachablePool(t),
+		multicaller: testutil.NewMockMulticaller(),
+		cfg:         config{chainID: mainnetChainID},
+		archiveWait: func() {},
 	}
 
 	_, err := activities.ReplayPartition(context.Background(), partitionWork{Partition: "1000-1999"})
@@ -773,6 +777,15 @@ func unreachablePool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// headerReadVerdict is the error classifyUnknownBlockHash reaches for a block whose
+// archived hash the node cannot resolve, given what the by-number read answers.
+func headerReadVerdict(blockNumber int64, canonical *ethtypes.Header, byNumberErr error) error {
+	return classifyUnknownBlockHash(context.Background(),
+		&fakeChainReader{byHashErr: ethereum.NotFound, canonical: canonical, byNumberErr: byNumberErr},
+		v2LogEntry{blockNumber: blockNumber, blockHash: common.HexToHash("0xdead")},
+		fmt.Sprintf("%s/%d_0_receipts.json.gz", partition.GetPartition(blockNumber), blockNumber), ethereum.NotFound)
+}
+
 // Neither activity caps its attempts, so a deterministic defect that stays
 // retryable is redone at up to a minute's backoff until the ScheduleToClose
 // envelope runs out — surfacing a ~20s partition failure two hours late, and a
@@ -785,6 +798,7 @@ func TestNonRetryableIfStructural_MarksDeterministicFailuresNonRetryable(t *test
 		{name: "an S3 gap inside a partition", err: requireCompletePartition("1000-1999", []int64{1000}, 1000, 1002)},
 		{name: "an unparseable partition prefix", err: requireCompletePartition("not-a-range", nil, 0, 999)},
 		{name: "a log the replay path cannot take", err: fmt.Errorf("replaying log: %w", morpho_indexer.ErrUnreplayableLog)},
+		{name: "an orphaned receipts object, proven by the canonical hash", err: headerReadVerdict(25395651, &ethtypes.Header{Number: big.NewInt(25395651)}, nil)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -812,6 +826,7 @@ func TestNonRetryableIfStructural_LeavesTransientFailuresRetryable(t *testing.T)
 	}{
 		{name: "a request that timed out", err: fmt.Errorf("streaming s3 object: %w", context.DeadlineExceeded)},
 		{name: "an upstream that was throttling", err: errors.New("SlowDown: please reduce your request rate")},
+		{name: "a replica that has not reached the archived block", err: headerReadVerdict(25395651, nil, ethereum.NotFound)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

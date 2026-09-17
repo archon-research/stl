@@ -155,13 +155,20 @@ func GetMetaMorphoReadABI() (*abi.ABI, error) {
 // liquidity adapter (not the vault itself).
 //
 // A VaultV2 never touches a downstream venue directly: it holds adapter
-// contracts, each wrapping one venue. The two type-discriminating selectors are
-// mutually exclusive on a real adapter — morpho() (0xd8fbc833) succeeds on a
-// MorphoMarketV1AdapterV2 (wraps a Morpho Blue market), morphoVaultV1()
-// (0xe4baaddf) succeeds on a MorphoVaultV1Adapter (wraps a nested MetaMorpho V1
-// vault). realAssets() (0x56c07573) exists on both and returns the adapter's
+// contracts, each wrapping one venue. The five type-discriminating selectors are
+// mutually exclusive on a real adapter, which answers its own and reverts on
+// every other — morpho() (0xd8fbc833) on a MorphoMarketV1AdapterV2 (wraps a
+// Morpho Blue market), morphoVaultV1() (0xe4baaddf) on a MorphoVaultV1Adapter
+// (wraps a nested MetaMorpho V1 vault), erc4626Vault() (0x5920b225) on an
+// ERC4626MerklAdapter (wraps an external ERC-4626 vault, rewards claimable via
+// Merkl), box() (0x754215a1) on a BoxAdapter (wraps a Morpho Box), and comet()
+// (0xba3e9c12) on a CompoundV3Adapter (wraps a Compound V3 Comet).
+// realAssets() (0x56c07573) exists on all of them and returns the adapter's
 // current holdings in the vault's underlying-asset base units. Chain-verified
-// against sparkUSDTbc's adapter.
+// against sparkUSDTbc's adapter and, for the latter three families, against
+// mainnet adapters 0x7d82bc573672e5b7587368b1148e09f88ae14dbd,
+// 0xb83a8af84f9123d3afd7b2e6de56c5b6e02ff19b and
+// 0x099789bd9de92cac98af6abb6a62579e2efc9050.
 func GetVaultV2AdapterReadABI() (*abi.ABI, error) {
 	return ParseABI(`[
 		{
@@ -174,6 +181,27 @@ func GetVaultV2AdapterReadABI() (*abi.ABI, error) {
 		{
 			"inputs": [],
 			"name": "morphoVaultV1",
+			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "erc4626Vault",
+			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "box",
+			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "comet",
 			"outputs": [{"name": "", "type": "address"}],
 			"stateMutability": "view",
 			"type": "function"

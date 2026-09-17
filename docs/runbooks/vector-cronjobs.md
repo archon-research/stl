@@ -18,7 +18,10 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
 | `morpho-vault-backfill` | `morpho-vault-backfill` | **on demand** | Discovers Morpho vaults from the archived S3 receipts and replays their VaultV2 structured events, for a block range supplied at start time (VEC-218) |
 | `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **on demand** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
-| `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (Python harness; staging + prod; N_MC capped at 100 until the sizing in #804 settles) |
+| `uniswap-v4-position-bootstrap` | `uniswap-v4-position-bootstrap` | **on demand** | Two hand-started workflow types on one queue, each closing a gap event-driven indexing cannot: `UniswapV4PositionBootstrap` snapshots every historical Uniswap V4 LP position of the registered pools at one finality-safe block into `uniswap_v4_position` (VEC-639), `UniswapV4PosmTransferBackfill` replays the PositionManager's whole ERC-721 `Transfer` history into `uniswap_v4_position_nft_transfer` (VEC-790); operated from [vector-indexers.md](vector-indexers.md#uniswap-v4-indexer-vec-475) |
+| `block-republisher`, `<chain>-block-republisher` | `block-republisher`, `<chain>-block-republisher` | **on demand** | Re-publishes named block heights under the next `block_version` their raw archive leaves free, so every indexer appends the canonical block for a height whose only published version is a losing fork (ARCT-383). One deployment per chain — see the table under its section below |
+| `block-meta-loader`, `<chain>-block-meta-loader` | `block-meta-loader`, `<chain>-block-meta-loader` | **on demand** | Fills `block_meta` (the canonical block-coordinate → header-timestamp lookup) for one chain from that chain's S3 raw-block archive (VEC-491). One deployment per chain |
+| `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (Python harness; staging + prod; N_MC=10000, pod sized from a live-data pass in #891) |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
 > [vector-indexers.md](vector-indexers.md), not this runbook.
@@ -50,8 +53,8 @@ scheduled cronjob, `VectorOnDemandWorkerDown` for an on-demand worker.
 > when no tick has *completed* (success or error) in 30h — the stall coverage
 > the exclusion above would otherwise remove, and the only rule that catches a
 > tick lost to a deploy-time cancel or a hang (neither records an error).
-> The runner runs in staging and prod (#800), both at N_MC=100 until the
-> sizing run in #804 settles — unrelated to this gap.
+> The runner runs in staging and prod (#800), both at N_MC=10000 since #891
+> — unrelated to this gap.
 
 > `transform-worker` ships at `replicas: 0` and is enabled (scaled to 1) only after
 > the one-off bootstrap has run. `VectorCronjobWorkerDown` is guarded on
@@ -129,6 +132,239 @@ does not fire this alert — Temporal retries that run on the new worker.
 `increase(cronjob_runs_total{status="error", service_name="<cronjob>"}[15m]) == 0`
 and a fresh `status="success"` run.
 
+### Special case: `watcher-data-validator` "Orphan-only heights"
+
+The validator fails the run — and so this alert — when its **Orphan-only
+heights** check reports `N height(s) have only an orphaned block: <numbers>`.
+The count is exact; the message names the first 100 heights and appends
+`(+K more)`, with the full list in the check's `orphan_only_heights` detail.
+
+It means block N is stored only on a losing fork: the watcher saved fork A, the
+canonical broadcast for N was dropped as `stale_fork` (a load-balanced RPC node
+had not converged when the watcher verified it), and the reorg that block N+1
+committed orphaned fork A without ever fetching the winner. Nothing at that
+height is canonical — S3 holds only the orphaned fork and every indexer has its
+events at `block_version` 0. `FindGaps` scans only above the backfill
+watermark, so it re-fetches the height only while the watermark still sits
+below it. This check scans the full block range, where **Chain Integrity**
+only looks for missing heights up to the watermark — and a fresh occurrence
+sits *above* the watermark, because the reorg that caused it rewound the
+watermark to the common ancestor below, so this check is the only one that
+names it. A hole older than that rewind sits below the watermark and fails
+both.
+
+`block_states` carries a 30-day retention policy
+(`add_retention_policy('block_states', INTERVAL '30 days')`), so the check only
+ever sees the retained window. **This alert clearing without a repair means the
+hole aged out of the check, not that it healed** — the downstream
+`block_version` 0 rows and the S3 objects are untouched by retention. The 14
+staging mainnet heights named in ARCT-379 (25087888 … 25589752) are already
+outside it.
+
+Confirm:
+
+1. `cast block <N> --field hash --rpc-url <chain rpc>` against the stored row —
+   `SELECT hash, version, is_orphaned FROM block_states WHERE chain_id = <id>
+   AND number = <N>;`. One row, orphaned, hash unknown to the chain, is the
+   signature.
+2. The watcher's Loki line `dropping stale-fork reorg broadcast … block=<N>`
+   around the block's timestamp is the cause. Use it, not
+   `chain_reorgs_dropped_total{reorg_dropped_reason="stale_fork"}`: that counter
+   carries no block label by design (block numbers are unbounded cardinality),
+   so it can only tell you drops happened, never at which height.
+
+Repair:
+
+- **New occurrences heal themselves.** A reorg commit rewinds
+  `backfill_watermark` to the common ancestor, so the next gap pass re-fetches
+  N and saves it as version 1 (ARCT-379). If the same height is still named two
+  poll intervals later, the RPC is still serving the losing fork — re-check
+  `cast block <N>`.
+- **A hole no rewind covered — one predating ARCT-379, or one below every
+  reorg since — is repaired by rewinding the watermark by hand,** as long as it
+  is still inside the retained window: `UPDATE backfill_watermark SET watermark
+  = <N-1>, rewind_count = rewind_count + 1 WHERE chain_id = <id>;`. Bump the
+  rewind count too: a pass already scanning compares against the pair, and
+  would otherwise advance straight back over the height you just re-opened. The
+  next gap pass saves N as version 1 and publishes it, so the indexers append
+  the correction. The orphaned version-0 rows stay put as history.
+- **A hole outside the retained window is repaired by the audit and the
+  republisher, in that order.** The archive is what both halves of the repair
+  read, so start by auditing it. `raw-block-bulk-downloader --dry-run --report`
+  writes nothing at all and leaves one JSON object per height that needs
+  something — see **Finding holes on a chain** under `block-republisher` below
+  for the flags and the row shapes:
+
+  ```bash
+  bulk-download --dry-run --chain-id <id> --rpc-url <chain rpc> \
+    --bucket <that chain's raw bucket> \
+    --start-block <N> --end-block <N> --report ~/holes.jsonl
+  ```
+
+  An `"action":"republish"` row is this hole: the archive's top version at that
+  height is a losing fork. Feed those `block` numbers to that chain's
+  `block-republisher` queue (**ARCT-383**, #850), which derives each height's
+  version from the objects in the raw bucket and re-emits the block event, so
+  the indexers append the canonical block. Then run the same command without
+  `--dry-run` to correct S3 itself (**#849**: next free version above the losing
+  fork, never a literal `_1_`). The order is a rule, not a preference:
+  **republisher first, bulk downloader after.** The other way round, the objects
+  the repair wrote push the event to the next version and the archive ends up
+  holding the same canonical block twice — and the republisher refuses the
+  height outright, because the archive's top version is by then already
+  canonical. For a height the downloader has already repaired, republish it with
+  `"archiveRepaired": true` (below), which publishes at the version those
+  objects occupy instead of past them. An `"action":"fresh"` row is a gap rather
+  than a fork — the archive holds nothing at that height — and the republisher
+  would repair it on your word alone; fix the gap first.
+
+Before the prod deploy, run the pre-flight queries below against prod's
+retained window — a hole found there is repairable while it is still inside
+retention.
+
+### Special case: `watcher-data-validator` "Chain Integrity" missing blocks
+
+`chain integrity violation: canonical block(s) A to B missing between blocks X
+and Y` (or `… missing after block X`, for a hole at the top of the checked
+range) means the canonical chain has a hole at A..B that the backfill watermark
+has already passed — so the gap filler is not working on it and
+`VectorWatcherBackfillWatermarkLagHigh` will not fire for it. Only the lowest
+hole is named, and that is the only one you need: one rewind to A re-opens
+every hole above it too (`FindGaps` returns them all, the pass fills each, and
+the advance parks below the first one it could not fill). Re-running the check
+before the filler has caught up tells you nothing — it can never name a hole
+above the watermark.
+
+Below the watermark the check is strict: every height present and linked. Above
+it, only the links are checked (`Parent-hash chain valid through backfill
+watermark N; parent links valid through block M`), because a missing height up
+there is the filler's live work — covered by `backfill_watermark_lag` and
+`VectorWatcherBackfillWatermarkLagHigh` in
+[vector-watcher.md](vector-watcher.md) — while a broken link or a duplicated
+height never repairs itself. A named *missing* range is therefore always
+**below** the watermark; a named link break can be either side of it.
+
+Two causes, told apart by `SELECT number, hash, is_orphaned FROM block_states
+WHERE chain_id = <id> AND number BETWEEN A AND B;`:
+
+- **Rows exist but are all orphaned** → the orphan-only case above; repair it
+  that way.
+- **No rows at all** → the watermark passed a height that was never filled.
+  Three ways in: a pre-#844 unconditional watermark write that overwrote a
+  reorg's rewind; a watermark written by hand past an unfilled height; and a
+  stale-chain recovery whose canonical refetch failed, which before #844
+  orphaned the row without rewinding. `FindGaps` never scans below the
+  watermark, so rewind it — `UPDATE backfill_watermark SET watermark = A - 1,
+  rewind_count = rewind_count + 1 WHERE chain_id = <id>;`, the rewind count
+  bump for the same reason as above. Then trigger a validator run by hand
+  (Temporal UI → Schedules → `<SERVICE_NAME>` → Trigger, or `temporal schedule
+  trigger --schedule-id <SERVICE_NAME>`) once the watermark has passed B; the
+  repair is done when `backfill_watermark_lag` has drained past B, not when the
+  check passes — right after the rewind it passes whether or not A..B was
+  refetched, because the strict half stops at the watermark you just lowered.
+
+### Pre-flight before deploying the ARCT-379 validator checks
+
+Both special cases above rest on checks #844 adds or widens —
+`FindOrphanOnlyHeights`, and the missing-height, duplicate-canonical and
+broken-parent-link violations `VerifyChainIntegrity` now reports. They judge
+state that is already in the database, so a hole that has been sitting there
+since long before the rollout fails the very first hourly run:
+`VectorCronjobRunFailing` immediately, `VectorCronjobAllRunsFailing`
+(critical, pages) about 1h15m later. The repair is the one above — one
+`UPDATE backfill_watermark SET watermark = <below the lowest hole>,
+rewind_count = rewind_count + 1 WHERE chain_id = <id>;` per chain, which
+re-opens every hole above it in the same rewind — but it is a repair you want
+made before the pager goes off, not after.
+
+`watcher-data-validator` runs on **three** chains in both staging and prod —
+chain ids 1, 130 and 42161. All six per-chain deployments are listed in
+`k8s/overlays/{staging,prod}/kustomization.yaml`, but `optimism-`, `base-` and
+`avalanche-watcher-data-validator` are `replicas: 0` in
+`k8s/base/<chain>-watcher-data-validator/deployment.yaml` with no overlay
+patch, because the Etherscan cross-check is not covered for those chains yet —
+so run the three queries once per **enabled** chain. All three are read-only,
+and `block_states`' 30-day retention bounds them: only the retained window is
+checkable, and only a hole inside it is repairable. Expected outcome on every
+chain: **zero rows from queries 1 and 2, and `tail = want` from query 3 — or
+repair first.**
+
+**1. Orphan-only heights.** This is the query `FindOrphanOnlyHeights`
+(`internal/adapters/outbound/postgres/blockstate_repository.go`) runs, minus
+its range bound. Sub-second; served by `idx_block_states_orphaned`.
+
+```sql
+SELECT DISTINCT o.number
+FROM block_states o
+WHERE o.chain_id = <id> AND o.is_orphaned
+  AND NOT EXISTS (SELECT 1 FROM block_states c
+                  WHERE c.chain_id = o.chain_id AND c.number = o.number AND NOT c.is_orphaned)
+ORDER BY o.number;
+```
+
+**2. Chain integrity** — missing heights below the watermark, plus duplicate
+canonical rows and broken parent links over the **whole** retained window. The
+validator checks two bands: `VerifyChainIntegrity` runs the strict form up to
+`min(max canonical, watermark)`, and `VerifyParentLinks` runs the
+links-and-duplicates form from there to the top canonical row, so a pre-flight
+bounded at the watermark misses every violation above it. One pass does both —
+only the missing-height arm carries the watermark bound. Measured on staging at
+14 s on the largest chain (42161, ~10.8 M heights).
+
+```sql
+WITH ordered_blocks AS (
+  SELECT number, hash, parent_hash,
+         LAG(hash)   OVER (ORDER BY number, version DESC) AS prev_hash,
+         LAG(number) OVER (ORDER BY number, version DESC) AS prev_number
+  FROM block_states
+  WHERE chain_id = <id> AND NOT is_orphaned)
+SELECT prev_number, number,
+       CASE WHEN prev_number = number     THEN 'duplicate canonical rows'
+            WHEN prev_number < number - 1 THEN 'missing ' || (prev_number + 1) || '..' || (number - 1)
+            ELSE 'broken parent link' END AS violation
+FROM ordered_blocks
+WHERE prev_number IS NOT NULL
+  AND (prev_number = number
+       OR (prev_number < number - 1 AND number <= <watermark>)
+       OR (prev_number = number - 1 AND parent_hash != prev_hash))
+ORDER BY number LIMIT 1;
+```
+
+**3. The tail.** The pair scan has no successor to flag a hole at the *top* of
+the strict band against, so check that separately — but check the same thing
+the validator checks. The validator fails when there is no canonical row at the
+watermark height (`verifyRangeReachesEnd`), and it fails when the watermark
+sits above the last canonical row altogether — the state a hand-written
+watermark or a pre-#844 overwritten rewind leaves. Both collapse into one
+comparison:
+
+```sql
+SELECT w.watermark,
+       (SELECT max(number) FROM block_states
+         WHERE chain_id = <id> AND NOT is_orphaned AND number <= w.watermark) AS tail
+FROM backfill_watermark w WHERE w.chain_id = <id>;
+```
+
+`tail` must equal `w.watermark`. A lower `tail` is either a watermark parked on
+an unfilled height or a watermark past the head, and the validator fails the
+run on both. A chain with no
+`backfill_watermark` row, or `watermark = 0`, is vacuous here — the validator
+verifies the whole range and the tail check cannot fail.
+
+Staging, as of 2026-09-01, on the three enabled chains: zero orphan-only
+heights, zero integrity violations over the whole retained window, and
+`tail = want` on each — nothing to repair there. Run the same three against
+prod before the prod deploy.
+
+If the pre-flight does turn something up, or you would rather not race the
+first hourly run, propose in the PR — and get a human to approve it, per
+[alerts/AGENTS.md](../../alerts/AGENTS.md) — that `VectorCronjobRunFailing` and
+`VectorCronjobAllRunsFailing` be silenced for the deploy window on
+`service_name=~"(unichain-|arbitrum-)?watcher-data-validator"`. `service_name`
+is the pod's own `app` label, injected as `SERVICE_NAME` through the downward
+API, so a matcher on the literal `watcher-data-validator` silences mainnet
+only. Keep the rewind tracked, and silence the alert while that is open.
+
 ---
 
 ## VectorCronjobAllRunsFailing
@@ -145,7 +381,11 @@ of `VectorCronjobRunFailing`.
 ### First checks
 
 1. Everything under `VectorCronjobRunFailing` — but the failure is now
-   persistent, so look for a hard, non-transient cause.
+   persistent, so look for a hard, non-transient cause. For
+   `watcher-data-validator` that includes an orphan-only height the gap filler
+   cannot heal: it fails every run, so it escalates here about 1h15m after the
+   first failure — see
+   [Special case: `watcher-data-validator` "Orphan-only heights"](#special-case-watcher-data-validator-orphan-only-heights).
 2. **Recent deploys** — `kubectl -n vector rollout history deploy/<deployment>`;
    a bad release is the most common persistent cause. Roll back if so.
 3. **Upstream contract / schema change** — a changed external API response or
@@ -211,7 +451,10 @@ stale. The only impact is that a new run cannot be started until the pod is back
 Warning severity for that reason.
 
 Currently matches: `offchain-price-backfill`, `reference-capital-backfill`,
-`morpho-vault-backfill`, `morpho-v2-bootstrap`.
+`morpho-vault-backfill`, `morpho-v2-bootstrap`, `uniswap-v4-position-bootstrap`, and
+every chain's republisher and block-meta loader — `block-republisher` /
+`<chain>-block-republisher` and `block-meta-loader` / `<chain>-block-meta-loader`,
+each matched with one prefix-agnostic regex rather than a list of chains.
 
 ### First checks
 
@@ -522,6 +765,26 @@ version to its trigger.
 - `partition ... missing receipt block(s) ... (S3 gap)` → the archive is
   genuinely incomplete for that partition. Replay hard-stops rather than replay
   a thinned partition; repair S3 and re-run the same range.
+- `block <N> (<partition>/<N>_<v>_receipts.json.gz): archived hash 0x… is an
+  orphaned fork, canonical hash at that height is 0x…: fetching header for block
+  0x…: not found` → the node does not know the archived hash but does know a
+  different block at that height, so the block's highest-version receipts object
+  is an orphaned fork: the watcher published it and never re-published the
+  canonical block (a missed reorg), and the live indexers ingested it too.
+  Structural — the run fails on the first attempt instead of burning the 2h retry
+  envelope (87 attempts, 2026-08-29 staging, block 25395651). The error names the
+  canonical hash itself, so `cast block <N> --field hash` is only a cross-check.
+  Re-archive the canonical receipts at a higher version, re-run from that block,
+  and audit the live tables at that block: the orphaned rows are the ones at the
+  orphaned object's version — the `<v>` in the key the error names, which is
+  `block_version` 0 only when that object is version 0 — and the append-only
+  correction is a re-publish of the canonical block, not an edit.
+- The same `fetching header for block 0x…: not found` **without** a canonical
+  hash (it ends `reading the canonical header at that height: …`, or `yet it is
+  the canonical hash at that height`) is left retryable on purpose: a
+  load-balanced RPC replica a few blocks behind head also answers null for a hash
+  it has not reached yet, and nothing is proven until a by-number read returns a
+  different hash. If it keeps failing, the node — not S3 — is what to look at.
 - An adapter-classification failure — same cause and same recovery as the
   bootstrap's, below; the two share the VaultV2 replay path.
 
@@ -530,13 +793,44 @@ version to its trigger.
 ### Special case: `morpho-v2-bootstrap` (on-demand, no schedule)
 
 Both history jobs emit the same `morpho_v2_*` metrics as the live indexer (the
-replay path is metered since VEC-218), so the V2 volume alerts in
-`vector-indexers.yaml` can fire during a deliberate replay or bootstrap run —
-expected, not an incident; the run is operator-initiated and visible here.
+replay path is metered since VEC-218), under their own `service_name`. Every rule
+in the `vector-morpho-v2` group of `vector-indexers.yaml` excludes those two
+names, so a deliberate replay or bootstrap run fires none of them. Replayed
+history is not a liquidity run, a wave of new unclassifiable adapters, or an
+enumeration gap — it is the same population being re-recorded, or the very repair
+those alerts would send you to make. Each worker's own series stays on the
+dashboard as run progress.
+
+The exclusion covers both sides of the two silent-empty guards
+(`VectorMorphoV2NoSnapshotsWritten`, `VectorMorphoV2NoStructuredEvents`) for the
+opposite reason: a run's own snapshots and events would otherwise satisfy the side
+that suppresses them, hiding a live write path that broke while the run was going
+for the run plus its whole trailing 6h window. A run no longer masks one.
 
 A third **on-demand** Temporal worker (`temporal.RunWorker`). Everything said
 about `offchain-price-backfill` above applies — nothing is missed while it is
 down, and it is excluded from `VectorCronjobAllRunsFailing` for the same reason.
+
+**Before starting a run, check what the range already holds.** Every V2 row
+carries the `block_version` the run that wrote it resolved, so an earlier run's
+stamps are visible per table:
+
+```sql
+SELECT 'morpho_vault_cap' AS tbl, block_version, count(*) AS rows, min(block_number) AS min_blk, max(block_number) AS max_blk
+FROM morpho_vault_cap GROUP BY 1, 2
+UNION ALL SELECT 'morpho_vault_fee', block_version, count(*), min(block_number), max(block_number) FROM morpho_vault_fee GROUP BY 1, 2
+UNION ALL SELECT 'morpho_adapter_state', block_version, count(*), min(block_number), max(block_number) FROM morpho_adapter_state GROUP BY 1, 2
+UNION ALL SELECT 'morpho_adapter_membership', block_version, count(*), min(block_number), max(block_number) FROM morpho_adapter_membership GROUP BY 1, 2
+ORDER BY 1, 2;
+```
+
+A version the archive does not hold for that range is an earlier run's stamp, not
+a reorg. Cross-check a few partitions across the range with
+`aws s3 ls s3://<bucket>/<partition>/`: on both envs the archive is version-1-only
+below ~24.27M, then a patchy band of identical 0/1 twins up to 24,340,697, then
+the watcher era at 0. On staging on 2026-09-08, 357 `morpho_vault_cap` identities
+carried both versions across blocks 23,419,201–24,339,378 — the constant-0
+bootstrap sitting beside the backfill's version-1 rows.
 
 **How to start a run.** Temporal UI (namespace **`vector`**) →
 **Start Workflow**:
@@ -571,7 +865,507 @@ still going after an hour is a stall signal, not normal.
 Unlike the backfill, progress lives in the activity's heartbeat details rather
 than in workflow history; see the resume note at the top of this runbook.
 
+**Block versions come from the raw archive.** The run's events come from a node,
+which carries no `block_version`, so each replayed row — and the head seed — is
+stamped with the version the chain's raw S3 archive holds at that height: the
+highest version archived there, the same rule `morpho-vault-backfill` reads off
+the S3 key it replays. That is what puts a replayed row at the same
+`block_version` as every other replay of that block, so this run's row — not the
+`morpho-vault-backfill`'s older one — is the row a current read returns.
+
+It is **not** a dedupe with live indexing's row. On the deep history the bulk
+downloader wrote, the archive holds version 1 where live indexing stamped 0, so
+the replayed row deliberately ranks above the live one; the two are the same
+block, hash-verified, so their values agree. And a run from a different build
+gets its own `processing_version` either way — see "Idempotency" in
+`cmd/cronjobs/morpho-v2-bootstrap/main.go`. `block_states` cannot serve as the
+source of the version: it keeps 30 days, and the sweep starts at the VaultV2
+factory deploy block.
+
+The bucket arrives as `S3_BUCKET` from the ExternalSecret and the pod reads it
+through its EKS Pod Identity association. Both are settled at startup: the name is
+checked against `CHAIN_ID` (through `DEPLOY_ENV`), and the pod lists and reads the
+bucket once — so another chain's bucket or a missing grant is a worker that will
+not start, rather than a run that dies on its first height, three attempts over.
+
+**Before the first run.** This ServiceAccount needs its **own** EKS Pod Identity
+association (`k8s/base/morpho-v2-bootstrap/serviceaccount.yaml`); the one
+`morpho-vault-backfill` has does not reach this pod. It carries two grants on the
+chain's raw bucket: `s3:ListBucket` (which versions a height holds) and
+`s3:GetObject` (which block the top version names). Nothing is ever written to S3.
+Both come from archon-research/infrastructure#706, which has to be applied to an
+environment before the Deployment lands there — without it the pod never becomes
+Ready, logging `this pod needs s3:ListBucket on that bucket` or `this pod needs
+s3:GetObject on that bucket` from the startup probes, and
+`VectorOnDemandWorkerDown` fires 30 minutes later.
+
+Every run closes with one `block versions resolved from the raw archive` line:
+`outcome=completed` at Info, `outcome=aborted` at **Error**, `heights=<n>` for the
+heights it resolved, and one `version_<v>` group per version the archive answered
+with, each carrying that version's own `heights`, `from` and `to`. A version above
+0 is not evidence of a reorg, just of what the archive holds. An `aborted` outcome
+means the sweep did not finish, so those extents cover only the range it reached.
+
+A height the archive cannot answer for **stops the run**, naming the height: it
+holds no object there, or the version it holds names a different block (an
+orphaned fork kept past its reorg — the ARCT-379 shape). Deep in the replay range
+that is a real hole — repair the archive, then start a new run:
+`block-republisher` for a single height whose object is missing or wrong,
+`raw-block-bulk-downloader` for a range. At the pinned head it is usually not a
+hole but an archive that has not caught up, and republishing that height makes
+things worse; see "morpho-v2-bootstrap run outcomes" below. Either way, do not
+work around it by stamping a version — the whole point is that no row is written
+under a version no canonical block was archived under.
+
 ---
+
+### Special case: `uniswap-v4-position-bootstrap` (on-demand, no schedule)
+
+Another **on-demand** Temporal worker (`temporal.RunWorker`, parameterless via
+`RegisterRunner` like `morpho-v2-bootstrap`). Everything said about
+`offchain-price-backfill` above applies — nothing is missed while it is down, and
+it is excluded from `VectorCronjobAllRunsFailing` for the same reason. One
+Deployment and one task queue per chain, named the way `block-republisher`'s are:
+`uniswap-v4-position-bootstrap` on mainnet, `<chain>-uniswap-v4-position-bootstrap`
+elsewhere (the worker derives the queue from its `CHAIN_ID`).
+
+**Two workflow types on that chain's queue, two tables.** Both are hand-started
+and either one runs on its own; the queue keeps the position bootstrap's older
+name for both:
+
+| Workflow Type | Writes | Closing log line | Row-growth tripwire |
+|---|---|---|---|
+| `UniswapV4PositionBootstrap` | `uniswap_v4_position` | `uniswap-v4 position bootstrap finished` | [`VectorUniswapV4AppendOnChangeGrowthHigh`](vector-indexers.md#vectoruniswapv4appendonchangegrowthhigh) |
+| `UniswapV4PosmTransferBackfill` | `uniswap_v4_position_nft_transfer` | `uniswap-v4 posm transfer backfill finished` | [`VectorUniswapV4NFTTransferBackfillGrowthHigh`](vector-indexers.md#vectoruniswapv4nfttransferbackfillgrowthhigh) |
+
+Positions go in through the live indexer's own append-on-change writer, so a run
+shows up on that rate once, by design. The posm transfer backfill's bulk load
+lands on its own tripwire, at a threshold one run stays under, while the live
+`uniswap_v4_position_nft_transfer` rules keep measuring the live decoder alone.
+
+**Which of the two failed.** `cronjob_runs_total` (OTel `cronjob.runs.total`)
+carries only the task queue, so a
+[`VectorCronjobRunFailing`](#vectorcronjobrunfailing) for
+`uniswap-v4-position-bootstrap` names mainnet's worker and
+`<chain>-uniswap-v4-position-bootstrap` another chain's, and the Temporal UI's
+execution list (namespace **`vector`**) names the type. The pod answers too:
+`kubectl -n vector logs deploy/$DEPLOY`, where `$DEPLOY` is the Deployment the
+alert names — the same string as its queue. A run that
+completed closes with its line from the table above; a failed attempt logs
+`uniswap-v4 position bootstrap stopped with partial progress` or
+`uniswap-v4 posm transfer backfill stopped with partial progress` at Warn, carrying
+the counters it reached — grep for `stopped with partial progress` after a failure.
+
+When to run each, how to start a run, what each does and how a killed attempt
+resumes are in the indexer runbook:
+[Uniswap V4 indexer — position coverage and the bootstrap](vector-indexers.md#uniswap-v4-indexer-vec-475).
+
+---
+
+### Special case: `block-republisher` (on-demand, no schedule)
+
+Another **on-demand** Temporal worker (`temporal.RunWorker`). Everything said
+about `offchain-price-backfill` above applies — nothing is missed while it is
+down, and it is excluded from `VectorCronjobAllRunsFailing` for the same reason.
+
+**What it repairs.** A height whose only published version is a losing fork
+(ARCT-379): the watcher dropped the canonical broadcast as a `stale_fork`, the
+next block's reorg commit orphaned the height without replacing it, and nothing
+re-fetched it. S3 then holds only that height's `_0_` objects and every indexer
+holds its events at `block_version` 0. Nothing else repairs it — the watcher's
+own retry only reaches non-orphaned `block_states` rows, which the 30-day
+retention drops, and `raw-block-bulk-downloader` repairs S3 without telling the
+indexers.
+
+**One run repairs one chain.** Every chain with a raw archive runs its own
+worker, on its own task queue, against its own topic, Redis and bucket — the
+`blocks` you pass are that chain's heights, and there is no way to mix chains in
+one run. Robinhood has a raw archive (backup worker, #870) but no republisher
+yet: its ServiceAccount needs an EKS Pod Identity grant in the infra repo first,
+which is why it is absent from the table below.
+
+The three chain-bearing variables are all checked against `CHAIN_ID` at startup,
+so a cross-chain deployment is a pod that will not start rather than corrections
+built from the wrong chain: `AWS_SNS_TOPIC_ARN` against the topic name,
+`S3_BUCKET` against the bucket prefix, and `ALCHEMY_HTTP_URL` against the chain
+the node itself reports for `eth_chainId`. The last is the only guard on the
+node URL — a mismatch there would read another chain's blocks and publish them,
+correctly named, onto this chain's topic.
+
+| Chain | Task queue = `service_name` | Deployment | `S3_BUCKET` (infra-config property) |
+|---|---|---|---|
+| Ethereum | `block-republisher` | `block-republisher` | `ethereum_s3_bucket` |
+| Arbitrum | `arbitrum-block-republisher` | `arbitrum-block-republisher` | `arbitrum_s3_bucket` |
+| Avalanche | `avalanche-block-republisher` | `avalanche-block-republisher` | `avalanche_s3_bucket` |
+| Base | `base-block-republisher` | `base-block-republisher` | `base_s3_bucket` |
+| Optimism | `optimism-block-republisher` | `optimism-block-republisher` | `optimism_s3_bucket` |
+| Unichain | `unichain-block-republisher` | `unichain-block-republisher` | `unichain_s3_bucket` |
+
+**How to start a run.** Temporal UI (namespace **`vector`**) → **Start
+Workflow**:
+
+| Field | Value |
+|---|---|
+| Task Queue | that chain's queue from the table above |
+| Workflow Type | `BlockRepublish` |
+| Workflow ID | descriptive and unique, e.g. `block-republisher-2026-09-01` |
+| Input | `{"blocks":[25395651,25087888]}` |
+
+`blocks` are the heights, processed in the order given, at most **200** per run,
+each named at most once, and with the optional `archiveRepaired` flag below they
+are the whole input. Every height must sit at least 64 blocks below the chain
+head. The chain comes from the Deployment's `CHAIN_ID`, and the version from the
+archive (below) — neither is an input. An input carrying `version`, or any other
+field, **fails the run non-retryably**: a run started from the old runbook line
+must stop rather than quietly do something else. The equivalent CLI call:
+
+```bash
+temporal workflow start --namespace vector \
+  --task-queue block-republisher --type BlockRepublish \
+  --workflow-id block-republisher-2026-09-01 \
+  --input '{"blocks":[25395651,25087888]}'
+```
+
+(`--task-queue` is the chain's; the example is Ethereum's.)
+
+**A height that needs no repair is refused, not republished.** While deriving the
+version the worker reads the block hash out of the first 8 KB of the top archived
+version's `_block` object (falling back to its `_receipts`) and compares it with
+the canonical hash the node reports. If they match, that height fails
+`StructuralData` — "already canonical in the archive at version N" — before
+anything is cached or published, so a healthy height **the archive holds** cannot
+gain a permanent identical extra version. A version that names no block at all
+(no `_block`, no `_receipts`, or only a data type this binary does not know) is
+treated as a height to repair, and the run proceeds at the next slot. A height the
+archive holds nothing for has no object to compare against at all: it is repaired
+at version 1 on your word alone, and logs a warning saying so — list such a height
+only once the dry run below or the indexers have proved the fork.
+
+**Finding holes on a chain.** `raw-block-bulk-downloader --dry-run` is the audit
+for every chain: it reads each height's top archived hash, compares it with the
+one the chain reports, and writes nothing at all. `--report` leaves the answer in
+a file instead of the log, so a dry run over a million heights ends as a list you
+can act on:
+
+```bash
+bulk-download --dry-run --chain-id 42161 \
+  --rpc-url <that chain's RPC> --bucket $RAW_BUCKET \
+  --start-block 380000000 --end-block 380999999 \
+  --report ~/arbitrum-holes.jsonl
+```
+
+`--chain-id` decides which data types that chain's archive is expected to hold —
+only Ethereum's carries traces — and is checked against the bucket's own chain
+segment, so a mismatched pair is refused at startup rather than reported as a
+range full of holes. The report carries one JSON object per height that needs
+something (a height that needs nothing is left out):
+
+- `"action":"republish"` — **the hole this worker repairs**: the archive's top
+  version at that height is not the canonical block. Feed those `block` numbers
+  to that chain's task queue.
+- `"action":"fresh"` — the archive holds nothing at that height: a gap, not a
+  fork. The republisher would repair it at version 1 on your word alone, so fix
+  the gap first (the backup worker's DLQ), or let a real downloader run archive
+  it.
+- `"action":"fill"` — the canonical version is there but a data type is not. A
+  real downloader run writes the missing object; there is nothing to republish.
+- `"action":"error"` — the run reached no decision for that height at all, and
+  `error` says why (a node that would not answer, an archived object it could
+  not read). The height is neither proven healthy nor proven a hole: fix the
+  cause and re-run the range over it before acting on the rest.
+
+`dataTypes` names what a real downloader run would write at that height, not
+what the height lacks: on a `fill` row it is exactly the absent types, and on
+`fresh` and `republish` it is every type that chain's archive holds (block and
+receipts, plus traces on Ethereum), because both write a whole version. An
+`error` row reached no plan, so it carries none.
+
+The counts are in the run's final `download complete` line too (`planFresh`,
+`planSkip`, `planFill`, `planRepublish`, and `blocksFailed` for the `error`
+rows), so a range with no `republish` and no failures needs no report read at
+all.
+
+Pointed at a single height it is also the cheap pre-check before a run, from the
+same read the worker itself does.
+
+**The version comes from the archive, per height.** `block_version` is the reorg
+counter, so a height that genuinely reorged once already has a real version 1,
+and republishing into an occupied slot would append rows that every reader
+(`ORDER BY block_version DESC, processing_version DESC`) prefers over the genuine
+ones. So the worker lists the height's own prefix in the chain's raw bucket
+(`S3_BUCKET`) and publishes at **one past the highest `<number>_<version>_*`
+object there — 1 where there is none, never 0**, which holds the data being
+corrected. An object at a version occupies it whatever data type it carries, so a
+half-written correction still moves the next one up. Two heights in one run
+routinely land at different versions; each block's own version is in the result,
+in the `progress` query and in the worker's log line for it.
+
+You can predict what a height will get, though nothing requires you to
+(`$RAW_BUCKET` is the chain's `stl-sentinel<env>-<chain>-raw-<suffix>` bucket, as
+on the backup worker):
+
+```bash
+aws s3 ls s3://$RAW_BUCKET/25395000-25395999/ | grep 25395651_
+```
+
+Only `_0_` present is the ARCT-379 shape, and that height will be republished at
+1; a height that also shows `_1_` goes to 2.
+
+**`archiveRepaired: true`, for a height #849 already fixed in S3.** The bulk
+downloader repairs the archive and tells no indexer, so a height it has been
+pointed at holds the canonical block in S3 while the indexers still hold the
+fork — and the derivation above, which lands one past what the archive holds,
+then refuses that height forever as already canonical. Adding the flag
+(`{"blocks":[25395651],"archiveRepaired":true}`) publishes each named height
+**at** the version the archive's top objects occupy instead of one past it, so
+the backup worker's if-not-exists write is a no-op and every indexer appends
+that version. It is not a force flag: the worker still reads the top version's
+hash, and fails the height `StructuralData` if the archive holds nothing there,
+if that version names no block, or if it is not the canonical one ("drop
+archiveRepaired") — so a healthy height cannot gain a duplicate version with it
+either. Version 0 is a legal answer here and only here: a height the archive
+never held at all is repaired by #849 at `_0_`. The flag applies to every height
+in the run, so keep such a run to the heights #849 actually repaired.
+
+The archive is written by `raw-data-backup` from the event, so it trails a
+healthy run by up to a minute — and stays behind for good if that worker
+dead-lettered the block. If a height holds fewer versions than you expect, check
+what the indexers have before starting a run:
+
+`protocol_event` is not the only place a version lands — 37 public tables carry a
+`block_version` today (`allocation_position`, `position_state`,
+`token_total_supply`, `psm3_reserves`, `fluid_vault_state`, `onchain_token_price`
+and the `morpho_*`, `curve_*`, `uniswap_v3_*` and `sparklend_reserve_data*`
+families among them). Generate the check rather than maintaining that list here:
+
+```sql
+SELECT string_agg(
+         format('SELECT %L AS source, max(block_version) AS block_version FROM %I WHERE block_number = %s',
+                table_name, table_name, 25395651),
+         E'\nUNION ALL ' ORDER BY table_name)
+FROM information_schema.columns
+WHERE table_schema = 'public' AND column_name = 'block_version';
+```
+
+Run what it prints. Only seven of those tables carry a `chain_id` of their own
+(`protocol_event`, `allocation_position`, `allocation_position_current`,
+`position_state`, `psm3_reserves`, `psm3_alm_shares`, `token_total_supply`); the
+rest reach the chain through a registry FK, so on a multi-chain database read a
+hit as "some chain has this version" and confirm before acting on it.
+
+A version there that the archive does not hold means the repair would land on a
+slot the indexers already have: fix the archive gap (the backup worker's DLQ)
+first. This query is the only guard on that. A republish at a version an indexer
+already holds is silent all the way down — the consumers insert `ON CONFLICT …
+DO NOTHING`, the backup worker writes only where the object is absent, and this
+worker reads no database at all — so the run reports success and the fork stays
+the highest version anywhere it matters.
+
+**Before the first run.** The ServiceAccount's EKS Pod Identity association needs
+`sns:Publish` on the chain's blocks topic, `s3:ListBucket` on the chain's raw
+bucket (which versions are taken) and `s3:GetObject` on it (the first kilobytes of
+the top version's block object, to tell an already-canonical height from a losing
+fork). Nothing is ever written to S3. Each chain has its own ServiceAccount
+(`<chain>-block-republisher`) and therefore its own association: a chain whose
+association is missing is a pod that never becomes Ready — a crash loop on the
+startup probes, and `VectorOnDemandWorkerDown` 30 minutes later. `sns:Publish` and `s3:ListBucket` come from
+archon-research/infrastructure#667 (merged); `s3:GetObject` from
+archon-research/infrastructure#669, merged and applied on staging and prod on
+2026-09-03. The worker proves both S3 grants at startup — one `ListObjectsV2`
+under the `0-999/0_` prefix and one one-byte ranged `GetObject` of
+`0-999/0_startup-probe`, a key that cannot exist, so a grant conditioned on a
+prefix covers both — and a missing grant or a mistyped `S3_BUCKET` is therefore a
+pod that will not start, logging `this pod needs s3:ListBucket` or `this pod
+needs s3:GetObject on that bucket`, rather than a run that dies on its first
+archived height. `ALCHEMY_HTTP_URL` is required too, with no mainnet default: a
+deployment without it would refuse to start rather than fetch another chain's
+blocks.
+
+**What a run does.** Two activities per block. `DeriveVersion` reads the chain
+head and refuses any height inside the 64-block reorg window, reads the canonical
+block by number, lists the height's archive prefix and settles the version.
+Temporal records the version **and that canonical hash** in the workflow's
+history — that is what makes a retried republish reuse the slot instead of
+stepping past the objects its own first attempt caused, and hold its payloads to
+the same block. `RepublishBlock` then fetches block + receipts + traces **by
+number** — three RPC reads, no by-hash call — checks every payload against the
+derived hash, writes the payload to `stl:{chainId}:{number}:{version}:{dataType}`
+in Redis, and publishes a `BlockEvent` at that version on the chain's SNS topic. A
+block takes seconds; a 200-block run takes minutes. The first failing block stops
+the run — the blocks before it are already durable, so the retry is the remaining
+list.
+
+**Why by number, and what is checked.** Alchemy serves `trace_block` by hash only
+near the head: at head−5,000 it answers, at head−50,000 it fails with `state at
+block #N is pruned`, and older than that with `invalid argument 0: hex number >
+64 bits`. Every hole this worker exists to repair is hundreds of thousands of
+blocks old, so the payloads are read by number and each is held to the hash
+`DeriveVersion` derived instead: the block payload's own `hash`, and the
+`blockHash` the receipt and trace lists carry in every element. An empty receipt
+or trace list is accepted only for a block whose payload carries no transactions
+— otherwise it is a replica answering from another state, and the attempt is
+retried rather than cached. Nothing is written to Redis or SNS until every check
+passes.
+
+**It does not write `block_states`.** The `assign_block_version` trigger
+overwrites the supplied version with `MAX(version)+1` over the rows surviving at
+that height, and after the 30-day retention there are none — it would hand back
+0 and re-stamp the losing fork's own slot. Writing there would also hand the
+watcher's gap filler an unpublished row to re-publish and pin its backfill
+watermark behind the repaired height. The durable record of a republish is the
+SNS event, the S3 objects and the indexers' rows.
+
+**What to verify afterwards.** Take each height's version from the run's result
+(or the `progress` query): they need not be the same, and the checks below are
+per height. The example uses a height that landed at 1.
+
+1. The archive holds the new version — `raw-data-backup` writes it from the same
+   event, usually within a minute:
+   ```bash
+   aws s3 ls s3://$RAW_BUCKET/25395000-25395999/ | grep 25395651_1_
+   ```
+   Expect `_1_block`, `_1_receipts` and (Ethereum only) `_1_traces`. This is also
+   what makes a re-run of the same height idempotent in the sense that matters:
+   the next run reads these objects and would go to 2, so an accidental repeat
+   appends a new version rather than overwriting one.
+2. The indexers appended the corrected version:
+   ```sql
+   SELECT block_version, count(*) FROM protocol_event
+   WHERE chain_id = 1 AND block_number = 25395651 GROUP BY 1 ORDER BY 1;
+   ```
+   Expect a `block_version = 1` group alongside the old `0`. Nothing is deleted:
+   the correction is the newer version, and every reader takes the highest.
+3. `morpho-vault-backfill` can now replay the partition the height sits in — its
+   replay reads the archive by partition prefix, so it picks up the `_1_` objects
+   the step above confirmed.
+
+**Failure modes specific to this worker.**
+
+- **`StructuralData`: the height is above the chain head or within 64 blocks of
+  it** (non-retryable, run goes red immediately). The worker refuses to repair
+  inside the reorg window: the hash it derives and the payload it fetches moments
+  later would both come from the same fork, and the "correction" could itself be
+  orphaned. A different node does not help —
+  wait until the height is deep enough (64 blocks is about 13 minutes on
+  mainnet), then start a new run.
+- **The node answers null for the block or one of its payloads (retryable).**
+  The head read already proved a synced node knows this height, so a null is a
+  replica behind that head and the next attempt asks again. If every attempt
+  inside the 30-minute envelope answers null, the RPC has no history this deep:
+  point at one that does — an archive node — and start a new run.
+- **`StructuralData`: the archive already holds the canonical block at the
+  height's top version** (non-retryable). Nothing to repair: the archived hash
+  and the chain's agree. The message names the version and the hash. Drop that
+  height from the list — a re-run cannot change the answer, and forcing it would
+  append an identical correction every reader then prefers. The one exception is
+  a height #849 repaired ahead of the indexers, where `archiveRepaired: true`
+  above is the answer.
+- **`StructuralData`: an object under the height's archive prefix carries no
+  version** (non-retryable). `DeriveVersion` cannot tell which slot is free while
+  something it cannot read sits there. The error names the key: remove or rename
+  it, then start a new run.
+- **`StructuralData`: an archived object cannot be read** (non-retryable). The
+  top version's `_block` or `_receipts` object is not a gzip stream, holds no
+  bytes at all, or keeps its hash past the first 8 KB — so the already-canonical
+  check cannot run, and no attempt reads it differently. The error names the
+  key: repair or remove that object, then start a new run.
+- **`InvalidParams` (non-retryable, nothing is republished)** — the input is not
+  the object this workflow takes: an empty or oversized `blocks` list, a
+  non-positive height, or a field it does not accept, `version` above all. Fix
+  the input and start a new run; nothing was published, so the list is unchanged.
+- **The node answers with another block (retryable)** — `block N came back as
+  0x…, not the 0x… this run derived`, `the receipts fetched for block N name
+  block 0x…`, or `the node has no traces for block N, which has transactions`.
+  Either the height reorged after `DeriveVersion` read it — a reorg deeper than
+  the 64-block guard — or the replica answered from a state behind the head. The
+  activity retries inside a 30-minute envelope, which is normally long enough for
+  either to clear. If every attempt says the same thing, the height genuinely
+  moved: start a new run so `DeriveVersion` reads the canonical block again.
+- **The archive listing fails (retryable)** — a throttled `ListObjectsV2` on the
+  raw bucket leaves the height with no version to publish under, so
+  `DeriveVersion` retries rather than guessing, and settles inside the 30-minute
+  envelope. A missing `s3:ListBucket` grant cannot show up here: the startup
+  probe would have kept the pod from starting.
+- **A republished block poisons an indexer's queue.** SNS FIFO groups by chain,
+  so one block an indexer cannot process head-of-line-blocks every later block on
+  that chain's queue until SQS redrives it to the DLQ. The usual cause is a state
+  read at a height the node has no archive state for. Watch the consumers' stall
+  alerts (`VectorMorphoIndexerStalled`, `VectorOracleIndexerStalled`,
+  `VectorFluidVaultIndexerStalled`, `VectorBackupWorkerStalled`) for the first
+  few minutes of a run — republish a single block first and confirm they stay
+  quiet before running a list.
+- **A block is published twice.** An activity Temporal cancelled (a rolled pod)
+  or timed out after its publish is retried at the version the run already
+  settled on, so the repeat is the same event. The activity heartbeats every 10s
+  against a 30s timeout, so a killed worker is noticed within 30s and the retry
+  usually lands inside SNS FIFO's five-minute deduplication window, where the
+  repeat never reaches the queues at all; outside it every append-only consumer
+  re-derives identical rows anyway. The case to avoid is a second **run** over a height that
+  already succeeded — the archive holds that version by then, so it lands one
+  slot further along. Naming the same height twice in one run is refused outright.
+- **Nothing arrives downstream** — check the worker actually published
+  (`kubectl -n vector logs deploy/<chain>-block-republisher | grep 'republished
+  block'`, unprefixed on Ethereum)
+  before suspecting the consumers; SNS FIFO silently drops a repeat of the same
+  `{chainId}:{blockHash}:{version}` inside its five-minute deduplication window.
+
+**Local runs.** The kind cluster's LocalStack topic is `stl-ethereum-blocks.fifo`,
+which the worker's startup guard rejects — it requires the deployed
+`stl-sentinel<env>-<chain>-blocks.fifo` naming for the configured `CHAIN_ID` and
+`DEPLOY_ENV`. Run it against a real environment's topic, or rename the dev topic.
+`S3_BUCKET` is guarded the same way, against `stl-sentinel<env>-<chain>-raw`.
+
+---
+
+## VectorBlockMetaWorklistGrowthHigh
+
+### What it means
+
+The block-meta loader paged more than 3,000,000 `block_meta_worklist` rows for one
+chain in 24h — about three times chain 1's full first pass of 981,915 pending
+blocks. **Nothing is broken.** `block_meta_worklist` is an UNLOGGED scratch table
+holding one chain's pending blocks for the length of a run, and a run that reaches
+the end clears its own chain. This is the tripwire on the assumption that the
+pending set stays bounded, so that the table can stay plain and unpartitioned.
+
+Warning severity: no data is wrong and nothing is stale. It is a capacity signal.
+
+### First checks
+
+1. **Is the same run failing repeatedly?** A run that dies before it finishes
+   leaves its rows behind, and the next run resumes from them rather than
+   re-enumerating. Repeated failures re-page the same set over and over:
+
+   ```sql
+   SELECT chain_id, count(*) FROM block_meta_worklist GROUP BY chain_id;
+   ```
+
+   Rows sitting there while no run is in flight mean the last one did not finish.
+   Check `VectorCronjobRunFailing` for that chain's `service_name`, and the
+   Temporal UI for the workflow's last outcome.
+
+2. **Did `block_meta` lose rows?** The pending set is what the arms find minus what
+   `block_meta` already holds, so a truncated or partially restored `block_meta`
+   makes every run re-enumerate history:
+
+   ```sql
+   SELECT chain_id, count(*), min(block_number), max(block_number)
+     FROM block_meta GROUP BY chain_id;
+   ```
+
+3. **Did the referenced set widen?** A table added to the loader's arms
+   (`workListArms` in `internal/adapters/outbound/postgres/block_meta_repository.go`)
+   brings every block it references into scope.
+
+### What to do
+
+- A repeatedly failing run is the common cause and is fixed on its own terms —
+  the growth is a symptom, not the problem.
+- If the pending set is genuinely and permanently larger (a new chain, a new
+  referencing table), the threshold is the thing to revisit: raise it to suit the
+  new normal, and record the new first-pass figure here.
+- If the set is large because the loader has never completed a first pass for that
+  chain, let it finish. The first pass is expected to be ~10^6 rows for chain 1.
 
 ## VectorCoreModelRunnerStale
 
@@ -969,7 +1763,7 @@ first firing as a real stall.
 
 **Nothing here needs rows reconciling by hand.** Adapter membership is an
 append-only observation log, so a failed pass writes no lifecycle a later run has
-to walk back, and re-running is always safe. Three things can stop a run:
+to walk back, and re-running is always safe. Four things can stop a run:
 
 **1. A chain or DB error.** `eth_getLogs` 401/429/5xx, an RPC timeout, a DB
 outage. Temporal retries the activity (3 attempts) and each retry resumes from the
@@ -993,6 +1787,33 @@ and the joined error names each vault that was not. Work through those
 individually; re-running unchanged produces the same set. The run stays red until
 each one is fixed or explicitly written off, which is the point: a hole is
 reported, never hidden.
+
+**4. A height the raw archive cannot answer for.** Either `the raw archive
+identifies no block at that height` — nothing is archived there at all, or the top
+version that is there names no usable block hash — or `the raw archive holds
+another block at that height`, which names the archived hash beside the one being
+replayed. Both name the height and the bucket. The run stamps every row with the
+version the archive holds (see "Block versions come from the raw archive" above),
+so it stops rather than guess.
+Which repair to reach for depends on which height it is, and the error says which.
+
+**The pinned head.** An error prefixed `resolving the block version of the pinned
+head <N>` and saying the archive `has not caught up to the finalized head` is an
+archive that is behind, not one with a hole. `raw-data-backup` archives a block
+when the watcher broadcasts it, minutes before it finalizes, so a head that is not
+archived points at that worker: check `VectorBackupWorkerStalled` and
+`VectorBackupWorkerLatencyHigh`
+([`vector-backup-worker.md`](vector-backup-worker.md)) and the chain's raw-backup
+SQS depth, then start a new run once the archive has reached the finalized head.
+**Do not republish that height.** `block-republisher` writes the next free version
+(1) permanently, and manufactures a `_0_`/`_1_` twin the moment the backup
+worker's in-flight object lands. The head is resolved before the sweep, and the
+activity's three attempts back off 2 s then 4 s, so a lagging head shows as a red
+run within seconds rather than after the whole replay.
+
+**Any height below the head**, deep in the replay range, is a real hole and does
+not clear on retry: repair the archive with `block-republisher` (one height) or
+`raw-block-bulk-downloader` (a range), then start a new run.
 
 **Not failures:**
 
@@ -1026,9 +1847,11 @@ exposure.
 ## Adding a new cronjob
 
 Failure + all-failing alerts are automatic (they group by `service_name`).
-`VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`, the four
-on-demand jobs (`offchain-price-backfill`, `reference-capital-backfill`,
-`morpho-vault-backfill`, `morpho-v2-bootstrap`), and `core-model-runner`;
+`VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`, the on-demand
+jobs (`offchain-price-backfill`, `reference-capital-backfill`,
+`morpho-vault-backfill`, `morpho-v2-bootstrap`, and every chain's republisher and
+block-meta loader: `block-republisher` / `<chain>-block-republisher` and
+`block-meta-loader` / `<chain>-block-meta-loader`), and `core-model-runner`;
 `VectorCronjobRunFailing` excludes only maple. Two manual steps:
 
 1. Add the new **Deployment name** to the `deployment=~"..."` regex in the

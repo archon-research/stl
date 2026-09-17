@@ -1,0 +1,268 @@
+//go:build livevalidation
+
+// Manual, Alchemy-backed gate. Never compiled into CI; run it by hand with
+//
+//	ALCHEMY_API_KEY=… go test -tags=livevalidation -run TestLiveValidation ./internal/services/uniswapv4bootstrap
+
+package uniswapv4bootstrap
+
+import (
+	"context"
+	"errors"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4indexer"
+)
+
+const poolManagerDeployBlock = int64(21688329)
+
+func liveClient(t *testing.T) *alchemy.Client {
+	t.Helper()
+	key := os.Getenv("ALCHEMY_API_KEY")
+	if key == "" {
+		t.Fatal("ALCHEMY_API_KEY must be set to run TestLiveValidation")
+	}
+	client, err := alchemy.NewClient(alchemy.ClientConfig{
+		HTTPURL: "https://eth-mainnet.g.alchemy.com/v2/" + key,
+		Timeout: 60 * time.Second,
+		Logger:  testLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	return client
+}
+
+// Empty poolIDs leaves topic1 unfiltered: one seeded pool emits only a few
+// hundred logs across all of V4 history, far under any provider's cap.
+func liveFilter(t *testing.T, poolIDs ...common.Hash) outbound.LogFilter {
+	t.Helper()
+	topic0, err := uniswapv4indexer.ModifyLiquidityTopic0()
+	if err != nil {
+		t.Fatalf("ModifyLiquidityTopic0: %v", err)
+	}
+	return outbound.LogFilter{
+		Address: common.HexToAddress(poolManagerAddr),
+		Topic0:  topic0,
+		Topic1:  poolIDs,
+	}
+}
+
+func TestLiveValidation_GetLogsReturnsDecodableModifyLiquidityLogs(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	pool := testPool(poolAFixture, true)
+	filter := liveFilter(t, pool.PoolIDHash)
+	filter.FromBlock = pool.DeployBlock
+	filter.ToBlock = pool.DeployBlock + 200_000
+
+	logs, err := liveClient(t).GetLogs(ctx, filter)
+	if err != nil {
+		t.Fatalf("GetLogs: %v", err)
+	}
+	if len(logs) == 0 {
+		t.Fatal("no ModifyLiquidity logs in the pool's first 200k blocks; the filter is wrong")
+	}
+
+	poolsByHash := map[common.Hash]uniswapv4indexer.RegisteredPool{pool.PoolIDHash: pool}
+	keys, err := uniswapv4indexer.PositionKeysFromLogs(toSharedLogs(logs), poolsByHash, common.HexToAddress(poolManagerAddr))
+	if err != nil {
+		t.Fatalf("decoding %d live logs: %v", len(logs), err)
+	}
+	if len(keys[pool.ID]) == 0 {
+		t.Fatalf("%d live logs decoded into no position keys", len(logs))
+	}
+	t.Logf("decoded %d live logs into %d distinct position keys", len(logs), len(keys[pool.ID]))
+}
+
+// The bisect only works while the adapter still recognises the provider's
+// refusal wording, which is prose it can change at any time.
+func TestLiveValidation_OversizedRangeIsClassifiedAsARangeRefusal(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	client := liveClient(t)
+	head, err := client.GetCurrentBlockNumber(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentBlockNumber: %v", err)
+	}
+
+	filter := liveFilter(t)
+	filter.FromBlock = poolManagerDeployBlock
+	filter.ToBlock = head - DefaultFinalityDepth
+
+	_, err = client.GetLogs(ctx, filter)
+	if !errors.Is(err, outbound.ErrLogRangeTooLarge) {
+		t.Fatalf("error = %v, want it to wrap ErrLogRangeTooLarge: the provider's refusal wording has drifted from rangeRefusalPhrases", err)
+	}
+	t.Logf("provider refused %d blocks as expected: %v", filter.ToBlock-filter.FromBlock+1, err)
+}
+
+// Enough for several windows, few enough to stay a bounded number of requests.
+const liveScanBlocks = int64(100_000)
+
+// Deliberately asserts nothing about narrowings: how often the provider refuses
+// depends on chain density in the fortnight it runs.
+func TestLiveValidation_AdaptiveScanCoversTheRangeAgainstTheRealProvider(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	head, err := liveClient(t).GetCurrentBlockNumber(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentBlockNumber: %v", err)
+	}
+	to := head - DefaultFinalityDepth
+	from := to - liveScanBlocks + 1
+
+	scanner := &logWindowScanner{
+		client: liveClient(t),
+		filter: liveFilter(t),
+		policy: windowPolicy{initial: liveScanBlocks, min: DefaultMinWindow, max: liveScanBlocks},
+		logger: testLogger(),
+	}
+
+	next := from
+	stats, err := scanner.scan(ctx, from, to, func(w logWindow) error {
+		if w.from != next {
+			t.Errorf("window starts at %d, want %d: the scan left a gap", w.from, next)
+		}
+		next = w.to + 1
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if next != to+1 {
+		t.Errorf("scan stopped at %d, want %d", next-1, to)
+	}
+	t.Logf("scanned %d blocks in %d windows with %d narrowings, %d logs", to-from+1, stats.windows, stats.narrowings, stats.logs)
+}
+
+// The posm transfer scan's filter: the address alone, since the ERC-721 Transfer
+// topic0 is shared with every ERC-20 on the chain.
+func livePosmFilter() outbound.LogFilter {
+	return outbound.LogFilter{
+		Address: common.HexToAddress(livePosmAddr),
+		Topic0:  abis.TransferTopic0(),
+	}
+}
+
+const (
+	// The mainnet PositionManager and its deploy block, as the seed migration
+	// registers them.
+	livePosmAddr       = "0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e"
+	posmDeployBlockNum = int64(21689089)
+)
+
+// liveVersions resolves every height to 0: this gate asks whether the provider's
+// logs still decode, not what the raw archive holds at a height.
+func liveVersions() *fakeBlockVersions {
+	return versionsAt(nil)
+}
+
+func livePosm() uniswapv4indexer.RegisteredPositionManager {
+	return uniswapv4indexer.RegisteredPositionManager{
+		ID: 1, Address: common.HexToAddress(livePosmAddr), DeployBlock: posmDeployBlockNum,
+	}
+}
+
+// The only gate that can catch the provider dropping a field the decoder needs —
+// blockTimestamp above all, which is Alchemy's extension rather than a spec field.
+func TestLiveValidation_PosmTransferLogsDecodeWithNoChainRead(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	filter := livePosmFilter()
+	filter.FromBlock = posmDeployBlockNum
+	filter.ToBlock = posmDeployBlockNum + 200_000
+
+	logs, err := liveClient(t).GetLogs(ctx, filter)
+	if err != nil {
+		t.Fatalf("GetLogs: %v", err)
+	}
+	if len(logs) == 0 {
+		t.Fatal("no posm Transfer logs in the PositionManager's first 200k blocks; the address or topic0 is wrong")
+	}
+
+	transfers, err := uniswapv4indexer.NFTTransfersFromLogs(ctx, toSharedLogs(logs), livePosm(), liveVersions())
+	if err != nil {
+		t.Fatalf("decoding %d live posm logs: %v", len(logs), err)
+	}
+	if len(transfers) != len(logs) {
+		t.Fatalf("decoded %d transfers from %d logs: the scan must decode every log it asked for", len(transfers), len(logs))
+	}
+
+	mints := 0
+	for _, transfer := range transfers {
+		if transfer.BlockTimestamp.IsZero() {
+			t.Fatalf("token %s at block %d decoded a zero block_timestamp: the provider stopped returning blockTimestamp on eth_getLogs", transfer.TokenID, transfer.BlockNumber)
+		}
+		if transfer.BlockNumber < filter.FromBlock || transfer.BlockNumber > filter.ToBlock {
+			t.Errorf("token %s decoded block %d, outside the requested range", transfer.TokenID, transfer.BlockNumber)
+		}
+		if transfer.From == (common.Address{}) {
+			mints++
+		}
+	}
+	if mints == 0 {
+		t.Error("not one decoded transfer is a mint; the posm's first 200k blocks must contain some")
+	}
+	t.Logf("decoded %d live posm Transfer logs (%d mints), every one with a block timestamp", len(transfers), mints)
+}
+
+// The log's blockTimestamp has to be the block's own, or every row lands at the
+// wrong time and the band sibling reads prune chunks with stops matching.
+func TestLiveValidation_PosmLogTimestampMatchesItsBlockHeader(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	client := liveClient(t)
+	head, err := client.GetCurrentBlockNumber(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentBlockNumber: %v", err)
+	}
+
+	filter := livePosmFilter()
+	filter.ToBlock = head - DefaultFinalityDepth
+	filter.FromBlock = filter.ToBlock - 5_000
+
+	logs, err := client.GetLogs(ctx, filter)
+	if err != nil {
+		t.Fatalf("GetLogs: %v", err)
+	}
+	transfers, err := uniswapv4indexer.NFTTransfersFromLogs(ctx, toSharedLogs(logs), livePosm(), liveVersions())
+	if err != nil {
+		t.Fatalf("decoding %d live posm logs: %v", len(logs), err)
+	}
+	if len(transfers) == 0 {
+		t.Fatal("no posm transfers in the last 5,000 blocks; mainnet moves these continuously")
+	}
+
+	checked := 0
+	for _, transfer := range transfers {
+		header, err := client.GetBlockHeaderByNumber(ctx, transfer.BlockNumber)
+		if err != nil {
+			t.Fatalf("GetBlockHeaderByNumber(%d): %v", transfer.BlockNumber, err)
+		}
+		pin, err := parsePinnedHeader(transfer.BlockNumber, header)
+		if err != nil {
+			t.Fatalf("parsing header %d: %v", transfer.BlockNumber, err)
+		}
+		if !transfer.BlockTimestamp.Equal(pin.ts) {
+			t.Fatalf("block %d: the log says %s, its header says %s", transfer.BlockNumber, transfer.BlockTimestamp, pin.ts)
+		}
+		checked++
+		if checked == 5 {
+			break
+		}
+	}
+	t.Logf("%d of %d decoded transfers had their log timestamp confirmed against the block header", checked, len(transfers))
+}

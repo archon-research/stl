@@ -121,6 +121,7 @@ func newActivityEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool, baseU
 	// The build registry refuses to register a build it cannot identify, and a
 	// `go test` binary carries no VCS stamp.
 	t.Setenv("BUILD_GIT_HASH", "integration-test")
+	testutil.SetBuildGitHash(t)
 
 	service, err := newPriceFetcher(ctx, temporal.Dependencies{Pool: pool, Logger: testutil.DiscardLogger()})
 	if err != nil {
@@ -142,6 +143,7 @@ func newWorkflowEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool, baseU
 	t.Setenv("COINGECKO_API_KEY", "test-api-key")
 	t.Setenv("COINGECKO_BASE_URL", baseURL)
 	t.Setenv("BUILD_GIT_HASH", "integration-test")
+	testutil.SetBuildGitHash(t)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	deps := temporal.Dependencies{Pool: pool, Logger: testutil.DiscardLogger()}
@@ -209,6 +211,90 @@ func TestIntegration_Register_ExposesTheDocumentedWorkflowType(t *testing.T) {
 	}
 	if got := countPrices(t, ctx, pool, tokenID); got == 0 {
 		t.Error("the run stored no prices, so it did not reach the real activity")
+	}
+}
+
+// seedTokenlessAsset registers a catalog row with no token (tokenless = true) and
+// returns its id. Idempotent: the migration already seeds ripple/hyperliquid.
+func seedTokenlessAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sourceAssetID, symbol string) int64 {
+	t.Helper()
+
+	var sourceID int64
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID); err != nil {
+		t.Fatalf("looking up the coingecko source: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO offchain_price_asset (source_id, source_asset_id, token_id, tokenless, symbol, name, enabled, created_at, updated_at)
+		VALUES ($1, $2, NULL, true, $3, $3, true, NOW(), NOW())
+		ON CONFLICT (source_id, source_asset_id) DO NOTHING
+	`, sourceID, sourceAssetID, symbol); err != nil {
+		t.Fatalf("seeding tokenless price asset: %v", err)
+	}
+	var assetID int64
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM offchain_price_asset WHERE source_id = $1 AND source_asset_id = $2`,
+		sourceID, sourceAssetID).Scan(&assetID); err != nil {
+		t.Fatalf("reading back tokenless price asset: %v", err)
+	}
+	return assetID
+}
+
+// The same operator-facing workflow must serve a token-less asset end to end:
+// the catalog row declares tokenless, the activity routes the points through
+// UpsertAssetPrices, and the rows land in asset_price — the path VEC-652 adds
+// for XRP/HYPE. Driven through the production register(), like the WETH test.
+func TestIntegration_Backfill_TokenlessAssetLandsInAssetPrice(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	server := coinGeckoFixtureServer(t)
+	t.Cleanup(server.Close)
+
+	assetID := seedTokenlessAsset(t, ctx, pool, "ripple", "XRP")
+	env := newWorkflowEnv(t, ctx, pool, server.URL)
+
+	from := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	env.ExecuteWorkflow("OffchainPriceBackfill", BackfillParams{
+		Assets: []string{"ripple"},
+		From:   from,
+		To:     from.Add(24 * time.Hour),
+	})
+
+	if !env.IsWorkflowCompleted() {
+		t.Fatal("expected the workflow to complete")
+	}
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("running the workflow for a token-less asset: %v", err)
+	}
+
+	// 25 points (inclusive 24h window) with the fixture's values read back, so a
+	// column transposition cannot pass as success.
+	var rows int
+	var firstPrice, firstMarketCap float64
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) OVER (), price_usd, market_cap_usd
+		FROM asset_price WHERE asset_id = $1
+		ORDER BY timestamp ASC LIMIT 1`, assetID,
+	).Scan(&rows, &firstPrice, &firstMarketCap); err != nil {
+		t.Fatalf("reading stored asset prices: %v", err)
+	}
+	if rows != 25 {
+		t.Errorf("rows in asset_price = %d, want 25 hourly points", rows)
+	}
+	if firstPrice != 1500.0 {
+		t.Errorf("first price = %v, want the fixture's 1500.0", firstPrice)
+	}
+	if firstMarketCap != 1500.0*1e6 {
+		t.Errorf("first market cap = %v, want the fixture's 1.5e9", firstMarketCap)
+	}
+	var tokenRows int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_token_price`).Scan(&tokenRows); err != nil {
+		t.Fatalf("counting token-keyed prices: %v", err)
+	}
+	if tokenRows != 0 {
+		t.Errorf("offchain_token_price gained %d rows for a token-less run", tokenRows)
 	}
 }
 

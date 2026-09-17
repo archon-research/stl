@@ -15,9 +15,10 @@ import { LIST_DELAY_MS, mock } from '../mock-api.ts';
 import { problemResponse } from '../problem.ts';
 import {
   bucketStarts,
-  readFlag,
   readLimit,
   resolveWindow,
+  rawWindowEcho,
+  resampledWindowEcho,
   sameHex,
 } from '../query.ts';
 import type { ProtocolEvent, ProtocolEventBucket } from '../schema.ts';
@@ -45,7 +46,8 @@ export function eventHandlers(): MockHandler[] {
         {
           fromTimestamp: query.get('from_timestamp'),
           toTimestamp: query.get('to_timestamp'),
-          resolution: query.get('resolution'),
+          frequency: query.get('frequency'),
+          aggregationMethod: query.get('aggregation_method'),
         },
         nowMs,
       );
@@ -61,12 +63,7 @@ export function eventHandlers(): MockHandler[] {
         return response.untyped(problemResponse(limit.problem));
       }
 
-      const aggregate = readFlag('aggregate', query.get('aggregate'));
-      if (!aggregate.ok) {
-        return response.untyped(problemResponse(aggregate.problem));
-      }
-
-      const { window, fromMs, toMs } = resolved.value;
+      const { bucketed, frequencyMs, fromMs, toMs } = resolved.value;
       const txHash = query.get('tx_hash');
       const protocolName = query.get('protocol_name');
       const matched = seedProtocolEvents(nowMs)
@@ -80,17 +77,17 @@ export function eventHandlers(): MockHandler[] {
           return createdMs >= fromMs && createdMs <= toMs;
         });
 
-      if (aggregate.value) {
+      if (bucketed) {
         return response(200).json({
           mode: 'aggregated',
-          window,
+          window: resampledWindowEcho(resolved.value),
           // Annotated for the same reason as the series buckets: a `.map()`
           // result is not fresh, so an unannotated literal would keep a field
           // the document had dropped. See `handlers/series.ts`.
-          data: bucketStarts(fromMs, toMs, window.interval_ms, limit.value).map(
+          data: bucketStarts(fromMs, toMs, frequencyMs, limit.value).map(
             (startMs): ProtocolEventBucket => ({
               bucket_start: iso(startMs),
-              event_count: countInBucket(matched, startMs, window.interval_ms),
+              event_count: countInBucket(matched, startMs, frequencyMs),
             }),
           ),
         });
@@ -98,7 +95,7 @@ export function eventHandlers(): MockHandler[] {
 
       return response(200).json({
         mode: 'raw',
-        window,
+        window: rawWindowEcho(resolved.value),
         data: matched.slice(0, limit.value),
       });
     }),

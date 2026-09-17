@@ -927,7 +927,7 @@ def test_list_allocation_activity_returns_aggregated_buckets():
         params={
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-01-02T00:00:00Z",
-            "aggregate": "true",
+            "aggregation_method": "end-period",
         },
     )
 
@@ -940,10 +940,16 @@ def test_list_allocation_activity_returns_aggregated_buckets():
             "event_count": 3,
             "total_tx_amount": "450.5",
             "net_flow_usd": "-120.25",
+            # Null on the flow series, which is the default: the two series are
+            # alternatives and only one query runs (VEC-760).
+            "balance_usd": None,
+            "priced_entity_count": None,
+            "entity_count": None,
         }
     ]
     kwargs = service.list_activity_buckets.await_args.kwargs
     assert kwargs["bucket_seconds"] == 5 * 60  # 24h window -> PT5M default
+    assert kwargs["series"] == "flow"
     service.list_allocation_activity.assert_not_awaited()
 
 
@@ -957,6 +963,27 @@ def test_list_allocation_activity_returns_422_for_invalid_prime_id():
     response = client.get(
         "/v1/allocations/activity",
         params={"prime_id": "0xdeadbeef"},
+    )
+
+    assert response.status_code == 422
+    service.list_allocation_activity.assert_not_awaited()
+
+
+def test_list_allocation_activity_returns_422_for_series_without_aggregation():
+    """``series`` selects between two aggregate queries; the raw arm has neither.
+
+    Silently ignoring it (VEC-760) would let ``series=balance`` on a raw request
+    look like it took effect.
+    """
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/allocations/activity",
+        params={"series": "balance"},
     )
 
     assert response.status_code == 422
@@ -993,6 +1020,46 @@ def test_list_allocation_activity_hides_synthetic_sweep_tx_hash():
 
     assert response.status_code == 200
     assert response.json()["data"][0]["tx_hash"] is None
+
+
+def test_list_allocation_activity_refuses_a_direction_outside_the_checked_set():
+    """`action_type` is a `Literal`, so an out-of-set direction fails loudly.
+
+    Unreachable in practice — `allocation_position.direction` carries
+    `CHECK (direction IN ('in', 'out', 'sweep'))`. Pinned because the refusal is
+    a deliberate choice, and because it lands earlier than one might expect: the
+    entity is a plain dataclass that validates nothing, so the row travels as
+    far as the response model's own constructor in the handler, which raises
+    before FastAPI reaches its response-serialization step.
+    """
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = [
+        AllocationActivityEvent(
+            chain_id=1,
+            prime_address=_VALID_ADDR,
+            prime_name="spark",
+            protocol_name="SparkLend",
+            token_id=1,
+            token_symbol="spUSDC",
+            # Deliberately out of set: the point of the test. The dataclass does
+            # not validate, so only the response model can refuse it.
+            action_type="SWEEP",  # ty: ignore[invalid-argument-type]
+            tx_amount=Decimal("0"),
+            balance=Decimal("200.0"),
+            tx_hash="0x" + "cd" * 32,
+            log_index=0,
+            block_number=100,
+            block_version=0,
+            created_at=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+        )
+    ]
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    with pytest.raises(ValidationError):
+        client.get("/v1/allocations/activity")
 
 
 def test_list_allocation_activity_returns_200_empty_for_unknown_valid_prime_id():
@@ -1064,6 +1131,7 @@ def test_list_allocation_activity_returns_422_for_wide_window_without_filter():
     )
 
     assert response.status_code == 422
+    assert response.json()["type"] == "window_too_large"
     assert "selective filter" in response.json()["detail"]
     service.list_allocation_activity.assert_not_awaited()
 
@@ -1082,12 +1150,25 @@ def test_list_allocation_activity_allows_wide_window_with_prime_id_filter():
             "prime_id": _VALID_ADDR,
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-03-15T00:00:00Z",
-            "resolution": "PT6H",
         },
     )
 
     assert response.status_code == 200
     service.list_allocation_activity.assert_awaited_once()
+
+
+def test_a_default_frequency_activity_window_names_no_grid():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    window = client.get("/v1/allocations/activity").json()["window"]
+
+    assert "frequency" not in window
+    assert "frequency_ms" not in window
 
 
 def test_list_allocation_activity_returns_422_for_invalid_tx_hash():
@@ -1118,7 +1199,7 @@ def test_list_allocation_activity_accepts_uppercase_0x_tx_hash():
     assert service.list_allocation_activity.await_args.kwargs["tx_hash"] == "0x" + "AB" * 32
 
 
-def test_list_allocation_activity_sets_public_cache_control_on_pinned_window():
+def test_list_allocation_activity_sets_private_cache_control_on_a_settled_pinned_window():
     from app.api.v1 import allocations
 
     service = _make_service()
@@ -1135,7 +1216,7 @@ def test_list_allocation_activity_sets_public_cache_control_on_pinned_window():
     )
 
     assert response.status_code == 200
-    assert response.headers["cache-control"] == "public, max-age=300"
+    assert response.headers["cache-control"] == "private, max-age=300"
 
 
 def test_list_allocation_activity_sets_no_store_when_bounds_not_pinned():

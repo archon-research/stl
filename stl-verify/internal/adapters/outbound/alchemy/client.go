@@ -374,6 +374,22 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 	return result, nil
 }
 
+// ChainID fetches the chain the node serves. A worker's chain and its node URL
+// arrive as independent configuration, and every block number it reads means
+// something else on another chain, so this is what proves the two agree.
+func (c *Client) ChainID(ctx context.Context) (int64, error) {
+	raw, err := c.callSingle(ctx, "eth_chainId", "chainId", []any{})
+	if err != nil {
+		return 0, err
+	}
+
+	var result string
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return 0, fmt.Errorf("failed to parse chain ID: %w", err)
+	}
+	return hexutil.ParseInt64(result)
+}
+
 // GetCurrentBlockNumber fetches the latest block number.
 func (c *Client) GetCurrentBlockNumber(ctx context.Context) (int64, error) {
 	req := jsonRPCRequest{
@@ -394,6 +410,57 @@ func (c *Client) GetCurrentBlockNumber(ctx context.Context) (int64, error) {
 	}
 
 	return hexutil.ParseInt64(result)
+}
+
+// GetFinalizedBlockNumber fetches the number of the head the node considers
+// final. A node that does not serve the "finalized" tag answers with an RPC
+// error or a null result, both of which surface as an error rather than a height.
+func (c *Client) GetFinalizedBlockNumber(ctx context.Context) (int64, error) {
+	raw, err := c.callSingle(ctx, "eth_getBlockByNumber", "finalized", []any{"finalized", false})
+	if err != nil {
+		return 0, err
+	}
+
+	var header outbound.BlockHeader
+	if err := json.Unmarshal(raw, &header); err != nil {
+		return 0, fmt.Errorf("failed to parse finalized block: %w", err)
+	}
+	return hexutil.ParseInt64(header.Number)
+}
+
+// GetBlockHeadersBatch fetches block headers — no transaction bodies, no
+// receipts — for multiple blocks in a single batched RPC call.
+func (c *Client) GetBlockHeadersBatch(ctx context.Context, blockNums []int64) ([]outbound.BlockData, error) {
+	if len(blockNums) == 0 {
+		return nil, nil
+	}
+
+	requests := make([]jsonRPCRequest, len(blockNums))
+	for i, blockNum := range blockNums {
+		requests[i] = jsonRPCRequest{
+			JSONRPC: "2.0",
+			ID:      i,
+			Method:  "eth_getBlockByNumber",
+			Params:  []any{fmt.Sprintf("0x%x", blockNum), false},
+		}
+	}
+
+	responses, err := c.callBatch(ctx, requests)
+	if err != nil {
+		return nil, err
+	}
+
+	respMap := make(map[int]*jsonRPCResponse, len(responses))
+	for i := range responses {
+		respMap[responses[i].ID] = &responses[i]
+	}
+
+	results := make([]outbound.BlockData, len(blockNums))
+	for i, blockNum := range blockNums {
+		results[i] = outbound.BlockData{BlockNumber: blockNum}
+		results[i].Block, results[i].BlockErr = extractResult(respMap[i], nil, "eth_getBlockByNumber", strconv.FormatInt(blockNum, 10))
+	}
+	return results, nil
 }
 
 // GetBlocksBatch fetches all data for multiple blocks in a single batched RPC call.
@@ -619,6 +686,10 @@ func (c *Client) callBatch(ctx context.Context, requests []jsonRPCRequest) ([]js
 
 // call makes an HTTP JSON-RPC call to the Alchemy API with retry.
 func (c *Client) call(ctx context.Context, req jsonRPCRequest) (*jsonRPCResponse, error) {
+	return c.callClassified(ctx, req, nil)
+}
+
+func (c *Client) callClassified(ctx context.Context, req jsonRPCRequest, classify func(*jsonRPCError) error) (*jsonRPCResponse, error) {
 	// Start span if telemetry is enabled
 	if c.telemetry != nil {
 		var span trace.Span
@@ -634,43 +705,11 @@ func (c *Client) call(ctx context.Context, req jsonRPCRequest) (*jsonRPCResponse
 
 	var rpcResp jsonRPCResponse
 	err = c.doWithRetry(ctx, req.Method, func() error {
-		// Reset response to avoid leftover error field from previous attempts
-		rpcResp = jsonRPCResponse{}
-
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.HTTPURL, bytes.NewReader(reqBytes))
+		resp, err := c.postJSONRPC(ctx, reqBytes, classify)
 		if err != nil {
-			return &nonRetryableError{err: fmt.Errorf("failed to create request: %w", err)}
+			return err
 		}
-		httpReq.Header.Set("Content-Type", "application/json")
-
-		httpResp, err := c.httpClient.Do(httpReq)
-		if err != nil {
-			return fmt.Errorf("HTTP request failed: %w", err)
-		}
-		defer func() {
-			if err := httpResp.Body.Close(); err != nil {
-				c.logger.Warn("failed to close HTTP response body", "error", err)
-			}
-		}()
-
-		// Check for retryable HTTP status codes
-		if httpResp.StatusCode >= 500 || httpResp.StatusCode == 429 {
-			return fmt.Errorf("HTTP %d: server error", httpResp.StatusCode)
-		}
-
-		respBytes, err := io.ReadAll(httpResp.Body)
-		if err != nil {
-			return fmt.Errorf("failed to read response: %w", err)
-		}
-
-		if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
-			return fmt.Errorf("failed to parse response: %w", err)
-		}
-
-		if rpcResp.Error != nil {
-			return fmt.Errorf("RPC error: %s", rpcResp.Error.Message)
-		}
-
+		rpcResp = resp
 		return nil
 	})
 
@@ -683,6 +722,45 @@ func (c *Client) call(ctx context.Context, req jsonRPCRequest) (*jsonRPCResponse
 		return nil, err
 	}
 	return &rpcResp, nil
+}
+
+func (c *Client) postJSONRPC(ctx context.Context, body []byte, classify func(*jsonRPCError) error) (jsonRPCResponse, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.HTTPURL, bytes.NewReader(body))
+	if err != nil {
+		return jsonRPCResponse{}, &nonRetryableError{err: fmt.Errorf("failed to create request: %w", err)}
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return jsonRPCResponse{}, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer func() {
+		if err := httpResp.Body.Close(); err != nil {
+			c.logger.Warn("failed to close HTTP response body", "error", err)
+		}
+	}()
+
+	if httpResp.StatusCode >= 500 || httpResp.StatusCode == 429 {
+		return jsonRPCResponse{}, fmt.Errorf("HTTP %d: server error", httpResp.StatusCode)
+	}
+
+	respBytes, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return jsonRPCResponse{}, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var rpcResp jsonRPCResponse
+	if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
+		return jsonRPCResponse{}, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if rpcResp.Error != nil {
+		if classify != nil {
+			return jsonRPCResponse{}, classify(rpcResp.Error)
+		}
+		return jsonRPCResponse{}, fmt.Errorf("RPC error: %s", rpcResp.Error.Message)
+	}
+	return rpcResp, nil
 }
 
 // nonRetryableError wraps errors that should not be retried.

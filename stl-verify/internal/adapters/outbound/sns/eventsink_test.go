@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -73,6 +74,37 @@ func TestNewEventSink_AppliesDefaults(t *testing.T) {
 	}
 	if sink.config.BackoffFactor != 2.0 {
 		t.Errorf("expected BackoffFactor=2.0, got %v", sink.config.BackoffFactor)
+	}
+}
+
+// One chain is one FIFO group, and SQS delivers no more of a group while a
+// message of it is in flight. That is the only reason the backup worker's
+// in-flight bound holds while its pool polls again before the buffer drains
+// (raw_data_backup.inFlightPerReceive); a finer grouping breaks it silently.
+func TestPublish_PutsEveryEventOfAChainInOneFIFOGroup(t *testing.T) {
+	client := &mockSNSClient{}
+	sink, err := NewEventSink(client, Config{TopicARN: testTopicARN})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	events := []outbound.BlockEvent{
+		{ChainID: 1, BlockNumber: 100, BlockHash: "0x100", ParentHash: "0x099"},
+		{ChainID: 1, BlockNumber: 101, BlockHash: "0x101", ParentHash: "0x100"},
+		{ChainID: 43114, BlockNumber: 100, BlockHash: "0xa100", ParentHash: "0xa099"},
+	}
+	for _, event := range events {
+		if err := sink.Publish(context.Background(), event); err != nil {
+			t.Fatalf("publishing block %d on chain %d: %v", event.BlockNumber, event.ChainID, err)
+		}
+	}
+
+	var groups []string
+	for _, call := range client.calls {
+		groups = append(groups, aws.ToString(call.MessageGroupId))
+	}
+	if want := []string{"1", "1", "43114"}; !slices.Equal(groups, want) {
+		t.Errorf("MessageGroupIds = %v, want %v (one group per chain, not per block)", groups, want)
 	}
 }
 

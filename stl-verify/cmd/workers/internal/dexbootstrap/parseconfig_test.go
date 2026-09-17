@@ -89,7 +89,7 @@ func TestParseConfig_HappyPath(t *testing.T) {
 	if cfg.AlchemyURL != "https://eth-mainnet.g.alchemy.com/v2/key" {
 		t.Errorf("AlchemyURL = %q, default Alchemy URL not applied", cfg.AlchemyURL)
 	}
-	if cfg.MaxMessages != 10 || cfg.WaitTime != 20 || cfg.VisibilityTimeout != 300 {
+	if cfg.MaxMessages != 1 || cfg.WaitTime != 20 || cfg.VisibilityTimeout != 300 {
 		t.Errorf("defaults not applied: max=%d wait=%d vis=%d", cfg.MaxMessages, cfg.WaitTime, cfg.VisibilityTimeout)
 	}
 	if cfg.Dex != "curve" {
@@ -124,6 +124,18 @@ func TestParseConfig_RequiredEnvVars(t *testing.T) {
 				t.Errorf("error %q must reference %q so operator can fix the right var", err, tc.mustMatch)
 			}
 		})
+	}
+}
+
+func TestParseConfig_ReportsMissingAlchemyKeyBeforeLaterConfiguration(t *testing.T) {
+	vars := happyEnv()
+	delete(vars, "ALCHEMY_API_KEY")
+	delete(vars, "REDIS_ADDR")
+	envSet(t, vars)
+
+	_, err := ParseConfig("test", nil)
+	if err == nil || !strings.Contains(err.Error(), "ALCHEMY_API_KEY") {
+		t.Fatalf("err = %v, want the earlier Alchemy key error", err)
 	}
 }
 
@@ -270,8 +282,8 @@ func TestParseConfig_RequiresAlchemyURLForNonMainnet(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error: a non-mainnet chain must set ALCHEMY_HTTP_URL (default is mainnet-only)")
 	}
-	if !strings.Contains(err.Error(), "ALCHEMY_HTTP_URL") {
-		t.Errorf("error %q should name ALCHEMY_HTTP_URL, not fall through to a later check", err)
+	if !strings.Contains(err.Error(), "resolving Alchemy RPC URL: ALCHEMY_HTTP_URL") {
+		t.Errorf("error %q should identify the Alchemy RPC URL configuration step", err)
 	}
 }
 

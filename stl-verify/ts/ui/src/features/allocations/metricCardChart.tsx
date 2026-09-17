@@ -1,24 +1,26 @@
 import {
-  AreaSeries,
-  Axis,
-  buildChartTheme,
-  ChartCursorLayer,
   ChartLegend,
   type ChartLegendItem,
   chartColorToken,
   type ChartColorToken,
   chartTokens,
+  resolveChartColor,
+  useContainerWidth,
+} from '@archon-research/charting/core';
+import {
+  AreaSeries,
+  Axis,
+  buildChartTheme,
+  ChartCursorLayer,
   DataContext,
   Grid,
   LineSeries,
   ReferenceBand,
-  resolveChartColor,
   Tooltip,
-  useContainerWidth,
   useHoveredTimestamp,
   useSyncedCursorHandlers,
   XYChart,
-} from '@archon-research/charting';
+} from '@archon-research/charting/xychart';
 import { SkeletonStack } from '@archon-research/design-system';
 import { useContext, useMemo } from 'react';
 
@@ -107,7 +109,7 @@ export function MetricCardLegend({
 const chartTooltipSurfaceClassName = css({
   borderColor: 'border.subtle',
   borderStyle: 'solid',
-  borderWidth: '1px',
+  borderWidth: 'hairline',
   borderRadius: 'md',
   background: 'surface.default',
   boxShadow: 'sm',
@@ -239,11 +241,9 @@ export function MetricCardTrend({
     // same space and there's no jump (or floating box) when the real chart loads
     // in.
     return (
-      <SkeletonStack
-        count={1}
-        itemHeight={CHART_HEIGHT}
-        className={css({ mt: '2' })}
-      />
+      <div className={css({ mt: '2' })}>
+        <SkeletonStack count={1} itemHeight={CHART_HEIGHT} />
+      </div>
     );
   }
 
@@ -359,7 +359,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
   const [hoveredTimestamp] = useHoveredTimestamp();
   // Reads the instant off the hovered datum rather than inverting a pixel, so
   // sibling cards line up on the bucket a reader is actually over even though
-  // they bucket at different resolutions and start at different points.
+  // they bucket at different frequencies and start at different points.
   const cursorHandlers = useSyncedCursorHandlers<ChartDatum>(
     (point) => point.timestamp ?? Number.NaN,
   );
@@ -391,10 +391,10 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
         // compares against NaN, every comparison is false, and it returns the
         // upper stop rather than clearing — so hovering a card with no history
         // jumped every other card's crosshair to an arbitrary bucket.
-        onPointerMove={
-          stops === null ? undefined : cursorHandlers.onPointerMove
-        }
-        onPointerOut={stops === null ? undefined : cursorHandlers.onPointerOut}
+        {...(stops !== null && {
+          onPointerMove: cursorHandlers.onPointerMove,
+          onPointerOut: cursorHandlers.onPointerOut,
+        })}
       >
         <Grid columns={false} numTicks={3} />
         <Axis
@@ -437,7 +437,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             mode="threshold"
             value={entry.value}
             breach="above"
-            stroke={entry.stroke}
+            {...(entry.stroke !== undefined && { stroke: entry.stroke })}
             // No breach fill: shading everything past the limit made a small
             // card read as mostly-in-breach even at a healthy ratio.
             fill="transparent"

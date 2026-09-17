@@ -11,9 +11,11 @@
 //   - Thread-safe: All public methods are safe for concurrent use
 //
 // Channel buffer sizing:
-//   - Default ChannelBufferSize is 100 blocks
-//   - If your consumer processes blocks slower than ~12 seconds/block (Ethereum
-//     block time), increase the buffer or optimize consumption to avoid drops
+//   - Default ChannelBufferSize is 100 headers
+//   - The buffer must hold every header that arrives while the consumer is
+//     blocked, so size it to block rate × the consumer's longest stall: 100
+//     slots is ~20 minutes on Ethereum (~12s blocks) but ~25s on Arbitrum
+//     (~4 blocks/s), where a single 30s RPC timeout already overflows it
 package alchemy
 
 import (

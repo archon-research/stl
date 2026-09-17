@@ -23,8 +23,7 @@ const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/
 // wiring.
 //
 // RecordRun is nil-receiver-safe so cronjobs run unchanged when telemetry
-// is not wired (unit tests, local runs without an OTLP endpoint). seedStatusSeries
-// is construction-time only and always runs on a non-nil receiver.
+// is not wired (unit tests, local runs without an OTLP endpoint).
 type cronjobMetrics struct {
 	runsTotal   metric.Int64Counter
 	runDuration metric.Float64Histogram
@@ -60,21 +59,33 @@ func newCronjobMetricsWithProvider(mp metric.MeterProvider) (*cronjobMetrics, er
 	return m, nil
 }
 
-// runStatusValues are the terminal statuses a run can land on; must stay in
-// sync with runStatusAttr and the counter description above.
-var runStatusValues = []string{"success", "error", "canceled"}
+// canceledStatusAttr is this counter's third terminal status, alongside
+// telemetry's success and error. Both the seed and the recording path go
+// through it so neither can spell it differently.
+func canceledStatusAttr() attribute.KeyValue {
+	return attribute.String("status", "canceled")
+}
+
+// runStatusValues are the terminal statuses a run can land on, held as the
+// exact attributes runStatusAttr returns rather than as strings: a seed whose
+// spelling the recorder never uses exports a phantom series at 0 forever while
+// real runs land on an unseeded one, which reads as fixed and is not.
+var runStatusValues = []attribute.KeyValue{
+	telemetry.SuccessStatusAttr(),
+	telemetry.ErrorStatusAttr(),
+	canceledStatusAttr(),
+}
 
 // seedStatusSeries exports every terminal-status series of cronjob.runs.total
-// at 0 at worker startup. Without it the {status="success"} series only appears
-// on the first success, so Prometheus never observes the 0->1 transition and
-// increase()/rate() report 0 successes for up to a full window after a pod
-// (re)start. That trips VectorCronjobAllRunsFailing on every rollover (see
-// stl/alerts/vector-cronjobs.yaml). Seeding to 0 makes the first real increment
-// visible to increase().
+// at 0 at worker startup, so increase() can observe the first real increment
+// (telemetry.SeedCounter carries the mechanism and the rollover it fixes).
+// telemetry.SeedStatusCounter is the usual way to do this and is deliberately
+// not used here: it seeds success and error, and this counter has a third
+// terminal status, which would leave {status="canceled"} unseeded.
 func (m *cronjobMetrics) seedStatusSeries() {
 	ctx := context.Background()
 	for _, status := range runStatusValues {
-		m.runsTotal.Add(ctx, 0, metric.WithAttributes(attribute.String("status", status)))
+		telemetry.SeedCounter(ctx, m.runsTotal, status)
 	}
 }
 
@@ -87,7 +98,7 @@ func (m *cronjobMetrics) seedStatusSeries() {
 // deadline (context.DeadlineExceeded) still counts as an error.
 func runStatusAttr(ctx context.Context, err error) attribute.KeyValue {
 	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
-		return attribute.String("status", "canceled")
+		return canceledStatusAttr()
 	}
 	return telemetry.StatusAttr(err)
 }

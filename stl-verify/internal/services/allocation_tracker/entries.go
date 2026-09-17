@@ -22,6 +22,7 @@ var legacyProtocolAliases = map[string]string{
 	"fluid-finance-erc4626-vault":          "fluid",
 	"grove-x-steakhouse-ausd-morpho-vault": "steakhouse",
 	"grove-x-steakhouse-usdc-high-yield-vault-v2": "steakhouse",
+	"grove-x-steakhouse-usdg-morpho-vault":        "steakhouse",
 	"morpho-blue-erc4626-vault":                   "morpho",
 	"sparklend-protocol":                          "sparklend",
 	"steakhouse-pyusd-morpho-vault":               "steakhouse",

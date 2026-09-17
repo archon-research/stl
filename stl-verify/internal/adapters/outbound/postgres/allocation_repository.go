@@ -26,6 +26,7 @@ type AllocationRepository struct {
 	tokenRepo outbound.TokenRepository
 	logger    *slog.Logger
 	buildID   buildregistry.BuildID
+	runID     buildregistry.RunID
 }
 
 type tokenCacheKey struct {
@@ -39,6 +40,7 @@ func NewAllocationRepository(
 	tokenRepo outbound.TokenRepository,
 	logger *slog.Logger,
 	buildID buildregistry.BuildID,
+	runID buildregistry.RunID,
 ) *AllocationRepository {
 	if logger == nil {
 		logger = slog.Default()
@@ -49,24 +51,30 @@ func NewAllocationRepository(
 		tokenRepo: tokenRepo,
 		logger:    logger,
 		buildID:   buildID,
+		runID:     runID,
 	}
 }
 
-// SavePositions persists positions within an externally managed transaction.
-// Callers obtain `tx` from a TxManager so this write can be coordinated with
-// other repository writes (e.g. TokenTotalSupplyRepository) atomically.
+// SavePositions persists positions within an externally managed transaction and
+// reports the rows history actually received. Callers obtain `tx` from a
+// TxManager so this write can be coordinated with other repository writes
+// (e.g. TokenTotalSupplyRepository) atomically.
+//
+// A write whose target chunk is still compressed is discarded by TimescaleDB
+// before the processing_version trigger runs, raising no error, so the count is
+// the only thing separating that from a clean insert (VEC-759).
 func (r *AllocationRepository) SavePositions(
 	ctx context.Context,
 	tx pgx.Tx,
 	positions []*entity.AllocationPosition,
-) error {
+) (int64, error) {
 	if len(positions) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	for i, pos := range positions {
 		if err := pos.Validate(); err != nil {
-			return fmt.Errorf("position %d: %w", i, err)
+			return 0, fmt.Errorf("position %d: %w", i, err)
 		}
 	}
 
@@ -92,13 +100,13 @@ func (r *AllocationRepository) SavePositions(
 
 	tokenIDs, err := r.resolveTokenIDs(ctx, tx, positions)
 	if err != nil {
-		return fmt.Errorf("resolve token IDs: %w", err)
+		return 0, fmt.Errorf("resolve token IDs: %w", err)
 	}
 
 	for _, pos := range positions {
 		key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
 		if _, ok := tokenIDs[key]; !ok {
-			return fmt.Errorf(
+			return 0, fmt.Errorf(
 				"token ID not resolved for chain=%d address=%s",
 				pos.ChainID, pos.TokenAddress.Hex(),
 			)
@@ -115,7 +123,7 @@ func (r *AllocationRepository) SavePositions(
 			ukey := tokenCacheKey{ChainID: pos.ChainID, Address: pos.Underlying.AssetAddress}
 			id, ok := tokenIDs[ukey]
 			if !ok {
-				return fmt.Errorf(
+				return 0, fmt.Errorf(
 					"underlying token ID not resolved for chain=%d address=%s",
 					pos.ChainID, pos.Underlying.AssetAddress.Hex(),
 				)
@@ -125,7 +133,7 @@ func (r *AllocationRepository) SavePositions(
 
 		query, args, err := r.buildInsertArgs(pos, tokenID, underlyingTokenID)
 		if err != nil {
-			return fmt.Errorf(
+			return 0, fmt.Errorf(
 				"build insert for chain=%d address=%s block=%d: %w",
 				pos.ChainID, pos.TokenAddress.Hex(), pos.BlockNumber, err,
 			)
@@ -133,24 +141,29 @@ func (r *AllocationRepository) SavePositions(
 		batch.Queue(query, args...)
 	}
 
+	var inserted int64
 	results := tx.SendBatch(ctx, batch)
 	for i := range positions {
-		if _, err := results.Exec(); err != nil {
+		tag, err := results.Exec()
+		if err != nil {
 			_ = results.Close()
-			return fmt.Errorf(
+			return 0, fmt.Errorf(
 				"insert position %d (chain=%d address=%s block=%d): %w",
 				i, positions[i].ChainID,
 				positions[i].TokenAddress.Hex(),
 				positions[i].BlockNumber, err,
 			)
 		}
+		inserted += tag.RowsAffected()
 	}
 	if err := results.Close(); err != nil {
-		return fmt.Errorf("close batch: %w", err)
+		return 0, fmt.Errorf("close batch: %w", err)
 	}
 
-	r.logger.Debug("positions saved", "inserted", len(positions))
-	return nil
+	if err := checkDedupedStateRows(r.logger, "allocation_position", inserted, len(positions)); err != nil {
+		return inserted, err
+	}
+	return inserted, nil
 }
 
 func (r *AllocationRepository) buildInsertArgs(
@@ -174,17 +187,6 @@ func (r *AllocationRepository) buildInsertArgs(
 		underlyingValue = toNumeric(pos.Underlying.Value, pos.Underlying.AssetDecimals)
 	}
 
-	query := `
-		INSERT INTO allocation_position (
-			chain_id, token_id, prime_id, proxy_address,
-			balance, scaled_balance,
-			block_number, block_version,
-			tx_hash, log_index, tx_amount, direction, created_at, build_id,
-			underlying_value, underlying_token_id, from_address, to_address
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-		ON CONFLICT (chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, processing_version, created_at) DO NOTHING
-	`
-
 	args := []any{
 		pos.ChainID,
 		tokenID,
@@ -200,14 +202,49 @@ func (r *AllocationRepository) buildInsertArgs(
 		pos.Direction,
 		pos.CreatedAt,
 		int(r.buildID),
+		r.runID,
 		underlyingValue,
 		underlyingTokenID,
 		encodeAddress(pos.FromAddress),
 		encodeAddress(pos.ToAddress),
 	}
 
+	query := insertPositionSQL
+	if pos.CorrectsVersion != nil {
+		query = insertCorrectionSQL
+		args = append(args, *pos.CorrectsVersion+1)
+	}
 	return query, args, nil
 }
+
+// The correction variant supplies processing_version rather than leaving it to
+// the column default. The default is 0, which is the version the row being
+// corrected already holds, and TimescaleDB resolves the conflict against the
+// columnstore before the trigger can replace it (VEC-759).
+const (
+	insertPositionSQL = `
+		INSERT INTO allocation_position (
+			chain_id, token_id, prime_id, proxy_address,
+			balance, scaled_balance,
+			block_number, block_version,
+			tx_hash, log_index, tx_amount, direction, created_at, build_id, run_id,
+			underlying_value, underlying_token_id, from_address, to_address
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+		` + onConflictPositionKeyDoNothing
+
+	insertCorrectionSQL = `
+		INSERT INTO allocation_position (
+			chain_id, token_id, prime_id, proxy_address,
+			balance, scaled_balance,
+			block_number, block_version,
+			tx_hash, log_index, tx_amount, direction, created_at, build_id, run_id,
+			underlying_value, underlying_token_id, from_address, to_address,
+			processing_version
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		` + onConflictPositionKeyDoNothing
+
+	onConflictPositionKeyDoNothing = `ON CONFLICT (chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, processing_version, created_at) DO NOTHING`
+)
 
 // encodeAddress keeps a nil address NULL, distinct from the zero address, which
 // is a genuine mint/burn party and must persist as 20 zero bytes.

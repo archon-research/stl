@@ -1,5 +1,7 @@
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
@@ -29,8 +31,8 @@ class AllocationService:
     async def list_protocols(self) -> list[ProtocolMetadata]:
         return await self._repository.list_protocols()
 
-    async def list_primes(self) -> list[Prime]:
-        return await self._repository.list_primes()
+    async def list_primes(self, allowed_vaults: Sequence[EthAddress] | None = None) -> list[Prime]:
+        return await self._repository.list_primes(allowed_vaults=allowed_vaults)
 
     async def prime_exists(self, prime_address: EthAddress) -> bool:
         return await self._repository.prime_exists(prime_address)
@@ -78,9 +80,14 @@ class AllocationService:
         from_timestamp: datetime | None = None,
         to_timestamp: datetime | None = None,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityEvent]:
+        # Authorization is part of the query semantics: allowed_vaults travels
+        # to the repository and lands in the SQL WHERE, before ORDER BY/LIMIT.
+        # None = auth off (no filter); [] = caller may view nothing (no rows).
         return await self._repository.list_allocation_activity(
             proxy_addresses=await self._prime_proxies(prime_id),
+            allowed_vaults=allowed_vaults,
             chain_id=chain_id,
             protocol_name=protocol_name,
             action_type=action_type,
@@ -104,9 +111,16 @@ class AllocationService:
         to_timestamp: datetime,
         bucket_seconds: float,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
+        series: Literal["flow", "balance"] = "flow",
     ) -> list[AllocationActivityBucket]:
+        # Same contract as the raw feed: the allow-list lands in the SQL WHERE,
+        # so an aggregate can only ever sum rows the caller may view. That holds
+        # for series="balance" too -- the allow-list is inside its window_rows.
         return await self._repository.list_activity_buckets(
+            series=series,
             proxy_addresses=await self._prime_proxies(prime_id),
+            allowed_vaults=allowed_vaults,
             chain_id=chain_id,
             protocol_name=protocol_name,
             action_type=action_type,

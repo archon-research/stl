@@ -2288,6 +2288,41 @@ func TestResolvePositionTokens_EmptyInputs(t *testing.T) {
 	}
 }
 
+func TestStart_RefusesAVisibilityTimeoutAReceiveCanOutrun(t *testing.T) {
+	ethClient, cleanup := newEthClientReturningUserReserves(t, nil)
+	defer cleanup()
+
+	svc, err := NewService(
+		shared.SQSConsumerConfig{ChainID: 1},
+		&testutil.MockSQSConsumer{VisibilityTimeoutFn: func() time.Duration { return 30 * time.Second }},
+		&testutil.MockBlockCache{},
+		ethClient,
+		testutil.NewMockMulticaller(),
+		&testutil.MockTxManager{},
+		&testutil.MockUserRepository{},
+		&testutil.MockProtocolRepository{},
+		&testutil.MockTokenRepository{},
+		&mockPositionRepository{},
+		&testutil.MockEventRepository{},
+		&testutil.MockReceiptTokenRepository{},
+		&testutil.MockDebtTokenRepository{},
+	)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	err = svc.Start(context.Background())
+	if err == nil {
+		_ = svc.Stop()
+		t.Fatal("Start accepted a 30s visibility timeout; a booted worker never crashloops on it, because " +
+			"ProcessMessages revalidates on every poll and RunLoop only logs what it returns, so the pod reports " +
+			"Ready and spins logging forever while the queue never drains")
+	}
+	if !strings.Contains(err.Error(), "visibility timeout") {
+		t.Errorf("Start error = %q, want it to name the visibility timeout", err)
+	}
+}
+
 // TestNewService covers the multicaller injection introduced for raw SC call
 // archiving (VEC-319): the multicaller now arrives as a dependency rather than
 // being built internally, so the composition root can wrap it for archiving.

@@ -49,24 +49,11 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/blocktime"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockversion"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
-
-// canonicalBlockVersion is the block_version stamped on every row this job
-// writes. The sweep reads the canonical chain below a finalized head, so the
-// blocks it replays are final and 0 is the version the watcher assigns a block
-// it never had to re-emit.
-//
-// Known gap (VEC-218 follow-up): a block the watcher DID re-emit before it
-// finalized carries version >= 1 in block_states, and block_version is part of
-// the primary key of morpho_vault_cap / morpho_vault_fee. For such a block this
-// job would write a version-0 row beside live indexing's version-1 row rather
-// than deduping against it. Resolving the version from block_states by
-// (chain_id, number, hash) — as the morpho-vault-backfill does from
-// the S3 key — needs a repository the service does not currently hold, so it is
-// deferred rather than half-solved here.
-const canonicalBlockVersion = 0
 
 // progressLogEvery bounds the run's log volume: with ~313 vaults and thousands
 // of chunks, one line per unit would bury the failures that matter.
@@ -135,12 +122,17 @@ type Service struct {
 	chain        ChainReader
 	replay       V2Replayer
 	progress     ProgressStore
+	archive      outbound.ArchiveReader
+	archiveName  string
 	deployBlock  int64
 	configTopics []common.Hash
 	logger       *slog.Logger
 }
 
-func NewService(config Config, chain ChainReader, replay V2Replayer, progress ProgressStore) (*Service, error) {
+// NewService takes the raw archive every replayed row's block_version is read from, and
+// the name to call it in errors and logs — the bucket URL, so an operator is told what to
+// repair.
+func NewService(config Config, chain ChainReader, replay V2Replayer, progress ProgressStore, archive outbound.ArchiveReader, archiveName string) (*Service, error) {
 	if err := config.validate(); err != nil {
 		return nil, fmt.Errorf("validating config: %w", err)
 	}
@@ -152,6 +144,12 @@ func NewService(config Config, chain ChainReader, replay V2Replayer, progress Pr
 	}
 	if progress == nil {
 		return nil, fmt.Errorf("progress store is required")
+	}
+	if archive == nil {
+		return nil, fmt.Errorf("archive reader is required")
+	}
+	if archiveName == "" {
+		return nil, fmt.Errorf("archive name is required")
 	}
 	deployBlock, err := morpho_indexer.VaultV2FactoryDeployBlock(config.ChainID)
 	if err != nil {
@@ -166,6 +164,8 @@ func NewService(config Config, chain ChainReader, replay V2Replayer, progress Pr
 		chain:        chain,
 		replay:       replay,
 		progress:     progress,
+		archive:      archive,
+		archiveName:  archiveName,
 		deployBlock:  deployBlock,
 		configTopics: topics,
 		logger:       config.Logger.With("component", "morpho-v2-bootstrap"),
@@ -174,8 +174,11 @@ func NewService(config Config, chain ChainReader, replay V2Replayer, progress Pr
 
 // Run performs one complete bootstrap pass. It is the body of the Temporal
 // activity, and is safe to invoke repeatedly.
-func (s *Service) Run(ctx context.Context) error {
-	head, err := s.pinFinalizedHead(ctx)
+func (s *Service) Run(ctx context.Context) (err error) {
+	reads := s.newReplayReads()
+	defer func() { s.logResolvedBlockVersions(ctx, reads.versions.Summary(), err) }()
+
+	head, err := s.pinFinalizedHead(ctx, reads.versions)
 	if err != nil {
 		return err
 	}
@@ -195,7 +198,7 @@ func (s *Service) Run(ctx context.Context) error {
 		"headBlock", head.number,
 		"headHash", head.hash.Hex())
 
-	if err := s.replayConfigHistory(ctx, scope.vaults, head); err != nil {
+	if err := s.replayConfigHistory(ctx, scope.vaults, head, reads); err != nil {
 		return err
 	}
 	if err := s.seedAdapterState(ctx, scope.vaults, head); err != nil {
@@ -205,6 +208,40 @@ func (s *Service) Run(ctx context.Context) error {
 	s.logger.Info("VaultV2 bootstrap complete",
 		"vaults", len(scope.vaults), "deferredVaults", scope.deferred, "headBlock", head.number)
 	return nil
+}
+
+// replayReads are the per-height answers one run reads once and reuses: a block's
+// timestamp, and the block_version it was indexed under. Both belong to the run rather
+// than the pod: two runs can be in flight at once, and a memo they shared would let one
+// stamp a version the other proved.
+type replayReads struct {
+	timestamps *blocktime.Cache
+	versions   *blockversion.Resolver
+}
+
+func (s *Service) newReplayReads() *replayReads {
+	return &replayReads{
+		timestamps: blocktime.New(s.chain),
+		versions:   blockversion.NewResolver(s.archive, s.archiveName, s.logger),
+	}
+}
+
+// logResolvedBlockVersions closes the run with what the archive answered, deferred so an
+// aborted run reports the heights it did reach — and says which it is, because an aborted
+// run's extents cover only the part of the range it swept.
+func (s *Service) logResolvedBlockVersions(ctx context.Context, summary blockversion.RunSummary, runErr error) {
+	outcome, level := "completed", slog.LevelInfo
+	if runErr != nil {
+		outcome, level = "aborted", slog.LevelError
+	}
+	attrs := []slog.Attr{slog.String("outcome", outcome), slog.Int("heights", summary.HeightsResolved)}
+	for _, extent := range summary.Versions {
+		attrs = append(attrs, slog.Group(fmt.Sprintf("version_%d", extent.Version),
+			slog.Int("heights", extent.Heights),
+			slog.Int64("from", extent.From),
+			slog.Int64("to", extent.To)))
+	}
+	s.logger.LogAttrs(ctx, level, "block versions resolved from the raw archive", attrs...)
 }
 
 // emptyScopeError explains a run with nothing in scope. A repair job that heals
@@ -232,13 +269,17 @@ type pinnedBlock struct {
 	number    int64
 	hash      common.Hash
 	timestamp time.Time
+	version   int
 }
 
-// pinFinalizedHead resolves the run's anchor block. Finalized rather than
-// latest: the seed writes permanent snapshots, and a latest-pinned run could
-// record state from a block that is subsequently reorged out, leaving rows no
-// canonical block ever produced.
-func (s *Service) pinFinalizedHead(ctx context.Context) (pinnedBlock, error) {
+// pinFinalizedHead resolves the run's anchor block, complete with the version it was
+// indexed under. Finalized rather than latest: the seed writes permanent snapshots, and a
+// latest-pinned run could record state from a block that is subsequently reorged out,
+// leaving rows no canonical block ever produced.
+//
+// The version is read here, before the sweep issues one eth_getLogs, so an archive that
+// cannot answer for the head fails the run in seconds instead of after the whole replay.
+func (s *Service) pinFinalizedHead(ctx context.Context, versions *blockversion.Resolver) (pinnedBlock, error) {
 	header, err := s.chain.HeaderByNumber(ctx, big.NewInt(int64(rpc.FinalizedBlockNumber)))
 	if err != nil {
 		return pinnedBlock{}, fmt.Errorf("fetching finalized head: %w", err)
@@ -254,11 +295,24 @@ func (s *Service) pinFinalizedHead(ctx context.Context) (pinnedBlock, error) {
 		return pinnedBlock{}, fmt.Errorf("finalized head %d is below the chain-%d VaultV2 factory deploy block %d: the RPC endpoint is not on the configured chain",
 			number, s.config.ChainID, s.deployBlock)
 	}
+	version, err := versions.ResolveBlockVersion(ctx, header.Number.Int64(), header.Hash())
+	if err != nil {
+		return pinnedBlock{}, s.headVersionError(header.Number.Int64(), err)
+	}
 	return pinnedBlock{
 		number:    header.Number.Int64(),
 		hash:      header.Hash(),
 		timestamp: time.Unix(int64(header.Time), 0).UTC(),
+		version:   version,
 	}, nil
+}
+
+func (s *Service) headVersionError(headBlock int64, err error) error {
+	if errors.Is(err, blockversion.ErrHeightNotArchived) {
+		return fmt.Errorf("resolving the block version of the pinned head %d: the raw archive has not caught up to the finalized head; check VectorBackupWorkerStalled and the raw-data-backup worker for chain %d, then start a new run once it has. Do not republish this height: %w",
+			headBlock, s.config.ChainID, err)
+	}
+	return fmt.Errorf("resolving the block version of the pinned head %d: %w", headBlock, err)
 }
 
 // v2VaultScope is what a run will work on: the vaults it heals, sorted by
@@ -326,7 +380,7 @@ func (s *Service) loadV2Vaults(ctx context.Context, head pinnedBlock) (v2VaultSc
 func (s *Service) seedAdapterState(ctx context.Context, vaults []common.Address, head pinnedBlock) error {
 	var failures []error
 	for i, vault := range vaults {
-		if err := s.replay.SeedV2VaultAdapters(ctx, vault, head.number, head.hash, canonicalBlockVersion, head.timestamp); err != nil {
+		if err := s.replay.SeedV2VaultAdapters(ctx, vault, head.number, head.hash, head.version, head.timestamp); err != nil {
 			wrapped := fmt.Errorf("seeding adapters for vault %s at block %d: %w", vault.Hex(), head.number, err)
 			// A cancelled run fails every remaining vault identically, so
 			// collecting those would bury the cause under one error per vault. The
@@ -356,7 +410,7 @@ func (s *Service) seedAdapterState(ctx context.Context, vaults []common.Address,
 // replayConfigHistory walks [resume point, head] in chunks, feeding every
 // VaultV2 governance event emitted by a known V2 vault through the live handler
 // path in strict chain order, and records each chunk once it is fully replayed.
-func (s *Service) replayConfigHistory(ctx context.Context, vaults []common.Address, head pinnedBlock) error {
+func (s *Service) replayConfigHistory(ctx context.Context, vaults []common.Address, head pinnedBlock, reads *replayReads) error {
 	vaultsDigest := vaultSetDigest(vaults)
 	from, err := s.resumeBlock(ctx, vaultsDigest)
 	if err != nil {
@@ -365,7 +419,6 @@ func (s *Service) replayConfigHistory(ctx context.Context, vaults []common.Addre
 
 	batches := batchAddresses(vaults, s.config.AddressBatchSize)
 	chunks := chunkBlockRange(from, head.number, s.config.BlockChunkSize)
-	timestamps := blocktime.New(s.chain)
 
 	s.logger.Info("starting config-event replay",
 		"fromBlock", from,
@@ -375,7 +428,7 @@ func (s *Service) replayConfigHistory(ctx context.Context, vaults []common.Addre
 
 	replayed := 0
 	for i, chunk := range chunks {
-		count, err := s.replayChunk(ctx, batches, chunk, timestamps)
+		count, err := s.replayChunk(ctx, batches, chunk, reads)
 		if err != nil {
 			return err
 		}
@@ -396,13 +449,13 @@ func (s *Service) replayConfigHistory(ctx context.Context, vaults []common.Addre
 // replayChunk fetches one chunk's logs across every address batch and drives
 // them through the live handler path in chain order, returning how many it
 // replayed.
-func (s *Service) replayChunk(ctx context.Context, batches [][]common.Address, chunk blockRange, timestamps *blocktime.Cache) (int, error) {
+func (s *Service) replayChunk(ctx context.Context, batches [][]common.Address, chunk blockRange, reads *replayReads) (int, error) {
 	logs, err := s.fetchChunkLogs(ctx, batches, chunk)
 	if err != nil {
 		return 0, err
 	}
 	sortLogs(logs)
-	if err := s.replayLogs(ctx, logs, timestamps); err != nil {
+	if err := s.replayLogs(ctx, logs, reads); err != nil {
 		return 0, fmt.Errorf("replaying config events in [%d,%d]: %w", chunk.From, chunk.To, err)
 	}
 	return len(logs), nil
@@ -488,25 +541,35 @@ func (s *Service) fetchChunkLogs(ctx context.Context, batches [][]common.Address
 	return logs, nil
 }
 
-// replayLogs drives already-ordered logs through the live handler path, dating
-// each from its own block header.
-func (s *Service) replayLogs(ctx context.Context, logs []ethtypes.Log, timestamps *blocktime.Cache) error {
+// replayLogs drives already-ordered logs through the live handler path.
+func (s *Service) replayLogs(ctx context.Context, logs []ethtypes.Log, reads *replayReads) error {
 	for _, l := range logs {
-		// The sweep's upper bound is a finalized block, so a reorged-out log
-		// cannot legitimately appear. Replaying one would write state from a
-		// block that is not on the canonical chain, so treat it as the data
-		// anomaly it is rather than filtering it away silently.
-		if l.Removed {
-			return fmt.Errorf("node returned a removed log at block %d index %d (tx %s) within the finalized range",
-				l.BlockNumber, l.Index, l.TxHash.Hex())
-		}
-		blockTimestamp, err := timestamps.TimestampAt(ctx, l.BlockHash)
-		if err != nil {
+		if err := s.replayLog(ctx, l, reads); err != nil {
 			return err
 		}
-		if err := s.replay.ReplayMetaMorphoLog(ctx, toSharedLog(l), int64(l.BlockNumber), l.BlockHash, canonicalBlockVersion, blockTimestamp); err != nil {
-			return fmt.Errorf("replaying log tx=%s index=%d block=%d: %w", l.TxHash.Hex(), l.Index, l.BlockNumber, err)
-		}
+	}
+	return nil
+}
+
+func (s *Service) replayLog(ctx context.Context, l ethtypes.Log, reads *replayReads) error {
+	// The sweep's upper bound is a finalized block, so a reorged-out log cannot
+	// legitimately appear. Replaying one would write state from a block that is not on
+	// the canonical chain, so treat it as the data anomaly it is rather than filtering
+	// it away silently.
+	if l.Removed {
+		return fmt.Errorf("node returned a removed log at block %d index %d (tx %s) within the finalized range",
+			l.BlockNumber, l.Index, l.TxHash.Hex())
+	}
+	blockTimestamp, err := reads.timestamps.TimestampAt(ctx, l.BlockHash)
+	if err != nil {
+		return err
+	}
+	blockVersion, err := reads.versions.ResolveBlockVersion(ctx, int64(l.BlockNumber), l.BlockHash)
+	if err != nil {
+		return fmt.Errorf("resolving the block version of block %d (tx=%s index=%d): %w", l.BlockNumber, l.TxHash.Hex(), l.Index, err)
+	}
+	if err := s.replay.ReplayMetaMorphoLog(ctx, toSharedLog(l), int64(l.BlockNumber), l.BlockHash, blockVersion, blockTimestamp); err != nil {
+		return fmt.Errorf("replaying log tx=%s index=%d block=%d: %w", l.TxHash.Hex(), l.Index, l.BlockNumber, err)
 	}
 	return nil
 }

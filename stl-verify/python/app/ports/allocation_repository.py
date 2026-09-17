@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Literal, Protocol
 
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
@@ -29,7 +29,7 @@ class AllocationRepositoryPort(Protocol):
         """Return protocol metadata used by the UI."""
         ...
 
-    async def list_primes(self) -> list[Prime]:
+    async def list_primes(self, allowed_vaults: Sequence[EthAddress] | None = None) -> list[Prime]:
         """Return all distinct primes."""
         ...
 
@@ -99,6 +99,10 @@ class AllocationRepositoryPort(Protocol):
         """
         ...
 
+    async def get_prime_vault_address(self, address: EthAddress) -> str | None:
+        """Vault address for a vault-or-proxy address, or None if unknown."""
+        ...
+
     async def list_allocation_activity(
         self,
         *,
@@ -111,6 +115,7 @@ class AllocationRepositoryPort(Protocol):
         from_timestamp: datetime | None = None,
         to_timestamp: datetime | None = None,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityEvent]:
         """Return allocation activity events with optional filters.
 
@@ -132,10 +137,20 @@ class AllocationRepositoryPort(Protocol):
         to_timestamp: datetime,
         bucket_seconds: float,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
+        series: Literal["flow", "balance"] = "flow",
     ) -> list[AllocationActivityBucket]:
         """Return allocation activity aggregated into time buckets.
 
-        ``proxy_addresses`` follows ``list_allocation_activity``'s contract.
+        ``proxy_addresses`` and ``allowed_vaults`` follow
+        ``list_allocation_activity``'s contract.
+
+        ``series`` selects which aggregate the buckets carry: ``"flow"`` (the
+        default) event counts, tx-amount sums and signed USD net flow;
+        ``"balance"`` each bucket's position value read from recorded state.
+        They are alternatives -- one query runs per call, and the fields
+        belonging to the other series come back ``None`` rather than a
+        misleading zero.
         """
         ...
 

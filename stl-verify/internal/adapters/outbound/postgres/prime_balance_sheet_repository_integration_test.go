@@ -32,11 +32,12 @@ func TestPrimeBalanceSheetRepositoryPreservesEighteenDecimalPrecision(t *testing
 	defer cleanup()
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-pbs-precision")
-	repo := NewPrimeBalanceSheetRepository(pool, newReferenceRepoTxm(t, pool), nil)
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo := NewPrimeBalanceSheetRepository(pool, newReferenceRepoTxm(t, pool), nil, runID)
 	observedAt := time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC)
 
 	inserted, newDays, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{
-		balanceSheetSnapshot(primeID, observedAt, 1),
+		balanceSheetSnapshot(primeID, observedAt, int(buildID)),
 	})
 	if err != nil {
 		t.Fatalf("SaveBalanceSheetSnapshots() = %v", err)
@@ -49,13 +50,15 @@ func TestPrimeBalanceSheetRepositoryPreservesEighteenDecimalPrecision(t *testing
 	}
 
 	var treasury string
+	var gotRunID *int64
 	if err := pool.QueryRow(ctx, `
-		SELECT treasury_balance_usd::text FROM prime_reference_balance_sheet WHERE prime_id = $1`, primeID).Scan(&treasury); err != nil {
+		SELECT treasury_balance_usd::text, run_id FROM prime_reference_balance_sheet WHERE prime_id = $1`, primeID).Scan(&treasury, &gotRunID); err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
 	if treasury != "48142491.085806286854722044" {
 		t.Errorf("treasury_balance_usd = %s, want the 18-decimal value unrounded", treasury)
 	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }
 
 // SaveBalanceSheetSnapshots returns the rows actually inserted, not the batch
@@ -67,7 +70,7 @@ func TestPrimeBalanceSheetRepositoryReportsZeroInsertedOnAReplayedSave(t *testin
 	defer cleanup()
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-pbs-replay")
-	repo := NewPrimeBalanceSheetRepository(pool, newReferenceRepoTxm(t, pool), nil)
+	repo := NewPrimeBalanceSheetRepository(pool, newReferenceRepoTxm(t, pool), nil, 0)
 	snapshot := balanceSheetSnapshot(primeID, time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC), 1)
 
 	first, _, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{snapshot})
@@ -106,7 +109,7 @@ func TestPrimeBalanceSheetRepositoryCountsOnlyTheNewRowsInAMixedBatch(t *testing
 	defer cleanup()
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-pbs-partial")
-	repo := NewPrimeBalanceSheetRepository(pool, newReferenceRepoTxm(t, pool), nil)
+	repo := NewPrimeBalanceSheetRepository(pool, newReferenceRepoTxm(t, pool), nil, 0)
 	day1 := balanceSheetSnapshot(primeID, time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC), 1)
 	day2 := balanceSheetSnapshot(primeID, time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC), 1)
 
@@ -136,7 +139,7 @@ func TestPrimeBalanceSheetRepositoryCountsACorrectionForANewBuildAsInsertedButNo
 	defer cleanup()
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-pbs-correction")
-	repo := NewPrimeBalanceSheetRepository(pool, newReferenceRepoTxm(t, pool), nil)
+	repo := NewPrimeBalanceSheetRepository(pool, newReferenceRepoTxm(t, pool), nil, 0)
 	observedAt := time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC)
 
 	for i, buildID := range []int{1, 2} {
@@ -176,7 +179,7 @@ func TestPrimeBalanceSheetRepositoryRollsBackWholeBatchOnAForeignKeyViolation(t 
 	defer cleanup()
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-pbs-fk-violation")
-	repo := NewPrimeBalanceSheetRepository(pool, newReferenceRepoTxm(t, pool), nil)
+	repo := NewPrimeBalanceSheetRepository(pool, newReferenceRepoTxm(t, pool), nil, 0)
 	valid := balanceSheetSnapshot(primeID, time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC), 1)
 	invalid := balanceSheetSnapshot(999999999, time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC), 1)
 

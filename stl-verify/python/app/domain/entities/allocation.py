@@ -7,6 +7,14 @@ from typing import Any, Literal
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import CoreSchema, core_schema
 
+ActivityDirection = Literal["in", "out", "sweep"]
+"""Direction of an allocation-activity event.
+
+The closed set is enforced by the database, not merely conventional:
+``allocation_position.direction`` carries
+``CHECK (direction IN ('in', 'out', 'sweep'))``, lower-case only.
+"""
+
 _ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
@@ -78,7 +86,7 @@ class ReceiptTokenPosition:
     balance: Decimal
     amount_usd: Decimal | None = None
     latest_activity_at: datetime | None = None
-    latest_activity_action: str | None = None
+    latest_activity_action: ActivityDirection | None = None
     latest_activity_amount: Decimal | None = None
 
 
@@ -103,7 +111,7 @@ class DirectAssetHolding:
     balance: Decimal
     amount_usd: Decimal | None = None
     latest_activity_at: datetime | None = None
-    latest_activity_action: str | None = None
+    latest_activity_action: ActivityDirection | None = None
     latest_activity_amount: Decimal | None = None
     underlying_token_id: int | None = None
     underlying_token_address: str | None = None

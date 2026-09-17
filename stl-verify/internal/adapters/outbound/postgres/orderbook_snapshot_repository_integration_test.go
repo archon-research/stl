@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const orderbookSnapshotDBName = "test_cex_orderbook"
@@ -31,7 +32,7 @@ func truncateOrderbookSnapshots(t *testing.T, ctx context.Context) {
 
 func newOrderbookSnapshotRepo(t *testing.T) *OrderbookSnapshotRepository {
 	t.Helper()
-	repo, err := NewOrderbookSnapshotRepository(orderbookSnapshotPool, nil)
+	repo, err := NewOrderbookSnapshotRepository(orderbookSnapshotPool, nil, 0)
 	if err != nil {
 		t.Fatalf("NewOrderbookSnapshotRepository: %v", err)
 	}
@@ -42,8 +43,12 @@ func newOrderbookSnapshotRepo(t *testing.T) *OrderbookSnapshotRepository {
 // strings as JSONB tuples, persists a present event_time, and stores SQL NULL for
 // a nil event_time.
 func TestSaveOrderbookSnapshots(t *testing.T) {
-	repo := newOrderbookSnapshotRepo(t)
 	ctx := context.Background()
+	_, runID := testutil.OpenTestRun(t, ctx, orderbookSnapshotPool)
+	repo, err := NewOrderbookSnapshotRepository(orderbookSnapshotPool, nil, runID)
+	if err != nil {
+		t.Fatalf("NewOrderbookSnapshotRepository: %v", err)
+	}
 	truncateOrderbookSnapshots(t, ctx)
 
 	venueTime := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
@@ -80,18 +85,20 @@ func TestSaveOrderbookSnapshots(t *testing.T) {
 		eventTime *time.Time
 		bidsJSON  string
 		asksJSON  string
+		gotRunID  *int64
 	)
-	err := orderbookSnapshotPool.QueryRow(ctx, `
-		SELECT event_time, bids::text, asks::text
+	err = orderbookSnapshotPool.QueryRow(ctx, `
+		SELECT event_time, bids::text, asks::text, run_id
 		FROM cex_orderbook_snapshots
 		WHERE exchange = 'coinbase' AND symbol = 'BTC-USD'
-	`).Scan(&eventTime, &bidsJSON, &asksJSON)
+	`).Scan(&eventTime, &bidsJSON, &asksJSON, &gotRunID)
 	if err != nil {
 		t.Fatalf("query BTC row: %v", err)
 	}
 	if eventTime == nil || !eventTime.Equal(venueTime) {
 		t.Errorf("BTC event_time = %v, want %v", eventTime, venueTime)
 	}
+	testutil.RequireRunID(t, gotRunID, runID)
 	assertTuples(t, "BTC bids", bidsJSON, [][2]string{{"65000.10", "0.5"}, {"65000.00", "1.20000000"}})
 	assertTuples(t, "BTC asks", asksJSON, [][2]string{{"65001.00", "2"}})
 

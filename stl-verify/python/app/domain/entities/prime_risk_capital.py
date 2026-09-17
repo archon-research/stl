@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
 
+from app.domain.entities.risk import ModelName
 from app.domain.exceptions import AllocationUnpricedReason
 
 # Closed set of ``unpriced_reason`` values. The share-data / price-data reasons
@@ -45,7 +46,7 @@ class AllocationRiskCapital:
     applied: bool
     required_risk_capital_usd: Decimal | None
     crr_pct: Decimal | None
-    model: str | None
+    model: ModelName | None
     unpriced_reason: UnpricedReason | None = None
 
     def __post_init__(self) -> None:
@@ -111,7 +112,7 @@ class PrimeRiskCapital:
     # queried, not the prime. Named for what it holds: the API serves it as both
     # `proxy_address` and, for backwards compatibility, the misnamed `prime_id`.
     proxy_address: str
-    model: str
+    model: ModelName
     exposure_usd: Decimal
     total_risk_capital_usd: Decimal | None
     required_risk_capital_usd: Decimal

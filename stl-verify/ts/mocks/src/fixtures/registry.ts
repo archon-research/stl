@@ -39,12 +39,7 @@ const PROTOCOL_ROWS: readonly ProtocolRow[] = [
   [7343806, 1, '1f98431c8ad98523631ae4a59f267346ea31f984', 'UniswapV3'],
   [7909060, 1, '52aa899454998be5b000ad077a46bbe360f4e497', 'fluid'],
   [10530259, 8453, 'bbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb', 'Morpho Blue'],
-  [
-    100446,
-    43114,
-    '794a61358d6845594f94dc1db02a252b5b4814ad',
-    'Aave V3 Avalanche',
-  ],
+  [100446, 43114, '794a61358d6845594f94dc1db02a252b5b4814ad', 'Aave V3'],
 ];
 
 export const PROTOCOLS: readonly Protocol[] = PROTOCOL_ROWS.map(
@@ -86,7 +81,7 @@ type PrimeRow = readonly [
   address: SeededPrime['address'],
   name: PrimeName,
   chain_id: SeededPrime['chain_id'],
-  chain: SeededPrime['chain'],
+  chain: Exclude<SeededPrime['chain'], undefined>,
 ];
 
 /**
@@ -143,13 +138,15 @@ const AAVAUSDC = '0x625e7708f30ca75bfd92586e17077590c60eb4cd';
  * Normalised here to 736, the id the allocation rows point at, because a fixture
  * exists to be coherent rather than to reproduce an upstream duplicate.
  */
+// Narrowed, not widened: the wire types are optional for a case no fixture
+// row is, and the compiler rejects any row that disagrees.
 type TokenRow = readonly [
   id: Token['id'],
   chain_id: Token['chain_id'],
   address: Token['address'],
-  symbol: Token['symbol'],
-  decimals: Token['decimals'],
-  metadata: Token['metadata'],
+  symbol: Exclude<Token['symbol'], undefined>,
+  decimals: Exclude<Token['decimals'], undefined>,
+  metadata: Exclude<Token['metadata'], undefined>,
 ];
 
 const TOKEN_ROWS: readonly TokenRow[] = [

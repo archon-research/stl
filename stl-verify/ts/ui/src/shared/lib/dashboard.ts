@@ -1,4 +1,8 @@
-import type { Allocation, Prime } from '../types/allocation';
+import type {
+  Allocation,
+  AllocationActivityBucket,
+  Prime,
+} from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
 import { getChainExplorerUrl, getChainName } from './chain-metadata';
 import { logging } from './logging';
@@ -116,7 +120,6 @@ export type PrimeGroup = {
   vaultAddress: string | null;
   primaryProxyAddress: string;
   proxyAddresses: string[];
-  chainCount: number;
 };
 
 // A prime allocates through one ALM proxy per chain, so `/v1/primes` returns
@@ -167,7 +170,6 @@ export function groupPrimesByVault(primes: Prime[]): PrimeGroup[] {
       // — `getAllocationKey` gives the copies identical keys, so nothing
       // downstream would catch it.
       proxyAddresses: [...new Set(sortedByAddress.map((row) => row.address))],
-      chainCount: new Set(rows.map((row) => row.chain_id)).size,
     };
   });
 }
@@ -202,58 +204,44 @@ export function findPrimeGroup(
   );
 }
 
-function getProtocolMatchScore(
+function isProtocolNamed(
   protocol: string,
   localProtocol: LocalProtocolRow,
-  chainId?: number | null,
-): number {
+): boolean {
   const normalizedProtocol = normalizeLabel(protocol);
   const normalizedName = normalizeLabel(localProtocol.name);
-  let score = 0;
 
-  if (chainId !== undefined && localProtocol.chain_id === chainId) {
-    score += 3;
-  }
-
-  if (normalizedName === normalizedProtocol) {
-    score += 10;
-  }
-
-  if (
-    normalizedName.includes(normalizedProtocol) ||
-    normalizedProtocol.includes(normalizedName)
-  ) {
-    score += 6;
-  }
-
-  if (
+  return (
+    normalizedName === normalizedProtocol ||
     (normalizedProtocol === 'spark' && normalizedName === 'sparklend') ||
     (normalizedProtocol === 'morpho' && normalizedName === 'morphoblue')
-  ) {
-    score += 8;
-  }
-
-  return score;
+  );
 }
 
+/**
+ * The registry row a protocol is named for, or `null` if none is.
+ *
+ * `protocol_name` is Sky's reference vocabulary — `psm3`, `anchorage`,
+ * `uniswap`, `pyusd` — and much of it names nothing in the registry, so the
+ * match is strict enough to say so: `Aave V2` and `Aave V3` are two protocols,
+ * not two spellings of `aave`. `getProtocolLabel` labels what comes back empty.
+ *
+ * `chainId` chooses between rows sharing a name, one per chain.
+ */
 export function findProtocolMetadata(
   protocol: string,
   localProtocols?: LocalProtocolRow[],
   chainId?: number,
 ): LocalProtocolRow | null {
-  if (!localProtocols || localProtocols.length === 0) {
-    return null;
-  }
+  const named = (localProtocols ?? []).filter((localProtocol) =>
+    isProtocolNamed(protocol, localProtocol),
+  );
 
-  const matches = localProtocols
-    .map((localProtocol) => ({
-      localProtocol,
-      score: getProtocolMatchScore(protocol, localProtocol, chainId),
-    }))
-    .filter((candidate) => candidate.score > 0)
-    .sort((left, right) => right.score - left.score);
-
-  return matches[0]?.localProtocol ?? null;
+  return (
+    named.find((localProtocol) => localProtocol.chain_id === chainId) ??
+    named[0] ??
+    null
+  );
 }
 
 // chain_id 0 is the off-chain sentinel (e.g. Anchorage BTC custody), which has
@@ -620,7 +608,7 @@ export function encumbranceSeverity(
  */
 // `timestamp` is what the synced cursor is keyed on, so it carries the bucket's
 // own instant rather than the formatted label: sibling cards bucket at different
-// resolutions, and only the instant means the same thing in all of them.
+// frequencies, and only the instant means the same thing in all of them.
 export function toChartSeries<T extends { bucket_start: string }>(
   buckets: readonly T[],
   read: (bucket: T) => number | null,
@@ -635,6 +623,25 @@ export function toChartSeries<T extends { bucket_start: string }>(
       (point) =>
         Number.isFinite(point.value) && Number.isFinite(point.timestamp),
     );
+}
+
+// The most recent bucket's own pricing coverage, oldest-first so the latest
+// observation is the last element. Null once it prices every position it
+// knows about, so a caller only has something to name when the total is
+// partial.
+export function latestAllocationCoverage(
+  buckets: readonly Pick<
+    AllocationActivityBucket,
+    'priced_entity_count' | 'entity_count'
+  >[],
+): { pricedEntityCount: number; entityCount: number } | null {
+  const latest = buckets.at(-1);
+  const priced = latest?.priced_entity_count;
+  const total = latest?.entity_count;
+  if (priced == null || total == null || priced >= total) {
+    return null;
+  }
+  return { pricedEntityCount: priced, entityCount: total };
 }
 
 export function balancedColumns(count: number, maxColumns: number): number {
@@ -810,13 +817,20 @@ export function formatWadValue(
   try {
     const wei = BigInt(plain.split('.')[0] || '0');
     const wad = 10n ** 18n;
-    const whole = wei / wad;
-    const fraction = wei % wad;
+    // Sign is split off before the divide: BigInt truncates toward zero, so a
+    // negative wei leaves a negative remainder and composing the two gave
+    // "-1.-500000".
+    const negative = wei < 0n;
+    const magnitude = negative ? -wei : wei;
+    const whole = magnitude / wad;
+    const fraction = magnitude % wad;
     const fraction6 = ((fraction * 1_000_000n) / wad)
       .toString()
       .padStart(6, '0');
 
-    return formatTokenAmount(`${whole.toString()}.${fraction6}`);
+    return formatTokenAmount(
+      `${negative ? '-' : ''}${whole.toString()}.${fraction6}`,
+    );
   } catch {
     logging.warn(`Failed to parse WAD value: "${value}"`, {
       context: 'formatWadValue',

@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ethereum/go-ethereum/common"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -57,11 +58,46 @@ func TestMain(m *testing.M) {
 // Integration tests for run()
 // ---------------------------------------------------------------------------
 
+func TestRunIntegration_RejectsNonPositiveSweepBlocks(t *testing.T) {
+	tests := []struct {
+		name        string
+		sweepBlocks string
+		args        []string
+	}{
+		{
+			name:        "environment variable",
+			sweepBlocks: "0",
+			args:        []string{"-queue", "http://localhost/test-queue", "-db", "postgres://localhost/test", "-redis", "localhost:6379"},
+		},
+		{
+			name: "flag",
+			args: []string{
+				"-queue", "http://localhost/test-queue",
+				"-db", "postgres://localhost/test",
+				"-redis", "localhost:6379",
+				"-sweep-blocks", "-1",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("ALCHEMY_API_KEY", "test-api-key")
+			t.Setenv("SWEEP_BLOCKS", tt.sweepBlocks)
+
+			err := run(context.Background(), tt.args, nil)
+			if err == nil || !strings.Contains(err.Error(), "sweep blocks must be at least 1") {
+				t.Fatalf("run error = %v, want non-positive sweep-blocks rejection", err)
+			}
+		})
+	}
+}
+
 func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer rpcServer.Close()
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))
@@ -72,7 +108,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 		"-queue", "http://localhost/test-queue",
 		"-redis", "localhost:6379",
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for bad connection config")
 	}
@@ -103,7 +139,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	bucket := testutil.S3TestBucketName(t, rawBucketPrefix)
 	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
@@ -124,15 +160,10 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 			"-queue", "http://localhost/test-queue",
 			"-db", dbURL,
 			"-redis", sharedRedisAddr,
-		})
+		}, nil)
 	}()
 
-	// Wait for the service to start (SQS ReceiveMessage call indicates it's polling)
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for service to start")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	// Service is running and polling SQS. Trigger graceful shutdown.
 	cancel()
@@ -206,7 +237,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 		blockNum, version, blockNum,
 	))
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
@@ -229,14 +260,10 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 			"-queue", "http://localhost/test-queue",
 			"-db", dbURL,
 			"-redis", sharedRedisAddr,
-		})
+		}, nil)
 	}()
 
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for worker to start polling SQS")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	// Wait until the transfer is fully processed (allocation_position row written)
 	// so the run loop is idle before we shut down, avoiding a context-cancelled
@@ -352,12 +379,17 @@ func seedUsdsTransferReceipt(t *testing.T, ctx context.Context, keyPrefix string
 	}
 }
 
-// buildErc20MulticallMockRPC serves a JSON-RPC endpoint that answers the two
-// Multicall3 aggregate3 batches the worker issues for a plain erc20 entry:
-// balanceOf(proxy) (from BalanceOfSource) and decimals()/symbol() (from the
-// position handler's metadata cache). Each inner sub-call is dispatched by
-// selector and answered with a packed ERC-20 return; unknown selectors fail the
-// test loudly so a silent zero-substitution cannot mask a routing bug.
+var shareSelector = crypto.Keccak256([]byte("share()"))[:4]
+
+// buildErc20MulticallMockRPC serves a JSON-RPC endpoint that answers every
+// Multicall3 aggregate3 batch the real registry issues: balanceOf(proxy) (from
+// BalanceOfSource), decimals()/symbol() (from the position handler's metadata
+// cache) and, because the registry carries the centrifuge entries too, share()
+// from ERC7540Source — answered as a revert so every entry takes the direct-share
+// branch, whose decimals() confirmation the same handler serves. Each inner
+// sub-call is dispatched by selector and answered with a packed ERC-20 return;
+// unknown selectors fail the test loudly so a silent zero-substitution cannot
+// mask a routing bug.
 func buildErc20MulticallMockRPC(t *testing.T) *httptest.Server {
 	t.Helper()
 
@@ -407,6 +439,10 @@ func buildErc20MulticallMockRPC(t *testing.T) *httptest.Server {
 			return mcResult{Success: true, ReturnData: decimalsData}
 		case bytes.Equal(sel, symbolMethod.ID):
 			return mcResult{Success: true, ReturnData: symbolData}
+		case bytes.Equal(sel, shareSelector):
+			// A clean revert for every address: this test asserts archiving, so every
+			// entry takes the direct-share branch (confirmed by the decimals() case above).
+			return mcResult{Success: false}
 		default:
 			t.Errorf("unexpected selector %x in aggregate3 sub-call", sel)
 			return mcResult{Success: false}

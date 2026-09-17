@@ -1,9 +1,8 @@
 # syntax=docker/dockerfile:1.10
-ARG PYTHON_VERSION
 
 # Build UI on the native builder architecture — the output is static JS/HTML/CSS,
 # so there's no reason to run npm under QEMU arm64 emulation (which crashes node).
-FROM --platform=$BUILDPLATFORM node:24-alpine AS ui-builder
+FROM --platform=$BUILDPLATFORM node:24.20.0-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf AS ui-builder
 
 WORKDIR /ui
 
@@ -19,8 +18,12 @@ RUN npm run prepare --workspace=@stl-verify/ui
 
 RUN npm run build --workspace=@stl-verify/ui
 
+# The one pinned Python base. Every stage below builds from this name, so the
+# tag+digest is written once.
+FROM python:3.12.14-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS py-base
+
 # Build Python dependencies
-FROM python:${PYTHON_VERSION}-slim AS builder
+FROM py-base AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.5 /uv /uvx /bin/
 
@@ -39,10 +42,7 @@ COPY python/app/ app/
 COPY python/suraf/ suraf/
 RUN uv sync --frozen --no-dev
 
-FROM python:${PYTHON_VERSION}-slim
-
-ARG GIT_COMMIT=unknown
-ENV GIT_COMMIT=${GIT_COMMIT}
+FROM py-base
 
 # groupadd/useradd live in the passwd package, which the hardening step below
 # removes — user creation must stay above it.
@@ -50,9 +50,13 @@ RUN groupadd --system --gid 10001 appuser \
     && useradd --system --uid 10001 --gid 10001 --no-create-home appuser
 
 # The -slim base tag lags Debian security releases, so pull in OS package
-# security updates at build time. Keep this after the per-commit GIT_COMMIT
-# ENV: its value busts the cache each release, so the upgrade re-runs on
-# every build instead of replaying a stale cached layer.
+# security updates at build time.
+#
+# Nothing per-commit may sit above this step (ORB-366). The GIT_COMMIT ENV used
+# to, precisely so its value would bust the cache and re-run the upgrade every
+# release — which also made this layer, and every layer below it, new on every
+# commit, so every python-api pod rolled whether or not any Python changed.
+# GIT_COMMIT now lands at the end of the file, where it cannot reach a layer.
 #
 # Then strip OS packages the service never uses at runtime (perl, bash,
 # ncurses, util-linux, gzip, tar, sed, coreutils, apt, ...). They exist only
@@ -97,5 +101,11 @@ USER 10001
 ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 8000
+
+# Build provenance, last: ARG/ENV are image config, not layers, so the commit
+# can ride along without making an unchanged image new (ORB-366 — see the
+# security-update note above). Nothing below this line may create a layer.
+ARG GIT_COMMIT=unknown
+ENV GIT_COMMIT=${GIT_COMMIT}
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

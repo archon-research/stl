@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -19,18 +20,19 @@ var _ outbound.DebtTokenRepository = (*DebtTokenRepository)(nil)
 type DebtTokenRepository struct {
 	pool   *pgxpool.Pool
 	logger *slog.Logger
+	runID  buildregistry.RunID
 }
 
 // NewDebtTokenRepository creates a new PostgreSQL DebtToken repository.
 // Returns an error if the database pool is nil.
-func NewDebtTokenRepository(pool *pgxpool.Pool, logger *slog.Logger) (*DebtTokenRepository, error) {
+func NewDebtTokenRepository(pool *pgxpool.Pool, logger *slog.Logger, runID buildregistry.RunID) (*DebtTokenRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &DebtTokenRepository{pool: pool, logger: logger}, nil
+	return &DebtTokenRepository{pool: pool, logger: logger, runID: runID}, nil
 }
 
 // nilIfEmpty returns a pointer to s, or nil when s is empty, so that an absent
@@ -49,8 +51,8 @@ func (r *DebtTokenRepository) GetOrCreateDebtToken(ctx context.Context, tx pgx.T
 	// "absent" means, so the COALESCE below can treat missing symbols uniformly.
 	var id int64
 	err := tx.QueryRow(ctx,
-		`INSERT INTO debt_token (protocol_id, underlying_token_id, variable_debt_address, stable_debt_address, variable_symbol, stable_symbol, created_at_block, metadata, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, '{}', NOW())
+		`INSERT INTO debt_token (protocol_id, underlying_token_id, variable_debt_address, stable_debt_address, variable_symbol, stable_symbol, created_at_block, metadata, updated_at, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, '{}', NOW(), $8)
 		 ON CONFLICT (protocol_id, underlying_token_id) DO UPDATE SET
 		     variable_debt_address = COALESCE(EXCLUDED.variable_debt_address, debt_token.variable_debt_address),
 		     stable_debt_address = COALESCE(EXCLUDED.stable_debt_address, debt_token.stable_debt_address),
@@ -62,7 +64,7 @@ func (r *DebtTokenRepository) GetOrCreateDebtToken(ctx context.Context, tx pgx.T
 		         ELSE debt_token.updated_at
 		     END
 		 RETURNING id`,
-		token.ProtocolID, token.UnderlyingTokenID, token.VariableDebtAddress, token.StableDebtAddress, nilIfEmpty(token.VariableSymbol), nilIfEmpty(token.StableSymbol), token.CreatedAtBlock,
+		token.ProtocolID, token.UnderlyingTokenID, token.VariableDebtAddress, token.StableDebtAddress, nilIfEmpty(token.VariableSymbol), nilIfEmpty(token.StableSymbol), token.CreatedAtBlock, r.runID,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get or create debt token: %w", err)

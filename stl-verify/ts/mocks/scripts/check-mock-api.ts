@@ -90,7 +90,7 @@ async function expectStatus<P extends GetPath>(
 /**
  * `request` for the cases that deliberately send a spelling the schema types
  * differently — the API accepts more than the schema can express (pydantic reads
- * `aggregate=YES` as true). The path is still checked.
+ * `reference=YES` as true). The path is still checked.
  */
 async function requestLoosely<P extends GetPath>(
   path: P,
@@ -137,6 +137,33 @@ function got<K, V>(map: ReadonlyMap<K, V>, key: K, label: string): V {
 }
 
 /**
+ * Unwraps a field that is only conditionally populated on the wire
+ * (`event_count` et al. go `null` on `series=balance`, VEC-760) at a call
+ * site that knows, from the query it made, which series answered.
+ */
+function present<T>(value: T | null | undefined, label: string): T {
+  assert.ok(
+    value !== null && value !== undefined,
+    `${label}: expected a value, got ${String(value)}`,
+  );
+  return value;
+}
+
+/**
+ * The union member that DECLARES key `K`, whether required or optional --
+ * `Extract<T, Record<K, unknown>>` only catches the required case, and an
+ * optional field (`event_count` et al. on `AllocationActivityBucketResponse`,
+ * VEC-760) is structurally assignable to `Record<K, unknown>` from a member
+ * that never declares the key at all, so `Extract` alone stops discriminating
+ * the moment a field the raw arm never had becomes optional on the other.
+ */
+type HasKey<Row, K extends PropertyKey> = Row extends unknown
+  ? K extends keyof Row
+    ? Row
+    : never
+  : never;
+
+/**
  * Narrow an envelope's `data` to the arm the query selected. Bucketed and
  * unbucketed rows are separate response schemas and the query param that picks
  * between them is not expressible in the response, so the generated type is a
@@ -147,7 +174,7 @@ function armWith<Rows extends readonly object[], K extends PropertyKey>(
   rows: Rows,
   key: K,
   label: string,
-): Extract<Rows[number], Record<K, unknown>>[] {
+): HasKey<Rows[number], K>[] {
   for (const row of rows) {
     assert.ok(
       key in row,
@@ -157,7 +184,7 @@ function armWith<Rows extends readonly object[], K extends PropertyKey>(
 
   // `rows` is a union of arrays, so the element type is `Rows[number]` and the
   // loop above is what proves which arm this is.
-  return rows as unknown as Extract<Rows[number], Record<K, unknown>>[];
+  return rows as unknown as HasKey<Rows[number], K>[];
 }
 
 /** Rows and queries these checks pass around, named off the generated paths. */
@@ -406,17 +433,28 @@ async function checkRawAndAggregatedActivityAgree() {
   );
   const aggregated = await request(
     '/v1/allocations/activity',
-    activity({ aggregate: true, resolution: 'PT1H', limit: 500 }),
+    activity({
+      aggregation_method: 'end-period',
+      frequency: 'PT1H',
+      limit: 500,
+    }),
     'activity (aggregated)',
   );
 
   assert.equal(raw.mode, 'raw');
+  assert.ok(
+    !('frequency' in raw.window),
+    'a default-frequency echo must name no grid',
+  );
   assert.equal(aggregated.mode, 'aggregated');
   const bucketed = armWith(
     aggregated.data,
     'event_count',
     'aggregated activity',
-  ).reduce((total, bucket) => total + bucket.event_count, 0);
+  ).reduce(
+    (total, bucket) => total + present(bucket.event_count, 'event_count'),
+    0,
+  );
   assert.equal(
     bucketed,
     raw.data.length,
@@ -427,23 +465,29 @@ async function checkRawAndAggregatedActivityAgree() {
 async function checkAggregatedRowShapeAndGrid() {
   const hourly = await request(
     '/v1/allocations/activity',
-    activity({ aggregate: true, resolution: 'PT1H' }),
+    activity({ aggregation_method: 'end-period', frequency: 'PT1H' }),
     'activity (PT1H)',
   );
 
-  assert.equal(hourly.window.resolution, 'PT1H');
-  assert.equal(hourly.window.interval_ms, 3_600_000);
+  // Bucketed, so the echo is the resampled arm of the union; `in` narrows it.
+  assert.ok('frequency' in hourly.window, 'a bucketed echo names its grid');
+  assert.equal(hourly.window.frequency, 'PT1H');
+  assert.equal(hourly.window.frequency_ms, 3_600_000);
   assert.equal(hourly.data.length, 25, '24h of hourly buckets, both ends');
   assert.ok(
     'event_count' in at(hourly.data, 0, 'hourly buckets'),
     'aggregated rows carry a count',
   );
 
-  // The resolution has to reach the bucket grid, not just the echoed window: a
-  // fixture that ignores it answers every resolution with the same buckets.
+  // The frequency has to reach the bucket grid, not just the echoed window: a
+  // fixture that ignores it answers every frequency with the same buckets.
   const quarterHourly = await request(
     '/v1/allocations/activity',
-    activity({ aggregate: true, resolution: 'PT15M', limit: 500 }),
+    activity({
+      aggregation_method: 'end-period',
+      frequency: 'PT15M',
+      limit: 500,
+    }),
     'activity (PT15M)',
   );
   assert.equal(quarterHourly.data.length, 97);
@@ -459,22 +503,26 @@ async function checkAggregatedFlowsAreValued() {
     const feed = await request(
       '/v1/allocations/activity',
       activity({
-        aggregate: true,
-        resolution: 'PT1H',
+        aggregation_method: 'end-period',
+        frequency: 'PT1H',
         token_symbol: symbol,
         limit: 500,
       }),
-      `activity?aggregate&token_symbol=${symbol}`,
+      `activity?aggregation_method&token_symbol=${symbol}`,
     );
     const moved = armWith(
       feed.data,
       'event_count',
-      `activity?aggregate&token_symbol=${symbol}`,
-    ).filter((bucket) => Number(bucket.total_tx_amount) > 0);
+      `activity?aggregation_method&token_symbol=${symbol}`,
+    ).filter(
+      (bucket) =>
+        Number(present(bucket.total_tx_amount, 'total_tx_amount')) > 0,
+    );
     assert.ok(moved.length > 0, `${symbol} moved nothing in the window`);
     return moved.map(
       (bucket) =>
-        Math.abs(Number(bucket.net_flow_usd)) / Number(bucket.total_tx_amount),
+        Math.abs(Number(present(bucket.net_flow_usd, 'net_flow_usd'))) /
+        Number(present(bucket.total_tx_amount, 'total_tx_amount')),
     );
   };
 
@@ -495,6 +543,55 @@ async function checkAggregatedFlowsAreValued() {
   // recorded as sweeps and its inflows alone are throughput, not net flow.
   for (const ratio of await usdPerUnit('sUSDS')) {
     assert.equal(ratio, 0, 'a direct holding must not be valued');
+  }
+}
+
+/**
+ * `series=balance` names how much of its own total it could price
+ * (VEC-760): every bucket's count pair has to be internally consistent, at
+ * least one has to be partial (tokens 9 and 12 carry no priced position in
+ * the fixture), and `series=flow` must carry neither field.
+ */
+async function checkBalanceSeriesReportsCoverage() {
+  const balance = await request(
+    '/v1/allocations/activity',
+    activity({
+      aggregation_method: 'end-period',
+      series: 'balance',
+      frequency: 'PT1H',
+      limit: 500,
+    }),
+    'activity (series=balance)',
+  );
+
+  const buckets = armWith(balance.data, 'entity_count', 'balance buckets');
+  for (const bucket of buckets) {
+    const priced = present(bucket.priced_entity_count, 'priced_entity_count');
+    const total = present(bucket.entity_count, 'entity_count');
+    assert.ok(
+      priced <= total,
+      `bucket ${bucket.bucket_start} prices more positions (${priced}) than it knows about (${total})`,
+    );
+  }
+  assert.ok(
+    buckets.some(
+      (bucket) =>
+        present(bucket.priced_entity_count, 'priced_entity_count') <
+        present(bucket.entity_count, 'entity_count'),
+    ),
+    'no bucket in the window is partial — tokens 9 and 12 should make one',
+  );
+
+  const flow = await request(
+    '/v1/allocations/activity',
+    activity({ aggregation_method: 'end-period', frequency: 'PT1H' }),
+    'activity (series=flow)',
+  );
+  for (const bucket of armWith(flow.data, 'event_count', 'flow buckets')) {
+    assert.ok(
+      !('entity_count' in bucket) && !('priced_entity_count' in bucket),
+      `flow bucket ${bucket.bucket_start} should carry neither coverage count`,
+    );
   }
 }
 
@@ -760,7 +857,7 @@ async function checkPositionKeysJoinTheTwoEndpoints() {
 }
 
 async function checkProvenanceSelection() {
-  const window = { aggregate: true, limit: 3 };
+  const window = { aggregation_method: 'end-period', limit: 3 } as const;
 
   for (const source of ['indexed', 'reference', 'both'] as const) {
     const envelope = await request(
@@ -815,7 +912,11 @@ async function checkProvenanceConflictRejected() {
     {
       params: {
         path: { prime_id: SPARK_MAINNET_PROXY },
-        query: { aggregate: true, source: 'indexed', reference: true },
+        query: {
+          aggregation_method: 'end-period',
+          source: 'indexed',
+          reference: true,
+        },
       },
     },
     422,
@@ -829,7 +930,7 @@ async function checkDebtAggregatedBuckets() {
     {
       params: {
         path: { prime_id: SPARK_MAINNET_PROXY },
-        query: { aggregate: true, resolution: 'PT6H' },
+        query: { aggregation_method: 'end-period', frequency: 'PT6H' },
       },
     },
     'debt (aggregated)',
@@ -846,7 +947,7 @@ async function checkDebtAggregatedBuckets() {
 
 /**
  * A bucket's value must follow its instant and nothing the request asked for:
- * page size, range and resolution all have to agree wherever their grids
+ * page size, range and frequency all have to agree wherever their grids
  * overlap, or paging or rescaling a chart redraws it.
  */
 async function checkSeriesValuesFollowTheirInstant() {
@@ -857,7 +958,7 @@ async function checkSeriesValuesFollowTheirInstant() {
       `exposure (${label})`,
     );
 
-  const daily = await read({ resolution: 'PT1H', limit: 25 }, '24h hourly');
+  const daily = await read({ frequency: 'PT1H', limit: 25 }, '24h hourly');
   const byInstant = new Map(
     daily.data.map((bucket) => [bucket.bucket_start, bucket.exposure_usd]),
   );
@@ -865,11 +966,11 @@ async function checkSeriesValuesFollowTheirInstant() {
   const hoursAgo = (hours: number) =>
     new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
   const variants: [Awaited<ReturnType<typeof read>>, string][] = [
-    [await read({ resolution: 'PT1H', limit: 10 }, 'limit=10'), 'page size'],
+    [await read({ frequency: 'PT1H', limit: 10 }, 'limit=10'), 'page size'],
     [
       await read(
         {
-          resolution: 'PT1H',
+          frequency: 'PT1H',
           limit: 500,
           from_timestamp: hoursAgo(24 * 7),
           to_timestamp: hoursAgo(3),
@@ -878,7 +979,7 @@ async function checkSeriesValuesFollowTheirInstant() {
       ),
       'window',
     ],
-    [await read({ resolution: 'PT6H', limit: 500 }, 'PT6H'), 'resolution'],
+    [await read({ frequency: 'PT6H', limit: 500 }, 'PT6H'), 'frequency'],
   ];
 
   for (const [variant, asked] of variants) {
@@ -906,7 +1007,7 @@ async function checkRepeatedReadsAreStable() {
       {
         params: {
           path: { prime_id: SPARK_MAINNET_PROXY },
-          query: { resolution: 'PT1H' },
+          query: { frequency: 'PT1H' },
         },
       },
       'total-capital',
@@ -1279,7 +1380,7 @@ async function checkInheritedKeysAreNotFound() {
   }
 }
 
-async function checkReferenceDebtRequiresAggregate() {
+async function checkReferenceDebtRequiresAMethod() {
   await expectStatus(
     '/v1/primes/{prime_id}/debt',
     {
@@ -1289,7 +1390,7 @@ async function checkReferenceDebtRequiresAggregate() {
       },
     },
     400,
-    'reference debt without aggregate',
+    'reference debt without an aggregation method',
   );
 }
 
@@ -1324,26 +1425,49 @@ async function checkMalformedParamsAreRejected() {
     422,
     'unparseable from_timestamp',
   );
+  await expectRejection(
+    '/v1/allocations/activity',
+    activity({ series: 'bogus' }),
+    422,
+    'series=bogus',
+  );
+  // series picks between two aggregate queries that only run when
+  // aggregation_method=end-period is set (VEC-760); this request has neither.
+  await expectStatus(
+    '/v1/allocations/activity',
+    activity({ series: 'balance' }),
+    422,
+    'series=balance without aggregation_method',
+  );
 }
 
 /**
  * A `bool` query param is parsed by pydantic, which takes six spellings either
- * side in any case and rejects everything else. Reading an unrecognised value as
- * `false` would serve a raw envelope to a screen that asked for buckets.
+ * side in any case and rejects everything else.
  */
 async function checkBooleanFlagsFollowPydantic() {
-  const feed = await requestLoosely(
-    '/v1/allocations/activity',
-    activity({ aggregate: 'YES' }),
-    'activity?aggregate=YES',
+  const envelope = await requestLoosely(
+    '/v1/primes/{prime_id}/debt',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { aggregation_method: 'end-period', reference: 'YES' },
+      },
+    },
+    'debt?reference=YES',
   );
-  assert.equal(feed.mode, 'aggregated', 'YES is a true this API accepts');
+  assert.equal(envelope.source, 'reference', 'YES is a true this API accepts');
 
   await expectRejection(
-    '/v1/allocations/activity',
-    activity({ aggregate: 'maybe' }),
+    '/v1/primes/{prime_id}/debt',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { aggregation_method: 'end-period', reference: 'maybe' },
+      },
+    },
     422,
-    'aggregate=maybe',
+    'reference=maybe',
   );
 }
 
@@ -1372,9 +1496,9 @@ async function checkIllegalWindowsAreRejected() {
   );
   await expectStatus(
     '/v1/allocations/activity',
-    activity({ aggregate: true, resolution: 'PT1M' }),
+    activity({ aggregation_method: 'end-period', frequency: 'PT1M' }),
     422,
-    'resolution finer than the 24h floor',
+    'frequency finer than the 24h floor',
   );
 }
 
@@ -1470,8 +1594,12 @@ const checks: [string, () => Promise<void>][] = [
   ['activity symbols are held', checkActivitySymbolsExistInAllocations],
   ['the default 24h window has data', checkDefaultWindowAlwaysHasData],
   ['raw and aggregated activity agree', checkRawAndAggregatedActivityAgree],
-  ['the aggregated grid follows resolution', checkAggregatedRowShapeAndGrid],
+  ['the aggregated grid follows frequency', checkAggregatedRowShapeAndGrid],
   ['aggregated flows are valued in USD', checkAggregatedFlowsAreValued],
+  [
+    'series=balance reports pricing coverage',
+    checkBalanceSeriesReportsCoverage,
+  ],
   ['the raw feed honours limit', checkRawActivityHonoursLimit],
   ['debt raw snapshots', checkDebtRawSnapshots],
   ['provenance selection', checkProvenanceSelection],
@@ -1520,7 +1648,10 @@ const checks: [string, () => Promise<void>][] = [
   ['an unknown prime is a 404', checkUnknownPrimeIsNotFound],
   ['an unknown asset is a 404', checkUnknownAssetIsNotFound],
   ['an inherited key is not a fixture', checkInheritedKeysAreNotFound],
-  ['reference debt requires aggregate', checkReferenceDebtRequiresAggregate],
+  [
+    'reference debt requires an aggregation method',
+    checkReferenceDebtRequiresAMethod,
+  ],
   ['malformed params are rejected', checkMalformedParamsAreRejected],
   ['boolean flags follow pydantic', checkBooleanFlagsFollowPydantic],
   ['illegal windows are rejected', checkIllegalWindowsAreRejected],

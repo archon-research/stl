@@ -36,9 +36,18 @@ func TestWorkerConfig_Validate(t *testing.T) {
 			wantErr: "Name is required",
 		},
 		{
-			name:    "missing database opener",
+			name:    "no database opener and no declaration that none is wanted",
 			mutate:  func(c *WorkerConfig) { c.OpenDatabase = nil },
-			wantErr: "OpenDatabase is required",
+			wantErr: "OpenDatabase is required (or set NoDatabase)",
+		},
+		{
+			name:   "a job that declares it wants no database",
+			mutate: func(c *WorkerConfig) { c.OpenDatabase, c.NoDatabase = nil, true },
+		},
+		{
+			name:    "an opener alongside the declaration that none is wanted",
+			mutate:  func(c *WorkerConfig) { c.NoDatabase = true },
+			wantErr: "mutually exclusive",
 		},
 		{
 			name:    "missing register hook",
@@ -207,5 +216,117 @@ func TestRunWorker_RejectsInvalidConfigBeforeAnySetup(t *testing.T) {
 	}
 	if opened {
 		t.Error("database was opened despite an invalid config")
+	}
+}
+
+// A pod told to stop before the worker was even built has done nothing wrong:
+// surfacing the cancelled context makes the main exit 1 and the rollout look
+// like a crash. RunWorker's clean stop after w.Run returns nil, and so does this.
+func TestRunWorker_TreatsACancelledStartupAsAShutdown(t *testing.T) {
+	t.Setenv("TEMPORAL_HOST_PORT", "127.0.0.1:1")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := RunWorker(ctx, BuildMeta{Commit: "test"}, validWorkerConfig())
+
+	if err != nil {
+		t.Fatalf("RunWorker = %v, want a cancelled startup reported as a clean stop", err)
+	}
+}
+
+func TestNewBootstrap_SurfacesACancelledContextWithoutDialingTemporal(t *testing.T) {
+	t.Setenv("TEMPORAL_HOST_PORT", "127.0.0.1:1")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := newBootstrap(ctx, BuildMeta{Commit: "test"}, "cancelled", nil)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("newBootstrap = %v, want the cancelled context, not a dial error", err)
+	}
+}
+
+// Two jobs on one worker is what a worker that owns more than one backfill of the
+// same data needs (the Uniswap V4 bootstrap owns two). Both register a method
+// called Execute, so the second one names its activity; without that a real
+// worker panics, and the test environment — which disables that check — silently
+// routes BOTH workflow types to whichever Runner registered last. Each case
+// therefore starts one of the two and demands its own Runner.
+func TestRegisterRunner_HostsTwoJobsOnOneWorkerWithoutCrossingThem(t *testing.T) {
+	for _, started := range []string{"FirstBackfill", "SecondBackfill"} {
+		t.Run(started, func(t *testing.T) {
+			env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+			var ran []string
+
+			// The first job keeps the default name, as a deployed one must.
+			for _, job := range []struct{ workflowType, activityName string }{
+				{"FirstBackfill", ""},
+				{"SecondBackfill", "SecondBackfillExecute"},
+			} {
+				name := job.workflowType
+				err := RegisterRunner(env, RunnerJob{
+					WorkflowType: name,
+					ActivityName: job.activityName,
+					Runner: RunnerFunc(func(context.Context) error {
+						ran = append(ran, name)
+						return nil
+					}),
+					Timeouts: ActivityTimeouts{StartToClose: time.Minute, ScheduleToClose: 2 * time.Minute, MaximumAttempts: 1},
+				})
+				if err != nil {
+					t.Fatalf("RegisterRunner(%s): %v", name, err)
+				}
+			}
+
+			env.ExecuteWorkflow(started)
+
+			if err := env.GetWorkflowError(); err != nil {
+				t.Fatalf("running %s: %v", started, err)
+			}
+			if len(ran) != 1 || ran[0] != started {
+				t.Fatalf("runners that ran = %v, want only %s: the workflow reached another job's Runner", ran, started)
+			}
+		})
+	}
+}
+
+// Every job deployed before ActivityName existed records "Execute" in its
+// workflow histories, so a run in flight across a rollout replays that name. An
+// unnamed job must keep it, and the scheduled cronjob path must keep it too.
+func TestRunnerJobActivityName_DefaultsToTheAlreadyDeployedName(t *testing.T) {
+	if cronjobActivityMethod != "Execute" {
+		t.Fatalf("cronjobActivityMethod = %q, want Execute: an in-flight run replays against that name", cronjobActivityMethod)
+	}
+	unnamed := RunnerJob{WorkflowType: "UniswapV4PositionBootstrap"}
+	if got := unnamed.activityName(); got != "Execute" {
+		t.Errorf("an unnamed job's activity is %q, want Execute", got)
+	}
+	// Empty prefix leaves the SDK's own derivation from the method name alone.
+	if got := unnamed.activityPrefix(); got != "" {
+		t.Errorf("an unnamed job's registration prefix is %q, want empty", got)
+	}
+
+	named := RunnerJob{WorkflowType: "X", ActivityName: "UniswapV4PosmTransferBackfillExecute"}
+	if got := named.activityName(); got != "UniswapV4PosmTransferBackfillExecute" {
+		t.Errorf("a named job's activity is %q", got)
+	}
+	if got := named.activityPrefix(); got != "UniswapV4PosmTransferBackfill" {
+		t.Errorf("a named job's registration prefix is %q, want the name minus the method", got)
+	}
+}
+
+// The SDK builds the name as prefix+method, so a name that does not end in the
+// method could never be registered under it — caught here rather than at boot.
+func TestRegisterRunner_RefusesAnActivityNameThatCannotBeRegistered(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+
+	err := RegisterRunner(env, RunnerJob{
+		WorkflowType: "SomeBackfill",
+		ActivityName: "SomeBackfillRun",
+		Runner:       RunnerFunc(func(context.Context) error { return nil }),
+		Timeouts:     ActivityTimeouts{StartToClose: time.Minute, MaximumAttempts: 1},
+	})
+	if err == nil || !strings.Contains(err.Error(), "must end in") {
+		t.Fatalf("RegisterRunner error = %v, want it to reject a name that does not end in the method name", err)
 	}
 }

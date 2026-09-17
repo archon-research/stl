@@ -34,8 +34,9 @@ type ServiceTelemetry struct {
 	outOfOrderBlocks   metric.Int64Counter
 
 	// Backfill invariant metrics
-	backfillGapNoCanonicalTotal metric.Int64Counter
-	backfillWatermarkLag        metric.Int64Gauge
+	backfillGapNoCanonicalTotal   metric.Int64Counter
+	backfillWatermarkLag          metric.Int64Gauge
+	backfillWatermarkAdvanceSkips metric.Int64Counter
 }
 
 // NewServiceTelemetry creates a new ServiceTelemetry instance with OpenTelemetry instrumentation.
@@ -105,6 +106,18 @@ func NewServiceTelemetryWithProvider(mp metric.MeterProvider) (*ServiceTelemetry
 		return nil, err
 	}
 
+	// backfill.watermark_advance_skipped counts passes whose advance the stored
+	// cursor refused. A non-zero rate is a reorg landing between a pass's cursor
+	// read and its write: contention, self-healing next pass. A wedged cursor is
+	// this counter at zero with backfill.watermark_lag climbing (ARCT-379).
+	t.backfillWatermarkAdvanceSkips, err = meter.Int64Counter(
+		"backfill.watermark_advance_skipped.total",
+		metric.WithDescription("Backfill passes whose watermark advance was refused because a reorg moved the cursor mid-scan"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return t, nil
 }
 
@@ -168,4 +181,12 @@ func (t *ServiceTelemetry) RecordBackfillGapNoCanonical(ctx context.Context, cha
 // service.name; no per-block attribute, so cardinality stays flat.
 func (t *ServiceTelemetry) RecordWatermarkLag(ctx context.Context, lag int64) {
 	t.backfillWatermarkLag.Record(ctx, lag)
+}
+
+// RecordWatermarkAdvanceSkipped counts a refused watermark advance. Per-chain
+// attribution comes from service.name, like the other backfill instruments, so
+// the chainID stays off the metric and out of the cardinality budget.
+func (t *ServiceTelemetry) RecordWatermarkAdvanceSkipped(ctx context.Context, chainID int64) {
+	_ = chainID
+	t.backfillWatermarkAdvanceSkips.Add(ctx, 1)
 }

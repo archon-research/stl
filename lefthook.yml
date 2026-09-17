@@ -22,10 +22,26 @@ pre-commit:
   commands:
     # Root-level generic file checks
     trailing-whitespace:
-      glob: "**/*.{yml,yaml,json,md,sh}"
+      glob: "**/*.{yml,yaml,json,sh}"
       exclude: '(stl-verify|lefthook).*'
       stage_fixed: true
       run: perl -i -pe 's/[^\S\n]+$//' {staged_files}
+
+    # Markdown is split out because its hard line break *is* two trailing
+    # spaces, so a blanket strip silently deletes intentional formatting — it
+    # did exactly that to every ADR metadata block, leaving those headers to
+    # render as one run-on line. Strip as usual, but keep a deliberate
+    # two-space break on a non-blank line, and normalise three or more down to
+    # two. Same rule as pre-commit's --markdown-linebreak-ext=md. The
+    # replacement is written \x20\x20 rather than as literal spaces so what it
+    # produces cannot itself be mangled by a whitespace-trimming editor, which
+    # is the bug this hook had.
+    trailing-whitespace-markdown:
+      glob: "**/*.md"
+      exclude: '(stl-verify|lefthook).*'
+      stage_fixed: true
+      run: |
+        perl -i -pe 'if (/\S/ && / {2}$/) { s/[^\S\n]+$/\x20\x20/ } else { s/[^\S\n]+$// }' {staged_files}
 
     end-of-file-fixer:
       glob: "**/*.{yml,yaml,json,md,sh}"

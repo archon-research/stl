@@ -131,7 +131,7 @@ func startCurveLPNGService(t *testing.T, repo *mockRepo, mc outbound.Multicaller
 			return nil, ctx.Err()
 		},
 	}
-	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

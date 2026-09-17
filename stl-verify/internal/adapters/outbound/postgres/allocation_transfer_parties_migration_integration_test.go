@@ -79,8 +79,8 @@ func TestSavePositions_PersistsTransferParties(t *testing.T) {
 	}
 
 	if _, err := allocTransferPartiesPool.Exec(ctx,
-		`INSERT INTO prime (name, vault_address)
-		 VALUES ('spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')
+		`INSERT INTO prime (external_id, name, vault_address)
+		 VALUES (gen_random_uuid(), 'spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')
 		 ON CONFLICT DO NOTHING`,
 	); err != nil {
 		t.Fatalf("seed prime: %v", err)
@@ -92,7 +92,7 @@ func TestSavePositions_PersistsTransferParties(t *testing.T) {
 		t.Fatalf("look up spark prime: %v", err)
 	}
 
-	tokenRepo, err := NewTokenRepository(allocTransferPartiesPool, nil, 0)
+	tokenRepo, err := NewTokenRepository(allocTransferPartiesPool, nil, 0, buildregistry.RunID(1))
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestSavePositions_PersistsTransferParties(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTxManager: %v", err)
 	}
-	repo := NewAllocationRepository(allocTransferPartiesPool, txm, tokenRepo, nil, buildregistry.BuildID(1))
+	repo := NewAllocationRepository(allocTransferPartiesPool, txm, tokenRepo, nil, buildregistry.BuildID(1), buildregistry.RunID(1))
 
 	usdcAddr := common.HexToAddress("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
 	proxyAddr := common.HexToAddress("0x2222222222222222222222222222222222222222")
@@ -143,7 +143,7 @@ func TestSavePositions_PersistsTransferParties(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	if err := repo.SavePositions(ctx, tx, []*entity.AllocationPosition{
+	if _, err := repo.SavePositions(ctx, tx, []*entity.AllocationPosition{
 		inboundPos, outboundPos, mintPos, sweepPos,
 	}); err != nil {
 		t.Fatalf("SavePositions: %v", err)

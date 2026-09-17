@@ -64,7 +64,7 @@ const tabTriggerClassName = css({
   fontSize: 'md',
   fontWeight: 'medium',
   color: 'text.muted',
-  borderBottomWidth: '2px',
+  borderBottomWidth: 'strong',
   borderBottomStyle: 'solid',
   borderBottomColor: 'transparent',
   transitionProperty: 'colors',
@@ -90,7 +90,7 @@ const sidebarToggleClassName = css({
   width: '9',
   p: '0',
   flexShrink: 0,
-  borderWidth: '1px',
+  borderWidth: 'hairline',
   borderStyle: 'solid',
   borderColor: 'border.subtle',
   borderRadius: 'md',
@@ -101,11 +101,31 @@ const sidebarToggleClassName = css({
   transitionDuration: 'fast',
   _hover: { color: 'text.strong', borderColor: 'border.default' },
   _focusVisible: {
-    outlineWidth: '2px',
+    outlineWidth: 'strong',
     outlineStyle: 'solid',
     outlineColor: 'interactive.accent',
     outlineOffset: '0.5',
   },
+});
+
+const signOutClassName = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  height: '9',
+  px: '3',
+  flexShrink: 0,
+  fontSize: 'md',
+  fontWeight: 'medium',
+  color: 'text.muted',
+  textDecoration: 'none',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border.subtle',
+  borderRadius: 'md',
+  background: 'surface.default',
+  transitionProperty: 'colors',
+  transitionDuration: 'fast',
+  _hover: { color: 'text.strong', borderColor: 'border.default' },
 });
 
 const rangeFieldClassName = css({
@@ -314,6 +334,11 @@ export function TopBar({
             </div>
           ) : null}
           <SettingsMenu sections={[dataSource]} />
+          {/* A plain link, not a handler: the edge owns the session and clears
+              it at this path, so the page never touches a credential. */}
+          <a href="/logout" className={signOutClassName}>
+            Sign out
+          </a>
         </div>
       </div>
     </DesignSystemPageShell>

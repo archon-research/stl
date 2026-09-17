@@ -33,7 +33,7 @@ _RECEIPT_TOKEN_BY_ADDRESS_SQL = (
 )
 
 _RECEIPT_TOKEN_ROUTING_SQL = """
-SELECT rt.id AS receipt_token_id, p.name AS protocol_name
+SELECT rt.id AS receipt_token_id, p.name AS protocol_name, rt.chain_id
 FROM receipt_token rt
 JOIN protocol p ON p.id = rt.protocol_id
 ORDER BY rt.id
@@ -99,7 +99,9 @@ class ReceiptTokenRepository:
             raise
 
         return [
-            ReceiptTokenProtocolPair(receipt_token_id=row.receipt_token_id, protocol_name=row.protocol_name)
+            ReceiptTokenProtocolPair(
+                receipt_token_id=row.receipt_token_id, protocol_name=row.protocol_name, chain_id=row.chain_id
+            )
             for row in rows
         ]
 

@@ -14,8 +14,8 @@ from temporalio.common import RetryPolicy
 
 ACTIVITY_NAME = "run_core_model"
 
-# A full "all markets" pass at the default N_MC is hours of Monte Carlo, not
-# minutes; 4h kills a hung tick without cutting off a legitimately slow one.
+# A full "all markets" pass at N_MC=10000 measured ~25 min on a laptop and is
+# slower on the pod; 4h kills a hung tick without cutting off a slow one.
 TICK_TIMEOUT = timedelta(hours=4)
 
 

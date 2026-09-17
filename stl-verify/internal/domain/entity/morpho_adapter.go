@@ -12,9 +12,13 @@ import (
 //
 // A VaultV2 never touches Morpho Blue directly: it holds a set of adapter
 // contracts, each wrapping one downstream venue. MarketV1 wraps a Morpho Blue
-// market; VaultV1 wraps a nested MetaMorpho V1 vault. Unknown is a
+// market; VaultV1 wraps a nested MetaMorpho V1 vault; ERC4626Merkl wraps an
+// external ERC-4626 vault whose rewards are claimable via Merkl; Box wraps a
+// Morpho Box; CompoundV3 wraps a Compound V3 Comet. Unknown is a
 // forward-compatible sentinel (mirroring the VaultShaped discovery pattern) so
-// an adapter of a not-yet-modelled type is recorded rather than dropped.
+// an adapter of a not-yet-modelled type is recorded rather than dropped —
+// bespoke curator-written adapters sharing no marker getter stay there by
+// design.
 //
 // Unknown (99) and "no classification at all" are different facts and both are
 // representable: 99 means an on-chain probe ran and could not classify the
@@ -23,14 +27,24 @@ import (
 type MorphoAdapterType int16
 
 const (
-	MorphoAdapterTypeMarketV1 MorphoAdapterType = 1  // MorphoMarketV1AdapterV2 (Morpho Blue market)
-	MorphoAdapterTypeVaultV1  MorphoAdapterType = 2  // MorphoVaultV1Adapter (nested MetaMorpho V1 vault)
-	MorphoAdapterTypeUnknown  MorphoAdapterType = 99 // unrecognised adapter type, recorded for later curation
+	MorphoAdapterTypeMarketV1     MorphoAdapterType = 1  // MorphoMarketV1AdapterV2 (Morpho Blue market)
+	MorphoAdapterTypeVaultV1      MorphoAdapterType = 2  // MorphoVaultV1Adapter (nested MetaMorpho V1 vault)
+	MorphoAdapterTypeERC4626Merkl MorphoAdapterType = 3  // ERC4626MerklAdapter (external ERC-4626 vault, rewards via Merkl)
+	MorphoAdapterTypeBox          MorphoAdapterType = 4  // BoxAdapter (Morpho Box)
+	MorphoAdapterTypeCompoundV3   MorphoAdapterType = 5  // CompoundV3Adapter (Compound V3 Comet)
+	MorphoAdapterTypeUnknown      MorphoAdapterType = 99 // unrecognised adapter type, recorded for later curation
 )
 
-// IsValid reports whether the type is one of the three modelled values.
+// morphoAdapterTypes is the closed set morpho_adapter_membership.adapter_type's
+// column comment also enumerates.
+var morphoAdapterTypes = []MorphoAdapterType{
+	MorphoAdapterTypeMarketV1, MorphoAdapterTypeVaultV1, MorphoAdapterTypeERC4626Merkl,
+	MorphoAdapterTypeBox, MorphoAdapterTypeCompoundV3, MorphoAdapterTypeUnknown,
+}
+
+// IsValid reports whether the type is one of the modelled values.
 func (t MorphoAdapterType) IsValid() bool {
-	return t == MorphoAdapterTypeMarketV1 || t == MorphoAdapterTypeVaultV1 || t == MorphoAdapterTypeUnknown
+	return slices.Contains(morphoAdapterTypes, t)
 }
 
 // MembershipSource records HOW an adapter-set membership was observed, and is
@@ -175,7 +189,7 @@ func (m *MorphoAdapterMembership) Validate() error {
 		return fmt.Errorf("observedVia must be one of %v, got %q", membershipSources, m.ObservedVia)
 	}
 	if m.AdapterType != nil && !m.AdapterType.IsValid() {
-		return fmt.Errorf("adapterType must be 1, 2, or 99, got %d", *m.AdapterType)
+		return fmt.Errorf("adapterType must be one of %v, got %d", morphoAdapterTypes, *m.AdapterType)
 	}
 	// "Only a removal may be untyped" is deliberately NOT checked here. An
 	// assertion whose caller already knows the adapter is a member carries no

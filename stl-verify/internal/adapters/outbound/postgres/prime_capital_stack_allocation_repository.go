@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -19,12 +20,14 @@ var _ outbound.PrimeCapitalStackAllocationRepository = (*PrimeCapitalStackAlloca
 type PrimeCapitalStackAllocationRepository struct {
 	pool   *pgxpool.Pool
 	logger *slog.Logger
+	runID  buildregistry.RunID
 }
 
 // NewPrimeCapitalStackAllocationRepository creates a new PrimeCapitalStackAllocationRepository.
 func NewPrimeCapitalStackAllocationRepository(
 	pool *pgxpool.Pool,
 	logger *slog.Logger,
+	runID buildregistry.RunID,
 ) *PrimeCapitalStackAllocationRepository {
 	if logger == nil {
 		logger = slog.Default()
@@ -32,6 +35,7 @@ func NewPrimeCapitalStackAllocationRepository(
 	return &PrimeCapitalStackAllocationRepository{
 		pool:   pool,
 		logger: logger.With("component", "prime-capital-stack-allocation-repo"),
+		runID:  runID,
 	}
 }
 
@@ -67,9 +71,10 @@ func (r *PrimeCapitalStackAllocationRepository) SaveCapitalStackAllocations(
 			required_risk_capital_usd,
 			crr,
 			source,
-			build_id
+			build_id,
+			run_id
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		ON CONFLICT (prime_id, synced_at, network, token_address, processing_version) DO NOTHING
 	`
 
@@ -92,6 +97,7 @@ func (r *PrimeCapitalStackAllocationRepository) SaveCapitalStackAllocations(
 			a.CRR,
 			a.Source,
 			a.BuildID,
+			r.runID,
 		)
 	}
 

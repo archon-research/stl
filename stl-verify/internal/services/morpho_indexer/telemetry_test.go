@@ -9,6 +9,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"go.opentelemetry.io/otel/attribute"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -81,30 +82,33 @@ func TestSecondsHistograms_UseSecondsBuckets(t *testing.T) {
 	}
 }
 
-// TestRecordAdapterMembershipObservation_LabelsTypeAndProvenance pins the label
-// vocabulary the VectorMorphoV2UnknownAdapters and
-// VectorMorphoV2LazyAdapterRegistrations rules select on. Renaming a value here
-// silently un-fires those alerts. observed_via deliberately carries the same five
-// values as morpho_adapter_membership.observed_via, so the metric and the table
-// answer provenance questions in one vocabulary.
+// Renaming a label value here silently un-fires VectorMorphoV2UnknownAdapters and
+// VectorMorphoV2LazyAdapterRegistrations, which select on this vocabulary.
 func TestRecordAdapterMembershipObservation_LabelsTypeAndProvenance(t *testing.T) {
 	tests := []struct {
-		name        string
-		adapterType *entity.MorphoAdapterType
-		observedVia entity.MembershipSource
-		wantType    string
+		name                 string
+		adapterType          *entity.MorphoAdapterType
+		observedVia          entity.MembershipSource
+		atDiscoveryBlock     *bool
+		wantType             string
+		wantAtDiscoveryBlock string
 	}{
-		{"market adapter seeded at discovery", adapterTypeFor(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromDiscovery, "market_v1"},
-		{"nested vault adapter via AddAdapter", adapterTypeFor(entity.MorphoAdapterTypeVaultV1), entity.MembershipFromAddAdapter, "vault_v1"},
-		{"unclassifiable adapter inferred from an Allocate", adapterTypeFor(entity.MorphoAdapterTypeUnknown), entity.MembershipFromAllocation, "unknown"},
-		{"a removal carries no classification at all", nil, entity.MembershipFromRemoveAdapter, "unprobed"},
-		{"adapter seeded by the bootstrap", adapterTypeFor(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromBootstrapSeed, "market_v1"},
-		{"adapter type added to the enum but not the label map", adapterTypeFor(entity.MorphoAdapterType(3)), entity.MembershipFromAddAdapter, "type_3"},
+		{"market adapter seeded at discovery", adapterTypeFor(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromDiscovery, nil, "market_v1", "not_applicable"},
+		{"nested vault adapter via AddAdapter", adapterTypeFor(entity.MorphoAdapterTypeVaultV1), entity.MembershipFromAddAdapter, nil, "vault_v1", "not_applicable"},
+		{"unclassifiable adapter inferred from an Allocate", adapterTypeFor(entity.MorphoAdapterTypeUnknown), entity.MembershipFromAllocation, discoveryBlockFlag(false), "unknown", "false"},
+		{"a removal carries no classification at all", nil, entity.MembershipFromRemoveAdapter, nil, "unprobed", "not_applicable"},
+		{"adapter seeded by the bootstrap", adapterTypeFor(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromBootstrapSeed, nil, "market_v1", "not_applicable"},
+		{"external ERC-4626 vault adapter", adapterTypeFor(entity.MorphoAdapterTypeERC4626Merkl), entity.MembershipFromAddAdapter, nil, "erc4626_merkl", "not_applicable"},
+		{"box adapter", adapterTypeFor(entity.MorphoAdapterTypeBox), entity.MembershipFromAddAdapter, nil, "box", "not_applicable"},
+		{"compound v3 adapter", adapterTypeFor(entity.MorphoAdapterTypeCompoundV3), entity.MembershipFromAddAdapter, nil, "compound_v3", "not_applicable"},
+		{"adapter type added to the enum but not the label map", adapterTypeFor(entity.MorphoAdapterType(42)), entity.MembershipFromAddAdapter, nil, "type_42", "not_applicable"},
+		{"allocation in the vault's own discovery block", adapterTypeFor(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromAllocation, discoveryBlockFlag(true), "market_v1", "true"},
+		{"allocation the set enumeration never covered", adapterTypeFor(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromAllocation, discoveryBlockFlag(false), "market_v1", "false"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tel, reader := newRecordingTelemetry(t)
-			tel.RecordAdapterMembershipObservation(context.Background(), tt.adapterType, tt.observedVia)
+			tel.RecordAdapterMembershipObservation(context.Background(), tt.adapterType, tt.observedVia, tt.atDiscoveryBlock)
 
 			points := counterPoints(t, reader, "morpho.v2.adapter.registrations")
 			if len(points) != 1 {
@@ -114,6 +118,7 @@ func TestRecordAdapterMembershipObservation_LabelsTypeAndProvenance(t *testing.T
 				attribute.String("chain", "mainnet"),
 				attribute.String("adapter.type", tt.wantType),
 				attribute.String("observed_via", string(tt.observedVia)),
+				attribute.String("at_discovery_block", tt.wantAtDiscoveryBlock),
 			)
 			if !points[0].Attributes.Equals(&want) {
 				t.Errorf("attributes = %v, want %v", points[0].Attributes.Encoded(attribute.DefaultEncoder()), want.Encoded(attribute.DefaultEncoder()))
@@ -148,26 +153,6 @@ func TestRecordV2Snapshot_LabelsSnapshotType(t *testing.T) {
 				t.Errorf("value = %d, want 1", points[0].Value)
 			}
 		})
-	}
-}
-
-func TestRecordUnprobeableCandidate_LabelsReason(t *testing.T) {
-	tel, reader := newRecordingTelemetry(t)
-	tel.RecordUnprobeableCandidate(context.Background(), UnprobeableGasExhausted)
-
-	points := counterPoints(t, reader, "morpho.vault.candidates.unprobeable")
-	if len(points) != 1 {
-		t.Fatalf("got %d data points, want 1", len(points))
-	}
-	want := attribute.NewSet(
-		attribute.String("chain", "mainnet"),
-		attribute.String("reason", string(UnprobeableGasExhausted)),
-	)
-	if !points[0].Attributes.Equals(&want) {
-		t.Errorf("attributes = %v, want %v", points[0].Attributes.Encoded(attribute.DefaultEncoder()), want.Encoded(attribute.DefaultEncoder()))
-	}
-	if points[0].Value != 1 {
-		t.Errorf("value = %d, want 1", points[0].Value)
 	}
 }
 
@@ -207,14 +192,40 @@ func exerciseAllMethods(t *testing.T, tel *Telemetry) {
 	tel.RecordRPCCall(ctx, "getMarketState", time.Millisecond, nil)
 	tel.RecordRPCCall(ctx, "getMarketState", time.Millisecond, someErr)
 	tel.RecordError(ctx, "op", someErr)
-	tel.RecordAdapterMembershipObservation(ctx, adapterTypeFor(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromAddAdapter)
+	tel.RecordAdapterMembershipObservation(ctx, adapterTypeFor(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromAddAdapter, nil)
 	tel.RecordV2Snapshot(ctx, v2SnapshotAdapterState)
-	tel.RecordUnprobeableCandidate(ctx, UnprobeableGasExhausted)
 
 	_, span := tel.StartBlockSpan(ctx, 1)
 	span.End()
 	_, span = tel.StartSpan(ctx, "test.span", attribute.String("key", "value"))
 	span.End()
+}
+
+// Guards the startup seed: VectorMorphoIndexerStalled reads
+// morpho_blocks_processed_total with rate()==0 and must be computable from
+// process start (a worker dead before its first block emits no series at
+// all otherwise). See telemetry.SeedCounter.
+func TestNewTelemetry_SeedsBlockStatusSeriesAtZero(t *testing.T) {
+	_, reader := newRecordingTelemetry(t)
+
+	dps := testutil.CollectSumDataPoints(t, reader, "morpho.blocks.processed")
+	got := map[string]int64{}
+	for _, dp := range dps {
+		if chain := testutil.AttrValue(dp, "chain"); chain != "mainnet" {
+			t.Errorf("morpho.blocks.processed chain attr = %q, want %q", chain, "mainnet")
+		}
+		got[testutil.AttrValue(dp, "status")] = dp.Value
+	}
+	for _, status := range []string{"success", "error"} {
+		v, ok := got[status]
+		if !ok {
+			t.Errorf("morpho.blocks.processed missing status=%q series before any block", status)
+			continue
+		}
+		if v != 0 {
+			t.Errorf("morpho.blocks.processed{status=%q} = %d, want 0", status, v)
+		}
+	}
 }
 
 func TestTelemetry_NilSafe(t *testing.T) {
@@ -243,15 +254,11 @@ func TestTelemetry_NilSafe(t *testing.T) {
 	})
 
 	t.Run("RecordAdapterMembershipObservation", func(t *testing.T) {
-		tel.RecordAdapterMembershipObservation(ctx, adapterTypeFor(entity.MorphoAdapterTypeUnknown), entity.MembershipFromAllocation)
+		tel.RecordAdapterMembershipObservation(ctx, adapterTypeFor(entity.MorphoAdapterTypeUnknown), entity.MembershipFromAllocation, discoveryBlockFlag(false))
 	})
 
 	t.Run("RecordV2Snapshot", func(t *testing.T) {
 		tel.RecordV2Snapshot(ctx, v2SnapshotVaultCap)
-	})
-
-	t.Run("RecordUnprobeableCandidate", func(t *testing.T) {
-		tel.RecordUnprobeableCandidate(ctx, UnprobeableGasExhausted)
 	})
 
 	t.Run("StartBlockSpan", func(t *testing.T) {
@@ -286,3 +293,5 @@ func TestTelemetry_NilSafe(t *testing.T) {
 
 // adapterTypeFor is the address-of helper the nil-able classification label needs.
 func adapterTypeFor(t entity.MorphoAdapterType) *entity.MorphoAdapterType { return new(t) }
+
+func discoveryBlockFlag(atDiscoveryBlock bool) *bool { return new(atDiscoveryBlock) }

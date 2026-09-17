@@ -118,7 +118,7 @@ func assertOracleEmitsPricesForSymbols(t *testing.T, oracleName string, symbols 
 		}
 	}
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("create repository: %v", err)
 	}
@@ -137,7 +137,7 @@ func assertOracleEmitsPricesForSymbols(t *testing.T, oracleName string, symbols 
 		ChainID:      1,
 	}
 
-	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

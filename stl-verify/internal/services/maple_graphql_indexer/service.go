@@ -310,7 +310,7 @@ func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID 
 		return nil, err
 	}
 
-	s.telemetry.RecordRowsWritten(ctx, "maple_pool_state", len(pools))
+	s.telemetry.RecordRowsWritten(ctx, maplePoolStateTable, len(pools))
 	s.logger.Info("pools synced", "count", len(pools))
 	return poolIDs, nil
 }

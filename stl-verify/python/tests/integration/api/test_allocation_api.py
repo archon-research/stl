@@ -236,7 +236,8 @@ async def _seed(db_url: str) -> None:
             # bucket — +100 in, -40 out, and a 1000 sweep that must net to zero.
             # aUSDC's underlying USDC is priced at 1 USD, so net_flow_usd == 60.
             flow_prime_id = await conn.fetchval(
-                "INSERT INTO prime (name, vault_address) VALUES ('flow_test', $1) RETURNING id",
+                "INSERT INTO prime (external_id, name, vault_address) "
+                "VALUES (gen_random_uuid(), 'flow_test', $1) RETURNING id",
                 bytes.fromhex(_FLOW_PRIME_VAULT_HEX),
             )
             for offset, (tx, direction, amount) in enumerate(
@@ -266,7 +267,8 @@ async def _seed(db_url: str) -> None:
             # wrapper, so the flow is excluded from net_flow_usd (== 0) even
             # though the events are still counted.
             direct_flow_prime_id = await conn.fetchval(
-                "INSERT INTO prime (name, vault_address) VALUES ('direct_flow_test', $1) RETURNING id",
+                "INSERT INTO prime (external_id, name, vault_address) "
+                "VALUES (gen_random_uuid(), 'direct_flow_test', $1) RETURNING id",
                 bytes.fromhex(_DIRECT_FLOW_PRIME_VAULT_HEX),
             )
             for offset, (tx, direction, amount) in enumerate(
@@ -606,8 +608,8 @@ def test_activity_buckets_net_flow_is_signed_and_excludes_sweeps(client: TestCli
             "prime_id": f"0x{_FLOW_PROXY_HEX}",
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-01-01T01:00:00Z",
-            "resolution": "PT1H",
-            "aggregate": "true",
+            "frequency": "PT1H",
+            "aggregation_method": "end-period",
         },
     )
 
@@ -636,8 +638,8 @@ def test_activity_buckets_exclude_direct_asset_flows(client: TestClient) -> None
             "prime_id": f"0x{_DIRECT_FLOW_PROXY_HEX}",
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-01-01T01:00:00Z",
-            "resolution": "PT1H",
-            "aggregate": "true",
+            "frequency": "PT1H",
+            "aggregation_method": "end-period",
         },
     )
 
@@ -667,8 +669,8 @@ def test_total_capital_buckets_locf_carry_forward_and_leading_gap(client: TestCl
         params={
             "from_timestamp": "2025-12-31T23:00:00Z",
             "to_timestamp": "2026-01-01T03:30:00Z",
-            "resolution": "PT1H",
-            "aggregate": "true",
+            "frequency": "PT1H",
+            "aggregation_method": "end-period",
         },
     )
 
@@ -703,8 +705,8 @@ def test_total_capital_returns_all_null_when_prime_has_no_treasury(client: TestC
         params={
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-01-01T03:00:00Z",
-            "resolution": "PT1H",
-            "aggregate": "true",
+            "frequency": "PT1H",
+            "aggregation_method": "end-period",
         },
     )
 

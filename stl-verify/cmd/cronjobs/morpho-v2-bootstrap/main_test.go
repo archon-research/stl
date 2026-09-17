@@ -16,6 +16,9 @@ import (
 // plain unit tests; the service-wiring path is covered by the integration test
 // (main_integration_test.go).
 
+// rawArchiveBucket is a real per-chain raw bucket name, the shape the worker is handed.
+const rawArchiveBucket = "stl-sentinelstaging-ethereum-raw-89d540d0"
+
 func discardDeps() temporal.Dependencies {
 	return temporal.Dependencies{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 }
@@ -45,67 +48,92 @@ func TestSetupRunner_RequiresChainID(t *testing.T) {
 	t.Setenv("CHAIN_ID", "")
 	t.Setenv("ALCHEMY_API_KEY", "key")
 
-	_, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
 	if err == nil {
 		t.Fatal("missing CHAIN_ID should error, got nil")
 	}
 	if !strings.Contains(err.Error(), "CHAIN_ID") {
 		t.Errorf("error %q should mention CHAIN_ID", err.Error())
 	}
+	if !strings.Contains(err.Error(), "requiring chain ID") {
+		t.Errorf("error %q should identify the failed operation", err.Error())
+	}
 }
 
 func TestSetupRunner_RequiresAlchemyKey(t *testing.T) {
 	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("DEPLOY_ENV", "staging")
+	t.Setenv("S3_BUCKET", rawArchiveBucket)
 	t.Setenv("ALCHEMY_API_KEY", "")
 
-	_, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
 	if err == nil {
 		t.Fatal("missing ALCHEMY_API_KEY should error, got nil")
 	}
 	if !strings.Contains(err.Error(), "ALCHEMY_API_KEY") {
 		t.Errorf("error %q should mention ALCHEMY_API_KEY", err.Error())
 	}
+	if !strings.Contains(err.Error(), "resolving RPC URL") {
+		t.Errorf("error %q should identify the failed operation", err.Error())
+	}
 }
 
-func TestResolveRPCURL(t *testing.T) {
+func TestSetupRunner_RefusesAnUnusableArchiveConfig(t *testing.T) {
 	tests := []struct {
 		name    string
 		env     map[string]string
-		want    string
 		wantErr string
 	}{
 		{
-			name: "defaults to eth mainnet",
-			env:  map[string]string{"ALCHEMY_API_KEY": "secret"},
-			want: "https://eth-mainnet.g.alchemy.com/v2/secret",
+			name:    "no bucket at all",
+			env:     map[string]string{"S3_BUCKET": ""},
+			wantErr: "S3_BUCKET",
 		},
 		{
-			name: "honours an explicit base url",
-			env:  map[string]string{"ALCHEMY_API_KEY": "secret", "ALCHEMY_HTTP_URL": "https://base-mainnet.g.alchemy.com/v2"},
-			want: "https://base-mainnet.g.alchemy.com/v2/secret",
+			name:    "no environment to check the bucket against",
+			env:     map[string]string{"DEPLOY_ENV": ""},
+			wantErr: "DEPLOY_ENV",
 		},
 		{
-			name:    "an absent key is a hard error, never an unauthenticated URL",
-			env:     map[string]string{},
-			wantErr: "ALCHEMY_API_KEY",
+			name:    "another chain's raw bucket",
+			env:     map[string]string{"S3_BUCKET": "stl-sentinelstaging-base-raw-89d540d0"},
+			wantErr: "S3_BUCKET / CHAIN_ID mismatch",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveRPCURL(func(k string) string { return tc.env[k] })
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want one mentioning %q", err, tc.wantErr)
-				}
-				return
+			t.Setenv("CHAIN_ID", "1")
+			t.Setenv("DEPLOY_ENV", "staging")
+			t.Setenv("ALCHEMY_API_KEY", "key")
+			t.Setenv("S3_BUCKET", rawArchiveBucket)
+			for name, value := range tc.env {
+				t.Setenv(name, value)
 			}
-			if err != nil {
-				t.Fatalf("resolveRPCURL: %v", err)
-			}
-			if got != tc.want {
-				t.Fatalf("url = %q, want %q", got, tc.want)
+
+			_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want one mentioning %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestSetupRunner_IdentifiesSweepConfigFailure(t *testing.T) {
+	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("BOOTSTRAP_BLOCK_CHUNK_SIZE", "lots")
+
+	_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	if err == nil || !strings.Contains(err.Error(), "parsing sweep config") {
+		t.Fatalf("err = %v, want sweep-config operation context", err)
+	}
+}
+
+func TestRegister_IdentifiesRunnerSetupFailure(t *testing.T) {
+	t.Setenv("CHAIN_ID", "")
+
+	err := (&bootstrapWorker{}).register(context.Background(), discardDeps(), nil)
+	if err == nil || !strings.Contains(err.Error(), "setting up bootstrap runner") {
+		t.Fatalf("err = %v, want runner-setup operation context", err)
 	}
 }
 

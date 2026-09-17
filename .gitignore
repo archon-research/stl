@@ -17,6 +17,8 @@ stl-verify/dist/
 # Deliberately NOT listed: `internal` and `stress-test` — those names are also tracked
 # directories at stl-verify/, and an ignore on the bare name would hide new files
 # inside them. Build those two with -o dist/ (the Makefile targets already do).
+/stl-verify/allocation-underlying-value-backfill
+/allocation-underlying-value-backfill
 /stl-verify/aave-like-user-snapshot-indexer
 /aave-like-user-snapshot-indexer
 /stl-verify/anchorage-indexer
@@ -106,15 +108,21 @@ __pycache__/
 htmlcov/
 
 # Go
-.gopath/
+.gopath
 
 # Skillfile (github.com/eljulians/skillfile)
 # Skill sources live in skills/ (local) or are pinned by SHA in Skillfile.lock
 # (remote). Every tool's deploy target and the downloaded CLI binary are
 # regenerated on demand by `make skills-install`, so none of them are committed.
+# `.skillfile/` is the CLI's per-developer working state: the fetch cache, the
+# `skillfile pin` patches, and conflict markers from `skillfile resolve`.
 .claude/skills/
 .codex/skills/
 .github/skills/
-.skillfile/cache/
-.skillfile/conflict
+.skillfile/
 bin/skillfile
+
+# Transient control files written by scripts/deploy/check-build-reproducible.sh.
+# Ignored so an interrupted run cannot leave one to be committed by accident.
+stl-verify/**/zz_reproducibility_control.go
+stl-verify/**/zz_reproducibility_control.py

@@ -44,8 +44,9 @@ export type PrimeDebtEnvelope = components['schemas']['PrimeDebtEnvelope'];
 
 export type PrimeDebtBucket = components['schemas']['PrimeDebtBucketResponse'];
 
-export type TimeSeriesResolution =
-  components['schemas']['TimeSeriesResolution'];
+export type TimeSeriesFrequency = components['schemas']['TimeSeriesFrequency'];
+
+export type AggregationMethod = components['schemas']['AggregationMethod'];
 
 export type TotalCapitalEnvelope =
   components['schemas']['TotalCapitalEnvelope'];

@@ -4,27 +4,97 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 )
 
 // SlogRecorder is a slog.Handler that captures records so tests can assert
-// on emitted logs. Tests using it run their logging sequentially, so it
-// needs no locking.
-type SlogRecorder struct{ Records []slog.Record }
+// on emitted logs.
+type SlogRecorder struct {
+	mu      sync.Mutex
+	Records []slog.Record
+}
 
 func (h *SlogRecorder) Enabled(context.Context, slog.Level) bool { return true }
 func (h *SlogRecorder) Handle(_ context.Context, r slog.Record) error {
-	h.Records = append(h.Records, r)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.Records = append(h.Records, r.Clone())
 	return nil
 }
 func (h *SlogRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *SlogRecorder) WithGroup(string) slog.Handler      { return h }
 
+// Int64Attrs returns attr key's value from every record whose message is msg,
+// in emission order.
+func (h *SlogRecorder) Int64Attrs(msg, key string) []int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	var values []int64
+	for _, r := range h.Records {
+		if r.Message != msg {
+			continue
+		}
+		r.Attrs(func(attr slog.Attr) bool {
+			if attr.Key == key {
+				values = append(values, attr.Value.Int64())
+			}
+			return true
+		})
+	}
+	return values
+}
+
 // CountWarn returns how many captured warn-level records contain substr in
 // their message.
 func (h *SlogRecorder) CountWarn(substr string) int {
+	return h.count(slog.LevelWarn, substr)
+}
+
+// CountInfo returns how many captured info-level records contain substr in
+// their message.
+func (h *SlogRecorder) CountInfo(substr string) int {
+	return h.count(slog.LevelInfo, substr)
+}
+
+func (h *SlogRecorder) MessagesAt(level slog.Level) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var messages []string
+	for _, r := range h.Records {
+		if r.Level == level {
+			messages = append(messages, r.Message)
+		}
+	}
+	return messages
+}
+
+// ContainsAttr reports whether any captured record carries an attribute whose
+// formatted value contains substr.
+func (h *SlogRecorder) ContainsAttr(substr string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.Records {
+		found := false
+		r.Attrs(func(a slog.Attr) bool {
+			if strings.Contains(a.Value.String(), substr) {
+				found = true
+			}
+			return !found
+		})
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *SlogRecorder) count(level slog.Level, substr string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	n := 0
 	for _, r := range h.Records {
-		if r.Level == slog.LevelWarn && strings.Contains(r.Message, substr) {
+		if r.Level == level && strings.Contains(r.Message, substr) {
 			n++
 		}
 	}

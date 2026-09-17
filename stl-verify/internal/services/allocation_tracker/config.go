@@ -36,11 +36,14 @@ type Config struct {
 	// is the signal the VectorAllocationTracker{Stalled,ErrorRatioHigh,BlockLatencyHigh}
 	// alerts key on. Optional; nil disables it.
 	Metrics outbound.BackupMetricsRecorder
+
+	// Telemetry records the share re-point counter. Optional; nil records nothing (unit tests).
+	Telemetry *Telemetry
 }
 
 func ConfigDefaults() Config {
 	return Config{
-		MaxMessages:       10,
+		MaxMessages:       1,
 		PollInterval:      100 * time.Millisecond,
 		SweepEveryNBlocks: 75,
 		Logger:            slog.Default(),

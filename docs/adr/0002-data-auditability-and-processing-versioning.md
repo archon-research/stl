@@ -1,13 +1,15 @@
 # ADR-0002: Data Auditability and Processing Versioning
 
-**Status**: Accepted
-**Proposed**: @simonbojeoutzen
-**Date**: 2026-04-08
-**Deciders**: @vector, @infrastructure
+- **Status**: Superseded by [ADR-0006](0006-data-reproducibility-and-append-only-guarantees.md)
+- **Proposed**: @simonbojeoutzen
+- **Date**: 2026-04-08
+- **Deciders**: @vector, @infrastructure
 
-> **Note (2026-08-17):** [ADR-0006](0006-data-reproducibility-and-append-only-guarantees.md)
-> proposes to supersede the version-assignment mechanism in §3 and to extend this ADR to
-> third-party reproducibility. Until ADR-0006 is accepted, this document remains authoritative.
+> **Superseded (2026-08-17):** [ADR-0006](0006-data-reproducibility-and-append-only-guarantees.md)
+> is **Accepted** and is the document to read and to cite. It replaces the version-assignment
+> mechanism in §3 and carries §1, §2 and §4 forward extended to third-party reproducibility.
+> Nothing here is authoritative any more, and nothing new should reference this ADR — it is kept
+> for the history of the decision.
 
 ## Context
 

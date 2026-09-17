@@ -124,8 +124,10 @@ def test_breakdown_endpoint_empty_when_pool_unindexed(client: TestClient) -> Non
 
 
 def test_rrc_returns_404_no_applicable_model(client: TestClient, maple_seed: None) -> None:
-    # Maple is excluded from the gap-sweep RRC set and has no SURAF mapping, so
-    # no model applies. The endpoint must degrade to 404, never 500.
+    # This fixture empties the CORE mapping, so no model applies here: Maple is
+    # excluded from gap_sweep and has no SURAF rating. The endpoint must degrade
+    # to 404, never 500. The packaged mapping DOES serve syrup through CORE —
+    # that shape is pinned in test_rrc_core_model_degradation.py.
     response = client.get(
         "/v1/risk/rrc",
         params={"chain_id": 1, "token_address": f"0x{SYRUP_USDC_HEX}", "prime_id": _PRIME_ID},

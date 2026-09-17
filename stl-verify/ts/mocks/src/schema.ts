@@ -12,6 +12,7 @@ export type { operations, paths };
 
 type Schemas = components['schemas'];
 
+export type ApiError = Schemas['ApiErrorResponse'];
 export type Allocation = Schemas['AllocationResponse'];
 export type AllocationActivity = Schemas['AllocationActivityResponse'];
 export type AllocationActivityBucket =
@@ -32,8 +33,10 @@ export type ProtocolEventBucket = Schemas['ProtocolEventBucketResponse'];
 export type RiskBreakdown = Schemas['RiskBreakdownResponse'];
 export type RiskBreakdownItem = Schemas['RiskBreakdownItemResponse'];
 export type RrcEnvelope = Schemas['RrcEnvelope'];
-export type TimeSeriesResolution = Schemas['TimeSeriesResolution'];
+export type AggregationMethod = Schemas['AggregationMethod'];
+export type TimeSeriesFrequency = Schemas['TimeSeriesFrequency'];
 export type TimeSeriesWindow = Schemas['TimeSeriesWindow'];
+export type ResampledTimeSeriesWindow = Schemas['ResampledTimeSeriesWindow'];
 export type Token = Schemas['TokenResponse'];
 export type TokenPrice = Schemas['TokenPriceResponse'];
 export type TotalCapitalBucket = Schemas['TotalCapitalBucketResponse'];

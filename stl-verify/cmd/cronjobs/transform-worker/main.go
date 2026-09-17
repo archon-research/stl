@@ -18,6 +18,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/transform_worker"
 )
 
@@ -51,7 +52,6 @@ func main() {
 	}
 }
 
-// Build metadata, populated from VCS in init() (GitBranch is set at link time).
 var (
 	GitCommit string
 	GitBranch string
@@ -59,10 +59,14 @@ var (
 )
 
 func init() {
-	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
+	buildinfo.Populate(&GitCommit, &GitBranch, &BuildTime)
 }
 
-func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
+func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
+	if _, _, err := writerrun.Open(ctx, deps.Pool); err != nil {
+		return nil, err
+	}
+
 	telemetry, err := transform_worker.NewTelemetry()
 	if err != nil {
 		return nil, fmt.Errorf("creating transform telemetry: %w", err)

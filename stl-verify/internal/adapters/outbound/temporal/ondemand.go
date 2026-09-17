@@ -3,8 +3,11 @@ package temporal
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
@@ -22,7 +25,14 @@ type WorkerConfig struct {
 	// Name is the task queue and the OTel service name.
 	Name string
 
+	// OpenDatabase opens the app database pool. Required unless NoDatabase says
+	// this job wants none, so a job that loses its opener to a wiring mistake
+	// fails at startup rather than running pool-less.
 	OpenDatabase func(ctx context.Context) (*pgxpool.Pool, error)
+
+	// NoDatabase declares that this job touches no Postgres: it gets a nil
+	// Dependencies.Pool and its deployment needs no database credential.
+	NoDatabase bool
 
 	// Register attaches the job's workflows and activities. It runs after the
 	// database pool is open so activity structs can capture their dependencies.
@@ -47,11 +57,14 @@ func (c WorkerConfig) validate() error {
 	if c.Name == "" {
 		return fmt.Errorf("WorkerConfig.Name is required")
 	}
-	if c.OpenDatabase == nil {
-		return fmt.Errorf("WorkerConfig.OpenDatabase is required")
-	}
 	if c.Register == nil {
 		return fmt.Errorf("WorkerConfig.Register is required")
+	}
+	if c.OpenDatabase == nil && !c.NoDatabase {
+		return fmt.Errorf("WorkerConfig.OpenDatabase is required (or set NoDatabase)")
+	}
+	if c.OpenDatabase != nil && c.NoDatabase {
+		return fmt.Errorf("WorkerConfig.OpenDatabase and NoDatabase are mutually exclusive")
 	}
 	return nil
 }
@@ -81,18 +94,43 @@ type RunnerJob struct {
 	// Progress, when set, is the heartbeat-details store the runner records
 	// through — the SAME instance the runner holds, because the liveness
 	// heartbeat re-sends what it holds rather than erasing it with a bare ping.
+	//
+	// One instance per job for the process, holding one record per activity
+	// execution, so concurrent executions of a job — Temporal's duplicate guard is
+	// per Workflow ID — keep their own resume points and liveness beats.
 	Progress ProgressHeartbeater
+
+	// ActivityName is the name this job's activity registers under, and so the
+	// ActivityType its workflow histories carry.
+	//
+	// Empty means cronjobActivityMethod, which is what the SDK derives from the
+	// activity's method name and what every job deployed before this field existed
+	// already records. That name must not move under a job: a run in flight across
+	// a rollout replays its history, and an ActivityType that disagrees with the
+	// recorded one is a non-determinism error that wedges the run until
+	// ScheduleToClose.
+	//
+	// So a worker's FIRST runner job leaves this empty and every later one sets it.
+	// Two jobs sharing a name is not silent — the SDK panics at registration.
+	ActivityName string
 }
 
 // RegisterRunner registers job as a workflow that accepts no input, plus the
-// shared activity that executes its Runner. Call it from WorkerConfig.Register.
+// activity that executes its Runner. Call it from WorkerConfig.Register.
 //
 // The activity gets no metrics recorder on purpose: RunWorker's interceptor
 // already records one cronjob.runs.total per activity execution, so a second
-// recorder here would double every count.
+// recorder here would double every count. That interceptor is name-agnostic, so
+// every job on a worker lands on one cronjob.runs.total per task queue, which an
+// alert reads as the worker's outcome rather than one job's.
 func RegisterRunner(r worker.Registry, job RunnerJob) error {
 	if job.WorkflowType == "" {
 		return fmt.Errorf("RunnerJob.WorkflowType is required")
+	}
+	// The SDK derives an activity name by appending the method to the prefix, so a
+	// name that does not end in it could never be registered.
+	if job.ActivityName != "" && !strings.HasSuffix(job.ActivityName, cronjobActivityMethod) {
+		return fmt.Errorf("RunnerJob.ActivityName %q must end in %q, the activity's method name", job.ActivityName, cronjobActivityMethod)
 	}
 	// A job that bothers to record resumable progress runs long, and with no
 	// heartbeat timeout a dead worker goes undetected until StartToClose.
@@ -103,15 +141,37 @@ func RegisterRunner(r worker.Registry, job RunnerJob) error {
 	if err != nil {
 		return fmt.Errorf("creating the runner activity: %w", err)
 	}
-	r.RegisterWorkflowWithOptions(runnerWorkflow(job.Timeouts), workflow.RegisterOptions{Name: job.WorkflowType})
-	r.RegisterActivity(activities)
+	r.RegisterWorkflowWithOptions(runnerWorkflow(job.Timeouts, job.activityName()), workflow.RegisterOptions{Name: job.WorkflowType})
+	r.RegisterActivityWithOptions(activities, activity.RegisterOptions{Name: job.activityPrefix()})
 	return nil
 }
 
+// RunnerActivityName is the ActivityName a later job on a worker should take:
+// the workflow type carrying the suffix RegisterRunner requires. Exported so a
+// call site does not hand-spell "Execute" and learn of a typo at registration.
+func RunnerActivityName(workflowType string) string {
+	return workflowType + cronjobActivityMethod
+}
+
+func (j RunnerJob) activityName() string {
+	if j.ActivityName == "" {
+		return cronjobActivityMethod
+	}
+	return j.ActivityName
+}
+
+// activityPrefix is what RegisterActivityWithOptions prepends to the struct's
+// method name, so it is the desired name minus that method name.
+func (j RunnerJob) activityPrefix() string {
+	return strings.TrimSuffix(j.activityName(), cronjobActivityMethod)
+}
+
 // runnerWorkflow is cronjobWorkflow with its bounds closed over instead of
-// arriving as an argument, so a run starts with no input payload at all.
-func runnerWorkflow(timeouts ActivityTimeouts) func(workflow.Context) error {
-	return func(ctx workflow.Context) error { return cronjobWorkflow(ctx, timeouts) }
+// arriving as an argument, so a run starts with no input payload at all, and with
+// its activity named rather than referenced, since a prefixed registration does
+// not answer to the bare method name a method reference resolves to.
+func runnerWorkflow(timeouts ActivityTimeouts, activityName string) func(workflow.Context) error {
+	return func(ctx workflow.Context) error { return runActivityWorkflow(ctx, timeouts, activityName) }
 }
 
 // RunWorker runs an on-demand Temporal worker until ctx is cancelled. It shares
@@ -126,6 +186,12 @@ func RunWorker(ctx context.Context, meta BuildMeta, cfg WorkerConfig) error {
 
 	boot, err := newBootstrap(ctx, meta, cfg.Name, cfg.OpenDatabase)
 	if err != nil {
+		// A pod told to stop before the worker was built has done nothing wrong:
+		// returning the error here would exit 1 on an ordinary rollout.
+		if ctx.Err() != nil {
+			slog.Info("shutdown requested during startup", "taskQueue", cfg.Name)
+			return nil
+		}
 		return err
 	}
 	defer boot.close()

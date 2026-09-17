@@ -46,7 +46,12 @@ def _override_lookup(info: ReceiptTokenInfo):
 
 
 def _make_service() -> AsyncMock:
-    return AsyncMock(spec=CryptoLendingRiskService)
+    service = AsyncMock(spec=CryptoLendingRiskService)
+    # Nothing to gate: the no-prime path here is a protocol whose legacy share
+    # is genuinely pool-wide. tests/unit/auth/test_risk_authz.py drives the
+    # other case against a real service.
+    service.resolve_pool_prime.return_value = None
+    return service
 
 
 def test_bad_debt_returns_404_when_service_returns_none() -> None:
@@ -60,7 +65,7 @@ def test_bad_debt_returns_404_when_service_returns_none() -> None:
 
         assert response.status_code == 404
         assert response.json()["detail"] == "receipt token not found"
-        service.get_bad_debt_legacy.assert_awaited_once_with(_RECEIPT_TOKEN_ID, Decimal("0.1"))
+        service.get_bad_debt_legacy.assert_awaited_once_with(_RECEIPT_TOKEN_ID, Decimal("0.1"), None)
     finally:
         app.dependency_overrides.pop(get_crypto_lending_risk_service, None)
 
@@ -123,8 +128,8 @@ def test_breakdown_returns_404_when_service_returns_none() -> None:
 
         assert response.status_code == 404
         assert response.json()["detail"] == "receipt token not found"
-        # No prime_id query -> pool-level breakdown.
-        service.get_risk_breakdown.assert_awaited_once_with(_RECEIPT_TOKEN_ID, None)
+        # No prime_id query -> the no-prime path, with nothing to gate on.
+        service.get_risk_breakdown.assert_awaited_once_with(_RECEIPT_TOKEN_ID, None, None)
     finally:
         app.dependency_overrides.pop(get_crypto_lending_risk_service, None)
 
@@ -140,7 +145,7 @@ def test_breakdown_forwards_prime_id_when_supplied() -> None:
         response = client.get(f"/v1/risk/{_RECEIPT_TOKEN_ID}/breakdown?prime_id={prime}")
 
         assert response.status_code == 404
-        awaited_id, awaited_prime = service.get_risk_breakdown.await_args.args
+        awaited_id, awaited_prime, _ = service.get_risk_breakdown.await_args.args
         assert awaited_id == _RECEIPT_TOKEN_ID
         assert str(awaited_prime) == prime
     finally:
@@ -182,7 +187,7 @@ def test_breakdown_by_address_forwards_prime_id() -> None:
         response = client.get(f"/v1/risk/1/{_RECEIPT_TOKEN_ADDRESS}/breakdown?prime_id={prime}")
 
         assert response.status_code == 404
-        awaited_id, awaited_prime = service.get_risk_breakdown.await_args.args
+        awaited_id, awaited_prime, _ = service.get_risk_breakdown.await_args.args
         assert awaited_id == _RECEIPT_TOKEN_ID
         assert str(awaited_prime) == prime
     finally:

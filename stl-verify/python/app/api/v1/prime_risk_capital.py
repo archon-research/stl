@@ -8,8 +8,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
 from app.api._validators import ProxyAddressPathParam
-from app.api.deps import get_engine, get_model_registry, get_reference_risk_capital_service_factory
+from app.api.deps import (
+    get_engine,
+    get_model_registry,
+    get_reference_as_of,
+    get_reference_risk_capital_service_factory,
+    require_prime_view,
+)
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
@@ -17,6 +24,7 @@ from app.api.provenance import (
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_risk_capital import AllocationRiskCapital, PrimeRiskCapital, UnpricedReason
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
+from app.domain.entities.risk import ModelName
 from app.domain.position_identity import PositionFacts, position_identities
 from app.domain.prime_registry import ProxyKind, alm_proxies_for_prime, classify_proxy
 from app.domain.provenance import Provenance
@@ -105,7 +113,7 @@ class AllocationRiskCapitalResponse(BaseModel):
             "scale matches self mode."
         ),
     )
-    model: str | None = Field(
+    model: ModelName | None = Field(
         default=None,
         description=(
             "Model that produced the figure. `null` when unpriced, and always `null` for a Sky-reported "
@@ -222,7 +230,7 @@ class PrimeRiskCapitalResponse(BaseModel):
             "cycle has ever reported on."
         ),
     )
-    model: str | None = Field(
+    model: ModelName | None = Field(
         description=(
             "The default RRC model this view prefers (`core_model`). `null` under `source=reference`, "
             "which runs no model; under `source=both` it is STL's preference, since the unprefixed "
@@ -407,8 +415,9 @@ class PrimeRiskCapitalResponse(BaseModel):
 async def _get_service(
     engine: AsyncEngine = Depends(get_engine),
     registry: ModelRegistry = Depends(get_model_registry),
+    reference_as_of: ReferenceEffectiveAtProvider = Depends(get_reference_as_of),
 ) -> PrimeRiskCapitalService:
-    return PrimeRiskCapitalService(AllocationRepository(engine), registry)
+    return PrimeRiskCapitalService(AllocationRepository(engine, reference_as_of), registry)
 
 
 @router.get(
@@ -449,6 +458,7 @@ async def get_prime_risk_capital(
     requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: PrimeRiskCapitalService = Depends(_get_service),
     reference_services: Callable[[], ReferenceRiskCapitalService] = Depends(get_reference_risk_capital_service_factory),
+    _authz: None = Depends(require_prime_view),
 ) -> PrimeRiskCapitalResponse:
     # A SubProxy holds the prime's treasury, not its allocations, so it is not a
     # member of the prime's ALM fan-out set. Answering for one folds the treasury

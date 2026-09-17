@@ -15,9 +15,9 @@ Welcome!
 >   ≠ compute-meaning. The correct pattern is for data pipelines to write
 >   to the data store, and model pipelines to ingest the data needed from
 >   that store.
-> - Every timeseries table must be a hypertable + compressed + S3-tiered,
->   in the same migration that creates it (one narrow carve-out for
->   sparse governance-event tables — see §11 rule 4).
+> - **Create tables plain.** Compression and tiering policies come with the
+>   later migration that partitions the table, once measurement says to
+>   (see §11 rule 4).
 > - **Never modify an applied migration** — write a new one.
 > - PR title: `TICKET-1234: <description>`. GitHub squash-merges; don't
 >   squash locally.
@@ -118,13 +118,16 @@ with `make dev-wipe`.
 Need a second cluster next to someone else's (two agents, one machine)?
 
 ```bash
-KIND_CLUSTER=mine KIND_PORT_OFFSET=100 make dev-up
+make dev-up-new                                  # free offset, name derived from it
+KIND_CLUSTER=mine KIND_PORT_OFFSET=100 make dev-up   # or name and offset yourself
 ```
 
 It gets its own cluster name, host ports (every mapped port +100), image
 tags (`stl-*:local-mine`) and data dir (`~/.mine`), so it cannot disturb
-the default `vector` cluster. Every `run-*`, `dev-*` and `kind-*` target
-honours the same two variables — export them in the shell you work in.
+the default `vector` cluster. `dev-up-new` prints the host endpoints when
+it is done; afterwards only `export KIND_CLUSTER=<name>` is needed, since
+every `run-*`, `dev-*` and `kind-*` target derives the offset from the
+cluster's own control plane.
 
 > **⚠️ You need an Alchemy key for anything to actually work.** By
 > default `make dev-up` points the watcher at a **mock blockchain
@@ -227,7 +230,7 @@ Pick the language **before** you start, and when in doubt, ask first.
   Python is a fully supported second option.
 - **Anything outside Go or Python needs prior discussion.** Open an
   issue or start a thread with
-  `@archon-research/vector-engineers` **before** writing code. PRs
+  `@archon-research/stl-engineers` **before** writing code. PRs
   introducing a new runtime (Rust, TypeScript, Java, …) without
   a prior design conversation **may be rejected** regardless of code
   quality — every new language adds build infrastructure, observability
@@ -371,7 +374,10 @@ func run(ctx context.Context, args []string) error {
     ...
     consumer, err := sqsadapter.NewConsumer(awsCfg, sqsadapter.Config{...}, logger)
     pool, err   := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
-    repo, err   := postgres.NewOnchainPriceRepository(pool, logger, buildID, 0)
+    buildReg, err := buildregistry.New(ctx, pool)                       // artefact identity; hard error if incomplete
+    referenceEffectiveAt, err := env.ReferenceEffectiveAt(time.Now().UTC())
+    runID, err  := buildReg.OpenRun(ctx, referenceEffectiveAt, nil)     // one writer_run per process start
+    repo, err   := postgres.NewOnchainPriceRepository(pool, logger, buildReg.BuildID(), runID, 0)
     service, err := oracle_price_worker.NewService(shared.SQSConsumerConfig{...}, consumer, repo, ...)
 
     return lifecycle.Run(ctx, logger, service) // runs the consume loop; handles SIGINT/SIGTERM graceful stop
@@ -382,7 +388,12 @@ func run(ctx context.Context, args []string) error {
 
 1. **Create `cmd/workers/<my-worker>/main.go`.** Copy an existing worker
    as a template. Keep `main()` small — it parses flags, wires adapters,
-   and calls `lifecycle.Run`.
+   and calls `lifecycle.Run`. Every binary that connects to Postgres
+   registers its artefact and opens a writer run at startup
+   (`buildregistry.New` + `OpenRun`, ADR-0006 §2) and passes the `RunID`
+   into its repositories next to the `BuildID`; startup reads of an
+   append-on-change reference table go inside `OpenRun`'s load callback
+   (`internal/pkg/oraclewire` is the reference).
 2. **Create a service in `internal/services/<my_worker>/`.** The service
    owns the business logic, depends only on ports, and exposes a public
    API tested in isolation (mock the repo + consumer + any contract
@@ -399,15 +410,43 @@ func run(ctx context.Context, args []string) error {
    `k8s/image-roster.txt`, so add one roster line instead (kind, image name,
    the `image:` alias your manifests use; ORB-362). For local kind,
    `k8s/overlays/dev/workers/kustomization.yaml` still takes both the base
-   dir under `resources:` and a `localhost/stl-<name>:local` `images:` entry.
-6. **Add build/deploy targets to the Makefile** (`docker-build-<name>`,
+   dir under `resources:` and a `localhost/stl-<name>:local` `images:` entry,
+   plus a patch setting `AWS_SQS_QUEUE_URL` to the LocalStack queue. The dev
+   runtime Component replaces the base's `envFrom` with the shared
+   `stl-config` + `stl-secrets`, so anything your base reads from a
+   per-service ConfigMap (e.g. the DEX indexers' `DEX`) must be set
+   explicitly in that patch.
+6. **Create the local SQS queue** in the LocalStack init script,
+   `stl-verify/localstack-init/init-aws.sh` — the single source of truth —
+   via `create_consumer_queue <chain> <name>`, which creates the FIFO
+   queue + DLQ and subscribes it to the chain's blocks topic with raw
+   delivery. `make kind-infra` generates the `localstack-init` ConfigMap
+   from that file and stamps a hash of it into the LocalStack pod
+   template, so the pod restarts and your queue exists after the next
+   `make dev-up`. Nothing is inlined in `k8s/dev-infra/localstack.yaml`.
+7. **Add build/deploy targets to the Makefile** (`docker-build-<name>`,
    `docker-release-<name>`, and register the worker in the `run-*` /
-   `kind-load-workers` / `kind-deploy-workers` groupings). Grep for an
+   `kind-load-workers` / `kind-deploy-workers` groupings, plus the
+   rollout lists in `_dev-up-alchemy-workers` and `dev-up`). Grep for an
    existing worker name in the Makefile to see every site you need to
    touch.
-7. **Coordinate with infra.** Open a PR in the Infrastructure repo for
+
+   **Include `docker-release-all`.** It is an explicit chain of
+   `_docker-release-<name>-internal` calls, not a wildcard — only cronjobs
+   are picked up automatically, via its `$(CRONJOBS)` loop. Forgetting it
+   is caught loudly rather than silently: that target is what the deploy
+   builds with, so the image is never pushed and the overlay's pinned tag
+   reaches the cluster as ImagePullBackOff (ORB-313).
+8. **Coordinate with infra.** Open a PR in the Infrastructure repo for
    the SQS queue, SNS subscription, IAM policy, and any secrets — your
    code PR depends on those resources existing.
+
+Once steps 5–7 are in place, `make dev-up` runs the worker in kind (when
+`ALCHEMY_API_KEY` is set in `.env.secrets`), consuming the in-cluster
+watcher's blocks through LocalStack SNS→SQS — no host-run binary, no
+ad-hoc queue script. The DEX indexers (`curve-indexer`,
+`uniswap-v3-indexer`, `uniswap-v4-indexer`, all one `stl-dex-indexer`
+image) are wired this way.
 
 > **Tip:** It's welcome (often preferred) to split the k8s-manifest and
 > Infrastructure-repo changes into a follow-up PR. The code PR stays
@@ -487,8 +526,9 @@ Run it locally with `uv run python -m cli.workers.<my_worker>.main` (from `stl-v
 - Long-poll SQS receive; process one message at a time in FIFO order;
   delete on success; let it redrive on failure.
 - Handle `SIGINT` / `SIGTERM` — finish the in-flight message, close
-  the DB pool, exit within ~25s (the Python equivalent of Go's
-  `lifecycle.Run`).
+  the DB pool, exit within Go's `lifecycle.ShutdownTimeout` (40s) plus
+  `lifecycle.ShutdownTailBudget` (45s), the Python equivalent of
+  `lifecycle.Run`.
 - Read block data from Redis using the exact cache-key convention
   above; do not refetch from Alchemy unless cache-miss rate indicates
   a real bug.
@@ -846,34 +886,19 @@ ArgoCD PreSync hook in staging/prod.
 3. **Never modify an applied migration.** The migrator checksums every
    file; a changed checksum fails the deploy. To fix a mistake, write a
    new migration.
-4. **Every timeseries table is a hypertable, tiered to S3, and
-   compressed.** One narrow exception, below. All three are set up in the
-   same migration that creates the table — don't ship a naked table and
-   "add the policies later". Specifically:
-   - **Hypertable** via `SELECT create_hypertable(...)` (or the
-     distributed-hypertable equivalent). Pick a chunk interval that
-     matches the ingest rate — too small and planning cost dominates,
-     too large and compression and S3 tiering can't evict anything.
-   - **Compression policy** via `ALTER TABLE ... SET (timescaledb.compress, ...)`
-     plus `SELECT add_compression_policy(...)`. Choose
-     `segmentby`/`orderby` columns that reflect how the table is
-     queried — getting this wrong costs 10–100× on reads.
-   - **Tiered-storage (S3) policy** via `SELECT add_tiering_policy(...)`.
-     This is what keeps the hot Postgres volume small; skipping it is
-     how we run out of disk in prod.
-   Also: primitives must be compatible with **distributed** hypertables.
-   When in doubt, read `docs/data_entities.md` and ADR-0002, or copy
-   the most recent timeseries migration as a template.
+4. **Create tables plain; partition later, if at all.** A chunk interval,
+   `segmentby`/`orderby` and a tiering horizon are bets on ingest rate and
+   query shape — let measurement settle them. Convert when the numbers say
+   to, in a **new** migration: that is where the compression and tiering
+   policies land, and it re-checks that the hot reads prune chunks. A few
+   tables stay plain permanently — see
+   `stl-verify/db/migrations/AGENTS.md`.
 
-   **The exception:** sparse governance/config-event tables — those
-   writing on the order of rows per day or less (e.g.
-   `morpho_adapter_membership`, `morpho_vault_cap`, `morpho_vault_fee`)
-   — may be plain tables at maintainer discretion, because chunking,
-   compression and tiering buy nothing at that rate. State the decision
-   and its rationale in the table's `COMMENT`; the append-only +
-   `processing_version`/`build_id` + advisory-locked trigger requirements
-   still apply in full. If you are not sure your table qualifies, it
-   doesn't — make it a hypertable.
+   A plain table owes a **row-growth alert** plus a runbook section
+   carrying its conversion path in the same PR (copy
+   `VectorUniswapV4AppendOnChangeGrowthHigh`) — that alert is what notices
+   it growing. Say in the `COMMENT` that it is plain and what would change
+   that.
 5. **Append-only, and enforced by the database.** No `UPDATE`, no `DELETE`, no
    `INSERT … ON CONFLICT … DO UPDATE` (a no-op `SET` still needs UPDATE privilege
    and still fails) on a converted table. Identity rows are written once;
@@ -962,7 +987,7 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 1. **Branch off `main`.** Name the branch after the Linear ticket if
    there is one (`VEC-123-short-slug`).
 2. **Open a PR early** — drafts are fine. The `CODEOWNERS` file
-   auto-requests review from `@archon-research/vector-engineers`.
+   auto-requests review from `@archon-research/stl-engineers`.
 3. **Before you push**, run:
    ```bash
    cd stl-verify
@@ -1045,7 +1070,7 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 
 ## 16. Getting help
 
-- **Code questions / design review:** `@archon-research/vector-engineers`
+- **Code questions / design review:** `@archon-research/stl-engineers`
   on GitHub, or [`#proj-verify-beacon`](https://sentinel-0rx1449.slack.com/archives/C0AN04V9NGZ)
   on Laniakea Slack (review is required anyway — ask early).
 - **Protocol specs:** see `docs/` — `aave_v3_spec.md`, `morpho_spec.md`,

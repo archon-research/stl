@@ -46,11 +46,21 @@ func NewMetrics(meterName, chain string) (*Metrics, error) {
 		return nil, fmt.Errorf("failed to create blocks_processed_total counter: %w", err)
 	}
 
-	return &Metrics{
+	m := &Metrics{
 		processingLatency: latency,
 		blocksProcessed:   blocks,
 		chainAttr:         attribute.String("chain", chain),
-	}, nil
+	}
+	// VectorAllocationTrackerStalled and VectorBackupWorkerStalled read
+	// blocks_processed_total as rate(...)==0 with no zero-fill and no kube
+	// companion, so a worker that wedges before its first block created no
+	// series and neither page could fire — the case those rules exist for.
+	// Registered rather than seeded inline because NewMetrics can run before
+	// the exporting provider is installed, and a seed written then is dropped.
+	OnMeterProviderReady("telemetry.NewMetrics", func() {
+		SeedStatusCounter(context.Background(), m.blocksProcessed, m.chainAttr)
+	})
+	return m, nil
 }
 
 // RecordProcessingLatency records the duration of message processing.

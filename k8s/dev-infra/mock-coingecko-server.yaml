@@ -1,0 +1,50 @@
+# Local stand-in for the CoinGecko Pro API (VEC-748): lets offchain-price-indexer
+# and offchain-price-backfill run in dev with no real key, the way
+# mock-blockchain-server stands in for the chain. Real API stays the opt-in:
+# set COINGECKO_API_KEY in .env.secrets, then `make kind-secrets kind-use-coingecko`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-coingecko-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-coingecko-server
+  template:
+    metadata:
+      labels:
+        app: mock-coingecko-server
+    spec:
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mock-coingecko-server
+          image: localhost/stl-mock-coingecko-server:local
+          imagePullPolicy: Never
+          args:
+            - --addr=:8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-coingecko-server
+spec:
+  selector:
+    app: mock-coingecko-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

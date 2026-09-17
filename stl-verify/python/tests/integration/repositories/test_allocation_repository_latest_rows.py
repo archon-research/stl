@@ -36,6 +36,7 @@ from app.adapters.postgres.allocation_position_repository import (
     AllocationRepository,
 )
 from app.adapters.postgres.crypto_lending_reader import _WALLET_LOOKUP_SQL
+from app.adapters.postgres.reference_as_of import ORACLE_ASSET_AS_OF, utc_now
 from app.domain.entities.allocation import EthAddress
 from tests.integration.seed import (
     RTL_DIRECT_BALANCES,
@@ -142,7 +143,7 @@ _HISTORY_RECEIPT_TOKEN_POSITIONS_SQL = text(f"""
             AND po.protocol_id = p.protocol_id
         WHERE otp.token_id = p.underlying_token_id
           AND EXISTS (
-              SELECT 1 FROM oracle_asset oa
+              SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
               WHERE oa.oracle_id = otp.oracle_id
                 AND oa.token_id = otp.token_id
                 AND oa.enabled
@@ -187,7 +188,7 @@ LEFT JOIN LATERAL (
         AND po.protocol_id = p.protocol_id
     WHERE otp.token_id = p.underlying_token_id
       AND EXISTS (
-          SELECT 1 FROM oracle_asset oa
+          SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
           WHERE oa.oracle_id = otp.oracle_id
             AND oa.token_id = otp.token_id
             AND oa.enabled
@@ -244,7 +245,7 @@ _HISTORY_DIRECT_ASSET_HOLDINGS_SQL = text(f"""
         FROM onchain_token_price otp
         WHERE otp.token_id = lp.token_id
           AND EXISTS (
-              SELECT 1 FROM oracle_asset oa
+              SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
               WHERE oa.oracle_id = otp.oracle_id
                 AND oa.token_id = otp.token_id
                 AND oa.enabled
@@ -258,7 +259,7 @@ _HISTORY_DIRECT_ASSET_HOLDINGS_SQL = text(f"""
         FROM onchain_token_price otp
         WHERE otp.token_id = lp.underlying_token_id
           AND EXISTS (
-              SELECT 1 FROM oracle_asset oa
+              SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
               WHERE oa.oracle_id = otp.oracle_id
                 AND oa.token_id = otp.token_id
                 AND oa.enabled
@@ -293,7 +294,7 @@ latest_price AS (
     JOIN receipt_token rt ON rt.protocol_id = po.protocol_id AND rt.id = :receipt_token_id
     WHERE otp.token_id = rt.underlying_token_id
       AND EXISTS (
-          SELECT 1 FROM oracle_asset oa
+          SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
           WHERE oa.oracle_id = otp.oracle_id
             AND oa.token_id = otp.token_id
             AND oa.enabled
@@ -354,7 +355,7 @@ LIMIT 1
 """)
 
 
-_PROXY_PARAMS = {"proxy_hex": RTL_PROXY_HEX}
+_PROXY_PARAMS = {"proxy_hex": RTL_PROXY_HEX, "reference_effective_at": utc_now()}
 
 # (cache-backed query, history reference, bind parameters).
 _CACHE_QUERIES = (
@@ -408,7 +409,7 @@ async def repo(async_db_url: str):
     """Bare AllocationRepository for direct-method tests."""
     engine = create_async_engine(async_db_url)
     try:
-        yield AllocationRepository(engine)
+        yield AllocationRepository(engine, utc_now)
     finally:
         await engine.dispose()
 

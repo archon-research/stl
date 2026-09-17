@@ -1,10 +1,10 @@
 # ADR-0006: Data Reproducibility and Append-Only Guarantees
 
-**Status**: Proposed
-**Proposed**: @simonbojeoutzen
-**Date**: 2026-08-17
-**Deciders**: @vector, @infrastructure
-**Supersedes**: [ADR-0002](0002-data-auditability-and-processing-versioning.md) §3 (trigger-assigned `processing_version`); extends its §1, §2 and §4
+- **Status**: Accepted
+- **Proposed**: @simonbojeoutzen
+- **Date**: 2026-08-17
+- **Deciders**: @vector, @infrastructure
+- **Supersedes**: [ADR-0002](0002-data-auditability-and-processing-versioning.md) §3 (trigger-assigned `processing_version`); extends its §1, §2 and §4
 
 ## Context
 

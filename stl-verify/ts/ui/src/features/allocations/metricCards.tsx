@@ -1,7 +1,11 @@
-import type { ChartColor, ChartColorToken } from '@archon-research/charting';
+import type {
+  ChartColor,
+  ChartColorToken,
+} from '@archon-research/charting/core';
 import {
   ErrorState,
   InfoPopover,
+  SkeletonStack,
   StatTile,
 } from '@archon-research/design-system';
 import { Info } from 'lucide-react';
@@ -44,16 +48,22 @@ export type MetricChartSpec = {
   // Why the card has nothing to draw, for a card that cannot stand itself up
   // from a current value: without it a failed read plots as the empty state.
   errorMessage?: string | null;
-  // Ordered ascending. Each draws a dashed limit line with a labelled edge.
-  // `showInTooltip` also reports it at the cursor, in its own stroke — for a
-  // limit the series is read directly against. Off by default: a limit the
-  // reader is not comparing against only crowds the readout.
-  thresholds?: {
-    value: number;
-    label?: string;
-    showInTooltip?: boolean;
-    stroke?: ChartColor;
-  }[];
+  // The latest bucket's own pricing coverage. Null once its total prices
+  // every position it knows about, so a caption only names counts when the
+  // total is partial (VEC-760).
+  coverage?: { pricedEntityCount: number; entityCount: number } | null;
+  // Each draws a dashed limit line with a labelled edge. `showInTooltip` also
+  // reports it at the cursor, in its own stroke — for a limit the series is
+  // read directly against. Off by default: a limit the reader is not comparing
+  // against only crowds the readout.
+  thresholds?:
+    | {
+        value: number;
+        label?: string;
+        showInTooltip?: boolean;
+        stroke?: ChartColor;
+      }[]
+    | undefined;
 };
 
 // Every card the metrics band knows how to build. Not what it shows: see
@@ -77,7 +87,7 @@ export const TOP_METRIC_CARD_LABELS: Record<TopMetricCard, string> = {
   'total-risk-capital': 'Total risk capital',
   'prime-collateral': 'Prime collateral',
   encumbrance: 'Encumbrance',
-  'prime-debt': 'Prime debt exposure',
+  'prime-debt': 'Prime debt',
 };
 
 // The cards actually placed in the grid. Its length drives both the loading
@@ -294,27 +304,6 @@ export const CHART_HEIGHT = 236;
  * the label is known up front, so the page reads as itself while it loads and
  * nothing moves when the figures land.
  */
-// Not `SkeletonStack`: it fills its items with `surface.subtle`, which is this
-// card's own fill, and takes no tone — so its placeholders are invisible here
-// and neither a composed class nor a descendant override outranks the kit's own
-// layer.
-const placeholderClassName = css({
-  bg: 'border.subtle',
-  borderRadius: 'sm',
-  animation: 'pulse',
-});
-
-function Placeholder({ width, height }: { width: string; height: number }) {
-  return (
-    <div
-      className={placeholderClassName}
-      // Sizes vary per slot, so they ride the style attribute: Panda generates
-      // its classes at build time and cannot see a value passed in.
-      style={{ width, height: `${height}px` }}
-    />
-  );
-}
-
 export function MetricCardSkeleton({ label }: { label: string }) {
   return (
     <MetricCard
@@ -322,11 +311,13 @@ export function MetricCardSkeleton({ label }: { label: string }) {
       // Widths are a typical figure and subtitle rather than the full column: a
       // placeholder the width of the card reads as a filled card, not a loading
       // one.
-      value={<Placeholder width="8rem" height={28} />}
+      value={
+        <SkeletonStack count={1} itemHeight={28} style={{ width: '8rem' }} />
+      }
       detail={
         <div className={metricDetailClassName}>
-          <Placeholder width="12rem" height={16} />
-          <Placeholder width="100%" height={CHART_HEIGHT} />
+          <SkeletonStack count={1} itemHeight={16} style={{ width: '12rem' }} />
+          <SkeletonStack count={1} itemHeight={CHART_HEIGHT} />
         </div>
       }
     />
@@ -383,7 +374,7 @@ export function MetricCardError({
             size="inline"
             title={title}
             description={description}
-            errorMessage={errorMessage ?? undefined}
+            {...(errorMessage !== null && { errorMessage })}
           />
         </div>
       }
@@ -396,7 +387,7 @@ export function MetricCardError({
 const metricsCardClassName = css({
   borderRadius: 'sm',
   borderStyle: 'solid',
-  borderWidth: '1px',
+  borderWidth: 'hairline',
   borderColor: 'border.default',
   bg: 'surface.subtle',
   p: { base: '3', md: '3.5' },

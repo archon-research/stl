@@ -13,7 +13,7 @@ type TokenLogoProps = {
    * Issuing protocol, tried when the token itself has no CDN icon: a receipt
    * token (spUSDT, sparkUSDCbc) rarely has one, but its protocol does.
    */
-  protocolName?: string | null;
+  protocolName?: string | null | undefined;
 };
 
 const TOKEN_LOGO_SIZE_PX: Record<

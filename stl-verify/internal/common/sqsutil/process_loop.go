@@ -17,8 +17,14 @@ type BlockEventHandler func(ctx context.Context, event outbound.BlockEvent) erro
 
 // Config holds configuration for the SQS processing loop.
 type Config struct {
-	Consumer     outbound.SQSConsumer
-	MaxMessages  int
+	Consumer outbound.SQSConsumer
+
+	// MaxMessages is how many messages one receive may put in flight. The loop
+	// settles them one at a time against a visibility clock SQS starts for the
+	// whole batch, so raising it multiplies the visibility timeout Validate
+	// demands. Zero means one.
+	MaxMessages int
+
 	PollInterval time.Duration
 	Logger       *slog.Logger
 
@@ -30,20 +36,31 @@ type Config struct {
 	// elapses the handler's context is cancelled; the handler is expected to
 	// return promptly with an error, and the message is left undeleted so SQS
 	// redelivers it (and eventually DLQs it via the queue's redrive policy).
-	// It MUST be less than the queue's visibility timeout so a message is not
-	// redelivered while its handler is still running. Zero uses
-	// DefaultHandlerTimeout. A worker must never run a handler unbounded: an
-	// unbounded handler that blocks on a stuck dependency (e.g. a Postgres lock
-	// wait) parks the poll loop forever and silently stalls the queue.
+	// Validate rejects a queue whose visibility timeout cannot cover every
+	// message of a receive at this budget, so a message is not redelivered while
+	// its handler is still running. Zero uses DefaultHandlerTimeout. A worker
+	// must never run a handler unbounded: an unbounded handler that blocks on a
+	// stuck dependency (e.g. a Postgres lock wait) parks the poll loop forever
+	// and silently stalls the queue.
 	HandlerTimeout time.Duration
+
+	// DrainTimeout is the grace a handler already running at SIGTERM gets to
+	// finish; past it its message is released to the successor. Zero uses
+	// DefaultDrainTimeout.
+	DrainTimeout time.Duration
 }
 
-// Validate checks that required fields are set.
+// Validate checks the config at boot: a worker whose visibility timeout cannot
+// cover a receive must refuse to start rather than duplicate every message it
+// processes.
 func (c Config) Validate() error {
 	if c.ChainID == 0 {
 		return fmt.Errorf("sqsutil.Config: ChainID must be set")
 	}
-	return nil
+	if c.Consumer == nil {
+		return nil
+	}
+	return ValidateVisibilityTimeout(c.Consumer.VisibilityTimeout(), c.HandlerTimeout, c.MaxMessages)
 }
 
 // DefaultHandlerTimeout bounds a message handler when Config.HandlerTimeout is
@@ -60,135 +77,209 @@ func (c Config) handlerTimeout() time.Duration {
 	return DefaultHandlerTimeout
 }
 
-// ValidateVisibilityTimeout returns an error if the SQS visibility timeout does
-// not strictly exceed the per-message handler budget. If it does not, a message
-// can be redelivered while its handler is still running (duplicate processing /
-// re-entrant lock contention). handlerTimeout <= 0 means DefaultHandlerTimeout.
-// Callers building an SQS consumer should validate their configured visibility
-// timeout against the handler budget they pass to RunLoop.
-func ValidateVisibilityTimeout(visibilityTimeout, handlerTimeout time.Duration) error {
+// DefaultDrainTimeout is the drain grace used when Config.DrainTimeout is
+// unset. It plus the settle calls that follow it must stay under
+// lifecycle.ShutdownTimeout; lifecycle's shutdown_budget_test.go asserts that.
+const DefaultDrainTimeout = 15 * time.Second
+
+func (c Config) drainTimeout() time.Duration {
+	if c.DrainTimeout > 0 {
+		return c.DrainTimeout
+	}
+	return DefaultDrainTimeout
+}
+
+// ValidateVisibilityTimeout returns an error unless the SQS visibility timeout
+// strictly exceeds the wall time a whole receive can take. SQS starts one
+// visibility clock for every message it hands back, the loop settles them
+// serially, and shutdown adds a drain plus the two settle calls that follow it;
+// a timeout below that sum lets a message be redelivered while its handler is
+// still running (duplicate processing / re-entrant lock contention).
+// handlerTimeout <= 0 means DefaultHandlerTimeout, inFlightPerReceive <= 0 means
+// one, and the drain is budgeted at DefaultDrainTimeout.
+func ValidateVisibilityTimeout(visibilityTimeout, handlerTimeout time.Duration, inFlightPerReceive int) error {
 	budget := handlerTimeout
 	if budget <= 0 {
 		budget = DefaultHandlerTimeout
 	}
-	if visibilityTimeout <= budget {
-		return fmt.Errorf("sqsutil: SQS visibility timeout %s must exceed the handler budget %s, "+
-			"otherwise a message can be redelivered while its handler is still running", visibilityTimeout, budget)
+	inFlight := max(inFlightPerReceive, 1)
+	needed := time.Duration(inFlight)*budget + DefaultDrainTimeout + 2*SettleTimeout
+	if visibilityTimeout <= needed {
+		return fmt.Errorf("sqsutil: SQS visibility timeout %s must exceed %s, the wall time %d message(s) per receive "+
+			"take at a %s handler budget plus the %s shutdown drain and two %s settle calls, "+
+			"otherwise a message can be redelivered while its handler is still running",
+			visibilityTimeout, needed, inFlight, budget, DefaultDrainTimeout, SettleTimeout)
 	}
 	return nil
 }
 
-// RunLoop polls SQS on a ticker interval and delegates each parsed BlockEvent
-// to the handler. It blocks until ctx is cancelled.
+// RunLoop polls SQS and delegates each parsed BlockEvent to the handler. It
+// blocks until ctx is cancelled.
 //
-// At startup it logs an error (but still runs) if the consumer's visibility
-// timeout does not exceed the handler budget: that misconfiguration lets a
-// message be redelivered while its handler is still running.
+// A receive that returned messages is followed immediately by the next one:
+// PollInterval paces an idle queue, and pacing a backlog by it instead would
+// cap catch-up at one receive per interval.
 func RunLoop(ctx context.Context, cfg Config, handler BlockEventHandler) {
-	if cfg.Consumer != nil {
-		if err := ValidateVisibilityTimeout(cfg.Consumer.VisibilityTimeout(), cfg.HandlerTimeout); err != nil {
-			cfg.Logger.Error("SQS visibility timeout is misconfigured", "error", err)
-		}
-	}
-
-	ticker := time.NewTicker(cfg.PollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := ProcessMessages(ctx, cfg, handler); err != nil {
-				cfg.Logger.Error("error processing messages", "error", err)
+	for ctx.Err() == nil {
+		received, err := ProcessMessages(ctx, cfg, handler)
+		if err != nil {
+			if isShutdownCancellation(ctx, err) {
+				return
 			}
+			cfg.Logger.Error("error processing messages", "error", err)
+		}
+		// A batch that drained and released cleanly returns no error.
+		if ctx.Err() != nil {
+			return
+		}
+		if received == 0 && !waitBeforeNextPoll(ctx, cfg.PollInterval) {
+			return
 		}
 	}
+}
+
+func waitBeforeNextPoll(ctx context.Context, interval time.Duration) bool {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// The loop's context never carries a deadline, so a DeadlineExceeded here came
+// from a nested budget (handler, RPC, DB) and stays a genuine, logged failure.
+func isShutdownCancellation(ctx context.Context, err error) bool {
+	return ctx.Err() != nil &&
+		(errors.Is(err, context.Canceled) || errors.Is(err, ErrDrainAbandoned))
 }
 
 // ProcessMessages receives a batch of SQS messages, parses each as a
 // BlockEvent, calls the handler, and deletes successfully processed messages.
 // Events whose chain ID does not match cfg.ChainID are rejected.
-// Returns a joined error for any failures.
+//
+// Cancelling ctx (SIGTERM) drains the running handler rather than killing it,
+// and every message the shutdown leaves unfinished is released to the successor.
+//
+// It reports how many messages the receive returned, so a caller can poll again
+// straight away while the queue still has a backlog, plus a joined error for any
+// failures.
 func ProcessMessages(
 	ctx context.Context,
 	cfg Config,
 	handler BlockEventHandler,
-) error {
+) (received int, err error) {
 	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("invalid config: %w", err)
+		return 0, fmt.Errorf("invalid config: %w", err)
 	}
 
 	messages, err := cfg.Consumer.ReceiveMessages(ctx, cfg.MaxMessages)
 	if err != nil {
-		return fmt.Errorf("receiving messages: %w", err)
+		return 0, fmt.Errorf("receiving messages: %w", err)
 	}
 
 	if len(messages) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	cfg.Logger.Info("received messages", "count", len(messages))
 
 	var errs []error
-	for _, msg := range messages {
-		var event outbound.BlockEvent
-		if err := json.Unmarshal([]byte(msg.Body), &event); err != nil {
-			cfg.Logger.Error("failed to parse block event",
-				"messageID", msg.MessageID,
-				"error", err)
-			errs = append(errs, fmt.Errorf("parsing message %s: %w", msg.MessageID, err))
-			continue
+	var inFlight []outbound.SQSMessage
+	for i, msg := range messages {
+		if ctx.Err() != nil {
+			inFlight = append(inFlight, messages[i:]...)
+			break
 		}
-
-		if event.ChainID != cfg.ChainID {
-			cfg.Logger.Error("chain ID mismatch, deleting message",
-				"messageID", msg.MessageID,
-				"expected", cfg.ChainID,
-				"got", event.ChainID,
-				"block", event.BlockNumber)
-			// Chain ID is immutable in the message — retrying will never succeed.
-			// Delete to avoid infinite retry. Investigate queue subscription if this occurs.
-			if deleteErr := cfg.Consumer.DeleteMessage(ctx, msg.ReceiptHandle); deleteErr != nil {
-				cfg.Logger.Error("failed to delete mismatched message",
-					"messageID", msg.MessageID,
-					"error", deleteErr)
-			}
-			continue
-		}
-
-		// Bound each handler so a stuck dependency (e.g. a Postgres lock wait)
-		// cannot park the poll loop forever. On timeout the handler's ctx is
-		// cancelled and it returns an error, so the message is left undeleted
-		// and SQS redelivers it.
-		hctx, cancel := context.WithTimeout(ctx, cfg.handlerTimeout())
-		err := handler(hctx, event)
-		budgetExceeded := errors.Is(hctx.Err(), context.DeadlineExceeded)
-		cancel()
-		if err != nil {
-			cfg.Logger.Error("failed to process message",
-				"messageID", msg.MessageID,
-				"error", err)
+		if err := processMessage(ctx, cfg, msg, handler); err != nil {
 			errs = append(errs, err)
-			continue
-		}
-		if budgetExceeded {
-			// Handler returned nil but ran past its budget — it ignored ctx
-			// cancellation. The work completed, so we still delete; log it so a
-			// handler that does not honour its deadline is visible.
-			cfg.Logger.Warn("handler returned nil after exceeding its timeout budget; deleting anyway",
-				"messageID", msg.MessageID)
-		}
-
-		if deleteErr := cfg.Consumer.DeleteMessage(ctx, msg.ReceiptHandle); deleteErr != nil {
-			cfg.Logger.Error("failed to delete message",
-				"messageID", msg.MessageID,
-				"error", deleteErr)
+			inFlight = append(inFlight, msg)
 		}
 	}
+	releaseUnsettledOnShutdown(ctx, cfg, inFlight)
 
-	if len(errs) > 0 {
-		return errors.Join(errs...)
+	return len(messages), errors.Join(errs...)
+}
+
+// releaseUnsettledOnShutdown releases poison pills too: a visibility change
+// leaves ApproximateReceiveCount alone, so redrive still walks them to the DLQ.
+// https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html
+func releaseUnsettledOnShutdown(ctx context.Context, cfg Config, messages []outbound.SQSMessage) {
+	if ctx.Err() == nil {
+		return
 	}
-	return nil
+	releaseMessages(ctx, cfg, messages)
+}
+
+func processMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, handler BlockEventHandler) error {
+	var event outbound.BlockEvent
+	if err := json.Unmarshal([]byte(msg.Body), &event); err != nil {
+		cfg.Logger.Error("failed to parse block event",
+			"messageID", msg.MessageID,
+			"error", err)
+		return fmt.Errorf("parsing message %s: %w", msg.MessageID, err)
+	}
+
+	if event.ChainID != cfg.ChainID {
+		return discardForeignChainMessage(ctx, cfg, msg, event)
+	}
+
+	outcome := runHandler(ctx, cfg, event, handler)
+	return settleMessage(ctx, cfg, msg, event, outcome)
+}
+
+// Chain ID is immutable in the message, so redelivery would never succeed.
+func discardForeignChainMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, event outbound.BlockEvent) error {
+	cfg.Logger.Error("chain ID mismatch, deleting message",
+		"messageID", msg.MessageID,
+		"expected", cfg.ChainID,
+		"got", event.ChainID,
+		"block", event.BlockNumber)
+
+	return deleteSettledMessage(ctx, cfg, msg)
+}
+
+func runHandler(ctx context.Context, cfg Config, event outbound.BlockEvent, handler BlockEventHandler) DrainOutcome {
+	budget := DrainBudget{Work: cfg.handlerTimeout(), Drain: cfg.drainTimeout()}
+	return RunDrainable(ctx, budget, func(hctx context.Context) error {
+		return handler(hctx, event)
+	})
+}
+
+func settleMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, event outbound.BlockEvent, outcome DrainOutcome) error {
+	if outcome.Err != nil {
+		return keepMessageForRedelivery(cfg, msg, event, outcome)
+	}
+	return deleteProcessedMessage(ctx, cfg, msg, outcome)
+}
+
+func keepMessageForRedelivery(cfg Config, msg outbound.SQSMessage, event outbound.BlockEvent, outcome DrainOutcome) error {
+	if outcome.Abandoned {
+		cfg.Logger.Warn("shutdown drain expired with the handler still running; releasing its message",
+			"messageID", msg.MessageID,
+			"block", event.BlockNumber,
+			"drainBudget", cfg.drainTimeout())
+	} else {
+		cfg.Logger.Error("failed to process message",
+			"messageID", msg.MessageID,
+			"error", outcome.Err)
+	}
+	return outcome.Err
+}
+
+func deleteProcessedMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, outcome DrainOutcome) error {
+	if outcome.BudgetExceeded {
+		cfg.Logger.Warn("handler returned nil after exceeding its timeout budget; deleting anyway",
+			"messageID", msg.MessageID)
+	}
+	return deleteSettledMessage(ctx, cfg, msg)
+}
+
+// A refused delete is returned, not released here: the message then travels
+// with every other unsettled one and releaseUnsettledOnShutdown is the single
+// place that hands any of them back.
+func deleteSettledMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage) error {
+	return DeleteMessage(ctx, cfg.Consumer, cfg.Logger, cfg.ChainID, msg)
 }

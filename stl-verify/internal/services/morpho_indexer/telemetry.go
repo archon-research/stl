@@ -3,6 +3,7 @@ package morpho_indexer
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -24,10 +25,6 @@ const (
 	v2SnapshotVaultFee     v2SnapshotType = "vault_fee"
 )
 
-type UnprobeableReason string
-
-const UnprobeableGasExhausted UnprobeableReason = "gas_exhausted"
-
 // adapterTypeLabel renders an adapter classification as a metric label. Two
 // collapses are forbidden because VectorMorphoV2UnknownAdapters counts "unknown"
 // exactly: a value outside the modelled set renders numerically rather than as
@@ -42,11 +39,26 @@ func adapterTypeLabel(t *entity.MorphoAdapterType) string {
 		return "market_v1"
 	case entity.MorphoAdapterTypeVaultV1:
 		return "vault_v1"
+	case entity.MorphoAdapterTypeERC4626Merkl:
+		return "erc4626_merkl"
+	case entity.MorphoAdapterTypeBox:
+		return "box"
+	case entity.MorphoAdapterTypeCompoundV3:
+		return "compound_v3"
 	case entity.MorphoAdapterTypeUnknown:
 		return "unknown"
 	default:
 		return fmt.Sprintf("type_%d", int16(*t))
 	}
+}
+
+// A source that does not ask the question renders "not_applicable", never "false":
+// VectorMorphoV2LazyAdapterRegistrations counts "false" exactly.
+func discoveryBlockLabel(atDiscoveryBlock *bool) string {
+	if atDiscoveryBlock == nil {
+		return "not_applicable"
+	}
+	return strconv.FormatBool(*atDiscoveryBlock)
 }
 
 // Telemetry provides OpenTelemetry metrics and tracing for the Morpho indexer.
@@ -55,13 +67,12 @@ type Telemetry struct {
 	meter  metric.Meter
 
 	// Counters
-	blocksProcessed       metric.Int64Counter
-	eventsProcessed       metric.Int64Counter
-	rpcCallsTotal         metric.Int64Counter
-	errorsTotal           metric.Int64Counter
-	adapterRegistrations  metric.Int64Counter
-	v2SnapshotsWritten    metric.Int64Counter
-	unprobeableCandidates metric.Int64Counter
+	blocksProcessed      metric.Int64Counter
+	eventsProcessed      metric.Int64Counter
+	rpcCallsTotal        metric.Int64Counter
+	errorsTotal          metric.Int64Counter
+	adapterRegistrations metric.Int64Counter
+	v2SnapshotsWritten   metric.Int64Counter
 
 	// Histograms
 	blockDuration   metric.Float64Histogram
@@ -149,14 +160,6 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider,
 		return nil, fmt.Errorf("creating v2SnapshotsWritten counter: %w", err)
 	}
 
-	t.unprobeableCandidates, err = meter.Int64Counter(
-		"morpho.vault.candidates.unprobeable",
-		metric.WithDescription("Discovery candidates discarded because their own on-chain probe cannot be answered, by reason"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("creating unprobeableCandidates counter: %w", err)
-	}
-
 	t.symbolsMissing, err = meter.Int64Gauge(
 		"morpho.token.symbol.missing",
 		metric.WithDescription("Tokens still missing a symbol as seen by the latest reconciliation sweep (capped at the sweep batch size)"),
@@ -194,6 +197,10 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider,
 	if err != nil {
 		return nil, fmt.Errorf("creating rpcDuration histogram: %w", err)
 	}
+
+	// VectorMorphoIndexerStalled reads blocks.processed with rate()==0; seed so
+	// it is computable from process start (see telemetry.SeedCounter).
+	telemetry.SeedStatusCounter(context.Background(), t.blocksProcessed, t.chainAttr)
 
 	return t, nil
 }
@@ -260,7 +267,7 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 // redelivery repeats every visibility timeout while a block stays stuck — cannot
 // inflate it. observed_via mirrors the DB column of the same name; adapter.type
 // is "unprobed" when the observation carried no probe.
-func (t *Telemetry) RecordAdapterMembershipObservation(ctx context.Context, adapterType *entity.MorphoAdapterType, observedVia entity.MembershipSource) {
+func (t *Telemetry) RecordAdapterMembershipObservation(ctx context.Context, adapterType *entity.MorphoAdapterType, observedVia entity.MembershipSource, atDiscoveryBlock *bool) {
 	if t == nil {
 		return
 	}
@@ -268,6 +275,7 @@ func (t *Telemetry) RecordAdapterMembershipObservation(ctx context.Context, adap
 		t.chainAttr,
 		attribute.String("adapter.type", adapterTypeLabel(adapterType)),
 		attribute.String("observed_via", string(observedVia)),
+		attribute.String("at_discovery_block", discoveryBlockLabel(atDiscoveryBlock)),
 	))
 }
 
@@ -291,18 +299,6 @@ func (t *Telemetry) RecordV2Snapshot(ctx context.Context, snapshotType v2Snapsho
 	t.v2SnapshotsWritten.Add(ctx, 1, metric.WithAttributes(
 		t.chainAttr,
 		attribute.String("snapshot.type", string(snapshotType)),
-	))
-}
-
-// Every discard increments, a memo hit included, so this counts what the candidate
-// set holds rather than how often the bisection ran.
-func (t *Telemetry) RecordUnprobeableCandidate(ctx context.Context, reason UnprobeableReason) {
-	if t == nil {
-		return
-	}
-	t.unprobeableCandidates.Add(ctx, 1, metric.WithAttributes(
-		t.chainAttr,
-		attribute.String("reason", string(reason)),
 	))
 }
 

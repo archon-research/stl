@@ -48,18 +48,20 @@ spec:
           # in-process and single-threaded (forecaster.py pins the MC to
           # n_jobs=1 -- loky workers would multiply the per-scenario tensors;
           # the calibrator backtest still runs 4 joblib workers, hence the cpu
-          # limit). Memory scales with N_MC and accumulates across the 9
-          # markets of one "all" tick -- measured at N_MC=100: ~0.97 GiB for
-          # the full pass (~0.4 GiB heaviest single market); the 10000 default
-          # peaks at ~8.0 GiB on one market alone. Sized for the capped runs
-          # (every overlay pins N_MC=100; the design-point rollout is parked in
-          # #804); raising the cap must raise this limit with it, from a fresh
-          # full-pass measurement.
+          # limit). Memory is 2 * borrowers * N_MC * 15 * 8 bytes (the
+          # liquidator's two USD tensors) and the markets run one after another
+          # in one process, so the pod peak is the heaviest market plus ~0.2 GiB
+          # that lingers between markets. Measured on live staging data at
+          # N_MC=10000 with MIN_BORROW_USD=100 (2026-09-07): full 9-market pass
+          # 1.56 GiB peak RSS, 24 min wall on a laptop (7.5 GiB without the
+          # filter: sparklend_dai has 2,204 rows, 1,580 of them under $1 of
+          # debt). Re-measure before raising N_MC or lowering MIN_BORROW_USD;
+          # replacing the tensors with per-scenario valuation is a follow-up.
           resources:
             requests:
               cpu: "1"
-              memory: "1Gi"
+              memory: "2Gi"
             limits:
               cpu: "4"
-              memory: "2Gi"
+              memory: "4Gi"
       terminationGracePeriodSeconds: 60

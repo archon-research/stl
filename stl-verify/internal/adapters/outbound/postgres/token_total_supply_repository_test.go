@@ -13,7 +13,7 @@ import (
 )
 
 func TestTokenTotalSupply_BuildInsertArgs(t *testing.T) {
-	r := &TokenTotalSupplyRepository{buildID: buildregistry.BuildID(7)}
+	r := &TokenTotalSupplyRepository{buildID: buildregistry.BuildID(7), runID: buildregistry.RunID(9)}
 
 	supply := &entity.TokenTotalSupply{
 		ChainID:           1,
@@ -60,6 +60,9 @@ func TestTokenTotalSupply_BuildInsertArgs(t *testing.T) {
 	}
 	if got, ok := args[8].(int); !ok || got != 7 {
 		t.Errorf("build_id arg = %v, want 7", args[8])
+	}
+	if got, ok := args[9].(buildregistry.RunID); !ok || got != 9 {
+		t.Errorf("run_id arg = %v, want 9", args[9])
 	}
 }
 

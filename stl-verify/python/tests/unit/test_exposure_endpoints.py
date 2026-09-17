@@ -46,13 +46,15 @@ def test_list_prime_exposure_returns_aggregated_buckets():
             params={
                 "from_timestamp": "2026-05-19T00:00:00Z",
                 "to_timestamp": "2026-06-18T00:00:00Z",
-                "resolution": "PT6H",
+                "frequency": "PT6H",
             },
         )
 
         assert response.status_code == 200
         body = response.json()
         assert body["mode"] == "aggregated"
+        assert body["window"]["frequency"] == "PT6H"
+        assert body["window"]["frequency_ms"] == 6 * 60 * 60 * 1000
         assert body["data"] == [
             {
                 "bucket_start": "2026-06-18T00:00:00Z",
@@ -67,7 +69,7 @@ def test_list_prime_exposure_returns_aggregated_buckets():
         app.dependency_overrides.pop(exposure._get_service, None)
 
 
-def test_list_prime_exposure_sets_public_cache_control_on_pinned_window():
+def test_list_prime_exposure_sets_private_cache_control_on_a_settled_pinned_window():
     from app.api.v1 import exposure
 
     service = _make_service(buckets=[])
@@ -84,7 +86,7 @@ def test_list_prime_exposure_sets_public_cache_control_on_pinned_window():
         )
 
         assert response.status_code == 200
-        assert response.headers["cache-control"] == "public, max-age=300"
+        assert response.headers["cache-control"] == "private, max-age=300"
     finally:
         app.dependency_overrides.pop(exposure._get_service, None)
 

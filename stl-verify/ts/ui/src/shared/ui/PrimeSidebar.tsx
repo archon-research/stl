@@ -12,7 +12,8 @@ import { flex } from '#styled-system/patterns';
 import { toggleSwitch } from '#styled-system/recipes';
 
 import { ProtocolLogo } from '.';
-import { truncateMiddle } from '../lib/dashboard';
+import { useAllocationRows } from '../hooks/useAllocationRows';
+import { buildNetworkOptions, truncateMiddle } from '../lib/dashboard';
 import type { PrimeGroup } from '../lib/dashboard';
 
 type PrimeSidebarProps = {
@@ -27,6 +28,35 @@ type PrimeSidebarProps = {
 };
 
 const switchStyles = toggleSwitch();
+
+/**
+ * How many networks a prime holds positions on.
+ *
+ * Counts the entries of the top bar's network filter, built from the prime's
+ * own rows in whichever provenance the view is showing, so the number and the
+ * "All networks" list are the same set by construction rather than by
+ * convention — a regrouping of the filter carries this along with it.
+ *
+ * A dash until every one of the prime's queries has answered: the fold is empty
+ * both before a fetch settles and after one fails, and zero is a real count.
+ */
+function PrimeNetworkCount({ primeGroup }: { primeGroup: PrimeGroup }) {
+  const { allocations, isLoaded } = useAllocationRows(primeGroup);
+
+  const count = buildNetworkOptions(allocations).length;
+
+  return (
+    <span
+      className={css({
+        fontSize: 'xs',
+        color: 'text.muted',
+        whiteSpace: 'nowrap',
+      })}
+    >
+      {isLoaded ? `${count} ${count === 1 ? 'network' : 'networks'}` : '—'}
+    </span>
+  );
+}
 
 export function PrimeSidebar({
   primeGroups,
@@ -59,7 +89,7 @@ export function PrimeSidebar({
           boxSizing: 'border-box',
           px: '5',
           py: '4',
-          borderBottomWidth: '1px',
+          borderBottomWidth: 'hairline',
           borderBottomStyle: 'solid',
           borderBottomColor: 'border.subtle',
         })}
@@ -130,9 +160,9 @@ export function PrimeSidebar({
             <ErrorState
               title="Unable to load primes"
               description="An error occurred while fetching primes data."
-              errorMessage={errorMessage ?? undefined}
               tone="critical"
               size="inline"
+              {...(errorMessage !== null && { errorMessage })}
             />
           }
           emptyView={
@@ -157,7 +187,7 @@ export function PrimeSidebar({
                     boxSizing: 'border-box',
                     textAlign: 'left',
                     borderRadius: 'md',
-                    borderWidth: '1px',
+                    borderWidth: 'hairline',
                     borderStyle: 'solid',
                     borderColor: isSelected
                       ? 'interactive.accent'
@@ -211,16 +241,7 @@ export function PrimeSidebar({
                         >
                           {primeGroup.name}
                         </p>
-                        <span
-                          className={css({
-                            fontSize: 'xs',
-                            color: 'text.muted',
-                            whiteSpace: 'nowrap',
-                          })}
-                        >
-                          {primeGroup.chainCount}{' '}
-                          {primeGroup.chainCount === 1 ? 'chain' : 'chains'}
-                        </span>
+                        <PrimeNetworkCount primeGroup={primeGroup} />
                       </div>
                       <span
                         className={css({

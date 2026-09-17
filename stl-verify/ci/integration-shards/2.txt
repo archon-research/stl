@@ -19,6 +19,8 @@
 ./internal/adapters/outbound/coingecko
 ./internal/adapters/outbound/s3
 ./internal/testutil/mockchain
+./internal/testutil/mockgecko
+./cmd/util/mock-coingecko-server
 ./internal/adapters/outbound/redis
 ./internal/services/prime_debt
 ./internal/adapters/outbound/orderbook
@@ -47,6 +49,7 @@
 ./internal/adapters/outbound/blockverifier
 ./internal/pkg/httpclient
 ./internal/pkg/partition
+./internal/pkg/archiveblock
 ./internal/pkg/gziputil
 ./internal/pkg/hexutil
 ./cmd/backfillers/raw-block-bulk-downloader
@@ -65,3 +68,6 @@
 ./internal/services/reference_capital_indexer
 ./cmd/cronjobs/reference-capital-indexer
 ./cmd/cronjobs/morpho-v2-bootstrap
+./internal/services/block_republish
+./internal/services/block_meta_loader
+./cmd/cronjobs/block-meta-loader

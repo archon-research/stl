@@ -47,8 +47,8 @@ func StartMockEthRPC(t *testing.T, numTokens int) *httptest.Server {
 
 		switch req.Method {
 		case "eth_call":
-			blockNum := parseBlockFromEthCall(req.Params)
-			numCalls := countMulticallInnerCalls(req.Params)
+			blockNum := ParseBlockFromEthCall(req.Params)
+			numCalls := CountMulticallInnerCalls(req.Params)
 
 			type Result struct {
 				Success    bool
@@ -97,6 +97,32 @@ func StartMockEthRPC(t *testing.T, numTokens int) *httptest.Server {
 	}))
 }
 
+// StartChainIDRPC serves startup's chain-ID check and fails the test on any
+// other method, keeping wiring fixtures intentionally narrow.
+func StartChainIDRPC(t *testing.T, chainID int64) *httptest.Server {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcutil.Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decoding the RPC request: %v", err)
+			return
+		}
+		if req.Method != "eth_chainId" {
+			t.Errorf("unexpected RPC method %q; this fixture only serves eth_chainId", req.Method)
+		}
+		result, err := json.Marshal(fmt.Sprintf("0x%x", chainID))
+		if err != nil {
+			t.Errorf("encoding the chain id: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		WriteRPCResult(w, req.ID, json.RawMessage(result))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 // WriteRPCResult writes a JSON-RPC success response.
 func WriteRPCResult(w http.ResponseWriter, id, result json.RawMessage) {
 	rpcutil.WriteResult(w, id, result)
@@ -131,9 +157,10 @@ func writeBlockHeaderResponse(w http.ResponseWriter, id json.RawMessage, blockNu
 	WriteRPCResult(w, id, json.RawMessage(headerJSON))
 }
 
-// countMulticallInnerCalls extracts the number of inner calls from an eth_call
-// request by reading the array length from the ABI-encoded aggregate3 input.
-func countMulticallInnerCalls(params json.RawMessage) int {
+// CountMulticallInnerCalls extracts the number of inner calls from an eth_call
+// request's ABI-encoded aggregate3 input, for a mock that varies its response
+// shape by batch size rather than fully decoding each call.
+func CountMulticallInnerCalls(params json.RawMessage) int {
 	var p []json.RawMessage
 	if err := json.Unmarshal(params, &p); err != nil || len(p) < 1 {
 		return 1
@@ -167,7 +194,9 @@ func countMulticallInnerCalls(params json.RawMessage) int {
 	return n
 }
 
-func parseBlockFromEthCall(params json.RawMessage) int64 {
+// ParseBlockFromEthCall extracts the block number/tag argument from an
+// eth_call request's params, for a mock keying its response by block.
+func ParseBlockFromEthCall(params json.RawMessage) int64 {
 	var p []json.RawMessage
 	if err := json.Unmarshal(params, &p); err != nil || len(p) < 2 {
 		return 100

@@ -3,6 +3,7 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.adapters.postgres.backed_breakdown_repository_morpho import MORPHO_VAULT_USERS_SQL
 from app.domain.entities.risk import LiquidationParams
 from app.logging import get_logger
 from app.risk_engine.crypto_lending.lif import compute_lif
@@ -14,17 +15,14 @@ logger = get_logger(__name__)
 # to normalise into [0, 1] before passing to compute_lif().
 # When a collateral token appears in multiple markets of the same vault, MIN(lltv) is used
 # as the conservative liquidation threshold.
-_SQL = """
-WITH vault_user AS (
-    SELECT u.id AS user_id
-    FROM morpho_vault mv
-    JOIN "user" u ON u.address = mv.address AND u.chain_id = mv.chain_id
-    WHERE mv.id = :backed_asset_id
+_SQL = f"""
+WITH vault_users AS (
+    {MORPHO_VAULT_USERS_SQL}
 ),
 vault_market_ids AS (
     SELECT DISTINCT mmp.morpho_market_id
     FROM morpho_market_position mmp
-    WHERE mmp.user_id = (SELECT user_id FROM vault_user LIMIT 1)
+    WHERE mmp.user_id IN (SELECT user_id FROM vault_users)
 )
 SELECT
     mm.collateral_token_id AS token_id,

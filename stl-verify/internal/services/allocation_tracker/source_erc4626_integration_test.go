@@ -17,7 +17,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -47,8 +46,6 @@ type erc4626IntegrationFixture struct {
 func setupERC4626Integration(t *testing.T, ctx context.Context) *erc4626IntegrationFixture {
 	t.Helper()
 
-	t.Setenv("BUILD_GIT_HASH", "test-integration-erc4626-supply")
-
 	pool, _, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(dbCleanup)
 
@@ -56,20 +53,17 @@ func setupERC4626Integration(t *testing.T, ctx context.Context) *erc4626Integrat
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	buildReg, err := buildregistry.New(ctx, pool)
-	if err != nil {
-		t.Fatalf("buildregistry: %v", err)
-	}
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
 	txm, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1, runID)
 	if err != nil {
 		t.Fatalf("token repo: %v", err)
 	}
-	allocRepo := postgres.NewAllocationRepository(pool, txm, tokenRepo, logger, buildReg.BuildID())
-	supplyRepo := postgres.NewTokenTotalSupplyRepository(pool, txm, tokenRepo, logger, buildReg.BuildID())
+	allocRepo := postgres.NewAllocationRepository(pool, txm, tokenRepo, logger, buildID, runID)
+	supplyRepo := postgres.NewTokenTotalSupplyRepository(pool, txm, tokenRepo, logger, buildID, runID)
 
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
@@ -134,7 +128,7 @@ func seedSparkPrime(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int64
 	t.Helper()
 	sparkVault := common.HexToAddress("0x691a6c29e9e96dd897718305427ad5d534db16ba").Bytes()
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO prime (name, vault_address) VALUES ('spark', $1) ON CONFLICT (name) DO NOTHING`,
+		`INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'spark', $1) ON CONFLICT (name) DO NOTHING`,
 		sparkVault,
 	); err != nil {
 		t.Fatalf("seed spark prime: %v", err)

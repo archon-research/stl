@@ -17,8 +17,9 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 from app.risk_engine.core_model.calibrator import Calibrator
+from app.risk_engine.core_model.convergence import MonteCarloDiagnostics
 from app.risk_engine.core_model.forecaster import Simulator
-from app.risk_engine.core_model.importer import change_user_ltvs
+from app.risk_engine.core_model.importer import change_user_ltvs, drop_small_borrowers
 from app.risk_engine.core_model.liquidator import Liquidator
 
 if TYPE_CHECKING:
@@ -50,6 +51,8 @@ class CoreModelPipelineResult:
     copula_type: str
     computed_at: datetime
     params: dict
+    # Stored with the row so every CRR states how noisy it is.
+    mc_diagnostics: MonteCarloDiagnostics
 
 
 def _load_protection_usd(protocol: str, inputs_dir: Path) -> float:
@@ -102,6 +105,7 @@ async def _run_pipeline(
         galaxy_type=p["GALAXY_TYPE"],
     )
 
+    users_df = drop_small_borrowers(users_df, p["MIN_BORROW_USD"])
     if p["WORST_CASE"]:
         users_df = change_user_ltvs(users_df, market_df)
 
@@ -109,12 +113,10 @@ async def _run_pipeline(
     prices_df = await data_reader.get_prices(collateral_list)
 
     results = {}
-    # TODO(bug#5): JUMP_PARAMS is calibrated from one token and reused for all.
-    # Per-token path exists in forecaster.py but is never populated here.
-    JUMP_PARAMS = None
 
     for collateral in collateral_list:
         TICKER = collateral.upper()
+        token_jump_params = None
 
         prices = prices_df[collateral].dropna()
         prices.name = TICKER
@@ -148,13 +150,13 @@ async def _run_pipeline(
                 prices_jumps = prices.copy()
             returns, log_returns = Calibrator.calculate_returns(prices_jumps)
             all_returns = log_returns if p["USE_LOG_RETURNS"] else returns
-            JUMP_PARAMS = Calibrator.fit_poisson_intensity(
+            token_jump_params = Calibrator.fit_poisson_intensity(
                 hist_series=all_returns,
                 lower_q=0.025,
                 upper_q=0.975,
                 focus_on_negative=p["FOCUS_ON_NEGATIVE"],
             )
-            JUMP_PARAMS["focus_on_negative"] = p["FOCUS_ON_NEGATIVE"]
+            token_jump_params["focus_on_negative"] = p["FOCUS_ON_NEGATIVE"]
 
         simulator = Simulator(prices, arima_spec, garch_spec, p["SEED"])
         arima_model, garch_model, residuals = simulator.arma_garch_refitter(
@@ -168,6 +170,9 @@ async def _run_pipeline(
             "arima_model": arima_model,
             "garch_model": garch_model,
             "residuals": residuals,
+            # Each token simulates with the jumps calibrated from its own
+            # returns; upstream reused whichever token was calibrated last.
+            "jump_params": token_jump_params,
         }
 
     all_simulated_prices = Simulator.simulate_prices(
@@ -176,7 +181,6 @@ async def _run_pipeline(
         forecasted_step=p["FORECAST_STEP"],
         use_log_returns=p["USE_LOG_RETURNS"],
         use_brownian_bridge=p["HOURLY_CONV"],
-        jump_parameters=JUMP_PARAMS,
         n_sims=p["N_MC"],
         seed=p["SEED"],
         market_df=market_df,
@@ -224,4 +228,5 @@ async def _run_pipeline(
         copula_type=p["COPULA_TYPE"],
         computed_at=datetime.now(UTC),
         params=dict(p),
+        mc_diagnostics=liq_results["mc_diagnostics"],
     )

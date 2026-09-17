@@ -32,7 +32,7 @@ const triggerClassName = css({
   height: '9',
   width: '9',
   flexShrink: 0,
-  borderWidth: '1px',
+  borderWidth: 'hairline',
   borderStyle: 'solid',
   borderColor: 'border.subtle',
   borderRadius: 'md',
@@ -45,7 +45,7 @@ const triggerClassName = css({
 
 const contentClassName = css({
   minWidth: '60',
-  borderWidth: '1px',
+  borderWidth: 'hairline',
   borderStyle: 'solid',
   borderColor: 'border.subtle',
   borderRadius: 'md',
@@ -99,11 +99,12 @@ const optionDescriptionClassName = css({
 });
 
 const separatorClassName = css({
-  // Hairline rule; the scale has no 1px step.
+  // A thickness, not a border width: `borderWidths` doesn't apply,
+  // and the sizes scale's smallest step is 2px.
   height: '[1px]',
   marginBlock: '1.5',
   marginInline: '0',
-  borderWidth: '0',
+  borderWidth: 'none',
   background: 'border.subtle',
 });
 
@@ -236,7 +237,7 @@ export function useDataSourceSection(
         // The superseded spelling is dropped on the way out, so a link carrying
         // both cannot arrive contradicting itself.
         reference: undefined,
-        source: value === 'both' ? undefined : value,
+        source: value === 'reference' ? undefined : value,
       });
 
       // A composite response holds both provenances, so narrowing it is a

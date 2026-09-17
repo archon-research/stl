@@ -3,11 +3,14 @@ package temporal
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // Guards the startup seed in seedStatusSeries: every terminal-status series
@@ -22,8 +25,9 @@ func TestNewCronjobMetrics_SeedsAllStatusSeriesAtZero(t *testing.T) {
 		t.Fatalf("newCronjobMetricsWithProvider() error: %v", err)
 	}
 
-	got := collectCounterByStatus(t, reader, "cronjob.runs.total")
-	for _, status := range []string{"success", "error", "canceled"} {
+	got := testutil.CollectCounterByAttr(t, reader, "cronjob.runs.total", "status")
+	for _, statusAttr := range runStatusValues {
+		status := statusAttr.Value.AsString()
 		v, ok := got[status]
 		if !ok {
 			t.Errorf("cronjob.runs.total is missing the status=%q series before any run", status)
@@ -51,7 +55,7 @@ func TestRecordRun_LandsSuccessOnSeededSeriesAsOne(t *testing.T) {
 
 	m.RecordRun(context.Background(), time.Second, nil)
 
-	got := collectCounterByStatus(t, reader, "cronjob.runs.total")
+	got := testutil.CollectCounterByAttr(t, reader, "cronjob.runs.total", "status")
 	if got["success"] != 1 {
 		t.Errorf("cronjob.runs.total{status=\"success\"} = %d, want 1", got["success"])
 	}
@@ -119,8 +123,18 @@ func TestRecordRun_ClassifiesRunStatus(t *testing.T) {
 
 			m.RecordRun(tt.ctx, time.Second, tt.runErr)
 
-			got := collectCounterByStatus(t, reader, "cronjob.runs.total")
-			for _, status := range []string{"success", "error", "canceled"} {
+			// A status the recorder can emit but seedStatusSeries does not seed
+			// is bug #529 reintroduced for that status: increase() would miss
+			// its first 0->1 after every rollover.
+			if !slices.ContainsFunc(runStatusValues, func(a attribute.KeyValue) bool {
+				return a.Value.AsString() == tt.wantStatus
+			}) {
+				t.Fatalf("runStatusAttr can emit status=%q but seedStatusSeries does not seed it", tt.wantStatus)
+			}
+
+			got := testutil.CollectCounterByAttr(t, reader, "cronjob.runs.total", "status")
+			for _, statusAttr := range runStatusValues {
+				status := statusAttr.Value.AsString()
 				want := int64(0)
 				if status == tt.wantStatus {
 					want = 1
@@ -131,29 +145,4 @@ func TestRecordRun_ClassifiesRunStatus(t *testing.T) {
 			}
 		})
 	}
-}
-
-func collectCounterByStatus(t *testing.T, reader sdkmetric.Reader, name string) map[string]int64 {
-	t.Helper()
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collecting metrics: %v", err)
-	}
-	out := make(map[string]int64)
-	for _, scope := range rm.ScopeMetrics {
-		for _, m := range scope.Metrics {
-			if m.Name != name {
-				continue
-			}
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok {
-				t.Fatalf("metric %q is %T, want metricdata.Sum[int64]", name, m.Data)
-			}
-			for _, dp := range sum.DataPoints {
-				status, _ := dp.Attributes.Value("status")
-				out[status.AsString()] = dp.Value
-			}
-		}
-	}
-	return out
 }

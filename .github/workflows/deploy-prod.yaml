@@ -201,13 +201,13 @@ jobs:
       APP: stl-prod
     steps:
       - name: Configure AWS credentials (ArgoCD read-only)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: arn:aws:iam::030797368798:role/archonprod-github-actions-argocd-wait
           aws-region: eu-west-1
 
       - name: Fetch Tailscale + ArgoCD read-only token
-        uses: aws-actions/aws-secretsmanager-get-secrets@2cb1a461cbd4865ac4299648312e4704c646cd53 # v3.0.1
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
         with:
           secret-ids: |
             TS, archon-prod-argocd-ci-tailscale-oauth

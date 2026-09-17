@@ -18,7 +18,7 @@ func TestUtcNormalizeEnrichment(t *testing.T) {
 	defer cleanup()
 
 	// valid_from defaults to the UTC expression on every normalized table (not session CURRENT_DATE).
-	for _, tbl := range []string{"security_instrument_bridge", "position_classification", "position_entity_link"} {
+	for _, tbl := range []string{"security_instrument_bridge", "position_entity_link"} {
 		t.Run("utc default "+tbl, func(t *testing.T) {
 			var def string
 			if err := pool.QueryRow(ctx, `

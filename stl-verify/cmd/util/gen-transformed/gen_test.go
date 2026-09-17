@@ -95,7 +95,7 @@ func TestBucket1Tables_MatchConfig(t *testing.T) {
 }
 
 // TestCheckBucket1Fills_Rejects covers the fills a bucket-1 projection cannot render:
-// Const/BlockTime fills (bucket 2/3), and a two-hop fill whose first hop is missing
+// Const/BlockMeta fills (bucket 2/3), and a two-hop fill whose first hop is missing
 // (then_parent set, parent empty) — its subquery references the parent alias p, but
 // joinFor emits no join without parent/key/ref, so the SQL would reference an undefined p.
 func TestCheckBucket1Fills_Rejects(t *testing.T) {
@@ -106,7 +106,7 @@ func TestCheckBucket1Fills_Rejects(t *testing.T) {
 		wantErr bool
 	}{
 		{"const is bucket 2/3", schemamaster.Fill{Table: "t", Column: "chain_id", Const: &c}, true},
-		{"block_time is bucket 2/3", schemamaster.Fill{Table: "t", Column: "block_timestamp", BlockTime: true}, true},
+		{"block_meta is bucket 2/3", schemamaster.Fill{Table: "t", Column: "block_timestamp", BlockMeta: true}, true},
 		{"then_parent without parent", schemamaster.Fill{Table: "t", Column: "x", ThenParent: "l", ThenKey: "k", ThenRef: "r"}, true},
 		{"single-hop parent fill is fine", schemamaster.Fill{Table: "t", Column: "y", Parent: "p", Key: "k", Ref: "r"}, false},
 		{"two-hop with first hop is fine", schemamaster.Fill{Table: "t", Column: "z", Parent: "p", Key: "k", Ref: "r", ThenParent: "l", ThenKey: "lk", ThenRef: "lr"}, false},
@@ -156,5 +156,31 @@ func TestJoinFor_ConflictingJoins(t *testing.T) {
 		t.Fatal("joinFor: want error for disagreeing joins, got nil")
 	} else if !strings.Contains(err.Error(), "disagree on join") {
 		t.Errorf("joinFor err = %v, want 'disagree on join'", err)
+	}
+}
+
+func TestPlan_RunIDIsNotCarried(t *testing.T) {
+	reg, err := schemamaster.Load()
+	if err != nil {
+		t.Fatalf("load register: %v", err)
+	}
+	s := rawSchema("maple_syrup_global_state",
+		[]string{"chain_id", "synced_at", "tvl", "processing_version", "build_id", "run_id"},
+		[]string{"chain_id", "synced_at", "processing_version"})
+
+	p, err := plan(reg, s)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if slices.Contains(p.columns, "run_id") {
+		t.Errorf("columns = %v, want run_id absent", p.columns)
+	}
+	for _, expr := range p.selectExprs {
+		if strings.Contains(expr, "run_id") {
+			t.Errorf("selectExprs carries %q, want run_id absent", expr)
+		}
+	}
+	if !slices.Contains(p.columns, "build_id") {
+		t.Errorf("columns = %v, want build_id still carried", p.columns)
 	}
 }

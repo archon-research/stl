@@ -4,6 +4,31 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+
+def drop_small_borrowers(users_df: pd.DataFrame, min_borrow_usd: float) -> pd.DataFrame:
+    """Keep only borrowers whose total debt is at least ``min_borrow_usd``.
+
+    The liquidator's memory and loop time grow with the borrower count, and a
+    live market carries many sub-dollar dust rows the reference parquet
+    snapshots mostly never had. Logs what was dropped so the exposure the CRR is quoted
+    against is visible; ``min_borrow_usd <= 0`` keeps every row.
+    """
+    if min_borrow_usd <= 0:
+        return users_df
+    debt = users_df["total_borrow_usd"].fillna(0)
+    kept = users_df[debt >= min_borrow_usd]
+    dropped_debt = float(debt[debt < min_borrow_usd].sum())
+    total_debt = float(debt.sum())
+    logger.info(
+        "dropped %d of %d borrowers below min_borrow_usd=%s, %.4f%% of total debt",
+        len(users_df) - len(kept),
+        len(users_df),
+        min_borrow_usd,
+        dropped_debt / total_debt * 100 if total_debt > 0 else 0.0,
+    )
+    return kept
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Change each user LTV under the worst case scenario assumption HF = 1
 # ──────────────────────────────────────────────────────────────────────────────

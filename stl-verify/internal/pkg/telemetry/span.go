@@ -25,11 +25,22 @@ func NoopSpan() trace.Span {
 	return trace.SpanFromContext(context.Background())
 }
 
-// StatusAttr renders an error as the conventional success/error status
-// metric attribute.
+// SuccessStatusAttr and ErrorStatusAttr are the status values SeedStatusCounter
+// seeds. A recorder that spells its own status labels instead of deriving from
+// these orphans the seeded series, and several still do, so this is a
+// convention to follow rather than one the code enforces.
+func SuccessStatusAttr() attribute.KeyValue {
+	return attribute.String("status", "success")
+}
+
+func ErrorStatusAttr() attribute.KeyValue {
+	return attribute.String("status", "error")
+}
+
+// StatusAttr returns the terminal-status attribute derived from err.
 func StatusAttr(err error) attribute.KeyValue {
 	if err != nil {
-		return attribute.String("status", "error")
+		return ErrorStatusAttr()
 	}
-	return attribute.String("status", "success")
+	return SuccessStatusAttr()
 }
