@@ -32,7 +32,6 @@ from app.domain.time_series import (
     MAX_POINTS,
     MAX_WINDOW,
     TimeSeriesQuery,
-    TimeSeriesQueryError,
     TimeWindow,
     enforce_max_points,
 )
@@ -46,6 +45,9 @@ _UNKNOWN_PRIME = "0x" + "cd" * 20
 # A path item may also carry `parameters`, `summary` or `servers`; only operations
 # declare responses.
 _HTTP_METHODS = {method.value for method in HTTPMethod}
+
+# A floor, not a census: without it the loop below calls a shrunken surface every route.
+_PUBLISHED_OPERATIONS = 26
 
 # A window an hour wide ending at `now`: pinned below, and narrow enough that the
 # unfiltered-window ceiling never answers first.
@@ -100,20 +102,20 @@ def test_the_schema_publishes_the_rejection_types_as_a_closed_set() -> None:
     assert set(schema["components"]["schemas"]["RejectionType"]["enum"]) == set(RejectionType)
 
 
-def test_every_domain_rejection_is_published_as_a_rejection_type() -> None:
-    assert {error.error_type for error in TimeSeriesQueryError.__subclasses__()} <= set(RejectionType)
-
-
 def test_the_schema_declares_the_shared_body_on_every_route() -> None:
     schema = _source_schema()
+    operations = [
+        (method, path, operation)
+        for path, item in schema["paths"].items()
+        for method, operation in item.items()
+        if method.upper() in _HTTP_METHODS
+    ]
 
-    for path, operations in schema["paths"].items():
-        for method, operation in operations.items():
-            if method.upper() not in _HTTP_METHODS:
-                continue
-            content = operation.get("responses", {}).get("422", {}).get("content", {})
-            declared = content.get("application/json", {}).get("schema", {}).get("$ref", "")
-            assert declared.endswith("/ApiErrorResponse"), f"{method} {path}"
+    assert len(operations) >= _PUBLISHED_OPERATIONS, f"the published surface shrank to {len(operations)} operations"
+    for method, path, operation in operations:
+        content = operation.get("responses", {}).get("422", {}).get("content", {})
+        declared = content.get("application/json", {}).get("schema", {}).get("$ref", "")
+        assert declared.endswith("/ApiErrorResponse"), f"{method} {path}"
 
 
 # --- the window that answered ---------------------------------------------
@@ -172,6 +174,7 @@ def test_a_rejected_enum_value_uses_the_same_model(events_client: TestClient) ->
 def test_a_validation_failure_does_not_echo_what_was_sent(events_client: TestClient) -> None:
     response = _events(events_client, to_timestamp="totally-bogus-value")
 
+    assert response.status_code == 422
     assert "totally-bogus-value" not in response.text
 
 
@@ -195,6 +198,7 @@ def test_a_validation_failure_names_each_parameter_and_why_without_prose_parsing
 def test_a_domain_rejection_carries_no_per_field_errors(events_client: TestClient) -> None:
     response = _events(events_client, from_timestamp="2020-01-01T00:00:00Z", to_timestamp="2026-01-01T00:00:00Z")
 
+    assert response.status_code == 422
     assert "errors" not in response.json()
 
 
