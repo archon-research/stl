@@ -121,11 +121,12 @@ func TestDefaultStubSources(t *testing.T) {
 	for _, s := range sources {
 		names[s.Name()] = true
 	}
-	if !names["centrifuge-feeder"] {
-		t.Error("centrifuge-feeder stub not found")
+	if !names["psm3"] {
+		t.Error("psm3 stub not found")
 	}
-	// Centrifuge tranche tokens are handled by BalanceOfSource, not stubbed.
-	if names["centrifuge"] {
-		t.Error("centrifuge should no longer be a stub source")
+	for _, gone := range []string{"centrifuge", "centrifuge-feeder"} {
+		if names[gone] {
+			t.Errorf("%s should no longer be a stub source", gone)
+		}
 	}
 }

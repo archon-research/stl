@@ -109,8 +109,15 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 	const key = "85149000-85149999/85149017_0_block.json.gz"
 	putGzippedObject(t, ctx, s3c, bucket, key, []byte("null"))
 	// Large sentinel object so the scan path must filter it out.
+	// Go 1.27 changed the compress/flate encoder: repeating bytes gzip down
+	// below the 40-byte MaxSize threshold, so the object stopped being
+	// filtered. Non-repeating content stays above it on either encoder.
 	const sentinelKey = "85149000-85149999/85149018_0_block.json.gz"
-	putGzippedObject(t, ctx, s3c, bucket, sentinelKey, bytes.Repeat([]byte("x"), 4096))
+	sentinelData := make([]byte, 200)
+	for i := range sentinelData {
+		sentinelData[i] = byte(i)
+	}
+	putGzippedObject(t, ctx, s3c, bucket, sentinelKey, sentinelData)
 
 	// 4. Create a FIFO SNS topic and a subscribed FIFO SQS queue.
 	topicArn := createFifoTopic(t, ctx, snsc, "stl-sentineltest-avalanche-blocks.fifo")
