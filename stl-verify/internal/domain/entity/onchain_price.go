@@ -23,9 +23,10 @@ const (
 type QuoteCurrency string
 
 const (
-	QuoteCurrencyUSD QuoteCurrency = "USD"
-	QuoteCurrencyETH QuoteCurrency = "ETH"
-	QuoteCurrencyBTC QuoteCurrency = "BTC"
+	QuoteCurrencyUSD  QuoteCurrency = "USD"
+	QuoteCurrencyETH  QuoteCurrency = "ETH"
+	QuoteCurrencyBTC  QuoteCurrency = "BTC"
+	QuoteCurrencyUSDS QuoteCurrency = "USDS"
 )
 
 // IsFeedOracle returns true for oracle types that use per-feed price fetching
@@ -80,7 +81,7 @@ type OracleAsset struct {
 	Enabled       bool
 	FeedAddress   common.Address // zero for aave_oracle; the feed contract address for feed oracles
 	FeedDecimals  int            // 0 for aave_oracle; falls back to oracle.PriceDecimals
-	QuoteCurrency QuoteCurrency  // "USD" (default), "ETH", or "BTC"
+	QuoteCurrency QuoteCurrency  // "USD" by default
 	CreatedAt     time.Time
 }
 

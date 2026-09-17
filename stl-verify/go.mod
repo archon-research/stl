@@ -1,8 +1,6 @@
 module github.com/archon-research/stl/stl-verify
 
-go 1.26.6
-
-require github.com/gorilla/websocket v1.5.3
+go 1.27.1
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.42.0
@@ -13,6 +11,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.44.0
 	github.com/aws/smithy-go v1.27.2
 	github.com/ethereum/go-ethereum v1.17.4
+	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/klauspost/compress v1.18.7
 	github.com/redis/go-redis/v9 v9.21.0

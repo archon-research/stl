@@ -13,7 +13,6 @@ include lint.mk
 		docker-build-reference-capital-backfill docker-release-reference-capital-backfill _docker-release-reference-capital-backfill-internal \
 		docker-build-morpho-vault-backfill docker-release-morpho-vault-backfill _docker-release-morpho-vault-backfill-internal \
 		docker-build-block-republisher docker-release-block-republisher _docker-release-block-republisher-internal \
-		docker-build-block-meta-loader docker-release-block-meta-loader _docker-release-block-meta-loader-internal \
 		docker-build-uniswap-v4-position-bootstrap docker-release-uniswap-v4-position-bootstrap _docker-release-uniswap-v4-position-bootstrap-internal \
 		build-backfiller-% run-backfiller-% \
         docker-build-watcher docker-push-watcher docker-release-watcher \
@@ -53,7 +52,7 @@ include lint.mk
 		kind-create kind-delete kind-infra kind-config kind-secrets kind-bootstrap-db kind-migrate \
 		kind-load-migrate kind-load-watcher kind-load-workers kind-load-python-api kind-load-cronjobs \
 		kind-deploy-apps kind-deploy-workers kind-deploy-data-validator check-dev-overlay-sync \
-		check-reloader-opt-in check-overlay-images build-reproducibility-check \
+		check-reloader-opt-in check-overlay-images check-cronjob-release-dedupe build-reproducibility-check \
 		kind-redeploy-watcher kind-redeploy-worker \
 		docker-build-migrate \
 		kind-infra-ci kind-ci-up kind-ci-down \
@@ -232,7 +231,7 @@ test:
 
 test-integration: integration-shard-check
 	@echo "==> Running integration tests..."
-	GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=20m -p 4 ./...
+	go test -tags=integration -v -timeout=20m -p 4 ./...
 
 test-integration-shard: integration-shard-check
 	@case "$(INTEGRATION_SHARD)" in \
@@ -241,7 +240,7 @@ test-integration-shard: integration-shard-check
 	esac
 	@echo "==> Running integration test shard $(INTEGRATION_SHARD)/2..."
 	@packages=$$(grep -hEv '^[[:space:]]*(#|$$)' ci/integration-shards/$(INTEGRATION_SHARD).txt | tr '\n' ' '); \
-		GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=20m -p 4 $$packages
+		go test -tags=integration -v -timeout=20m -p 4 $$packages
 
 integration-shard-check:
 	@bash ci/check-integration-shards.sh
@@ -418,7 +417,9 @@ e2e-real-reserve-facts:
 # Install development tools
 tools:
 	@echo "==> Installing development tools..."
-	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 # keep in sync with .github/workflows/go-ci.yml
+	# v2.13.0+ is built with Go 1.27; v2.12.x was built with Go 1.26 and
+	# panics on Go 1.27 stdlib type-checking.
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 # keep in sync with .github/workflows/go-ci.yml
 	go install golang.org/x/vuln/cmd/govulncheck@latest
 	go install golang.org/x/tools/cmd/goimports@v0.49.0 # keep in sync with .github/workflows/go-ci.yml
 	go install github.com/go-delve/delve/cmd/dlv@latest
@@ -428,7 +429,7 @@ tools:
 # CI target for lint/format/static/security checks. go vet, staticcheck, and
 # go fix -diff are covered by golangci-lint v2 (govet, staticcheck, modernize
 # linters — see .golangci.yml); running them separately tripled analysis time.
-ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check buildinfo-populate-check check-overlay-images golangci-lint golangci-lint-new vulncheck
+ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check buildinfo-populate-check check-overlay-images check-cronjob-release-dedupe golangci-lint golangci-lint-new vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks
@@ -1453,7 +1454,6 @@ docker-release-all:
 	@$(MAKE) _docker-release-reference-capital-backfill-internal ENV=$(ENV)
 	@$(MAKE) _docker-release-morpho-vault-backfill-internal ENV=$(ENV)
 	@$(MAKE) _docker-release-block-republisher-internal ENV=$(ENV)
-	@$(MAKE) _docker-release-block-meta-loader-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-uniswap-v4-position-bootstrap-internal ENV=$(ENV)
 	@echo ""
@@ -2396,6 +2396,12 @@ docker-release-cronjob-%: ecr-login _docker-release-cronjob-%-internal
 _docker-release-cronjob-%-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Cronjob $*" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/cronjobs/$* GO_BIN=cronjob GO_CACHE_KEY="cronjob-$*" GO_TAG="$*-$(IMAGE_TAG)" GO_LATEST_TAG="$*-latest"
 
+# docker-release-all must release each cmd/cronjobs image exactly once, through
+# the pattern rules above; a duplicate now fails the deploy outright against
+# immutable ECR tags. The script carries the reasoning and the grep.
+check-cronjob-release-dedupe:
+	@ci/check-cronjob-release-dedupe.sh
+
 # transform-bootstrap (VEC-490): the one-off VEC-484 history backfill. It is not a
 # cronjob (no Temporal schedule) so it is not auto-discovered, but it ships in the
 # shared cronjob ECR repo with a name-prefixed tag (transform-bootstrap-<sha>), so
@@ -2464,15 +2470,6 @@ docker-release-morpho-vault-backfill: ecr-login _docker-release-morpho-vault-bac
 
 _docker-release-morpho-vault-backfill-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Morpho Vault Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/morpho-vault-backfill GO_BIN=morpho-vault-backfill GO_CACHE_KEY="cronjob-morpho-vault-backfill" GO_TAG="morpho-vault-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="morpho-vault-backfill-latest"
-# block-meta-loader: a per-chain on-demand Temporal worker that fills the block_meta dimension from a
-# chain's S3 raw-block archive. Ships in the shared cronjob ECR repo with a name-prefixed tag.
-docker-build-block-meta-loader:
-	docker build --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/cronjobs/block-meta-loader --build-arg BIN=block-meta-loader -t stl-block-meta-loader:$(LOCAL_TAG) -f Dockerfile.common .
-
-docker-release-block-meta-loader: ecr-login _docker-release-block-meta-loader-internal
-
-_docker-release-block-meta-loader-internal:
-	@$(MAKE) _docker-release-go-service GO_NAME="Block Meta Loader" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/cronjobs/block-meta-loader GO_BIN=block-meta-loader GO_CACHE_KEY="cronjob-block-meta-loader" GO_TAG="block-meta-loader-$(IMAGE_TAG)" GO_LATEST_TAG="block-meta-loader-latest"
 
 # block-republisher (ARCT-383): the on-demand repair that re-publishes a block
 # under a new version. Same lifecycle as the two backfillers above — a
