@@ -716,6 +716,10 @@ groups:
             /debt and /total-capital series is now frozen on its last value via
             locf.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerbalancesheetstalled
+
+  - name: vector-position-materializer
+    interval: 60s
+    rules:
       - alert: VectorPositionMaterializerSilentlyEmpty
         # Runs succeed but no view appended anything in 6h, which on a live chain means an upstream
         # stall. The offset gate needs the seeded series to exist 6h back, so a cold start does not fire.
