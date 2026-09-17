@@ -13,12 +13,14 @@ import {
   buildChartTheme,
   ChartCursorLayer,
   DataContext,
+  DragSelectionOverlay,
   Grid,
   LineSeries,
   ReferenceBand,
   Tooltip,
   useHoveredTimestamp,
   useSyncedCursorHandlers,
+  useTimeRangeBrushGesture,
   XYChart,
 } from '@archon-research/charting/xychart';
 import { SkeletonStack } from '@archon-research/design-system';
@@ -363,6 +365,16 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
   const cursorHandlers = useSyncedCursorHandlers<ChartDatum>(
     (point) => point.timestamp ?? Number.NaN,
   );
+  const brush = useTimeRangeBrushGesture();
+
+  // XYChart exposes one onPointerMove slot; the synced cursor and the brush
+  // both need it, so this fans one event out to both.
+  const handleChartPointerMove = (
+    params: { datum?: unknown; svgPoint?: { x: number } } | undefined,
+  ) => {
+    cursorHandlers.onPointerMove(params);
+    brush.onPointerMove(params);
+  };
 
   const xAccessor = (point: ChartDatum): string | number =>
     stops === null || point.timestamp === null ? point.label : point.timestamp;
@@ -390,10 +402,14 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
         // accessor would publish NaN to the shared cursor. `nearestStop`
         // compares against NaN, every comparison is false, and it returns the
         // upper stop rather than clearing — so hovering a card with no history
-        // jumped every other card's crosshair to an arbitrary bucket.
+        // jumped every other card's crosshair to an arbitrary bucket. The same
+        // placeholder plots a string band domain, which the brush cannot invert
+        // to a timestamp either, so both are gated by the same `stops` check.
         {...(stops !== null && {
-          onPointerMove: cursorHandlers.onPointerMove,
+          onPointerMove: handleChartPointerMove,
           onPointerOut: cursorHandlers.onPointerOut,
+          onPointerDown: brush.onPointerDown,
+          onPointerUp: brush.onPointerUp,
         })}
       >
         <Grid columns={false} numTicks={3} />
@@ -475,73 +491,79 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             }}
           />
         ) : (
-          // Driven by the shared timestamp rather than this chart's own pointer
-          // state, so hovering any card moves the crosshair in all of them. It
-          // replaces the visx tooltip's crosshair rather than joining it — two
-          // would draw two lines at the same instant.
-          <ChartCursorLayer
-            stops={stops}
-            cursor={hoveredTimestamp}
-            series={cursorSeries}
-          >
-            {({ x, left, points }) => {
-              const label = labelAt.get(x);
-              if (label === undefined) return null;
-              // `left` is the crosshair's own SVG x; the overlay it lands in
-              // spans the whole plot, so without placing the card here every
-              // tooltip parks at the plot's origin instead of following the
-              // line. Flipped to the near side past halfway so it cannot run
-              // off the card's right edge.
-              //
-              // Pinned to the plot top rather than tracking the readout dot:
-              // the plot is 152px tall, so a card centred on a dot near either
-              // edge is clipped, and one that slides with a wiggling series is
-              // harder to read than one that stays put.
-              const flip = left > chartWidth / 2;
-              return (
-                <div
-                  className={chartTooltipSurfaceClassName}
-                  style={{
-                    position: 'absolute',
-                    left,
-                    top: CHART_MARGIN.top,
-                    transform: `translateX(${flip ? 'calc(-100% - 10px)' : '10px'})`,
-                    whiteSpace: 'nowrap',
-                    pointerEvents: 'none',
-                  }}
-                >
-                  <div className={chartTooltipTitleClassName}>{label}</div>
-                  {points.map((point) => (
-                    <div
-                      key={point.id}
-                      className={chartTooltipValueClassName}
-                      style={{ color: point.color }}
-                    >
-                      {chart.formatValue(point.value)}
-                    </div>
-                  ))}
-                  {/* Unlabelled, like the series rows above it: each figure
+          <>
+            <DragSelectionOverlay
+              livePx={brush.livePx}
+              committedPx={brush.committedPx}
+            />
+            {/* Driven by the shared timestamp rather than this chart's own
+                pointer state, so hovering any card moves the crosshair in all
+                of them. It replaces the visx tooltip's crosshair rather than
+                joining it — two would draw two lines at the same instant. */}
+            <ChartCursorLayer
+              stops={stops}
+              cursor={hoveredTimestamp}
+              series={cursorSeries}
+            >
+              {({ x, left, points }) => {
+                const label = labelAt.get(x);
+                if (label === undefined) return null;
+                // `left` is the crosshair's own SVG x; the overlay it lands in
+                // spans the whole plot, so without placing the card here every
+                // tooltip parks at the plot's origin instead of following the
+                // line. Flipped to the near side past halfway so it cannot run
+                // off the card's right edge.
+                //
+                // Pinned to the plot top rather than tracking the readout dot:
+                // the plot is 152px tall, so a card centred on a dot near either
+                // edge is clipped, and one that slides with a wiggling series is
+                // harder to read than one that stays put.
+                const flip = left > chartWidth / 2;
+                return (
+                  <div
+                    className={chartTooltipSurfaceClassName}
+                    style={{
+                      position: 'absolute',
+                      left,
+                      top: CHART_MARGIN.top,
+                      transform: `translateX(${flip ? 'calc(-100% - 10px)' : '10px'})`,
+                      whiteSpace: 'nowrap',
+                      pointerEvents: 'none',
+                    }}
+                  >
+                    <div className={chartTooltipTitleClassName}>{label}</div>
+                    {points.map((point) => (
+                      <div
+                        key={point.id}
+                        className={chartTooltipValueClassName}
+                        style={{ color: point.color }}
+                      >
+                        {chart.formatValue(point.value)}
+                      </div>
+                    ))}
+                    {/* Unlabelled, like the series rows above it: each figure
                       wears its own mark's colour, which is what says whether it
                       is the line or the limit. A word here would have labelled
                       one row out of two and read as a table with a missing
                       header. The plot names the limit at its own line. */}
-                  {tooltipThresholds.map((entry) => (
-                    <div
-                      key={`tooltip-threshold-${entry.value}`}
-                      className={chartTooltipValueClassName}
-                      style={{
-                        color: resolveChartColor(
-                          entry.stroke ?? THRESHOLD_LEGEND_COLOR,
-                        ),
-                      }}
-                    >
-                      {chart.formatValue(entry.value)}
-                    </div>
-                  ))}
-                </div>
-              );
-            }}
-          </ChartCursorLayer>
+                    {tooltipThresholds.map((entry) => (
+                      <div
+                        key={`tooltip-threshold-${entry.value}`}
+                        className={chartTooltipValueClassName}
+                        style={{
+                          color: resolveChartColor(
+                            entry.stroke ?? THRESHOLD_LEGEND_COLOR,
+                          ),
+                        }}
+                      >
+                        {chart.formatValue(entry.value)}
+                      </div>
+                    ))}
+                  </div>
+                );
+              }}
+            </ChartCursorLayer>
+          </>
         )}
       </XYChart>
     </div>
