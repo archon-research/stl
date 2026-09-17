@@ -330,3 +330,10 @@ patches:
       - op: add
         path: /metadata/annotations/tailscale.com~1tags
         value: tag:k8s-external
+
+# position-materializer ships at 0 in base. Its first run is an irreversible bootstrap of position_state,
+# so each environment is switched on here, separately: staging first, prod after a staging soak
+# (docs/runbooks/vector-position-materializer.md, "Before the first run").
+replicas:
+  - name: position-materializer
+    count: 0

@@ -13,6 +13,17 @@ import (
 
 const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/position_materializer"
 
+// Run statuses. canceled is a run cut short by its parent context (a rollout stopping the pod), not a
+// broken view, so VectorPositionMaterializerViewFailing does not select it.
+const (
+	statusOK       = "ok"
+	statusError    = "error"
+	statusCanceled = "canceled"
+)
+
+// runStatuses is every status RecordRun is passed, and so every series the seed exports.
+var runStatuses = []string{statusOK, statusError, statusCanceled}
+
 // Telemetry provides OpenTelemetry metrics for the position materializer. A nil
 // *Telemetry is valid: every method no-ops, so tests and callers without a meter
 // provider need no stub.
@@ -64,8 +75,9 @@ func NewTelemetryWithProvider(mp metric.MeterProvider, materializers []string) (
 	ctx := context.Background()
 	for _, m := range materializers {
 		view := attribute.String("materializer", m)
-		telemetry.SeedCounter(ctx, t.projectionRuns, view, attribute.String("status", "ok"))
-		telemetry.SeedCounter(ctx, t.projectionRuns, view, attribute.String("status", "error"))
+		for _, status := range runStatuses {
+			telemetry.SeedCounter(ctx, t.projectionRuns, view, attribute.String("status", status))
+		}
 		telemetry.SeedCounter(ctx, t.rowsChanged, view)
 	}
 	return t, nil

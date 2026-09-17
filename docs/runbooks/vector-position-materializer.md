@@ -7,7 +7,8 @@ pre-flight checks, then the shared `materialize_position_projection` validates t
 observations it has not already stored.
 
 Configuration: `POSITION_PROJECTIONS` (comma-separated `materialize_<projection>` function names —
-explicit, never discovery), `MATERIALIZE_INTERVAL` (default `1h`), `DATABASE_URL`.
+explicit, never discovery), `MATERIALIZE_INTERVAL` (default `1h`), `MATERIALIZE_SCHEDULE_OFFSET` (`40m` in
+both overlays, off the hour the validators and indexers share), `DATABASE_URL`.
 
 Two properties make almost every incident low-risk:
 
@@ -16,9 +17,14 @@ Two properties make almost every incident low-risk:
 - **Nothing is ever overwritten.** `position_state` has no update channel, so a bad run cannot corrupt
   stored history. The worst outcome is missing rows, not wrong ones.
 
-Generic run failures, restarts and duration are covered by the shared cronjob alerts in
-`vector-cronjobs.yaml` under `service_name="position-materializer"`; only the two alerts below are
-specific to this service.
+The shared cronjob alerts in `vector-cronjobs.yaml` read `cronjob_runs_total`, which the Temporal
+adapter records for the whole run: they cover a failing run (`VectorCronjobRunFailing`,
+`VectorCronjobAllRunsFailing`, under `service_name="position-materializer"`) and a worker with no available
+replica (`VectorCronjobWorkerDown`). No alert reads run duration or container restarts, so a crash-looping
+pod may surface as `VectorCronjobWorkerDown` only while it stays unavailable. The five alerts below read
+this service's own `position_materializer_*` metrics. A run cut short by a rollout is recorded as
+`status="canceled"` on both counters, so neither the shared failure alerts nor `ViewFailing` fire on it;
+`ViewNotCompleting` fires when a view is cancelled with no completed run for 3 hours.
 
 The alerts label a projection two ways: `VectorPositionMaterializerViewFailing` carries the function
 (`materializer="materialize_morpho_market"`), `VectorPositionMaterializerWithholdingPositions` the view
@@ -26,7 +32,12 @@ The alerts label a projection two ways: `VectorPositionMaterializerViewFailing` 
 
 ## Before the first run
 
-The deployment ships at `replicas: 0`. Before bumping it to 1:
+The deployment ships at `replicas: 0`, and each environment is switched on separately through the
+`replicas:` entry at the end of its overlay's `kustomization.yaml`. Switch staging on first and let it soak
+before prod. The first run appends the whole history into `position_state`, which has no
+update or delete channel, so a wrong bootstrap cannot be rolled back without a superuser.
+
+Before bumping an environment to 1:
 
 1. Every entry in `POSITION_PROJECTIONS` exists in the target database. The worker checks this at
    startup and exits naming the ones it cannot call; `materialize_morpho_market` and
@@ -48,6 +59,20 @@ The deployment ships at `replicas: 0`. Before bumping it to 1:
 3. Confirm no schedule exists yet (`temporal schedule describe --schedule-id position-materializer`).
    A schedule keeps the activity timeouts it was created with, and a redeploy updates only its
    interval, so changing the timeouts later means deleting the schedule and letting the worker recreate it.
+4. Run the bootstrap by hand, with the deployment still at 0, so it is not bound by the schedule's
+   activity timeouts:
+   - Pick an off-peak window and tell the channel first: the call is one long transaction and trips the
+     long-running-transaction alert.
+   - Use a direct connection, not the pooler.
+   - Snapshot the counts first:
+     `SELECT projection, count(*) FROM position_state GROUP BY projection;` and
+     `SELECT count(*) FROM position_projection_run;`.
+   - Call each wrapper in `POSITION_PROJECTIONS` in turn, for example `SELECT materialize_morpho_market(0);`.
+     Rows written this way carry `build_id` 0 and a NULL `run_id`, so they read as pre-tracking in the
+     query under "Checking what a run actually did".
+   - While it runs, watch `pg_locks` for ungranted locks and the Tiger logs for `still waiting for ShareLock`.
+   - Afterwards, read the newest `position_projection_run` row per projection and any
+     `position_projection_refusal` rows it wrote, and resolve what they show before bumping replicas.
 
 While a run is longer than `MATERIALIZE_INTERVAL`, the ticks that fall inside it are skipped rather than
 queued; the bootstrap skips several. That is expected, not a stall.
@@ -177,6 +202,23 @@ nothing wrong is ever stored.
 
 **Resolution.** Fix the view, then let the next run proceed. Because the append is idempotent, the
 recovered run writes exactly the observations the failed runs missed.
+
+---
+
+## VectorPositionMaterializerViewNotCompleting
+
+**What it means.** One projection was cancelled at least once in the last 3 hours and completed no run in
+that time. A cancelled run is recorded as `status="canceled"`, which `ViewFailing` and the shared failure
+alerts ignore, so without this rule a view that never finishes would fire nothing while appending nothing.
+
+**Triage, in order.**
+
+1. Check whether rollouts landed on every tick: a deploy stream faster than one run cancels each run in turn.
+   It clears once deploys pause for longer than a run.
+2. Check the run duration in the pod logs (`projection materialized` carries `duration`) and the Temporal UI.
+   A run longer than the activity's StartToClose, or one that stops heartbeating, is cancelled by Temporal.
+3. If a single view's read has grown, time it by hand as in "Before the first run" and raise
+   `MATERIALIZE_INTERVAL` or bound the read (VEC-566).
 
 ---
 

@@ -173,14 +173,14 @@ func TestRunOnce_ParentCancellationAborts(t *testing.T) {
 
 func TestTelemetry_NilSafeAndConstructible(t *testing.T) {
 	var nilT *Telemetry
-	nilT.RecordRun(context.Background(), "v", "ok", 5) // must not panic
+	nilT.RecordRun(context.Background(), "v", statusOK, 5) // must not panic
 
 	tel, err := NewTelemetry(nil) // global provider is a no-op meter in tests
 	if err != nil {
 		t.Fatalf("NewTelemetry: %v", err)
 	}
-	tel.RecordRun(context.Background(), "v", "ok", 5)
-	tel.RecordRun(context.Background(), "v", "error", 0)
+	tel.RecordRun(context.Background(), "v", statusOK, 5)
+	tel.RecordRun(context.Background(), "v", statusError, 0)
 }
 
 // The withheld level is read for this process's writer run only. Read across every run, a projection

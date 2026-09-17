@@ -799,6 +799,40 @@ groups:
             this one did not.
           runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerviewfailing"
 
+      - alert: VectorPositionMaterializerViewNotCompleting
+        # A cancelled projection is recorded as status="canceled", which ViewFailing and the
+        # shared failure alerts ignore so a rollout does not fire them. A view cancelled on
+        # every tick for 3h (runs longer than the rollout cadence, or cancelled by Temporal)
+        # would then fire nothing, so this catches cancellations with no completed run.
+        # The ok series is seeded at 0, so `unless` keeps the alert when none completed.
+        expr: |
+          sum by (materializer, cluster) (
+            increase(position_materializer_projection_runs_total{
+              status="canceled",
+              k8s_namespace_name="vector"
+            }[3h])
+          ) > 0
+          unless
+          sum by (materializer, cluster) (
+            increase(position_materializer_projection_runs_total{
+              status="ok",
+              k8s_namespace_name="vector"
+            }[3h])
+          ) > 0
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "position-materializer view {{ $labels.materializer }} is not completing"
+          description: >-
+            Projection {{ $labels.materializer }} on {{ $labels.cluster }} was cancelled at
+            least once in 3h and completed no run. It appends nothing while no failure alert
+            fires.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerviewnotcompleting"
+
       - alert: VectorPositionMaterializerCacheTableGrowthHigh
         # position_current is a PLAIN table (db/migrations/AGENTS.md, "create
         # every table plain; convert on measured need"), and any further

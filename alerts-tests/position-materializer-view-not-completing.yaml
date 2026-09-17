@@ -1,0 +1,55 @@
+# Unit tests for VectorPositionMaterializerViewNotCompleting: a view cancelled on every tick
+# completes nothing while ViewFailing (status="error") stays quiet. Counters are seeded at 0,
+# ticks are hourly, and the rule reads a 3h window.
+rule_files:
+  - ../alerts/vector-cronjobs.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: "cancelled every tick, never completes: fires"
+    interval: 1m
+    input_series:
+      - series: 'position_materializer_projection_runs_total{k8s_namespace_name="vector", cluster="c1", materializer="materialize_morpho_vault", status="canceled"}'
+        values: '0x59 1x60 2x60 3x60'
+      - series: 'position_materializer_projection_runs_total{k8s_namespace_name="vector", cluster="c1", materializer="materialize_morpho_vault", status="ok"}'
+        values: '0x239'
+    alert_rule_test:
+      - eval_time: 3h59m
+        alertname: VectorPositionMaterializerViewNotCompleting
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "position-materializer"
+              materializer: "materialize_morpho_vault"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations:
+              summary: "position-materializer view materialize_morpho_vault is not completing"
+              description: "Projection materialize_morpho_vault on c1 was cancelled at least once in 3h and completed no run. It appends nothing while no failure alert fires."
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerviewnotcompleting"
+
+  - name: "one cancellation from a rollout, then completed runs: quiet"
+    interval: 1m
+    input_series:
+      - series: 'position_materializer_projection_runs_total{k8s_namespace_name="vector", cluster="c1", materializer="materialize_morpho_vault", status="canceled"}'
+        values: '0x59 1x180'
+      - series: 'position_materializer_projection_runs_total{k8s_namespace_name="vector", cluster="c1", materializer="materialize_morpho_vault", status="ok"}'
+        values: '0x119 1x60 2x60'
+    alert_rule_test:
+      - eval_time: 3h59m
+        alertname: VectorPositionMaterializerViewNotCompleting
+        exp_alerts: []
+
+  - name: "healthy, never cancelled: quiet"
+    interval: 1m
+    input_series:
+      - series: 'position_materializer_projection_runs_total{k8s_namespace_name="vector", cluster="c1", materializer="materialize_morpho_vault", status="canceled"}'
+        values: '0x239'
+      - series: 'position_materializer_projection_runs_total{k8s_namespace_name="vector", cluster="c1", materializer="materialize_morpho_vault", status="ok"}'
+        values: '0+1x239'
+    alert_rule_test:
+      - eval_time: 3h59m
+        alertname: VectorPositionMaterializerViewNotCompleting
+        exp_alerts: []

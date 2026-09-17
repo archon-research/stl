@@ -86,6 +86,16 @@ func (s *Service) CheckConfigured(ctx context.Context) error {
 	return nil
 }
 
+// runStatus classifies a failed projection. Only the parent's cancellation is canceled; a deadline,
+// the parent's or the projection's own, is an error. It reads ctx, not the error, as the Temporal
+// adapter's runStatusAttr does, so a failure that coincides with a rollout also counts as canceled.
+func runStatus(ctx context.Context) string {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return statusCanceled
+	}
+	return statusError
+}
+
 // RunOnce runs every configured projection materializer once, sequentially.
 //
 // Sequential is load-bearing, not a simplification: the shared function's
@@ -111,13 +121,13 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		changed, err := s.materializer.Materialize(ctx, m, s.buildID, s.runID)
 		if err != nil {
 			s.logger.Error("projection materialization failed", "materializer", m, "error", err)
-			s.telemetry.RecordRun(ctx, m, "error", 0)
+			s.telemetry.RecordRun(ctx, m, runStatus(ctx), 0)
 			errs = append(errs, fmt.Errorf("materializer %s: %w", m, err))
 			continue
 		}
 		s.logger.Info("projection materialized",
 			"materializer", m, "rows_changed", changed, "duration", time.Since(start))
-		s.telemetry.RecordRun(ctx, m, "ok", changed)
+		s.telemetry.RecordRun(ctx, m, statusOK, changed)
 	}
 	// Both reads are skipped on a cancelled context: the loop above has already recorded the abort,
 	// and a shutdown mid-run would otherwise log a spurious read failure on every deploy.
