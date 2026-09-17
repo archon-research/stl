@@ -20,9 +20,7 @@ export type TimeRangeSelection = {
   rangePreset: RangePreset;
   timeRange: TimeRange;
   onRangeChange: (preset: RangePreset, range: TimeRange) => void;
-  // Named apart from `onRangeChange` rather than given a third argument: a
-  // drag is a different event than a picker choice, and it pushes instead of
-  // replacing (see the implementation below).
+  /** Commits a range brushed on a chart. See its history note below. */
   onCustomRangeSelect: (range: TimeRange) => void;
 };
 
