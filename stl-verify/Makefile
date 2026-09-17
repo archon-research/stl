@@ -418,7 +418,9 @@ e2e-real-reserve-facts:
 # Install development tools
 tools:
 	@echo "==> Installing development tools..."
-	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 # keep in sync with .github/workflows/go-ci.yml
+	# v2.13.0+ is built with Go 1.27; v2.12.x was built with Go 1.26 and
+	# panics on Go 1.27 stdlib type-checking.
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 # keep in sync with .github/workflows/go-ci.yml
 	go install golang.org/x/vuln/cmd/govulncheck@latest
 	go install golang.org/x/tools/cmd/goimports@v0.49.0 # keep in sync with .github/workflows/go-ci.yml
 	go install github.com/go-delve/delve/cmd/dlv@latest

@@ -3,7 +3,7 @@
 # One run covers what used to be four separate CI passes: govet (go vet),
 # staticcheck (SA/S/ST/QF — the v1 staticcheck+gosimple+stylecheck split),
 # unused, and modernize (the same x/tools analyzers `go fix -diff` runs on
-# Go 1.26). The exclusion presets restore the v1 default exclusions that the
+# Go 1.27). The exclusion presets restore the v1 default exclusions that the
 # no-config v1 setup relied on (e.g. errcheck on deferred Close).
 version: "2"
 linters:
@@ -24,6 +24,13 @@ linters:
       lines: 80
       statements: 60
       ignore-comments: false
+    modernize:
+      # New in golangci-lint v2.13.x, which Go 1.27 requires. Disabled
+      # because they flag ~20 pre-existing call sites; modernizing those is
+      # its own task.
+      disable:
+        - errorsastype
+        - reflecttypeassert
     # Hexagonal layering from AGENTS.md ("dependencies flow inward"), enforced
     # on direct imports: domain -> nothing internal; ports -> domain;
     # services -> ports + domain. Adapters are wired in cmd/, so only cmd/ and
