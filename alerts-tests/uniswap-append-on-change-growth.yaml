@@ -151,3 +151,27 @@ tests:
       - eval_time: 12h
         alertname: VectorUniswapV4AppendOnChangeGrowthHigh
         exp_alerts: []
+
+  # The discriminating multi-chain case: one term reporting, the other absent, on
+  # a fleet whose only V4 Deployment is a prefixed one. The zero-fill has to match
+  # that Deployment or the addition has no series on its right-hand side and the
+  # whole rule goes silent while the table grows. Against a mainnet-only
+  # `deployment="uniswap-v4-indexer"` selector this case does not fire.
+  - name: "v4: a second chain's Deployment zero-fills the term its counter is missing"
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{deployment="base-uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x720'
+      - series: 'uniswap_v4_tick_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="base"}'
+        values: '0+180x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV4AppendOnChangeGrowthHigh
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: *v4_growth

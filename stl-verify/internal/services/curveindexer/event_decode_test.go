@@ -24,17 +24,25 @@ func newStableswapHandlerForTest(t *testing.T) (*StableswapHandler, *abi.ABI) {
 	return NewStableswapHandler(a), a
 }
 
+// fixedCalcTokenAmount and dynCalcTokenAmount are the two curated
+// calc_token_amount argument shapes; every pool seeded before ARCT-384 takes the
+// fixed one.
+func fixedCalcTokenAmount() *bool { b := false; return &b }
+func dynCalcTokenAmount() *bool   { b := true; return &b }
+
 // stableswapPoolPreNG and stableswapPoolNG are fixture pools for decode tests.
 // Both model real pools (stETH classic pre-NG, stETH-ng) that expose A_precise, so
 // HasAPrecise=true and the snapshot issues the gated A_precise call.
 func stableswapPoolPreNG() RegisteredPool {
 	return RegisteredPool{
-		ID:           1,
-		Address:      common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
-		Kind:         KindStableswapPreNG,
-		NCoins:       2,
-		CoinDecimals: []int{18, 18},
-		HasAPrecise:  true,
+		ID:                      1,
+		Address:                 common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
+		Kind:                    KindStableswapPreNG,
+		NCoins:                  2,
+		CoinDecimals:            []int{18, 18},
+		HasAPrecise:             true,
+		CalcTokenAmountDynArray: fixedCalcTokenAmount(),
+		HasFutureFee:            true,
 	}
 }
 
@@ -46,6 +54,10 @@ func stableswapPoolNG() RegisteredPool {
 		NCoins:       2,
 		CoinDecimals: []int{18, 18},
 		HasAPrecise:  true,
+		// stETH-ng answers all five no-arg oracle getters on chain.
+		HasNoArgOracleGetters:   true,
+		CalcTokenAmountDynArray: fixedCalcTokenAmount(),
+		HasFutureFee:            true,
 	}
 }
 

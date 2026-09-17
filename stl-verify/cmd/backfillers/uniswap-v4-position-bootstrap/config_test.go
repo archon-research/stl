@@ -4,10 +4,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4bootstrap"
 )
 
-const mainnetRPCURL = "https://eth-mainnet.g.alchemy.com/v2"
+const (
+	mainnetRPCURL = "https://eth-mainnet.g.alchemy.com/v2"
+	baseRPCURL    = "https://base-mainnet.g.alchemy.com/v2"
+)
 
 func TestLoadConfig(t *testing.T) {
 	// The complete valid environment; each case overrides one key, and an empty
@@ -79,6 +83,19 @@ func TestLoadConfig(t *testing.T) {
 			wantErrContains: "ALCHEMY_HTTP_URL",
 		},
 		{
+			name:            "an off-mainnet chain has no default finality depth",
+			override:        map[string]string{"CHAIN_ID": "8453", "ALCHEMY_HTTP_URL": baseRPCURL},
+			wantErrContains: "finality depth",
+		},
+		{
+			name:     "an off-mainnet chain takes its finality depth from the environment",
+			override: map[string]string{"CHAIN_ID": "8453", "ALCHEMY_HTTP_URL": baseRPCURL, "FINALITY_DEPTH": "200"},
+			want: config{
+				rpcURL:    baseRPCURL + "/test-key",
+				bootstrap: uniswapv4bootstrap.Config{ChainID: 8453, FinalityDepth: 200},
+			},
+		},
+		{
 			name:            "an unparseable knob is refused rather than defaulted",
 			override:        map[string]string{"MAX_WINDOW": "lots"},
 			wantErrContains: "MAX_WINDOW",
@@ -118,5 +135,33 @@ func setEnv(t *testing.T, base, override map[string]string) {
 	}
 	for key, value := range override {
 		t.Setenv(key, value)
+	}
+}
+
+// A run pins the worker's own chain, so each chain polls its own queue: bare on
+// mainnet (the deployed name), prefixed with the chain's slug everywhere else.
+// Only this worker's base name is pinned here; the rule itself, every chain's
+// slug and the error cases live with chainutil.TaskQueueName.
+func TestTaskQueueName(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		chainID string
+		want    string
+	}{
+		{name: "mainnet keeps the deployed name", chainID: "1", want: "uniswap-v4-position-bootstrap"},
+		{name: "every other chain is prefixed", chainID: "8453", want: "base-uniswap-v4-position-bootstrap"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CHAIN_ID", tc.chainID)
+
+			got, err := chainutil.TaskQueueName(queueBaseName)
+
+			if err != nil {
+				t.Fatalf("TaskQueueName error = %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("TaskQueueName = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

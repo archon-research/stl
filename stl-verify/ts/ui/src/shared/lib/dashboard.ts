@@ -120,7 +120,6 @@ export type PrimeGroup = {
   vaultAddress: string | null;
   primaryProxyAddress: string;
   proxyAddresses: string[];
-  chainCount: number;
 };
 
 // A prime allocates through one ALM proxy per chain, so `/v1/primes` returns
@@ -171,7 +170,6 @@ export function groupPrimesByVault(primes: Prime[]): PrimeGroup[] {
       // — `getAllocationKey` gives the copies identical keys, so nothing
       // downstream would catch it.
       proxyAddresses: [...new Set(sortedByAddress.map((row) => row.address))],
-      chainCount: new Set(rows.map((row) => row.chain_id)).size,
     };
   });
 }
@@ -206,58 +204,44 @@ export function findPrimeGroup(
   );
 }
 
-function getProtocolMatchScore(
+function isProtocolNamed(
   protocol: string,
   localProtocol: LocalProtocolRow,
-  chainId?: number | null,
-): number {
+): boolean {
   const normalizedProtocol = normalizeLabel(protocol);
   const normalizedName = normalizeLabel(localProtocol.name);
-  let score = 0;
 
-  if (chainId !== undefined && localProtocol.chain_id === chainId) {
-    score += 3;
-  }
-
-  if (normalizedName === normalizedProtocol) {
-    score += 10;
-  }
-
-  if (
-    normalizedName.includes(normalizedProtocol) ||
-    normalizedProtocol.includes(normalizedName)
-  ) {
-    score += 6;
-  }
-
-  if (
+  return (
+    normalizedName === normalizedProtocol ||
     (normalizedProtocol === 'spark' && normalizedName === 'sparklend') ||
     (normalizedProtocol === 'morpho' && normalizedName === 'morphoblue')
-  ) {
-    score += 8;
-  }
-
-  return score;
+  );
 }
 
+/**
+ * The registry row a protocol is named for, or `null` if none is.
+ *
+ * `protocol_name` is Sky's reference vocabulary — `psm3`, `anchorage`,
+ * `uniswap`, `pyusd` — and much of it names nothing in the registry, so the
+ * match is strict enough to say so: `Aave V2` and `Aave V3` are two protocols,
+ * not two spellings of `aave`. `getProtocolLabel` labels what comes back empty.
+ *
+ * `chainId` chooses between rows sharing a name, one per chain.
+ */
 export function findProtocolMetadata(
   protocol: string,
   localProtocols?: LocalProtocolRow[],
   chainId?: number,
 ): LocalProtocolRow | null {
-  if (!localProtocols || localProtocols.length === 0) {
-    return null;
-  }
+  const named = (localProtocols ?? []).filter((localProtocol) =>
+    isProtocolNamed(protocol, localProtocol),
+  );
 
-  const matches = localProtocols
-    .map((localProtocol) => ({
-      localProtocol,
-      score: getProtocolMatchScore(protocol, localProtocol, chainId),
-    }))
-    .filter((candidate) => candidate.score > 0)
-    .sort((left, right) => right.score - left.score);
-
-  return matches[0]?.localProtocol ?? null;
+  return (
+    named.find((localProtocol) => localProtocol.chain_id === chainId) ??
+    named[0] ??
+    null
+  );
 }
 
 // chain_id 0 is the off-chain sentinel (e.g. Anchorage BTC custody), which has

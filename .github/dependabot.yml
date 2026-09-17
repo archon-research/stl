@@ -16,7 +16,7 @@ updates:
       # uikit versions move only through deliberate adoption PRs, never bot PRs
       - dependency-name: "@archon-research/*"
   # Base images are pinned by digest (VEC-783), so a published patch is a visible,
-  # reviewable PR. Covers Dockerfile.common and Dockerfile.migrate in one entry.
+  # reviewable PR.
   - package-ecosystem: "docker"
     directory: "/stl-verify"
     schedule:

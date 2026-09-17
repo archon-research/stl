@@ -33,15 +33,19 @@ func coinIndexOrError(field string, v *big.Int, nCoins int) (int, error) {
 	return int(v.Int64()), nil
 }
 
-// packCalcTokenAmount packs calc_token_amount(uint256[N], bool). The on-chain
-// signature takes a fixed-size array, so the selector depends on N; go-ethereum's
-// abi.ABI.Pack of a dynamic uint256[] would compute the wrong selector. We build
-// the selector and the uint256[N] argument type by N instead. Arguments.Pack
-// accepts the []*big.Int slice directly for a uint256[N] arg (it length-checks
-// against N), so no fixed-array conversion is needed.
-func packCalcTokenAmount(amounts []*big.Int, isDeposit bool) ([]byte, error) {
+// packCalcTokenAmount packs calc_token_amount(<array>, bool), where <array> is
+// uint256[N] when dynArray is false and uint256[] when it is. Curve splits on
+// this by implementation -- the pre-NG pools, the cryptoswap pools and the
+// original NG pools take the fixed array, later NG implementations take a
+// DynArray and REVERT on the fixed selector -- and the argument shape cannot be
+// discovered from a return value, so it is curated per pool
+// (curve_pool.calc_token_amount_dyn_array). Both selector and argument type are
+// built here because go-ethereum's abi.ABI.Pack would compute only one of them.
+// Arguments.Pack accepts the []*big.Int slice for either arg type (it
+// length-checks against N for the fixed one), so no array conversion is needed.
+func packCalcTokenAmount(amounts []*big.Int, isDeposit, dynArray bool) ([]byte, error) {
 	n := len(amounts)
-	arrT, err := uint256ArrayType(n)
+	arrT, err := calcTokenAmountArgType(n, dynArray)
 	if err != nil {
 		return nil, fmt.Errorf("calc_token_amount arg type: %w", err)
 	}
@@ -54,11 +58,22 @@ func packCalcTokenAmount(amounts []*big.Int, isDeposit bool) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("packing calc_token_amount args: %w", err)
 	}
-	return append(calcTokenAmountSelector(n), body...), nil
+	return append(calcTokenAmountSelector(n, dynArray), body...), nil
 }
 
-// calcTokenAmountSelector returns the 4-byte selector for calc_token_amount(uint256[N],bool).
-func calcTokenAmountSelector(n int) []byte {
+func calcTokenAmountArgType(n int, dynArray bool) (abi.Type, error) {
+	if dynArray {
+		return abi.NewType("uint256[]", "", nil)
+	}
+	return uint256ArrayType(n)
+}
+
+// calcTokenAmountSelector returns the 4-byte selector for
+// calc_token_amount(uint256[N],bool) or calc_token_amount(uint256[],bool).
+func calcTokenAmountSelector(n int, dynArray bool) []byte {
 	sig := fmt.Sprintf("calc_token_amount(uint256[%d],bool)", n)
+	if dynArray {
+		sig = "calc_token_amount(uint256[],bool)"
+	}
 	return gocrypto.Keccak256([]byte(sig))[:4]
 }

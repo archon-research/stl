@@ -362,20 +362,30 @@ func TestFetchPrimeAllocationsRejectsADuplicateRowIdentityAcrossCasing(t *testin
 	}
 }
 
-// The monitor's own vocabulary is lowercase; a casing difference upstream
-// must still resolve rather than silently reading as an unmapped network.
-func TestFetchPrimeAllocationsMapsChainIDCaseInsensitively(t *testing.T) {
-	client, _ := newTestClient(t, map[string]any{
-		"/primes/spark/allocations/": allocationsPayload(map[string]any{"network": "Ethereum"}),
-	})
+// Upstream's casing is not trustworthy, and a network that fails to resolve is
+// served with a null chain id that reads as a chain of its own on the page.
+func TestFetchPrimeAllocationsMapsNetworkToChainID(t *testing.T) {
+	for _, tc := range []struct {
+		network string
+		want    int64
+	}{
+		{"Ethereum", 1},
+		{"robinhood", 4663},
+	} {
+		t.Run(tc.network, func(t *testing.T) {
+			client, _ := newTestClient(t, map[string]any{
+				"/primes/spark/allocations/": allocationsPayload(map[string]any{"network": tc.network}),
+			})
 
-	rows, err := client.FetchPrimeAllocations(context.Background(), []string{"spark"})
-	if err != nil {
-		t.Fatalf("FetchPrimeAllocations() = %v", err)
-	}
+			rows, err := client.FetchPrimeAllocations(context.Background(), []string{"spark"})
+			if err != nil {
+				t.Fatalf("FetchPrimeAllocations() = %v", err)
+			}
 
-	if rows[0].ChainID == nil || *rows[0].ChainID != 1 {
-		t.Errorf("ChainID = %v, want 1 for network \"Ethereum\"", rows[0].ChainID)
+			if rows[0].ChainID == nil || *rows[0].ChainID != tc.want {
+				t.Errorf("ChainID = %v, want %d for network %q", rows[0].ChainID, tc.want, tc.network)
+			}
+		})
 	}
 }
 

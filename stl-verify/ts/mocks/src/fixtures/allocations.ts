@@ -263,7 +263,7 @@ function sparkAvalancheAllocations(nowMs: number): Allocation[] {
     {
       receipt_token_id: 1302,
       underlying_token_id: 1301,
-      protocol_name: 'Aave V3 Avalanche',
+      protocol_name: 'Aave V3',
       balance: '0.156275',
       amount_usd: '0.156324898675310000',
       latest_activity_amount: '0.000000',
@@ -654,7 +654,7 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
   },
   {
     prime_address: SPARK_AVALANCHE_PROXY,
-    protocol_name: 'Aave V3 Avalanche',
+    protocol_name: 'Aave V3',
     token_id: 1302,
     action_type: 'sweep',
     tx_amount: '0.000000',
