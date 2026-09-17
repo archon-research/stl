@@ -113,36 +113,28 @@ CREATE OR REPLACE FUNCTION materialize_morpho_market_refusals(p_since timestampt
     -- morpho_market_position tiers at one year and a database can set tiered reads off.
     SET timescaledb.enable_tiered_reads = 'on' AS $fn$
 DECLARE
-    v_neg text[] := '{}';
-    v_corrected boolean;
-    r record;
+    v_bad text;
 BEGIN
     -- The loan leg takes abs() of the net, so a negative amount would pass as a plausible exposure. Only an
-    -- uncorrected one refuses; the window bound and each probe's timestamp are literals so they prune chunks.
-    FOR r IN EXECUTE format($q$
-        SELECT p.user_id, p.morpho_market_id, p.block_number, p.block_version, p.processing_version, p.timestamp,
-               format('market %%s on chain %%s user %%s at bn=%%s bv=%%s pv=%%s has a negative source amount: supply=%%s borrow=%%s collateral=%%s',
-                      encode(m.market_id, 'hex'), m.chain_id, encode(u.address, 'hex'), p.block_number,
-                      p.block_version, p.processing_version, p.supply_assets, p.borrow_assets, p.collateral) AS msg
-        FROM public.morpho_market_position p
-        JOIN public.morpho_market m ON m.id = p.morpho_market_id
-        JOIN public."user" u ON u.id = p.user_id
-        WHERE least(p.supply_assets, p.borrow_assets, p.collateral) < 0 %s
-        ORDER BY msg$q$,
+    -- uncorrected one refuses, judged in one pass; the window bound is a literal so it prunes chunks.
+    EXECUTE format($q$
+        SELECT string_agg(msg, '; ' ORDER BY msg) FROM (
+            SELECT format('market %%s on chain %%s user %%s at bn=%%s bv=%%s pv=%%s has a negative source amount: supply=%%s borrow=%%s collateral=%%s',
+                          encode(m.market_id, 'hex'), m.chain_id, encode(u.address, 'hex'), p.block_number,
+                          p.block_version, p.processing_version, p.supply_assets, p.borrow_assets, p.collateral) AS msg
+            FROM public.morpho_market_position p
+            JOIN public.morpho_market m ON m.id = p.morpho_market_id
+            JOIN public."user" u ON u.id = p.user_id
+            WHERE least(p.supply_assets, p.borrow_assets, p.collateral) < 0 %s
+              AND NOT EXISTS (SELECT 1 FROM public.morpho_market_position q
+                               WHERE q.timestamp = p.timestamp AND q.user_id = p.user_id
+                                 AND q.morpho_market_id = p.morpho_market_id AND q.block_number = p.block_number
+                                 AND q.block_version = p.block_version AND q.processing_version > p.processing_version)
+            ORDER BY msg
+            LIMIT 5) z$q$,
         CASE WHEN p_since IS NULL THEN '' ELSE format('AND p.timestamp > %L::timestamptz', p_since) END)
-    LOOP
-        EXECUTE format($q$
-            SELECT EXISTS (SELECT 1 FROM public.morpho_market_position q
-                            WHERE q.timestamp = %L::timestamptz AND q.user_id = $1 AND q.morpho_market_id = $2
-                              AND q.block_number = $3 AND q.block_version = $4 AND q.processing_version > $5)$q$,
-            r.timestamp)
-            INTO v_corrected USING r.user_id, r.morpho_market_id, r.block_number, r.block_version, r.processing_version;
-        IF NOT v_corrected THEN
-            v_neg := v_neg || r.msg;
-            EXIT WHEN cardinality(v_neg) = 5;
-        END IF;
-    END LOOP;
-    RETURN nullif(array_to_string(v_neg, '; '), '');
+        INTO v_bad;
+    RETURN v_bad;
 END
 $fn$;
 

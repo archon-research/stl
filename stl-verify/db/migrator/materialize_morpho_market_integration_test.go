@@ -180,14 +180,19 @@ END $$;`
 // Total 26 over 16 distinct positions: the 12 above plus M-loan-M2, N-loan, O-loan and P-loan. L nets to zero
 // on its first observation, so it has none.
 func morphoMarketProjectionShape(ctx context.Context, t *testing.T, pool *pgxpool.Pool, written int64) {
-	var rows, distinctPositions, collisions, badLen int
+	var rows, distinctPositions, collisions, badLen, nullDealType int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*),
 		       count(DISTINCT position_id),
 		       count(*) - count(DISTINCT (position_id, block_number, block_version, processing_version)),
-		       count(*) FILTER (WHERE octet_length(position_id) <> 32)
-		FROM position_state`).Scan(&rows, &distinctPositions, &collisions, &badLen); err != nil {
+		       count(*) FILTER (WHERE octet_length(position_id) <> 32),
+		       count(*) FILTER (WHERE deal_type IS NULL)
+		FROM position_state`).Scan(&rows, &distinctPositions, &collisions, &badLen, &nullDealType); err != nil {
 		t.Fatalf("position_state summary: %v", err)
+	}
+	// The view emits a NULL deal_type for a leading net-zero loan leg; closure drops it, and none may land.
+	if nullDealType != 0 {
+		t.Errorf("%d stored rows carry a NULL deal_type; want 0", nullDealType)
 	}
 	if rows != 26 {
 		t.Errorf("position_state rows = %d, want 26", rows)
@@ -915,6 +920,32 @@ func TestMaterializeMorphoMarketWithholdsAnEmptyHolderWithoutAbortingTheRun(t *t
 	}
 	if err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(new(int64)); err != nil {
 		t.Fatalf("an empty holder address aborted the run: %v", err)
+	}
+	morphoMarketOthersLanded(ctx, t, pool, "", 0)
+}
+
+// A market that takes a token from another chain but has no positions withholds nothing and records nothing:
+// the check is per pair, so a dormant misconfigured market cannot stop or clutter any run.
+func TestMaterializeMorphoMarketIgnoresADormantMarketWithATokenOnAnotherChain(t *testing.T) {
+	ctx, pool := morphoMarketSeedOnly(t)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO token (chain_id, address, symbol, decimals) VALUES (8453, '\xcafe', 'USDC', 6) ON CONFLICT DO NOTHING;
+		INSERT INTO morpho_market (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, lltv, oracle_address, irm_address, created_at_block)
+		SELECT 1, p.id, '\x9abc', lt.id, ct.id, 0, '\x00', '\x00', 1
+		FROM protocol p, token lt, token ct
+		WHERE p.chain_id = 1 AND p.address = '\xff'
+		  AND lt.chain_id = 8453 AND lt.address = '\xcafe' AND ct.chain_id = 1 AND ct.address = '\xbeef'`); err != nil {
+		t.Fatalf("seed the dormant market: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(new(int64)); err != nil {
+		t.Fatalf("a dormant misconfigured market stopped the run: %v", err)
+	}
+	var recorded int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_projection_refusal WHERE detail LIKE '%market 9abc%'`).Scan(&recorded); err != nil {
+		t.Fatal(err)
+	}
+	if recorded != 0 {
+		t.Errorf("recorded %d refusals for a market with no positions; want 0", recorded)
 	}
 	morphoMarketOthersLanded(ctx, t, pool, "", 0)
 }
