@@ -5,8 +5,8 @@ package migrator_test
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math/rand"
-	"strings"
 	"testing"
 	"time"
 
@@ -15,11 +15,10 @@ import (
 
 // The position stack's invariants, end to end from a FRESH database through the real
 // write path, over randomised histories, and then through a later feed into days that
-// were already crystallized.
+// already have an answer.
 //
 // One database hosts every seed: each seed's holders are namespaced, so the seeds share
-// a spine without sharing positions. That is deliberate — it also makes the crystallizer
-// work over a spine holding other seeds' history, which a database per seed would not.
+// a spine without sharing positions, and the reads run over other seeds' history too.
 //
 // POSITION_DAILY_SEEDS widens the committed set, which is what CI runs; this package
 // builds its own database per fixture and sits close to its per-package timeout.
@@ -33,32 +32,24 @@ func TestPositionDailyStackInvariants(t *testing.T) {
 
 	inv := &stackInvariants{ctx: ctx, t: t, pool: pool}
 
-	// A fresh database, before anything is written. The harness itself is under test
-	// here: the objects must exist, the table must be empty, and a pass over an empty
-	// spine must be a reported no-op rather than an error.
-	t.Run("a fresh database crystallizes to nothing", func(t *testing.T) {
+	t.Run("a fresh database reads nothing", func(t *testing.T) {
 		for _, obj := range []struct{ kind, name string }{
-			{"table", "position_daily_observation"},
 			{"view", "position_daily"},
 			{"function", "position_daily_as_of"},
-			{"procedure", "crystallize_position_daily"},
+			{"function", "position_daily_on"},
 		} {
 			if !inv.objectExists(obj.kind, obj.name) {
 				t.Errorf("a freshly migrated database has no %s %s", obj.kind, obj.name)
 			}
 		}
-		if n := inv.rowCount(); n != 0 {
-			t.Errorf("a freshly migrated database already holds %d row(s)", n)
-		}
-		if wrote := inv.crystallize(); wrote != 0 {
-			t.Errorf("a pass over an empty spine wrote %d row(s), want 0", wrote)
+		if n := inv.readingCount(); n != 0 {
+			t.Errorf("a freshly migrated database already reads %d row(s)", n)
 		}
 		inv.assertAll(t, "empty spine")
 	})
 
-	// Randomised histories through materialize_position_projection, in random batch
-	// order, with a pass part-way through so the crystallizer meets a spine that is
-	// still growing rather than only a finished one.
+	// Randomised histories through materialize_position_projection, in random batch order,
+	// with the invariants checked part-way through so they meet a spine that is still growing.
 	rng := rand.New(rand.NewSource(int64(multiplier)))
 	for seed := 1; seed <= seeds; seed++ {
 		t.Run(fmt.Sprintf("seed-%02d", seed), func(t *testing.T) {
@@ -67,45 +58,34 @@ func TestPositionDailyStackInvariants(t *testing.T) {
 			view := fmt.Sprintf("pv_inv_%d", seed)
 
 			var arrived []obsRow
-			batches := splitBatches(r, rows)
-			for bi, batch := range batches {
+			for bi, batch := range splitBatches(r, rows) {
 				arrived = append(arrived, batch...)
 				inv.materialize(view, arrived, bi)
 				if r.Intn(2) == 0 {
-					inv.crystallize()
+					inv.assertAll(t, fmt.Sprintf("seed %d batch %d", seed, bi))
 				}
 			}
-			inv.crystallize()
 			inv.assertAll(t, fmt.Sprintf("seed %d", seed))
 		})
 	}
 
-	// TODAY. The generated histories are all in the past, so without this the
-	// "current day is never crystallized" invariant would pass on an empty set. This
-	// also pins the operational split the two caches have: the open day belongs to
-	// position_current, and position_daily does not carry it until it closes.
-	var openDay []byte
-	t.Run("the open day reaches position_current and not position_daily", func(t *testing.T) {
+	// TODAY. The generated histories are all in the past, so without this the current
+	// date is never read. There is no settling step: both reads carry it at once.
+	t.Run("the open day reaches position_current and position_daily", func(t *testing.T) {
 		today := inv.openDayObservation()
-		if n := inv.crystallize(); n != 0 {
-			t.Errorf("an observation on the open day crystallized %d row(s), want 0", n)
-		}
-		var inCurrent, inDaily int
+		var inCurrent, inDaily, inOn int
 		if err := inv.pool.QueryRow(inv.ctx, `
 			SELECT (SELECT count(*) FROM position_current WHERE position_id = $1),
-			       (SELECT count(*) FROM position_daily WHERE position_id = $1)`, today).
-			Scan(&inCurrent, &inDaily); err != nil {
+			       (SELECT count(*) FROM position_daily WHERE position_id = $1),
+			       (SELECT count(*) FROM position_daily_on((now() AT TIME ZONE 'utc')::date) WHERE position_id = $1)`, today).
+			Scan(&inCurrent, &inDaily, &inOn); err != nil {
 			t.Fatal(err)
 		}
-		if inCurrent != 1 {
-			t.Errorf("position_current holds %d row(s) for a position observed today, want 1", inCurrent)
+		if inCurrent != 1 || inDaily != 1 || inOn != 1 {
+			t.Errorf("a position observed today has %d row(s) in position_current, %d in position_daily and %d in "+
+				"position_daily_on(today); want 1 each", inCurrent, inDaily, inOn)
 		}
-		if inDaily != 0 {
-			t.Errorf("position_daily holds %d row(s) for a day that has not closed, want 0", inDaily)
-		}
-		// The widening control runs last: it writes today's row, which every later
-		// invariant would then read as the settling window having failed.
-		openDay = today
+		inv.assertAll(t, "after the open day")
 	})
 
 	// Everything the stack has said so far, pinned. The later feed below must not
@@ -115,35 +95,19 @@ func TestPositionDailyStackInvariants(t *testing.T) {
 	if len(pinned) == 0 {
 		t.Fatal("no answers were recorded before the later feed; the phases below would prove nothing")
 	}
-	before := inv.rowImages()
+	latestBefore := inv.readAsOf(inv.dbNow())
 
-	// THE LATER FEED. Four shapes arrive into days that are already crystallized: a
+	// THE LATER FEED. Four shapes arrive into days that already have an answer: a
 	// correction to the winner, a reorg of its block, a higher block on the same day,
 	// and an older block that must lose. Each is a legal spine append.
-	t.Run("a later feed into settled days", func(t *testing.T) {
-		fed := inv.feedLate(rng)
-		if fed == 0 {
+	t.Run("a later feed into answered days", func(t *testing.T) {
+		if fed := inv.feedLate(rng); fed == 0 {
 			t.Fatal("the later feed appended nothing, so this case is vacuous")
 		}
-		wrote := inv.crystallize()
-		if wrote == 0 {
+		if latest := inv.readAsOf(inv.dbNow()); maps.Equal(latest, latestBefore) {
 			t.Error("the later feed changed no day's answer; the corrections it appends are newer by construction")
 		}
 		inv.assertAll(t, "after the later feed")
-	})
-
-	t.Run("nothing already written was touched", func(t *testing.T) {
-		after := inv.rowImages()
-		for key, img := range before {
-			got, ok := after[key]
-			if !ok {
-				t.Errorf("the row at %s is gone after the later feed; rows are never removed", key)
-				continue
-			}
-			if got != img {
-				t.Errorf("the row at %s changed after the later feed:\n  before %s\n  after  %s", key, img, got)
-			}
-		}
 	})
 
 	t.Run("every earlier answer is still reproducible", func(t *testing.T) {
@@ -155,37 +119,6 @@ func TestPositionDailyStackInvariants(t *testing.T) {
 			if got := again[key]; got != want {
 				t.Errorf("the answer for %s read %q at the pinned time and %q now", key, want, got)
 			}
-		}
-	})
-
-	t.Run("a further pass is a no-op", func(t *testing.T) {
-		digest := inv.digest()
-		if wrote := inv.crystallize(); wrote != 0 {
-			t.Errorf("a pass with nothing to do wrote %d row(s), want 0", wrote)
-		}
-		if inv.digest() != digest {
-			t.Error("a pass with nothing to do changed the table")
-		}
-		inv.assertAll(t, "after a no-op pass")
-	})
-
-	// The control for the open-day case, run last because it deliberately writes
-	// today's row: the day is absent because it has not settled, not because the
-	// position never reached the spine.
-	t.Run("the open day lands once the window is widened", func(t *testing.T) {
-		if openDay == nil {
-			t.Skip("the open-day phase did not run")
-		}
-		if _, err := inv.pool.Exec(inv.ctx, `CALL crystallize_position_daily(interval '-2 days')`); err != nil {
-			t.Fatal(err)
-		}
-		var inDaily int
-		if err := inv.pool.QueryRow(inv.ctx,
-			`SELECT count(*) FROM position_daily WHERE position_id = $1`, openDay).Scan(&inDaily); err != nil {
-			t.Fatal(err)
-		}
-		if inDaily != 1 {
-			t.Errorf("with the window widened, position_daily holds %d row(s) for today, want 1", inDaily)
 		}
 	})
 }
@@ -229,16 +162,6 @@ func (s *stackInvariants) objectExists(kind, name string) bool {
 	return n > 0
 }
 
-func (s *stackInvariants) crystallize() int64 {
-	s.t.Helper()
-	var wrote int64
-	if err := s.pool.QueryRow(s.ctx,
-		`CALL crystallize_position_daily(interval '1 hour', NULL)`).Scan(&wrote); err != nil {
-		s.t.Fatalf("crystallize: %v", err)
-	}
-	return wrote
-}
-
 func (s *stackInvariants) materialize(view string, rows []obsRow, batch int) {
 	s.t.Helper()
 	if _, err := s.pool.Exec(s.ctx, `CREATE OR REPLACE VIEW `+view+` AS `+valuesBody(rows)); err != nil {
@@ -250,7 +173,7 @@ func (s *stackInvariants) materialize(view string, rows []obsRow, batch int) {
 	}
 }
 
-// feedLate appends, for a sample of already-crystallized days, observations that a
+// feedLate appends, for a sample of days that already have an answer, observations that a
 // running system really produces after a day has closed: a correction at a higher
 // processing_version, a reorg at a higher block_version, a higher block on the same
 // day, and an older block that must lose. Written straight to the spine, because the
@@ -262,7 +185,7 @@ func (s *stackInvariants) feedLate(rng *rand.Rand) int {
 		       block_number, block_version, processing_version, block_timestamp
 		  FROM position_daily ORDER BY position_id, as_of_date`)
 	if err != nil {
-		s.t.Fatalf("read the crystallized days: %v", err)
+		s.t.Fatalf("read the answered days: %v", err)
 	}
 	type day struct {
 		id           []byte
@@ -344,9 +267,8 @@ func (s *stackInvariants) assertAll(t *testing.T, phase string) {
 		name string
 		run  func() string
 	}{
-		{"position_daily equals the spine argmax per (position, settled UTC date)", s.viewEqualsSpineArgmax},
-		{"every stored row is a real spine observation", s.noInventedRows},
-		{"the current UTC day is never crystallized", s.currentDayAbsent},
+		{"position_daily equals the spine argmax per (position, UTC date)", s.viewEqualsSpineArgmax},
+		{"position_daily_on over every observed date equals position_daily", s.onEqualsView},
 		{"position_current still equals the spine argmax per position", s.currentEqualsSpineArgmax},
 		{"position_current agrees with position_daily's newest settled day", s.cachesAgree},
 		{"as_of is monotone: an earlier bound returns a subset", s.asOfIsMonotone},
@@ -358,7 +280,7 @@ func (s *stackInvariants) assertAll(t *testing.T, phase string) {
 }
 
 // The oracle is a window function over position_state, computed independently of the
-// procedure's DISTINCT ON, and bounded by the same settled horizon.
+// reads' DISTINCT ON.
 func (s *stackInvariants) viewEqualsSpineArgmax() string {
 	return s.diff(`
 		WITH ranked AS (
@@ -368,9 +290,7 @@ func (s *stackInvariants) viewEqualsSpineArgmax() string {
 		         row_number() OVER (PARTITION BY position_id, (block_timestamp AT TIME ZONE 'utc')::date
 		           ORDER BY block_number DESC, block_version DESC, processing_version DESC,
 		                    block_timestamp DESC) rn
-		    FROM position_state
-		   WHERE (block_timestamp AT TIME ZONE 'utc')::date
-		         <= ((now() - interval '1 hour') AT TIME ZONE 'utc')::date - 1),
+		    FROM position_state),
 		     oracle AS (SELECT position_id, as_of_date, quantity, block_number, block_version,
 		                       processing_version, block_timestamp, deal_type, holder_id, instrument_key
 		                  FROM ranked WHERE rn = 1),
@@ -383,25 +303,23 @@ func (s *stackInvariants) viewEqualsSpineArgmax() string {
 		"the spine implies", "the view holds that the spine does not")
 }
 
-func (s *stackInvariants) noInventedRows() string {
-	return s.count(`
-		SELECT count(*) FROM position_daily_observation d
-		 WHERE NOT EXISTS (SELECT 1 FROM position_state p
-		                    WHERE (p.position_id, p.block_number, p.block_version,
-		                           p.processing_version, p.block_timestamp)
-		                        = (d.position_id, d.block_number, d.block_version,
-		                           d.processing_version, d.block_timestamp))`,
-		"stored row(s) have no position_state observation at their coordinate")
+// The one-date read, applied to every observed date, is the all-dates view, row for row.
+func (s *stackInvariants) onEqualsView() string {
+	const cols = `position_id, as_of_date, quantity, block_number, block_version, processing_version,
+	              block_timestamp, deal_type, holder_id, instrument_key, projection, build_id, run_id, created_at`
+	return s.diff(`
+		WITH on_every_date AS (
+		  SELECT `+cols+` FROM (SELECT DISTINCT (block_timestamp AT TIME ZONE 'utc')::date AS d FROM position_state) dates
+		   CROSS JOIN LATERAL position_daily_on(dates.d)),
+		     daily AS (SELECT `+cols+` FROM position_daily)
+		SELECT (SELECT count(*) FROM (SELECT * FROM daily EXCEPT ALL SELECT * FROM on_every_date) a),
+		       (SELECT count(*) FROM (SELECT * FROM on_every_date EXCEPT ALL SELECT * FROM daily) b),
+		       COALESCE((SELECT a::text FROM (SELECT * FROM daily EXCEPT ALL SELECT * FROM on_every_date) a LIMIT 1), '')`,
+		"the view holds", "position_daily_on holds that the view does not")
 }
 
-func (s *stackInvariants) currentDayAbsent() string {
-	return s.count(
-		`SELECT count(*) FROM position_daily_observation WHERE as_of_date >= (now() AT TIME ZONE 'utc')::date`,
-		"row(s) carry today's or a future UTC date; only settled days are written")
-}
-
-// position_current is not this PR's table, but the crystallizer reads the same spine
-// through the same ordering, so a change that broke one would likely break both.
+// position_current is not this PR's table, but it reads the same spine through the
+// same ordering, so a change that broke one would likely break both.
 func (s *stackInvariants) currentEqualsSpineArgmax() string {
 	return s.diff(`
 		WITH ranked AS (
@@ -421,9 +339,7 @@ func (s *stackInvariants) currentEqualsSpineArgmax() string {
 		"the spine implies", "position_current holds that the spine does not")
 }
 
-// The two caches must name the same winner wherever a position's newest observation
-// falls on a settled day. Where it falls on the open day they legitimately differ:
-// position_current has it and position_daily does not yet.
+// position_current and position_daily's newest date must name the same winner.
 func (s *stackInvariants) cachesAgree() string {
 	return s.count(`
 		WITH newest_settled AS (
@@ -433,30 +349,29 @@ func (s *stackInvariants) cachesAgree() string {
 		SELECT count(*)
 		  FROM newest_settled d
 		  JOIN position_current c ON c.position_id = d.position_id
-		 WHERE (c.block_timestamp AT TIME ZONE 'utc')::date
-		       <= ((now() - interval '1 hour') AT TIME ZONE 'utc')::date - 1
-		   AND ((d.quantity, d.block_number, d.block_version, d.processing_version, d.block_timestamp)
+		 WHERE ((d.quantity, d.block_number, d.block_version, d.processing_version, d.block_timestamp)
 		        IS DISTINCT FROM
 		        (c.quantity, c.block_number, c.block_version, c.processing_version, c.block_timestamp)
 		        OR d.deal_type IS DISTINCT FROM c.deal_type)`,
-		"position(s) where position_current and position_daily's newest settled day disagree")
+		"position(s) where position_current and position_daily's newest date disagree")
 }
 
-// Append-only implies the as-of read only ever grows: every row visible at an earlier
-// bound is still visible at a later one.
+// The spine is append-only, so the as-of read only ever grows: every row visible at the
+// earliest bound is still visible at the latest.
 func (s *stackInvariants) asOfIsMonotone() string {
 	return s.count(`
-		-- An empty table has no bounds; the sentinels make both sides empty rather than
+		-- An empty spine has no bounds; the sentinels make both sides empty rather than
 		-- passing a NULL to the as-of read, which refuses one.
 		WITH bounds AS (SELECT COALESCE(min(created_at), '-infinity'::timestamptz) AS lo,
 		                       COALESCE(max(created_at), 'infinity'::timestamptz) AS hi
-		                  FROM position_daily_observation)
+		                  FROM position_state)
 		SELECT count(*) FROM (
 		    SELECT position_id, as_of_date, block_number, block_version, processing_version, block_timestamp
 		      FROM position_daily_as_of((SELECT lo FROM bounds))
 		    EXCEPT
-		    SELECT position_id, as_of_date, block_number, block_version, processing_version, block_timestamp
-		      FROM position_daily_observation WHERE created_at <= (SELECT hi FROM bounds)) x`,
+		    SELECT position_id, (block_timestamp AT TIME ZONE 'utc')::date, block_number, block_version,
+		           processing_version, block_timestamp
+		      FROM position_state WHERE created_at <= (SELECT hi FROM bounds)) x`,
 		"row(s) visible at the earliest bound are absent at the latest one")
 }
 
@@ -504,10 +419,10 @@ func (s *stackInvariants) openDayObservation() []byte {
 	return id
 }
 
-func (s *stackInvariants) rowCount() int {
+func (s *stackInvariants) readingCount() int {
 	s.t.Helper()
 	var n int
-	if err := s.pool.QueryRow(s.ctx, `SELECT count(*) FROM position_daily_observation`).Scan(&n); err != nil {
+	if err := s.pool.QueryRow(s.ctx, `SELECT count(*) FROM position_daily`).Scan(&n); err != nil {
 		s.t.Fatal(err)
 	}
 	return n
@@ -520,17 +435,6 @@ func (s *stackInvariants) dbNow() time.Time {
 		s.t.Fatal(err)
 	}
 	return at
-}
-
-func (s *stackInvariants) digest() string {
-	s.t.Helper()
-	var d string
-	if err := s.pool.QueryRow(s.ctx,
-		`SELECT COALESCE(md5(string_agg(x::text, '|' ORDER BY x::text)), '') FROM position_daily_observation x`).
-		Scan(&d); err != nil {
-		s.t.Fatal(err)
-	}
-	return d
 }
 
 // readAsOf is every answer the stack gives at time T, keyed by (position, date).
@@ -558,31 +462,3 @@ func (s *stackInvariants) readAsOf(at time.Time) map[string]string {
 	}
 	return out
 }
-
-// rowImages carries each row's physical identity, so a rewrite that leaves the values
-// and the row count alone is still visible.
-func (s *stackInvariants) rowImages() map[string]string {
-	s.t.Helper()
-	rows, err := s.pool.Query(s.ctx, `
-		SELECT (position_id, as_of_date, block_number, block_version, processing_version, block_timestamp)::text,
-		       d.ctid::text || ' ' || d.xmin::text || ' ' || to_jsonb(d)::text
-		  FROM position_daily_observation d`)
-	if err != nil {
-		s.t.Fatalf("row images: %v", err)
-	}
-	defer rows.Close()
-	out := map[string]string{}
-	for rows.Next() {
-		var k, v string
-		if err := rows.Scan(&k, &v); err != nil {
-			s.t.Fatal(err)
-		}
-		out[k] = v
-	}
-	if err := rows.Err(); err != nil {
-		s.t.Fatal(err)
-	}
-	return out
-}
-
-var _ = strings.TrimSpace

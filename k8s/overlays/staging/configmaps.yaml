@@ -647,23 +647,6 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: position-daily-crystallizer
-data:
-  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
-  TEMPORAL_NAMESPACE: "vector"
-  # One tick a day: the table holds one row per settled UTC day, so a second tick
-  # the same day recomputes the same winners and writes nothing.
-  POSITION_DAILY_INTERVAL: "24h"
-  # Run after midnight UTC rather than on the boundary, so the day being crystallized
-  # has closed and late arrivals from the boundary batches have landed.
-  POSITION_DAILY_SCHEDULE_OFFSET: "1h"
-  # Hold back a day that has only just closed. Quiet, not correctness: a day
-  # crystallized early is repaired by the next tick.
-  POSITION_DAILY_SETTLE_AFTER: "1h"
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
   name: transform-worker
 data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"

@@ -9,28 +9,9 @@ import (
 	"testing"
 )
 
-// The rest of the position_daily suite writes to the spine directly, which exercises the crystallizer but
-// not the write path production actually uses. These drive it through
-// materialize_position_projection, where the batch is an INSERT ... WHERE NOT EXISTS ... ON CONFLICT
-// DO NOTHING. Reads go through the position_daily view, which is that day's winning row.
-
-// mppDaily materializes a batch and then crystallizes, which is the production sequence: the
-// materializer appends to the spine continuously, and the scheduled job writes the settled days.
-// Every date in this file is in the past, so all of them are settled.
-func (f *psFixture) mppDaily(t *testing.T, name, valuesBody, reason string) int {
-	t.Helper()
-	n := f.mppN(t, name, valuesBody, reason)
-	f.crystallize(t)
-	return n
-}
-
-// crystallize runs the only writer of position_daily_observation.
-func (f *psFixture) crystallize(t *testing.T) {
-	t.Helper()
-	if _, err := f.pool.Exec(f.ctx, `CALL crystallize_position_daily()`); err != nil {
-		t.Fatalf("crystallize: %v", err)
-	}
-}
+// The rest of the position_daily suite writes to the spine directly. These drive it through
+// materialize_position_projection, the write path production uses, where the batch is an
+// INSERT ... WHERE NOT EXISTS ... ON CONFLICT DO NOTHING. Reads go through the position_daily view.
 
 // mppRow is one contract-shaped projection row with its own block_timestamp, which the package's
 // shared row() helper pins to a single date.
@@ -40,10 +21,9 @@ func mppRow(ik string, qty, bn, bv, pv int, ts, dealType string) string {
 		strconv.Itoa(bn) + "::bigint," + strconv.Itoa(bv) + "::int," + strconv.Itoa(pv) + "::int,'" + ts + "'::timestamptz)"
 }
 
-// cacheDivergence reports every (position, date) where position_daily is not the spine's winning
-// observation -- missing, extra, or holding a losing row -- as one description per divergence. The
-// whole-row comparison is what a writer that forgets a column fails.
-func cacheDivergence(t *testing.T, f *psFixture) []string {
+// readingDivergence reports every (position, date) where position_daily is not the spine's winning
+// observation -- missing, extra, or holding a losing row -- as one description per divergence.
+func readingDivergence(t *testing.T, f *psFixture) []string {
 	t.Helper()
 	rows, err := f.pool.Query(f.ctx, `
 		WITH winner AS (
@@ -55,7 +35,7 @@ func cacheDivergence(t *testing.T, f *psFixture) []string {
 		     ORDER BY p.position_id, (p.block_timestamp AT TIME ZONE 'utc')::date,
 		              p.block_number DESC, p.block_version DESC, p.processing_version DESC, p.block_timestamp DESC
 		)
-		SELECT format('ik=%s date=%s cache=%s spine=%s',
+		SELECT format('ik=%s date=%s reading=%s spine=%s',
 		              coalesce(w.instrument_key, d.instrument_key),
 		              coalesce(w.as_of_date, d.as_of_date)::text,
 		              coalesce(to_jsonb(d) - 'position_id' - 'created_at', 'null'::jsonb)::text,
@@ -72,7 +52,7 @@ func cacheDivergence(t *testing.T, f *psFixture) []string {
 		    OR d.run_id IS DISTINCT FROM w.run_id
 		 ORDER BY 1`)
 	if err != nil {
-		t.Fatalf("read the cache divergence: %v", err)
+		t.Fatalf("read the reading divergence: %v", err)
 	}
 	defer rows.Close()
 	var out []string
@@ -84,20 +64,20 @@ func cacheDivergence(t *testing.T, f *psFixture) []string {
 		out = append(out, v)
 	}
 	if err := rows.Err(); err != nil {
-		t.Fatalf("cache divergence iteration: %v", err)
+		t.Fatalf("reading divergence iteration: %v", err)
 	}
 	return out
 }
 
-// cachedDays returns one position's series through the latest view as (date, quantity) pairs, keyed by
+// readDays returns one position's series through the latest view as (date, quantity) pairs, keyed by
 // instrument_key because the materializer derives position_id itself.
-func cachedDays(t *testing.T, f *psFixture, ik string) []string {
+func readDays(t *testing.T, f *psFixture, ik string) []string {
 	t.Helper()
 	rows, err := f.pool.Query(f.ctx, `
 		SELECT as_of_date::text || '=' || quantity::text FROM position_daily
 		 WHERE instrument_key = $1 ORDER BY as_of_date`, ik)
 	if err != nil {
-		t.Fatalf("cachedDays(%s): %v", ik, err)
+		t.Fatalf("readDays(%s): %v", ik, err)
 	}
 	defer rows.Close()
 	var out []string
@@ -109,16 +89,16 @@ func cachedDays(t *testing.T, f *psFixture, ik string) []string {
 		out = append(out, v)
 	}
 	if err := rows.Err(); err != nil {
-		t.Fatalf("cachedDays(%s) iteration: %v", ik, err)
+		t.Fatalf("readDays(%s) iteration: %v", ik, err)
 	}
 	return out
 }
 
-// cacheDisagreement reports every position where position_current is not the position_daily row on
+// currentDisagreement reports every position where position_current is not the position_daily row on
 // that position's latest observed date. Both derive from the same spine, and their agreement is what the
 // block_time_inverts_height refusal exists to protect: one orders by block and the other groups by date,
 // so an inverted pair makes them name different winners.
-func cacheDisagreement(t *testing.T, f *psFixture) []string {
+func currentDisagreement(t *testing.T, f *psFixture) []string {
 	t.Helper()
 	rows, err := f.pool.Query(f.ctx, `
 		WITH latest_day AS (
@@ -142,7 +122,7 @@ func cacheDisagreement(t *testing.T, f *psFixture) []string {
 		    OR d.run_id IS DISTINCT FROM c.run_id
 		 ORDER BY 1`)
 	if err != nil {
-		t.Fatalf("read the cross-cache disagreement: %v", err)
+		t.Fatalf("read the cross-read disagreement: %v", err)
 	}
 	defer rows.Close()
 	var out []string
@@ -154,7 +134,7 @@ func cacheDisagreement(t *testing.T, f *psFixture) []string {
 		out = append(out, v)
 	}
 	if err := rows.Err(); err != nil {
-		t.Fatalf("cross-cache disagreement iteration: %v", err)
+		t.Fatalf("cross-read disagreement iteration: %v", err)
 	}
 	return out
 }
@@ -177,30 +157,30 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 			mppRow("mpp-b", 25, 550, 1, 0, "2026-04-01T02:00:00Z", "LOAN"),
 			mppRow("mpp-b", 30, 550, 1, 1, "2026-04-01T02:00:00Z", "BORROW"),
 		)
-		if n := f.mppDaily(t, "pv_daily_argmax", body, "a multi-position batch"); n != 6 {
+		if n := f.mppN(t, "pv_daily_argmax", body, "a multi-position batch"); n != 6 {
 			t.Fatalf("the materializer appended %d observations, want 6", n)
 		}
-		if got := cachedDays(t, f, "mpp-a"); len(got) != 2 || got[0] != "2026-04-01=150" || got[1] != "2026-04-02=175" {
-			t.Errorf("mpp-a cached %v; want the day's winner on each observed date, 2026-04-01=150 and 2026-04-02=175", got)
+		if got := readDays(t, f, "mpp-a"); len(got) != 2 || got[0] != "2026-04-01=150" || got[1] != "2026-04-02=175" {
+			t.Errorf("mpp-a reads %v; want the day's winner on each observed date, 2026-04-01=150 and 2026-04-02=175", got)
 		}
-		if got := cachedDays(t, f, "mpp-b"); len(got) != 1 || got[0] != "2026-04-01=30" {
-			t.Errorf("mpp-b cached %v; want 2026-04-01=30, the highest (block_version, processing_version) for the day", got)
+		if got := readDays(t, f, "mpp-b"); len(got) != 1 || got[0] != "2026-04-01=30" {
+			t.Errorf("mpp-b reads %v; want 2026-04-01=30, the highest (block_version, processing_version) for the day", got)
 		}
-		if d := cacheDivergence(t, f); len(d) != 0 {
-			t.Errorf("the cache diverges from the spine argmax on %d (position, date)(s): %s", len(d), strings.Join(d, " | "))
+		if d := readingDivergence(t, f); len(d) != 0 {
+			t.Errorf("the reading diverges from the spine argmax on %d (position, date)(s): %s", len(d), strings.Join(d, " | "))
 		}
 	})
 
-	// The block_time_inverts_height refusal exists BECAUSE the caches order by block and date by
-	// timestamp. The withheld position must reach neither the spine nor the cache, and its peer must
+	// The block_time_inverts_height refusal exists BECAUSE the readings order by block and date by
+	// timestamp. The withheld position must reach neither the spine nor the reading, and its peer must
 	// still land -- a refusal that took the whole batch down would be a different bug.
-	t.Run("a withheld position reaches neither spine nor cache while its peer lands", func(t *testing.T) {
+	t.Run("a withheld position reaches neither spine nor reading while its peer lands", func(t *testing.T) {
 		body := valuesOf(
 			mppRow("mpp-inv", 10, 800, 0, 0, "2026-04-10T00:00:00Z", "LOAN"),
 			mppRow("mpp-inv", 11, 900, 0, 0, "2026-04-09T00:00:00Z", "LOAN"),
 			mppRow("mpp-peer", 44, 850, 0, 0, "2026-04-10T12:00:00Z", "LOAN"),
 		)
-		if n := f.mppDaily(t, "pv_daily_inverted", body, "an inverted pair plus a peer"); n != 1 {
+		if n := f.mppN(t, "pv_daily_inverted", body, "an inverted pair plus a peer"); n != 1 {
 			t.Errorf("the materializer appended %d observations, want 1: the peer lands, the inverted position is withheld", n)
 		}
 		var refusals int
@@ -212,28 +192,28 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 		if refusals == 0 {
 			t.Error("the inverted position was not recorded as refused, so this case is not exercising the withholding path at all")
 		}
-		if got := cachedDays(t, f, "mpp-inv"); len(got) != 0 {
-			t.Errorf("the withheld position is cached as %v; nothing the spine refused may reach the cache", got)
+		if got := readDays(t, f, "mpp-inv"); len(got) != 0 {
+			t.Errorf("the withheld position is read as %v; nothing the spine refused may reach the reading", got)
 		}
-		if got := cachedDays(t, f, "mpp-peer"); len(got) != 1 || got[0] != "2026-04-10=44" {
-			t.Errorf("the peer cached %v; want 2026-04-10=44 -- one position's refusal must not withhold another", got)
+		if got := readDays(t, f, "mpp-peer"); len(got) != 1 || got[0] != "2026-04-10=44" {
+			t.Errorf("the peer reads %v; want 2026-04-10=44 -- one position's refusal must not withhold another", got)
 		}
-		if d := cacheDivergence(t, f); len(d) != 0 {
-			t.Errorf("the cache diverges from the spine argmax: %s", strings.Join(d, " | "))
+		if d := readingDivergence(t, f); len(d) != 0 {
+			t.Errorf("the reading diverges from the spine argmax: %s", strings.Join(d, " | "))
 		}
 	})
 
 	// A projection re-emitting a stored coordinate with a changed payload is drift: the spine keeps the
-	// stored row and records the drift, inserting nothing. The cache must not take the emitted value --
+	// stored row and records the drift, inserting nothing. The reading must not take the emitted value --
 	// if it did, it would hold a number that exists in no observation of history.
-	t.Run("a drift re-emission does not move the cache", func(t *testing.T) {
+	t.Run("a drift re-emission does not move the reading", func(t *testing.T) {
 		const ik = "mpp-drift"
-		if n := f.mppDaily(t, "pv_daily_drift", valuesOf(mppRow(ik, 70, 1000, 0, 0, "2026-04-20T00:00:00Z", "LOAN")),
+		if n := f.mppN(t, "pv_daily_drift", valuesOf(mppRow(ik, 70, 1000, 0, 0, "2026-04-20T00:00:00Z", "LOAN")),
 			"the stored observation"); n != 1 {
 			t.Fatalf("seeding appended %d, want 1", n)
 		}
 		// Same coordinate, different quantity and deal_type.
-		if n := f.mppDaily(t, "pv_daily_drift", valuesOf(mppRow(ik, 99, 1000, 0, 0, "2026-04-20T00:00:00Z", "BORROW")),
+		if n := f.mppN(t, "pv_daily_drift", valuesOf(mppRow(ik, 99, 1000, 0, 0, "2026-04-20T00:00:00Z", "BORROW")),
 			"the drifted re-emission"); n != 0 {
 			t.Errorf("the drifted re-emission appended %d observations, want 0: the spine keeps the stored row", n)
 		}
@@ -247,46 +227,42 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 		if drifts == 0 {
 			t.Error("no drift was recorded, so the re-emission did not take the drift path and this proves nothing")
 		}
-		if got := cachedDays(t, f, ik); len(got) != 1 || got[0] != "2026-04-20=70" {
-			t.Errorf("the cache holds %v after a drifted re-emission; want 2026-04-20=70, the value the spine kept", got)
+		if got := readDays(t, f, ik); len(got) != 1 || got[0] != "2026-04-20=70" {
+			t.Errorf("the reading holds %v after a drifted re-emission; want 2026-04-20=70, the value the spine kept", got)
 		}
 		if got := f.dealTypeOf(t, ik, "2026-04-20"); got != "LOAN" {
-			t.Errorf("the cached deal_type is %q after a drifted re-emission; want LOAN, the stored one", got)
+			t.Errorf("the read deal_type is %q after a drifted re-emission; want LOAN, the stored one", got)
 		}
-		if d := cacheDivergence(t, f); len(d) != 0 {
-			t.Errorf("the cache diverges from the spine argmax: %s", strings.Join(d, " | "))
+		if d := readingDivergence(t, f); len(d) != 0 {
+			t.Errorf("the reading diverges from the spine argmax: %s", strings.Join(d, " | "))
 		}
 	})
 
-	// A re-run over unchanged history appends nothing to the spine, so the next crystallization recomputes
-	// the same winner and must write nothing here either.
-	t.Run("a re-run appends nothing to the table", func(t *testing.T) {
+	// A re-run over unchanged history appends nothing to the spine, so the day's reading is unchanged.
+	t.Run("a re-run leaves the reading unchanged", func(t *testing.T) {
 		const ik = "mpp-rerun"
 		body := valuesOf(mppRow(ik, 60, 1100, 0, 0, "2026-04-25T00:00:00Z", "LOAN"))
-		if n := f.mppDaily(t, "pv_daily_rerun", body, "the first run"); n != 1 {
+		if n := f.mppN(t, "pv_daily_rerun", body, "the first run"); n != 1 {
 			t.Fatalf("the first run appended %d, want 1", n)
 		}
-		f.crystallize(t)
 		before := f.dailyImagesFor(t, ik)
 		if len(before) != 1 {
-			t.Fatalf("the first run left %d row(s) for %s, want 1", len(before), ik)
+			t.Fatalf("the first run left %d reading(s) for %s, want 1", len(before), ik)
 		}
-		if n := f.mppDaily(t, "pv_daily_rerun", body, "the re-run"); n != 0 {
+		if n := f.mppN(t, "pv_daily_rerun", body, "the re-run"); n != 0 {
 			t.Errorf("the re-run appended %d observations, want 0", n)
 		}
-		// Row images, not a count: a count is unchanged by a rewrite in place, which is the thing an
-		// append-only table must never do and the thing a re-run is most likely to do.
 		if after := f.dailyImagesFor(t, ik); !slices.Equal(before, after) {
-			t.Errorf("the re-run changed the stored rows for %s while appending nothing to the spine:\n  before %v\n  after  %v", ik, before, after)
+			t.Errorf("the re-run changed the reading for %s while appending nothing to the spine:\n  before %v\n  after  %v", ik, before, after)
 		}
-		if d := cacheDivergence(t, f); len(d) != 0 {
+		if d := readingDivergence(t, f); len(d) != 0 {
 			t.Errorf("the reading diverges from the spine argmax: %s", strings.Join(d, " | "))
 		}
 	})
 
 	// build_id and run_id are the audit trail for which run last advanced a day. They are the
-	// materializer's own arguments, so only a run through it can prove the cache carries them.
-	t.Run("the materializer's build_id and run_id reach the cache", func(t *testing.T) {
+	// materializer's own arguments, so only a run through it can prove the reading carries them.
+	t.Run("the materializer's build_id and run_id reach the reading", func(t *testing.T) {
 		const ik = "mpp-audit"
 		if _, err := f.pool.Exec(f.ctx, `CREATE OR REPLACE VIEW pv_daily_audit AS `+
 			valuesOf(mppRow(ik, 12, 1200, 0, 0, "2026-04-28T00:00:00Z", "LOAN"))); err != nil {
@@ -311,26 +287,25 @@ func TestPositionDailyThroughTheMaterializer(t *testing.T) {
 		if inserted != 1 {
 			t.Fatalf("appended %d, want 1", inserted)
 		}
-		f.crystallize(t)
 		var gotBuild int
 		var gotRun int64
 		if err := f.pool.QueryRow(f.ctx, `
 			SELECT build_id, run_id FROM position_daily WHERE instrument_key = $1`, ik).Scan(&gotBuild, &gotRun); err != nil {
-			t.Fatalf("read the cached audit columns: %v", err)
+			t.Fatalf("read the audit columns: %v", err)
 		}
 		if gotBuild != buildID || gotRun != runID {
-			t.Errorf("the cache carries build_id=%d run_id=%d; want %d and %d from the run that wrote the observation",
+			t.Errorf("the reading carries build_id=%d run_id=%d; want %d and %d from the run that wrote the observation",
 				gotBuild, gotRun, buildID, runID)
 		}
-		if d := cacheDivergence(t, f); len(d) != 0 {
-			t.Errorf("the cache diverges from the spine argmax: %s", strings.Join(d, " | "))
+		if d := readingDivergence(t, f); len(d) != 0 {
+			t.Errorf("the reading diverges from the spine argmax: %s", strings.Join(d, " | "))
 		}
 	})
 }
 
-// Both caches derive from the same spine. position_current holds
-// the newest observation outright; position_daily_observation's latest date must be that same observation, or one of
-// them is telling a consumer something the other denies.
+// Both derive from the same spine. position_current holds the newest observation outright;
+// position_daily's latest date must be that same observation, or one of them is telling a
+// consumer something the other denies.
 //
 // This holds while a position's newest observation also falls on its latest observed date, which the
 // block_time_inverts_height refusal secures across DIFFERENT blocks. It does NOT hold when a correction
@@ -355,36 +330,34 @@ func TestPositionCurrentAndPositionDailyNameTheSameWinner(t *testing.T) {
 		// A single-observation position: its only day is also its newest.
 		mppRow("agree-c", 99, 700, 0, 0, "2026-05-04T00:00:00Z", "BORROW"),
 	)
-	if n := f.mppDaily(t, "pv_agree", body, "a multi-day history"); n != 9 {
+	if n := f.mppN(t, "pv_agree", body, "a multi-day history"); n != 9 {
 		t.Fatalf("the materializer appended %d observations, want 9", n)
 	}
 
-	// Positive control: both caches are actually populated, so an empty-vs-empty comparison cannot pass.
+	// Positive control: both are actually populated, so an empty-vs-empty comparison cannot pass.
 	var daily, current int
 	if err := f.pool.QueryRow(f.ctx, `
-		SELECT (SELECT count(*) FROM position_daily_observation), (SELECT count(*) FROM position_current)`).
+		SELECT (SELECT count(*) FROM position_daily), (SELECT count(*) FROM position_current)`).
 		Scan(&daily, &current); err != nil {
 		t.Fatal(err)
 	}
 	if daily != 6 || current != 3 {
-		t.Fatalf("position_daily_observation holds %d rows and position_current %d; want 6 observed days across 3 positions", daily, current)
+		t.Fatalf("position_daily holds %d rows and position_current %d; want 6 observed days across 3 positions", daily, current)
 	}
-	if d := cacheDisagreement(t, f); len(d) != 0 {
-		t.Errorf("the two caches name different winners for %d position(s): %s", len(d), strings.Join(d, " | "))
+	if d := currentDisagreement(t, f); len(d) != 0 {
+		t.Errorf("position_current and position_daily name different winners for %d position(s): %s", len(d), strings.Join(d, " | "))
 	}
 
-	// And after re-deriving each from the spine alone.
-	for _, proc := range []string{"CALL crystallize_position_daily()", "CALL rebuild_position_current()"} {
-		if _, err := f.pool.Exec(f.ctx, proc); err != nil {
-			t.Fatalf("%s: %v", proc, err)
-		}
+	// And after re-deriving position_current from the spine alone.
+	if _, err := f.pool.Exec(f.ctx, `CALL rebuild_position_current()`); err != nil {
+		t.Fatalf("rebuild_position_current: %v", err)
 	}
-	if d := cacheDisagreement(t, f); len(d) != 0 {
-		t.Errorf("the two caches disagree after re-deriving from the spine: %s", strings.Join(d, " | "))
+	if d := currentDisagreement(t, f); len(d) != 0 {
+		t.Errorf("the two disagree after re-deriving position_current from the spine: %s", strings.Join(d, " | "))
 	}
 }
 
-// dealTypeOf reads one cached day's deal_type, "NULL" when it is absent.
+// dealTypeOf reads one day's deal_type, "NULL" when it is absent.
 func (f *psFixture) dealTypeOf(t *testing.T, ik, date string) string {
 	t.Helper()
 	var dt *string
@@ -398,13 +371,11 @@ func (f *psFixture) dealTypeOf(t *testing.T, ik, date string) string {
 	return *dt
 }
 
-// dailyImagesFor is every stored row for one instrument with its physical identity: ctid and xmin
-// move under an UPDATE, so comparing these catches a rewrite that leaves the row count alone.
+// dailyImagesFor is every reading for one instrument, whole row.
 func (f *psFixture) dailyImagesFor(t *testing.T, ik string) []string {
 	t.Helper()
 	rows, err := f.pool.Query(f.ctx, `
-		SELECT d.ctid::text || ' ' || d.xmin::text || ' ' || to_jsonb(d)::text
-		  FROM position_daily_observation d WHERE d.instrument_key = $1 ORDER BY 1`, ik)
+		SELECT to_jsonb(d)::text FROM position_daily d WHERE d.instrument_key = $1 ORDER BY 1`, ik)
 	if err != nil {
 		t.Fatalf("dailyImagesFor(%s): %v", ik, err)
 	}
@@ -425,23 +396,21 @@ func (f *psFixture) dailyImagesFor(t *testing.T, ik string) []string {
 
 // A correction at the SAME block_number carrying an earlier instant, crossing UTC midnight. Nothing
 // refuses it: block_time_inverts_height compares a higher block against an earlier instant, and this
-// pair shares a block. The correction lands on the EARLIER date, and position_daily_observation -- append-only, so
-// nothing removes a row -- keeps the superseded observation standing on the later date. That later
-// date is then its newest, so the two caches name different winners.
+// pair shares a block. The correction lands on the EARLIER date, and the superseded observation is
+// still the spine's only row on the later date, so that date keeps it and the two reads disagree.
 //
-// Pinned rather than fixed: removing the stale day means a DELETE, which the append-only contract in
-// the table's COMMENT (VEC-636) rules out. This test fails the day that changes, which is when the
-// COMMENT and this comment must change too.
+// Pinned rather than fixed: a spine observation is never removed, and a read that hid the later
+// date would need a cross-date rule nothing specifies. This test fails the day that changes.
 func TestPositionDailyKeepsADayACorrectionMovedAway(t *testing.T) {
 	f, cleanup := newPositionStateFixture(t)
 	defer cleanup()
 
 	const ik = "moved-day"
-	if n := f.mppDaily(t, "pv_moved", valuesOf(
+	if n := f.mppN(t, "pv_moved", valuesOf(
 		mppRow(ik, 100, 1000, 0, 0, "2026-06-02T00:00:05Z", "LOAN")), "the original, just after midnight"); n != 1 {
 		t.Fatalf("seeding appended %d, want 1", n)
 	}
-	if n := f.mppDaily(t, "pv_moved", valuesOf(
+	if n := f.mppN(t, "pv_moved", valuesOf(
 		mppRow(ik, 555, 1000, 0, 1, "2026-06-01T23:59:58Z", "LOAN")), "the correction, just before it"); n != 1 {
 		t.Fatalf("the correction appended %d, want 1: same block, so nothing refuses it", n)
 	}
@@ -455,13 +424,13 @@ func TestPositionDailyKeepsADayACorrectionMovedAway(t *testing.T) {
 		t.Fatalf("the correction was refused %d time(s); this case is about the path that is NOT refused", refused)
 	}
 
-	if got := cachedDays(t, f, ik); len(got) != 2 ||
+	if got := readDays(t, f, ik); len(got) != 2 ||
 		got[0] != "2026-06-01=555" || got[1] != "2026-06-02=100" {
-		t.Errorf("position_daily_observation holds %v; want the correction on 2026-06-01 and the superseded row still on 2026-06-02", got)
+		t.Errorf("position_daily holds %v; want the correction on 2026-06-01 and the superseded row still on 2026-06-02", got)
 	}
-	// The known consequence: position_daily_observation's newest day is NOT the position's newest observation.
-	if d := cacheDisagreement(t, f); len(d) != 1 {
-		t.Errorf("the caches disagree on %d position(s), want exactly 1 -- if this is now 0 the gap is fixed "+
+	// The known consequence: position_daily's newest day is NOT the position's newest observation.
+	if d := currentDisagreement(t, f); len(d) != 1 {
+		t.Errorf("the readings disagree on %d position(s), want exactly 1 -- if this is now 0 the gap is fixed "+
 			"and the forward-only COMMENT plus this test must be updated; more than 1 means something else broke: %s",
 			len(d), strings.Join(d, " | "))
 	}

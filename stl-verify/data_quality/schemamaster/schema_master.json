@@ -208,11 +208,6 @@
       "class": "S",
       "semantics": "event_time"
     },
-    "as_of_date": {
-      "type": "date",
-      "class": "S",
-      "semantics": "event_time"
-    },
     "block_version": {
       "type": "int4",
       "class": "S"
@@ -352,11 +347,6 @@
     "copula_type": {
       "type": "text",
       "class": "S"
-    },
-    "correction_seq": {
-      "type": "int4",
-      "class": "A",
-      "not_null": true
     },
     "created_at": {
       "type": "timestamptz",
@@ -711,10 +701,6 @@
       "class": "S"
     },
     "is_present": {
-      "type": "bool",
-      "class": "R"
-    },
-    "is_retracted": {
       "type": "bool",
       "class": "R"
     },
@@ -1141,14 +1127,6 @@
     "reserve_factor": {
       "type": "numeric",
       "class": "S"
-    },
-    "retraction_reason": {
-      "type": "text",
-      "class": "A"
-    },
-    "retraction_ticket": {
-      "type": "text",
-      "class": "A"
     },
     "rewind_count": {
       "type": "int8",
@@ -1777,10 +1755,6 @@
     "oracle_asset": {
       "type": "config",
       "owner": "pricing"
-    },
-    "position_daily_observation": {
-      "type": "derived",
-      "owner": "prime"
     },
     "position_projection_refusal": {
       "type": "infrastructure",

@@ -71,4 +71,3 @@
 ./internal/services/block_republish
 ./internal/services/block_meta_loader
 ./cmd/cronjobs/block-meta-loader
-./internal/services/position_daily_crystallizer

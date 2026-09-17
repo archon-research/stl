@@ -169,9 +169,9 @@ func loginRoleDSN(t *testing.T, pool *pgxpool.Pool) string {
 		url.QueryEscape("PLACEHOLDER_SET_VIA_TERRAFORM"), cfg.Host, cfg.Port, cfg.Database)
 }
 
-// triggerOnlyCacheTables are the derived caches whose write path is closed structurally: they are
-// written only by their own maintainer -- a SECURITY DEFINER trigger, or an owner-only procedure --
-// and no login role holds a write grant on them (VEC-660).
+// triggerOnlyCacheTables are the derived `*_current` caches whose write path is closed
+// structurally: the only two writers are the cache's own SECURITY DEFINER trigger and the
+// migrator's backfill, and no login role holds a write grant on them (VEC-660).
 //
 // A separate list from convertedAppendOnlyTables rather than an addition to it, because the
 // assertion differs at INSERT: a converted history table KEEPS INSERT — ingest appends to it —
@@ -185,10 +185,6 @@ var triggerOnlyCacheTables = []string{
 	"allocation_position_current",
 	// VEC-409: written only by its SECURITY DEFINER trigger and rebuild_position_current().
 	"position_current",
-	// VEC-636: append-only itself, and written only by crystallize_position_daily(), which is
-	// invoker-rights and so owner-only. It belongs here rather than in convertedAppendOnlyTables
-	// because the app role holds no INSERT either: writing a day is the crystallizer's job.
-	"position_daily_observation",
 	"morpho_market_position_current",
 	// VEC-659: the two Morpho state caches the backed-breakdown read joins beside it.
 	"morpho_vault_state_current",
@@ -196,7 +192,7 @@ var triggerOnlyCacheTables = []string{
 }
 
 // TestTriggerOnlyCachesGrantTheAppRoleNoWrite asserts that the application role keeps SELECT and
-// holds no INSERT, UPDATE or DELETE on a maintainer-only cache, so any write reintroduced by a
+// holds no INSERT, UPDATE or DELETE on a trigger-only cache, so any write reintroduced by a
 // future change fails at runtime instead of silently forking the cache from history.
 //
 // The assertion is the CATALOGUE, for the reason TestConvertedTablesAreAppendOnly records: the

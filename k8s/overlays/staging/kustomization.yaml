@@ -95,7 +95,6 @@ resources:
   - ../../base/arbitrum-watcher-data-validator
   - ../../base/avalanche-watcher-data-validator
   - ../../base/transform-worker
-  - ../../base/position-daily-crystallizer
   - ../../base/migrate
   - ../../base/python-api
   - external-secrets.yaml
