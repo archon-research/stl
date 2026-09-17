@@ -148,17 +148,7 @@ func (w uniswapTickWriter) lockTickKeys(ctx context.Context, tx pgx.Tx, keys []u
 	for i, k := range keys {
 		lockKeys[i] = fmt.Sprintf("%s|%d|%d", w.table, k.poolID, k.tick)
 	}
-	// pg_advisory_xact_lock is taken left-to-right as unnest() yields rows, so
-	// ORDER BY ord preserves the sorted lock order.
-	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended(k, 0))
-		 FROM unnest($1::text[]) WITH ORDINALITY AS u(k, ord)
-		 ORDER BY ord`,
-		lockKeys,
-	); err != nil {
-		return fmt.Errorf("locking %d %s slots: %w", len(keys), w.table, err)
-	}
-	return nil
+	return lockAdvisoryKeys(ctx, tx, lockKeys, w.table+" slots")
 }
 
 func (w uniswapTickWriter) readLatestTicks(ctx context.Context, tx pgx.Tx, keys []uniswapTickKey, blockNumber int64) (map[uniswapTickKey]uniswapTickValues, error) {

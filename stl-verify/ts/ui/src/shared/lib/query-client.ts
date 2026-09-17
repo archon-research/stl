@@ -1,11 +1,19 @@
-import { isHttpRequestError } from '@archon-research/http-client-react';
+import {
+  createQueryClient,
+  isHttpRequestError,
+} from '@archon-research/http-client-react';
 import {
   type NetworkMode,
   QueryCache,
-  QueryClient,
+  type QueryClient,
 } from '@tanstack/react-query';
 
 import { logging } from './logging';
+import {
+  browserSessionReloadDeps,
+  isSessionExpired,
+  reloadForLogin,
+} from './session-expired';
 
 /**
  * How a query wants its failures reported, so that one central handler can log
@@ -61,49 +69,25 @@ function logQueryFailure(
 const NETWORK_MODE: NetworkMode = 'always';
 
 /**
- * The 4xx statuses that say "not now" rather than "no": the request itself was
- * acceptable and the identical one may well succeed.
- *
- * 429 is the one that bites here — this screen opens a dozen requests at once,
- * so it is the first paint that trips a rate limiter, and `staleTime: Infinity`
- * on the registries plus `refetchOnWindowFocus: false` mean a query stranded
- * there stays stranded until the tab is reloaded.
- */
-const RETRYABLE_CLIENT_ERRORS: ReadonlySet<number> = new Set([
-  408, // Request Timeout
-  425, // Too Early
-  429, // Too Many Requests
-]);
-
-// A 4xx is otherwise an answer, not an outage: retrying one only delays the
-// error the caller is already equipped to render. Anything else gets three
-// attempts rather than react-query's default four — this screen issues a dozen
-// requests, and a fourth round of backoff on all of them outlasts anyone's
-// patience.
-function retryUnlessClientError(failureCount: number, error: Error): boolean {
-  if (
-    isHttpRequestError(error) &&
-    error.status < 500 &&
-    !RETRYABLE_CLIENT_ERRORS.has(error.status)
-  ) {
-    return false;
-  }
-
-  return failureCount < 2;
-}
-
-/**
- * The app's cache.
- *
- * Constructed here rather than taken from `createQueryClient()` so the defaults
- * below are stated: the package's factory takes no options, and `HttpProvider`
- * accepts a client.
+ * The app's cache: `createQueryClient`'s `refetchOnWindowFocus: false` and
+ * status-aware retry, plus the app-specific defaults it deliberately leaves
+ * unset — `staleTime`, `gcTime` and `networkMode` are a product decision, not
+ * a package one — and this app's failure logging.
  */
 function createAppQueryClient(): QueryClient {
-  return new QueryClient({
+  return createQueryClient({
     queryCache: new QueryCache({
-      onError: (error, query) =>
-        logQueryFailure(error, query.queryKey, query.meta),
+      onError: (error, query) => {
+        const browser = browserSessionReloadDeps();
+        if (
+          isSessionExpired(error) &&
+          browser !== null &&
+          reloadForLogin(browser)
+        ) {
+          return;
+        }
+        logQueryFailure(error, query.queryKey, query.meta);
+      },
     }),
     defaultOptions: {
       queries: {
@@ -112,11 +96,6 @@ function createAppQueryClient(): QueryClient {
         staleTime: 30_000,
         gcTime: 5 * 60_000,
         networkMode: NETWORK_MODE,
-        // This screen issues a dozen requests on first paint. Refiring them
-        // because someone alt-tabbed back is cost without an answer anyone
-        // asked for.
-        refetchOnWindowFocus: false,
-        retry: retryUnlessClientError,
       },
     },
   });

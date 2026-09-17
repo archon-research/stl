@@ -15,6 +15,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 )
 
+// The posm transfer instruments are named here and reused by NFTTransferRecorder,
+// so a replay's rows land on the series the live indexer's do.
+const (
+	nftTransferRowsAttemptedSuffix = ".nft.transfer.rows.attempted"
+	nftTransferRowsAttemptedDesc   = "Total NFT transfer rows a block queued for insert, conflicts included"
+	nftTransferRowsWrittenSuffix   = ".nft.transfer.rows.written"
+	nftTransferRowsWrittenDesc     = "Total NFT transfer event rows written"
+)
+
 // Telemetry emits per-worker block/error counters plus a block-duration
 // histogram. Every datapoint is tagged with the worker's chain NAME via the
 // `chain` attribute (the same entity.ChainName value morpho/oracle emit) so
@@ -108,11 +117,11 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		return nil, err
 	}
 
-	nftTransferRowsAttempted, err := counter(".nft.transfer.rows.attempted", "Total NFT transfer rows a block queued for insert, conflicts included")
+	nftTransferRowsAttempted, err := counter(nftTransferRowsAttemptedSuffix, nftTransferRowsAttemptedDesc)
 	if err != nil {
 		return nil, err
 	}
-	nftTransferRowsWritten, err := counter(".nft.transfer.rows.written", "Total NFT transfer event rows written")
+	nftTransferRowsWritten, err := counter(nftTransferRowsWrittenSuffix, nftTransferRowsWrittenDesc)
 	if err != nil {
 		return nil, err
 	}

@@ -18,7 +18,7 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
 | `morpho-vault-backfill` | `morpho-vault-backfill` | **on demand** | Discovers Morpho vaults from the archived S3 receipts and replays their VaultV2 structured events, for a block range supplied at start time (VEC-218) |
 | `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **on demand** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
-| `uniswap-v4-position-bootstrap` | `uniswap-v4-position-bootstrap` | **on demand** | Snapshots every historical Uniswap V4 LP position of the registered pools at one finality-safe block, closing the gap event-driven indexing cannot (VEC-639); operated from [vector-indexers.md](vector-indexers.md#uniswap-v4-indexer-vec-475) |
+| `uniswap-v4-position-bootstrap` | `uniswap-v4-position-bootstrap` | **on demand** | Two hand-started workflow types on one queue, each closing a gap event-driven indexing cannot: `UniswapV4PositionBootstrap` snapshots every historical Uniswap V4 LP position of the registered pools at one finality-safe block into `uniswap_v4_position` (VEC-639), `UniswapV4PosmTransferBackfill` replays the PositionManager's whole ERC-721 `Transfer` history into `uniswap_v4_position_nft_transfer` (VEC-790); operated from [vector-indexers.md](vector-indexers.md#uniswap-v4-indexer-vec-475) |
 | `block-republisher`, `<chain>-block-republisher` | `block-republisher`, `<chain>-block-republisher` | **on demand** | Re-publishes named block heights under the next `block_version` their raw archive leaves free, so every indexer appends the canonical block for a height whose only published version is a losing fork (ARCT-383). One deployment per chain — see the table under its section below |
 | `block-meta-loader`, `<chain>-block-meta-loader` | `block-meta-loader`, `<chain>-block-meta-loader` | **on demand** | Fills `block_meta` (the canonical block-coordinate → header-timestamp lookup) for one chain from that chain's S3 raw-block archive (VEC-491). One deployment per chain |
 | `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (Python harness; staging + prod; N_MC=10000, pod sized from a live-data pass in #891) |
@@ -924,14 +924,40 @@ under a version no canonical block was archived under.
 Another **on-demand** Temporal worker (`temporal.RunWorker`, parameterless via
 `RegisterRunner` like `morpho-v2-bootstrap`). Everything said about
 `offchain-price-backfill` above applies — nothing is missed while it is down, and
-it is excluded from `VectorCronjobAllRunsFailing` for the same reason. It writes
-only `uniswap_v4_position`, through the live indexer's own append-on-change
-writer, so a run shows up on the
-[`VectorUniswapV4AppendOnChangeGrowthHigh`](vector-indexers.md#vectoruniswapv4appendonchangegrowthhigh)
-rate once, by design.
+it is excluded from `VectorCronjobAllRunsFailing` for the same reason. One
+Deployment and one task queue per chain, named the way `block-republisher`'s are:
+`uniswap-v4-position-bootstrap` on mainnet, `<chain>-uniswap-v4-position-bootstrap`
+elsewhere (the worker derives the queue from its `CHAIN_ID`).
 
-When to run it, how to start a run, what it does and how a killed attempt resumes
-are in the indexer runbook:
+**Two workflow types on that chain's queue, two tables.** Both are hand-started
+and either one runs on its own; the queue keeps the position bootstrap's older
+name for both:
+
+| Workflow Type | Writes | Closing log line | Row-growth tripwire |
+|---|---|---|---|
+| `UniswapV4PositionBootstrap` | `uniswap_v4_position` | `uniswap-v4 position bootstrap finished` | [`VectorUniswapV4AppendOnChangeGrowthHigh`](vector-indexers.md#vectoruniswapv4appendonchangegrowthhigh) |
+| `UniswapV4PosmTransferBackfill` | `uniswap_v4_position_nft_transfer` | `uniswap-v4 posm transfer backfill finished` | [`VectorUniswapV4NFTTransferBackfillGrowthHigh`](vector-indexers.md#vectoruniswapv4nfttransferbackfillgrowthhigh) |
+
+Positions go in through the live indexer's own append-on-change writer, so a run
+shows up on that rate once, by design. The posm transfer backfill's bulk load
+lands on its own tripwire, at a threshold one run stays under, while the live
+`uniswap_v4_position_nft_transfer` rules keep measuring the live decoder alone.
+
+**Which of the two failed.** `cronjob_runs_total` (OTel `cronjob.runs.total`)
+carries only the task queue, so a
+[`VectorCronjobRunFailing`](#vectorcronjobrunfailing) for
+`uniswap-v4-position-bootstrap` names mainnet's worker and
+`<chain>-uniswap-v4-position-bootstrap` another chain's, and the Temporal UI's
+execution list (namespace **`vector`**) names the type. The pod answers too:
+`kubectl -n vector logs deploy/$DEPLOY`, where `$DEPLOY` is the Deployment the
+alert names — the same string as its queue. A run that
+completed closes with its line from the table above; a failed attempt logs
+`uniswap-v4 position bootstrap stopped with partial progress` or
+`uniswap-v4 posm transfer backfill stopped with partial progress` at Warn, carrying
+the counters it reached — grep for `stopped with partial progress` after a failure.
+
+When to run each, how to start a run, what each does and how a killed attempt
+resumes are in the indexer runbook:
 [Uniswap V4 indexer — position coverage and the bootstrap](vector-indexers.md#uniswap-v4-indexer-vec-475).
 
 ---

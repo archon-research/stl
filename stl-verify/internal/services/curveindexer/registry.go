@@ -7,14 +7,19 @@ func IndexPoolsByAddress(rows []outbound.CurvePoolRow) []RegisteredPool {
 	pools := make([]RegisteredPool, 0, len(rows))
 	for _, row := range rows {
 		pools = append(pools, RegisteredPool{
-			ID:             row.ID,
-			Address:        row.Address,
-			Kind:           PoolKind(row.Kind),
-			NCoins:         row.NCoins,
-			DeployBlock:    row.DeployBlock,
-			CoinDecimals:   row.CoinDecimals,
-			LpTokenAddress: row.LpTokenAddress,
-			HasAPrecise:    row.HasAPrecise,
+			ID:                    row.ID,
+			Address:               row.Address,
+			Kind:                  PoolKind(row.Kind),
+			NCoins:                row.NCoins,
+			DeployBlock:           row.DeployBlock,
+			CoinDecimals:          row.CoinDecimals,
+			LpTokenAddress:        row.LpTokenAddress,
+			HasAPrecise:           row.HasAPrecise,
+			HasNoArgOracleGetters: row.HasNoArgOracleGetters,
+
+			CalcTokenAmountDynArray: row.CalcTokenAmountDynArray,
+			HasFutureFee:            row.HasFutureFee,
+			HasOffpegFeeMultiplier:  row.HasOffpegFeeMultiplier,
 		})
 	}
 	return pools

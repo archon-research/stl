@@ -4,7 +4,6 @@ import {
   type DataTableProps,
   EmptyState,
   ErrorState,
-  SkeletonStack,
 } from '@archon-research/design-system';
 
 import { css } from '#styled-system/css';
@@ -82,6 +81,26 @@ function ActivityTable({
   );
 }
 
+// Enough rows to fill the height the loaded table occupies, so the panel does
+// not visibly grow when the data lands.
+const SKELETON_ROWS = 8;
+
+// `DataTable` draws its own skeleton from the column definitions: the cell
+// count comes from the real rendered columns and each cell's shape from that
+// column's `meta.align`, so the bars line up under the header they will fill.
+function ActivitySkeletonTable({ table }: Pick<ActivityTableProps, 'table'>) {
+  return (
+    <div className={tableHeaderTypographyClassName}>
+      <DataTable
+        table={table}
+        isLoading
+        density="compact"
+        skeletonConfig={{ rows: SKELETON_ROWS }}
+      />
+    </div>
+  );
+}
+
 type ActivityResultsProps = ActivityTableProps & {
   error: string | null;
   // Rows fetched before the search filter narrows them: the skeleton shows
@@ -106,7 +125,7 @@ export function ActivityResults({
       isLoading={isLoading && totalEventCount === 0}
       error={error}
       isEmpty={false}
-      loadingView={<SkeletonStack count={3} />}
+      loadingView={<ActivitySkeletonTable table={table} />}
       errorView={
         <ErrorState
           title="Error Loading Activity"

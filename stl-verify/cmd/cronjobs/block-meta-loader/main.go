@@ -38,6 +38,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 )
 
 func main() {
@@ -80,7 +81,7 @@ func init() {
 const workflowTypeName = "BlockMetaLoad"
 
 func run(ctx context.Context) error {
-	taskQueue, err := taskQueueName()
+	taskQueue, err := chainutil.TaskQueueName(queueBaseName)
 	if err != nil {
 		return fmt.Errorf("resolving the task queue: %w", err)
 	}

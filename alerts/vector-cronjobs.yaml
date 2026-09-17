@@ -31,9 +31,9 @@
 # maple-graphql-indexer, which has richer dedicated rules in
 # vector-indexers.yaml (VEC-320); the seven on-demand ones —
 # offchain-price-backfill, reference-capital-backfill, morpho-vault-backfill,
-# morpho-v2-bootstrap, uniswap-v4-position-bootstrap, block-republisher and
-# block-meta-loader (the last two one deployment per chain, below), none of
-# which carries a schedule;
+# morpho-v2-bootstrap, and every chain's uniswap-v4-position-bootstrap,
+# block-republisher and block-meta-loader (one deployment per chain, below),
+# none of which carries a schedule;
 # and core-model-runner, which does carry a schedule but ticks only every 24h with
 # no retry (RetryPolicy.maximum_attempts=1) — see VectorCronjobAllRunsFailing
 # for why "no successes in an hour" is their healthy state. Every other
@@ -57,7 +57,7 @@
 # Severity → routing (per the alerting routing spec):
 #   critical       → pages, prod #at_stl_prod_alerts / staging
 #                    #at_stl_staging_alerts, [CRITICAL], 1h repeat.
-#   warning / info → no page, prod #at_stl_alerts / staging
+#   warning / info → no page, prod #at_stl_prod_alerts / staging
 #                    #at_stl_staging_alerts, [WARNING]/[INFO], 4h repeat.
 # Per-env routing is automatic via each Mimir tenant's default_webhook_url; no
 # `alert_env` label is needed — every rule reads objects in its own tenant.
@@ -112,8 +112,8 @@ groups:
         #
         # On-demand jobs (temporal.RunWorker: offchain-price-backfill,
         # reference-capital-backfill, morpho-vault-backfill,
-        # morpho-v2-bootstrap, uniswap-v4-position-bootstrap, and every chain's
-        # block-republisher) are excluded: they run only
+        # morpho-v2-bootstrap, and every chain's uniswap-v4-position-bootstrap
+        # and block-republisher) are excluded: they run only
         # when a human starts them, so "zero successes in the last hour" is their
         # healthy state and a single failed run is by definition
         # errors=1/successes=0, which would page critical for a run the operator
@@ -140,7 +140,7 @@ groups:
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
                 service_name!="morpho-vault-backfill",
-                service_name!="uniswap-v4-position-bootstrap",
+                service_name!~"([a-z0-9-]+-)?uniswap-v4-position-bootstrap",
                 service_name!~"([a-z0-9-]+-)?block-republisher",
                 service_name!~"([a-z0-9-]+-)?block-meta-loader",
                 service_name!="core-model-runner",
@@ -158,7 +158,7 @@ groups:
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
                 service_name!="morpho-vault-backfill",
-                service_name!="uniswap-v4-position-bootstrap",
+                service_name!~"([a-z0-9-]+-)?uniswap-v4-position-bootstrap",
                 service_name!~"([a-z0-9-]+-)?block-republisher",
                 service_name!~"([a-z0-9-]+-)?block-meta-loader",
                 service_name!="core-model-runner",
@@ -264,7 +264,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|uniswap-v4-position-bootstrap|([a-z0-9-]+-)?block-republisher|([a-z0-9-]+-)?block-meta-loader"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|([a-z0-9-]+-)?uniswap-v4-position-bootstrap|([a-z0-9-]+-)?block-republisher|([a-z0-9-]+-)?block-meta-loader"
               }
             ) < 1
           )
@@ -272,7 +272,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|uniswap-v4-position-bootstrap|([a-z0-9-]+-)?block-republisher|([a-z0-9-]+-)?block-meta-loader"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|([a-z0-9-]+-)?uniswap-v4-position-bootstrap|([a-z0-9-]+-)?block-republisher|([a-z0-9-]+-)?block-meta-loader"
               }
             ) > 0
           )

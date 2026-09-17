@@ -23,6 +23,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
@@ -30,25 +31,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// alchemyURL builds the real mainnet Alchemy endpoint this harness dials from
-// the ALCHEMY_API_KEY env var (same variable the workers use). Real network
-// access is the point of this build-tagged live-validation test (see task B13
-// brief): it is never compiled into normal `go test`/CI runs.
-func alchemyURL(t *testing.T) string {
-	t.Helper()
-	key := os.Getenv("ALCHEMY_API_KEY")
-	if key == "" {
-		t.Fatal("ALCHEMY_API_KEY must be set to run TestLiveValidation")
-	}
-	return "https://eth-mainnet.g.alchemy.com/v2/" + key
-}
-
-// multicall3Address is the canonical Multicall3 deployment address, identical
-// across every EVM chain including mainnet.
-var multicall3Address = common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11")
-
 // busyPoolAddress is the wstETH/WETH 0.01% pool used for the event-decode and
-// baseline-tick assertions: the deepest/most active of the 18 seeded pools.
+// baseline-tick assertions: the deepest/most active of the 19 seeded pools.
 var busyPoolAddress = common.HexToAddress("0x109830a1AAaD605BbF02a9dFA7B0B92EC2FB7dAa")
 
 // liveValidationReportPath is where the human-readable data report (the B13
@@ -88,20 +72,21 @@ func TestLiveValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadPools: %v", err)
 	}
-	if len(poolRows) != 18 {
-		t.Fatalf("LoadPools returned %d pools, want 18 (seed migration did not apply cleanly)", len(poolRows))
+	// 19 = the 18 VEC-261 wstETH/stETH pools + the ARCT-384 AUSD/USDC pool.
+	if len(poolRows) != 19 {
+		t.Fatalf("LoadPools returned %d pools, want 19 (seed migration did not apply cleanly)", len(poolRows))
 	}
 	regPools := toRegisteredPools(poolRows)
 	rep.poolsLoaded = len(regPools)
 
-	rpcClient, err := rpc.DialContext(ctx, alchemyURL(t))
+	rpcClient, err := rpc.DialContext(ctx, testutil.AlchemyMainnetURL(t))
 	if err != nil {
 		t.Fatalf("BLOCKED: rpc.Dial(alchemy): %v", err)
 	}
 	defer rpcClient.Close()
 	ethClient := ethclient.NewClient(rpcClient)
 
-	mc, err := multicall.NewClient(ethClient, multicall3Address)
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
 		t.Fatalf("BLOCKED: multicall.NewClient: %v", err)
 	}
@@ -123,7 +108,7 @@ func TestLiveValidation(t *testing.T) {
 	rep.blockHash = blockHash.Hex()
 	rep.blockTimestamp = blockTS
 
-	// --- Step 3: state snapshot for all 18 pools ------------------------------
+	// --- Step 3: state snapshot for all 19 pools ------------------------------
 	states := snapshotAllPools(t, ctx, mc, regPools, blockHash, targetBlockNum, blockTS, rep)
 
 	txMgr, err := postgres.NewTxManager(pool, nil)

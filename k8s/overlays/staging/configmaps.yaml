@@ -439,7 +439,8 @@ data:
   AWS_REGION: "eu-west-1"
   DEPLOY_ENV: "staging"
 ---
-# On-demand Uniswap V4 position bootstrap worker (VEC-639). No schedule: it
+# On-demand Uniswap V4 backfill worker (VEC-639, VEC-790): hosts both
+# UniswapV4PositionBootstrap and UniswapV4PosmTransferBackfill. No schedule: it
 # idles on its task queue until a run is started by hand. ALCHEMY_HTTP_URL is
 # the uniswap-v4-indexer's own; a run reads the same chain the indexer does.
 apiVersion: v1
@@ -951,10 +952,10 @@ data:
   # verification, the per-router role gates and the OpenFGA checks together.
   AUTH_ENABLED: "false"
   # Two names for one Keycloak. OIDC_ISSUER must equal the `iss` CLAIM
-  # (KC_HOSTNAME), which jwt.py compares exactly and Swagger sends a BROWSER to;
-  # OIDC_JWKS_URL is where this POD fetches keys, and MagicDNS does not resolve
-  # `keycloak-staging` inside a pod.
-  OIDC_ISSUER: "http://keycloak-staging/realms/archon"
+  # (KC_HOSTNAME, https and the full tailnet name since ORB-440), which jwt.py
+  # compares exactly and Swagger sends a BROWSER to; OIDC_JWKS_URL is where this
+  # POD fetches keys, and MagicDNS does not resolve tailnet names inside a pod.
+  OIDC_ISSUER: "https://keycloak-staging.tail25f1d9.ts.net/realms/archon"
   OIDC_JWKS_URL: "http://keycloak.auth.svc/realms/archon/protocol/openid-connect/certs"
   OIDC_AUDIENCE: "python-api"
   OPENFGA_URL: "http://openfga.auth.svc:8080"

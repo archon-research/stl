@@ -1864,43 +1864,74 @@ run failures are covered by `VectorOnDemandWorkerDown` and
 `VectorCronjobRunFailing` like the other on-demand workers
 ([vector-cronjobs.md](vector-cronjobs.md#vectorondemandworkerdown)).
 
+**That Deployment hosts TWO workflow types**, both hand-started, closing
+different holes: `UniswapV4PositionBootstrap` (the positions, above) and
+`UniswapV4PosmTransferBackfill` (the posm token holders, below). The task queue
+keeps the older name. They write different tables and neither is a phase of the
+other, so either can be started alone, or both at once. One consequence when
+triaging: `cronjob.runs.total` carries only the task queue, so
+`VectorCronjobRunFailing` for `uniswap-v4-position-bootstrap` names the worker,
+while the Temporal UI's execution list and the pod logs name the workflow type.
+
 **How to start a run.** Temporal UI (namespace **`vector`**) → **Start Workflow**:
 
 | Field | Value |
 |---|---|
-| Task Queue | `uniswap-v4-position-bootstrap` |
-| Workflow Type | `UniswapV4PositionBootstrap` |
+| Task Queue | `uniswap-v4-position-bootstrap` on mainnet; `<chain>-uniswap-v4-position-bootstrap` for any other chain's worker (derived from its `CHAIN_ID`) |
+| Workflow Type | `UniswapV4PositionBootstrap` or `UniswapV4PosmTransferBackfill` |
 | Workflow ID | descriptive and unique, e.g. `uniswap-v4-position-bootstrap-2026-09-14` |
 | Input | leave empty |
 
-There is nothing to supply: the run reads the chain from its ConfigMap, the pool
-set from the database, and pins its own finalized head. The equivalent CLI call:
+There is nothing to supply: a run reads the chain from its ConfigMap, the
+registry from the database, and pins its own finalized head. The equivalent CLI
+call for the positions:
 
 ```bash
+# --task-queue is mainnet's; off mainnet it is <chain>-uniswap-v4-position-bootstrap,
+# the chain's own Deployment name. Starting a run on mainnet's queue snapshots
+# mainnet, whichever chain you meant.
 temporal workflow start --namespace vector \
   --task-queue uniswap-v4-position-bootstrap --type UniswapV4PositionBootstrap \
   --workflow-id uniswap-v4-position-bootstrap-2026-09-14
 ```
 
+And for the posm transfers — same queue as the positions on that chain, its own
+type, its own ID:
+
+```bash
+temporal workflow start --namespace vector \
+  --task-queue uniswap-v4-position-bootstrap --type UniswapV4PosmTransferBackfill \
+  --workflow-id uniswap-v4-posm-transfer-backfill-2026-09-14
+```
+
 The Workflow ID is the concurrency guard: Temporal rejects a duplicate while a
-run with that ID is in flight. Follow a run with
-`kubectl -n vector logs -f deploy/uniswap-v4-position-bootstrap` or in the
-execution's history; it closes with one `uniswap-v4 position bootstrap finished`
-line carrying its counters, and a failed attempt logs the partial ones at Warn.
+run with that ID is in flight. It is per ID, not per queue, so give the two
+workflow types distinct IDs. Follow a run with
+`kubectl -n vector logs -f deploy/uniswap-v4-position-bootstrap` — the Deployment
+carries the same per-chain name as the queue — or in the execution's history; it
+closes with one `uniswap-v4 position bootstrap finished` or `uniswap-v4 posm
+transfer backfill finished` line carrying its counters, and a failed attempt logs
+the partial ones at Warn.
 
 The scan knobs are the Deployment's ConfigMap, all optional and defaulted when
-unset: `FINALITY_DEPTH`, `INITIAL_WINDOW`, `MIN_WINDOW`, `MAX_WINDOW`,
-`POSITION_BATCH`. Changing one is a config change and a rollout, not a run
-input. The worker reuses nothing of the indexer's: it has its own ConfigMap, Secret
-(`DATABASE_URL`, `ALCHEMY_API_KEY`) and ServiceAccount.
+unset except `FINALITY_DEPTH` off mainnet (below): `FINALITY_DEPTH`,
+`INITIAL_WINDOW`, `MIN_WINDOW`, `MAX_WINDOW`, `POSITION_BATCH`,
+`TRANSFER_BATCH`. They are shared by both workflow types except the last two,
+which size one each. Changing one is a config change and a
+rollout, not a run input. The worker reuses nothing of the indexer's: it has its
+own ConfigMap, Secret (`DATABASE_URL`, `ALCHEMY_API_KEY`) and ServiceAccount.
 
-- **Pin semantics.** The whole run snapshots one block: `head - 64` (two epochs,
-  comfortably past finalisation). One block for the run is what makes the
-  snapshot internally consistent, and being past finality is what lets every
-  row carry `block_version = 0` — a shallow pin would let a reorg redelivery of
-  that height make the live indexer re-read the pool's entire historical
-  position set. The pin is re-read after the scan, and the run fails rather
-  than write if the height now names a different hash.
+- **Pin semantics.** The whole run snapshots one block: `head - FINALITY_DEPTH`,
+  which on mainnet defaults to 64 (two epochs, comfortably past finalisation).
+  Every other chain's ConfigMap must set `FINALITY_DEPTH`: 64 blocks is two
+  minutes on Base and sixteen seconds on Arbitrum, so there is no default off
+  mainnet, and the worker refuses to boot without one (the error names the
+  chain). One block for the run is what makes the snapshot internally consistent,
+  and being past finality is what lets every row carry `block_version = 0` — a
+  shallow pin would let a reorg redelivery of that height make the live indexer
+  re-read the pool's entire historical position set. The pin is re-read after the
+  scan, and the run fails rather than write if the height now names a different
+  hash.
 - **Rerun behaviour.** Re-running is safe and **idempotent except at a pinned
   height that carries a live `block_version > 0` row** (the known edge below):
   the append-on-change writer inserts only where the stored value for a slot
@@ -1935,6 +1966,118 @@ input. The worker reuses nothing of the indexer's: it has its own ConfigMap, Sec
   on the same pin appends it again. State-at-height answers are unaffected (the
   canonical version ranks above); a later run pins higher and avoids it.
 
+**Backfilling the posm transfer log (VEC-790).** `UniswapV4PosmTransferBackfill`
+on the same worker replays the PositionManager's whole ERC-721 `Transfer` history
+from `uniswap_v4_position_manager.deploy_block` (21689089 on mainnet) up to a
+pinned finality-safe height, and appends the rows into
+`uniswap_v4_position_nft_transfer`. Start it from the form or the CLI call in
+"How to start a run" above, under its own Workflow ID.
+
+Why it is not optional: for a PositionManager-managed position —
+**2,895 of 4,501 tracked keys on staging, 64% (measured 2026-09-14)** — `uniswap_v4_position.owner` is
+the PositionManager contract, so that transfer table is the only path to a real
+holder. A token appears in it only when it MOVES, so an LP position minted and
+then held emits no `Transfer` at all and forward-only coverage never reaches it.
+Mainnet spreads ~1k transfers/day across ~389k minted tokens, so the share
+landing on the tracked set is small and skewed toward whichever few trade
+actively — months to years before coverage is adequate. And the failure is
+silent: the holder query returns no row, which is exactly its answer for a burned
+or non-existent token.
+
+- **It reads no chain state at all.** Every field is carried by the log: height,
+  timestamp, token id, both parties. That makes it much cheaper than the
+  position bootstrap, and it is why there is no multicall and no pinned read.
+  The `blockTimestamp` is Alchemy's per-log extension, outside the JSON-RPC
+  spec — a run REFUSES a log without one rather than stamping 1970, so a
+  provider that stopped returning it fails the run loudly instead of writing
+  rows outside the band every sibling read prunes chunks with. Verified present
+  and matching `eth_getBlockByNumber` across 21,122 sampled logs spanning the
+  whole history (2026-09-14).
+- **Pin semantics.** The scan stops at `head - FINALITY_DEPTH` and the live
+  indexer owns everything above, so no row is written for a block that can still
+  reorg. The pin is re-read at the end of the scan; because rows commit as the scan
+  goes, that check cannot prevent a bad write — it is how you learn the range was
+  reorged under the run, which past the finality depth means the rows below it want
+  re-checking.
+- **Where `block_version` comes from.** A scanned log carries none, so each row's
+  version is read from the chain's raw S3 archive through
+  `internal/pkg/blockversion` — never from `block_states`, which is the watchers'
+  operational table and retains only 30 days, less than this scan's range. The rule
+  is the maintainer-set highest-version-wins one every replay in this repo uses,
+  and `cmd/backfillers/morpho-vault-backfill/discovery.go` states it in full
+  including its two surprises: deep history is `_1_`-only and one transition window
+  holds identical `_0_`/`_1_` twins, so **a replayed row carrying
+  `block_version = 1` implies no reorg**. Never read a reorg out of `block_version`
+  on a replayed row. A height the archive cannot answer for, or answers for with a
+  different block, stops the run — the archive is what gets repaired, by the
+  republisher or the bulk downloader, before the range is replayed again.
+- **Rerun behaviour is the live path's**, the same terms `morpho-v2-bootstrap`
+  states for its replay. `SaveNFTTransfers` queues the statement the live
+  indexer's transfer phase queues, so a rerun **on the same build** conflicts away
+  and reports `transfersWritten=0`. A rerun **from a different build** re-records
+  the range as parallel provenance rows, because `processing_version` keys on
+  `build_id`: the row count moves by up to one whole posm history while the holder
+  answer does not, since the newest `processing_version` wins the ordering and
+  carries identical content. The backfill is itself a different build from the
+  live indexer, so its first run over a stretch the indexer already covered writes
+  parallel rows there by construction. Run it again whenever you suspect a gap;
+  read `transfersWritten` together with the build, not on its own.
+- **Row volume and runtime.** Mainnet, measured 2026-09-14: **487,908 Transfer
+  logs over 4,286,968 blocks in 68 `eth_getLogs` windows with 25 narrowings**,
+  about two minutes of RPC. A whole-history run still takes **~7.5h**, because
+  the archive reads that stamp `block_version` dominate it: one `ListObjectsV2`
+  per distinct height plus a ranged GET for that height's block hash, ~250k of
+  each. The default `INITIAL_WINDOW` of 500,000 is right — measured against
+  50,000 and 100,000, all three land within 68–75 windows and 106–114 s, because
+  the adaptive window self-tunes to the provider's ~10,000-log response cap
+  within a few narrowings.
+- **It does NOT trip the live indexers' growth tripwire; it has its own.**
+  487,908 rows over ~7.5h is ~18 rows/s, six times
+  [`VectorUniswapV4NFTTransferGrowthHigh`](#vectoruniswapv4nfttransfergrowthhigh)'s
+  budget and sustained past its `for: 6h`, so both
+  `uniswap_v4_position_nft_transfer` rules exclude this worker's `service_name`:
+  its bulk load is neither a growth regime nor evidence the live decoder is
+  healthy. The run still records through the same `dextelemetry`
+  counters, so its rows stay visible on
+  `uniswap_v4_nft_transfer_rows_written_total{service_name=~"([a-z0-9-]+-)?uniswap-v4-position-bootstrap"}`,
+  and
+  [`VectorUniswapV4NFTTransferBackfillGrowthHigh`](#vectoruniswapv4nfttransferbackfillgrowthhigh)
+  watches exactly that series at a threshold a single run cannot reach. Remember
+  both when reconciling the table's row count against the live rate: the count
+  includes one whole posm history per chain backfilled.
+- **A killed attempt resumes near where it stopped.** The run records the chain,
+  the PositionManager registry row, its pin and a `NextBlock` cursor in the
+  activity's heartbeat details, advanced one scan window at a time once that
+  window's rows have committed, so a resumed attempt redoes at most one window —
+  and redoing one writes nothing. It never re-derives a fresh pin. A cursor
+  already past the pin means an earlier attempt finished the scan and only its
+  closing pin check failed; that attempt logs `already scanned to its pin on an
+  earlier attempt` and succeeds rather than failing the run. The record is scoped
+  to the PositionManager as well as the chain, so a correcting registry version
+  landing mid-run makes the next attempt rescan from the deploy block under the
+  new surrogate id instead of inheriting a cursor that would skip everything below
+  it. Timeouts are 12h `StartToClose`, 75h `ScheduleToClose`, 10 attempts, 60 s
+  heartbeat. **Each pod roll spends one attempt**: the activity dies with its
+  worker, Temporal notices 180 s later (heartbeat × 3), and the next attempt picks
+  up the recorded cursor — so a deploy, a spot reclaim and a drain in one afternoon
+  cost three of the ten and no rescanning beyond the window that was in flight.
+  As for the position run, heartbeat details belong to one activity execution, so a
+  run started again by hand rescans from the deploy block, which is safe and costs
+  RPC time plus an archive read per height. That is the reason the attempt budget
+  is 10: exhausting it is what turns a resumable interruption into a full rescan.
+- **A run that scans the whole history and decodes nothing logs a Warn**, not an
+  error. On a chain with no posm activity yet that is the truth; on mainnet it is
+  what a wrong `uniswap_v4_position_manager` protocol address looks like (the
+  address is the FK'd `protocol` row's, never a column here). The line names both
+  readings. A *resumed* attempt covers only a tail, so it never raises this — a
+  quiet tail says nothing about the address.
+- **An unseeded `deploy_block` refuses the run**, naming the chain: scanning from
+  genesis is not a sensible fallback. It refuses the RUN, not the worker: the
+  workflow type still registers and the pod logs the reason at Error on boot, so
+  `UniswapV4PositionBootstrap` stays startable. The live indexer never reads that
+  column either, so it boots fine — fix it by appending a correcting registry
+  version ([Fixing a bad registry row](#fixing-a-bad-registry-row)).
+
 **Tables:** `uniswap_v4_pool_state`, `uniswap_v4_swap`,
 `uniswap_v4_liquidity_event`, `uniswap_v4_tick`, `uniswap_v4_pool_event`,
 `uniswap_v4_position`, `uniswap_v4_position_nft_transfer`.
@@ -1948,14 +2091,98 @@ version histories matched on `chain_id`, and "current" always means the highest
 `uniswap_v4_position_manager` is a third registry table of the same shape, for
 the ERC-721 PositionManager, and its address comes through `protocol_id` too.
 
+### Adding a chain
+
+Nothing in the worker is mainnet-specific; a second chain is a queue, a
+migration and a Deployment, in that order. What already holds without any
+change: the SQS loop deletes a message whose chain id is not the worker's
+(`chain ID mismatch, deleting message`), `entity.ChainName` fails boot on an
+unknown chain id, `dexbootstrap` refuses to boot off mainnet without
+`ALCHEMY_HTTP_URL`, `ValidatePoolKeys` refuses a registry whose PoolIds do not
+hash from their keys, every registry table is keyed on `chain_id` and every
+fact table reaches the chain through its pool or manager surrogate (a PoolId is
+identical across chains for an identical PoolKey, which is why the registry's
+natural key is `(chain_id, pool_id)` and never `pool_id` alone).
+
+1. **Infrastructure repo** — the chain's `uniswap_v4_indexing` SQS queue, IAM
+   role and pod identity, mirroring archon-research/infrastructure#617 for
+   ethereum. The chain must already have a watcher and backup worker (mainnet,
+   arbitrum, base, optimism, unichain, robinhood and avalanche do); a chain id
+   missing from `entity.ChainIDToName` is chain onboarding, not a V4 task.
+2. **One additive migration**, every value read from chain and asserted in a
+   `DO` block (the `20260908_120000_seed_uniswap_v4_rlusd_usds.sql` shape): a
+   `protocol` row for the chain's PoolManager; a `uniswap_v4_pool_manager` row
+   with its StateView address and deploy block; a `uniswap_v4_position_manager`
+   row for its PositionManager; a native-currency placeholder `token` row
+   (`0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE`, that chain's native symbol
+   and decimals — only chain 1 has one today, and without it the pool seed's
+   token join inserts nothing); the pools' `token` rows; the pools themselves,
+   each from its own `Initialize` log. The seed tests in
+   `uniswap_v4_migration_integration_test.go` are chain-1-only today
+   (`uniswapV4ExpectedPool` has no chain field, the queries say `chain_id = 1`),
+   so a second chain needs chain-aware expectations, not a longer list. Re-derive the four hypertables'
+   `chunk_interval` for the combined ingest (VEC-663's rule: the active chunk plus
+   its indexes within a quarter of `shared_buffers`, capped at 30 days; 30 days
+   today at mainnet's few MB/day): `set_chunk_time_interval` affects new chunks
+   only, and `TestUniswapV4HypertablesChunkIntervalAndCompressionOrder` pins the
+   value.
+3. **Kubernetes** — copy `k8s/base/uniswap-v4-indexer/` to
+   `k8s/base/<chain>-uniswap-v4-indexer/`, changing only the names, where
+   `<chain>` is the `chainutil.ChainSlug` value (`base`, `avalanche`) — the
+   name every deployed resource in the fleet is built from, and the one the
+   Down and Stalled rules derive their `chain` label from. The `app` label must
+   equal the Deployment name. Do not use `entity.ChainName` here: that is the
+   `chain` *metric label* the worker emits, and for 43114 it is `avalanche-c`
+   while every Deployment is `avalanche-*`. The rules bridge the two, so the
+   indexer tolerates either name — the bootstrap worker in step 5 does not. Keep `image:
+   dex-indexer`: the roster already aliases it for the three DEX bases, so
+   there is no `k8s/image-roster.txt` change (rename the image key and it is a
+   new alias on that line, never a new line). Add its ConfigMap with the same
+   entries as the mainnet one (`DEX`, `CHAIN_ID`, `AWS_REGION`,
+   `ALCHEMY_HTTP_URL`, `ENVIRONMENT`, `DEPLOY_ENV`), its ExternalSecret (`AWS_SQS_QUEUE_URL`,
+   `DATABASE_URL`, `ALCHEMY_API_KEY`, `REDIS_ADDR`, `S3_BUCKET` — the bucket
+   must be the chain's `stl-sentinel<env>-<chain>-raw`, which `dexbootstrap`
+   checks against `CHAIN_ID`), and the overlay `resources:` entries.
+4. **Alerts** — nothing to copy: every rule in the group is chain-generic. On
+   the first deploy confirm that
+   `kube_deployment_status_replicas_available{deployment="<chain>-uniswap-v4-indexer"}`
+   exists and that the alerts' derived `chain` label equals the one
+   `uniswap_v4_blocks_processed_total` carries. The Deployment prefix and that
+   label are the same string for every chain but 43114, where the Deployment is
+   `avalanche-*` and the label is `avalanche-c` by design — which is what the
+   third `label_replace` exists for. A mismatch the rules do not bridge means
+   the naming rule was not followed, and
+   `VectorUniswapV4IndexerStalled` will fire on a phantom chain.
+5. **Bootstrap** — a second chain needs its own worker Deployment, the
+   `block-republisher` shape: copy `k8s/base/uniswap-v4-position-bootstrap/` to
+   `k8s/base/<chain>-uniswap-v4-position-bootstrap/` changing only the names
+   (`<chain>` as in step 3), with its own ConfigMap carrying every key mainnet's
+   carries — `TEMPORAL_HOST_PORT`, `TEMPORAL_NAMESPACE`, `CHAIN_ID`,
+   `ALCHEMY_HTTP_URL`, `AWS_REGION`, `DEPLOY_ENV` — plus an explicit
+   `FINALITY_DEPTH` chosen for that chain's finality (see *Pin semantics*
+   above). Only two of those fail loudly: `DEPLOY_ENV` and `CHAIN_ID` are
+   required at boot, but `TEMPORAL_HOST_PORT` and `TEMPORAL_NAMESPACE` default
+   to `localhost:7233` and `sentinel`, so a worker missing them starts, polls a
+   queue in the wrong namespace, and every run an operator starts in `vector`
+   sits unassigned. Its ExternalSecret carries `DATABASE_URL`,
+   `ALCHEMY_API_KEY` and `S3_BUCKET`; add the overlay `resources:` entries; keep `image: uniswap-v4-position-bootstrap`, the roster
+   line already covers it. The worker derives its task queue from `CHAIN_ID` —
+   `<chain>-uniswap-v4-position-bootstrap` — so a run for that chain is started
+   on that queue and can land on no other chain's worker. Then start a run from
+   the Temporal UI as for mainnet.
+
 **Who holds a posm position NFT.** `uniswap_v4_position.owner` is the
 *PoolManager-level* owner, which for every PositionManager-managed position is
 the PositionManager contract itself — never the person. The holder lives in
 `uniswap_v4_position_nft_transfer`, one row per ERC-721 `Transfer` log, and the
 two join on `uniswap_v4_position.salt = bytes32(token_id)` (PositionManager
-passes the token id as the salt). Coverage starts at the block the indexer began
-running, not at the PositionManager's deploy block; a historical backfill of the
-transfer log is a separate job. The holder at a height is a plain SELECT:
+passes the token id as the salt). The live indexer's coverage starts at the block
+it began running; everything below that comes from the
+`UniswapV4PosmTransferBackfill` run described under "Backfilling the posm
+transfer log" below, so on a chain where that has not been run the holder query
+answers "no row" for any token whose last move predates go-live — which is the
+same answer it gives for a burned token. The holder at a height is a plain
+SELECT:
 
 ```sql
 -- Who held posm token 388720 at block 25873334 on chain 1?
@@ -2103,9 +2330,10 @@ row is wrong.
 
 ### What it means
 
-The `uniswap-v4-indexer` Deployment has <1 available replica for 10 minutes. No
-pod is running, so nothing is written to any `uniswap_v4_*` table and the SQS
-backlog is growing.
+A uniswap-v4-indexer Deployment has <1 available replica for 10 minutes. No
+pod is running, so nothing is written to any `uniswap_v4_*` table for that
+chain and its SQS backlog is growing. The alert names the Deployment
+(`deployment`) and the chain it serves (`chain`).
 
 This rule reads `kube_deployment_status_replicas_available` from
 kube-state-metrics, which is independent of the OTel pipeline. That is the whole
@@ -2116,30 +2344,46 @@ single-PoolManager check, and the boot-time `PoolIDsEverSnapshotted` read each
 refuse to start rather than index wrong or invisible data — which makes a boot
 crash-loop a routine failure mode here, not an exotic one.
 
+kube-state knows nothing about chains and exports no Deployment labels, so
+`chain` is derived from the Deployment name: the bare `uniswap-v4-indexer` is
+mainnet and every other chain's Deployment is `<chain>-uniswap-v4-indexer`,
+where `<chain>` is the `chainutil.ChainSlug` value every deployed resource is
+named from (`base-uniswap-v4-indexer`, `avalanche-uniswap-v4-indexer`). The
+worker labels its own series with `entity.ChainName` instead, and the two agree
+on every chain but 43114 (`avalanche` against `avalanche-c`), which the rule's
+third `label_replace` bridges — so the derived label equals the `chain` the
+worker emits on its own series. One rule covers every chain; a new chain gets a
+Deployment that follows the naming rule, never a copy of this rule
+([Adding a chain](#adding-a-chain)).
+
 ### First checks (<=5 min)
 
-1. **Pod status** — `kubectl -n vector get pods -l app=uniswap-v4-indexer`.
-2. **Why it is not ready** — `kubectl -n vector describe deployment/uniswap-v4-indexer`
+`$DEPLOY` below is the alert's `deployment` label; the pods' `app` label equals
+it.
+
+1. **Pod status** — `kubectl -n vector get pods -l app=$DEPLOY`.
+2. **Why it is not ready** — `kubectl -n vector describe deployment/$DEPLOY`
    and, for a crash loop, the *previous* container's logs:
-   `kubectl -n vector logs -l app=uniswap-v4-indexer --previous --tail=100`.
+   `kubectl -n vector logs -l app=$DEPLOY --previous --tail=100`.
 3. **Registry refusal** — the fail-fast startup errors are self-identifying:
-   `kubectl -n vector logs -l app=uniswap-v4-indexer --previous | grep -E "registry bug|PoolManager|StateView|no uniswap v4 pools|ever been indexed"`
+   `kubectl -n vector logs -l app=$DEPLOY --previous | grep -E "registry bug|PoolManager|StateView|no uniswap v4 pools|ever been indexed"`
    - `... : registry bug` — `ValidatePoolKeys` recomputed a PoolId that
      disagrees with the seeded one, or two rows share a PoolId.
    - `pools A and B have different PoolManager/StateView addresses` — the
      registry spans two deployments; one worker serves one.
    - `no uniswap v4 pools registered for chain N` — the chain has no
-     current-version `uniswap_v4_pool` rows.
+     current-version `uniswap_v4_pool` rows. On a newly added chain this is
+     the seeding migration missing, not a bad row.
    - `reading which uniswap v4 pools have ever been indexed on chain N` — the
      boot read against TimescaleDB failed; this is a DB availability problem,
      not a registry one.
-
    Every one of these is fixed by appending a superseding registry row
    ([Fixing a bad registry row](#fixing-a-bad-registry-row)) or by restoring the
    database — never by editing the offending row in place.
-4. **Secrets/config present** — a missing key from the `uniswap-v4-indexer`
+4. **Secrets/config present** — a missing key from the Deployment's
    ExternalSecret (queue URL, `DATABASE_URL`, `ALCHEMY_API_KEY`, `REDIS_ADDR`)
-   crashes the worker on startup by design.
+   crashes the worker on startup by design; off mainnet so does a missing
+   `ALCHEMY_HTTP_URL` in its ConfigMap.
 5. **Node/scheduling** — a pending pod means node capacity or taints, not the
    worker.
 
@@ -2154,9 +2398,13 @@ crash-loop a routine failure mode here, not an exotic one.
 
 ### Verify recovery
 
-`kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer"} >= 1`,
-and the pod logs show the `uniswap-v4-indexer started` line with a non-zero
-`pools` count.
+`kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer"} >= 1`
+with the alert's own `deployment` value in place of mainnet's — this is a PromQL
+matcher, not a shell, so `$DEPLOY` is not expanded here the way it is in the
+`kubectl` lines above, and a regex over every V4 Deployment would answer for a
+chain that never went down. The
+pod logs show the `uniswap-v4-indexer started` line with a non-zero `pools`
+count.
 
 ---
 
@@ -2166,8 +2414,9 @@ and the pod logs show the `uniswap-v4-indexer started` line with a non-zero
 
 ### What it means
 
-The worker is **up** (>=1 replica) but has consumed **no block for 15 minutes**:
-`rate(uniswap_v4_blocks_processed_total{status="success", chain="mainnet"}[5m])`
+A uniswap-v4-indexer Deployment is **up** (>=1 replica) but has consumed **no
+block for 15 minutes** on its chain:
+`rate(uniswap_v4_blocks_processed_total{status="success", chain="<chain>"}[5m])`
 is zero — or the series has **vanished entirely**. The expression zero-fills from
 kube-state-metrics, so a dead OTLP export with a live pod still fires; without
 that zero-fill the counter would simply staleness-expire and the rule would
@@ -2180,19 +2429,20 @@ or tick updates are being recorded. The worker consumes one `BlockEvent` per
 block (~12s on mainnet) and counts every one, touched pools or not, so this is
 never a quiet market.
 
-Because the zero-fill comes from kube-state-metrics, which knows nothing about
-chains, this rule *aggregates* by `cluster` only — but it still *carries* a
-`chain` label: `chain: mainnet` is re-added as a static rule label, and the rate
-is pinned to `chain="mainnet"` so a second chain's Deployment cannot mask this
-one's stall. Aggregating without `chain` and carrying no `chain` are different
-things. This is not the odd one out either: it is one of the group's two
-kube-state-keyed rules, and
-[`VectorUniswapV4IndexerDown`](#vectoruniswapv4indexerdown) is built the same way
-(`max by (cluster)` plus a static `chain: mainnet`). The five metric-keyed rules
-in the group — ErrorRatioHigh, BlockLatencyHigh, NotWritingState, NoPoolsTouched,
-PoolNeverIndexed — derive `chain` from the series instead. A second chain gets
-its own copy of this pair, with its own deployment name and its own static
-chain.
+The zero-fill comes from kube-state-metrics, which knows nothing about chains,
+so the rule derives `chain` from the Deployment name exactly as
+[`VectorUniswapV4IndexerDown`](#vectoruniswapv4indexerdown) does (bare name =
+mainnet, otherwise the `ChainSlug` prefix, mapped onto the worker's
+`entity.ChainName` for 43114) and joins both the zero-fill
+and the replica gate `on (chain, cluster)` against the worker's own `chain`
+label. That is what lets one chain reach zero on its own series while another
+chain's Deployment keeps running, and what keeps a dead second-chain pod in
+Down's lane rather than this one's. The metric-keyed rules in the group —
+ErrorRatioHigh, BlockLatencyHigh, NotWritingState, NoPoolsTouched,
+PoolNeverIndexed, StateRowsNotLanding, NoNFTTransfers — derive `chain` from the
+series directly.
+One rule covers every chain; a new chain needs the Deployment naming rule and
+nothing else ([Adding a chain](#adding-a-chain)).
 
 ### First checks (<=5 min)
 
@@ -2202,13 +2452,15 @@ chain.
    pod is alive and this is a wedged consume loop or a dead metrics export.
 2. **Recent logs** — look for decode panics, DB connection errors,
    `context deadline exceeded`, or SQS poll failures:
-   `kubectl -n vector logs -l app=uniswap-v4-indexer --tail=100`
+   `kubectl -n vector logs -l app=$DEPLOY --tail=100`, where `$DEPLOY` is the
+   chain's Deployment (`uniswap-v4-indexer` on mainnet,
+   `<chain>-uniswap-v4-indexer` elsewhere)
 3. **OTLP export** — if the logs show blocks still being processed while the
    counter is flat, the metrics pipeline is the problem, not the worker; other
    OTel series from the pod will be flat or absent too.
 4. **Upstream lag** — confirm the watcher is producing blocks for this chain
    (if not, the root cause is upstream — see `VectorWatcherNoBlocks`).
-5. **SQS queue depth** — check the uniswap-v4-indexer SQS queue. A depth of 0
+5. **SQS queue depth** — check that chain's uniswap-v4-indexer SQS queue. A depth of 0
    with no processing means the consumer lost its connection or the queue is
    empty.
 6. **TimescaleDB health** — connection pool exhaustion or replication lag can
@@ -2234,10 +2486,8 @@ A startup registry refusal is **not** in this list: it kills the pod, so it fire
 
 ### Verify recovery
 
-`sum by (cluster) (rate(uniswap_v4_blocks_processed_total{status="success", chain="mainnet"}[5m])) > 0`
-in the affected cluster. Keep the `chain` pin: without it the sum adds up every
-chain's rate, and once a second Deployment exists one chain's stall would never
-reach zero.
+`sum by (chain, cluster) (rate(uniswap_v4_blocks_processed_total{status="success", k8s_namespace_name="vector"}[5m])) > 0`
+for the alert's `chain` in the affected cluster.
 
 ---
 
@@ -2285,14 +2535,16 @@ not an alert.
 
 1. **Dominant error class** — `sum by (operation)(rate(uniswap_v4_errors_total[10m]))`
    to see which operation is failing most.
-2. **Pod logs** — `kubectl -n vector logs -l app=uniswap-v4-indexer | grep "ERROR"`
+2. **Pod logs** — `kubectl -n vector logs -l app=$DEPLOY | grep "ERROR"`, where
+   `$DEPLOY` is the alert's chain's Deployment (`uniswap-v4-indexer` on mainnet,
+   `<chain>-uniswap-v4-indexer` elsewhere).
 3. **Zero sqrt price** — a `sqrt_price_x96` validation error names a registry
    bug, not a transient fault. StateView returns zeros (no revert) for a PoolId
    it has never seen, and `Validate` rejects that rather than persisting a fake
    price. Confirm with the `getSlot0` snippet in the service intro, then append
    a superseding registry row
    ([Fixing a bad registry row](#fixing-a-bad-registry-row)).
-4. **Recent deploys** — `kubectl rollout history deploy/uniswap-v4-indexer -n vector`.
+4. **Recent deploys** — `kubectl rollout history deploy/$DEPLOY -n vector`.
 5. **Chain reorgs** — check watcher logs; a reorg delivers blocks the indexer
    may reject until the version advances.
 
@@ -2449,7 +2701,9 @@ lag in Uniswap V4 pool state.
 4. **DB write latency** — confirm TimescaleDB is not under I/O pressure. The
    append-on-change tick writer takes per-`(pool, tick)` advisory locks, so a
    block touching a wide tick range serializes more work.
-5. **Pod CPU/memory** — `kubectl top pod -n vector -l app=uniswap-v4-indexer`.
+5. **Pod CPU/memory** — `kubectl top pod -n vector -l app=$DEPLOY`, where
+   `$DEPLOY` is the alert's chain's Deployment (`uniswap-v4-indexer` on mainnet,
+   `<chain>-uniswap-v4-indexer` elsewhere).
 
 ### Common causes
 
@@ -2615,7 +2869,7 @@ signature, and only one of them is a fault.
 
 ### First checks
 
-1. **Is it a replay?** `kubectl -n vector logs -l app=uniswap-v4-indexer --tail=500 | grep -E "block=[0-9]+"`
+1. **Is it a replay?** `kubectl -n vector logs -l app=$DEPLOY --tail=500 | grep -E "block=[0-9]+"` (`$DEPLOY`: `uniswap-v4-indexer` on mainnet, `<chain>-uniswap-v4-indexer` elsewhere)
    — block numbers well below the chain head, arriving in order, is a replay.
    Confirm with `SELECT max(block_number) FROM uniswap_v4_pool_state` against the head.
 2. **Is it a drop?** Pick one queued block from the logs and check the table:
@@ -2818,7 +3072,8 @@ this fires on a pool younger than the window. Step 1 resolves it in one look.
    and tells you immediately whether the pool is new:
 
    ```bash
-   kubectl -n vector logs -l app=uniswap-v4-indexer | \
+   # $DEPLOY: uniswap-v4-indexer on mainnet, <chain>-uniswap-v4-indexer elsewhere
+   kubectl -n vector logs -l app=$DEPLOY | \
      grep "have never produced a state or tick row"
    ```
 
@@ -2944,14 +3199,25 @@ nothing (every INSERT conflicts away) still keeps it alive;
 `uniswap_v4_nft_transfer_rows_written_total` is the growth counter.
 
 **Zero, not absent.** Unlike its siblings in this group, the rule requires the
-counter's series to exist. `dextelemetry` seeds it at construction, so it is
-present from the boot of any build carrying the posm decoder and absent from one
-that predates it. That distinction is load-bearing: the alert rules sync to Mimir
+counter's series to exist. The indexer's `dextelemetry` set seeds it at
+construction, so it is present from the boot of any build carrying the posm
+decoder and absent from one that predates it. That distinction is load-bearing: the alert rules sync to Mimir
 the moment a PR merges, while the image reaches the cluster minutes later, and
 the blocks-processed terms are satisfied by the old build throughout. Written as
 `unless … > 0` this fired on every rollout of the feature rather than only when
 decoding was broken. A pod that dies before exporting anything is
 [`VectorUniswapV4IndexerDown`](#vectoruniswapv4indexerdown)'s case, not this one.
+
+**The live indexers only.** The selector excludes
+`service_name=~"(^|.*-)uniswap-v4-position-bootstrap"` (every chain's worker, not
+mainnet's alone), whose posm transfer backfill moves
+this same counter under the same `chain`. A run would lift the sum off zero on the
+live indexer's behalf and hold this alert quiet for the run plus the 6h the window
+remembers it, precisely while a wrong PositionManager address in the LIVE path went
+unnoticed. The exclusion also keeps the existence requirement above the live
+indexer's own, so the backfill worker's series can never stand in for an indexer
+that carries no decoder yet. A backfill running, or merely deployed, changes
+nothing about what this alert says.
 
 `uniswap_v4_position_nft_transfer` is the only source of posm token holders, so
 while this fires "who holds token T" answers with stale data and no query can
@@ -3079,6 +3345,14 @@ ERC-721 `Transfer` — have run above 250k/day for six hours. The counter is
 a redelivered range whose INSERTs all conflict away adds nothing, so the rate is
 real table growth.
 
+**The rule reads the live indexers only.** It excludes
+`service_name=~"(^|.*-)uniswap-v4-position-bootstrap"` (every chain's worker), because that worker hosts the
+VEC-790 posm transfer backfill, and one hand-started run bulk-loads a chain's
+whole posm history — 487,908 rows on mainnet over ~7.5h, ~18 rows/s, six times
+the budget — for a load that is bounded, known, and not a growth regime.
+So a firing rule is never the backfill, and the row count in step 1 will exceed
+what this rate alone implies by one posm history per chain backfilled.
+
 **Threshold derivation** (mirrored in the rule comment):
 
 | | |
@@ -3109,14 +3383,19 @@ spans chains).
    GROUP BY 1 ORDER BY 1;
    ```
 
-2. **Is a backfill running?** The ARCT-385 historical backfill from the
-   PositionManager's deploy block (`uniswap_v4_position_manager.deploy_block`)
-   writes years of transfers in hours. It moves this rule only if it records
-   through `dextelemetry.RecordNFTTransferRows`, as the live indexer does —
-   today nothing but the live indexer does, so a backfill built without that
-   grows the table while this rule stays flat, and step 1's `created_at`
-   histogram is where its rows show up. If it does record, confirm the run, let
-   it finish, expect the alert to clear itself.
+2. **Separate the backfill's rows from the live rate.** The backfill
+   (`UniswapV4PosmTransferBackfill`) does record through
+   `dextelemetry.RecordNFTTransferRows`, so its rows are visible — they are just
+   excluded from this rule. Split the two to see what step 1's total is made of:
+
+   ```promql
+   sum by (service_name) (
+     rate(uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector"}[6h])
+   )
+   ```
+
+   If the live indexer's own term is what is over budget, this is a real regime
+   change; go to step 3. A firing rule cannot have been caused by the backfill.
 
 3. **What changed.** Another chain's `uniswap-v4-indexer` now writing into the
    same table, or a traffic regime change on an existing one:
@@ -3211,6 +3490,99 @@ After a conversion the rule no longer describes the table — remove it in that 
 
 ---
 
+## VectorUniswapV4NFTTransferBackfillGrowthHigh
+
+**Severity:** warning · **For:** 2h
+
+The companion to
+[`VectorUniswapV4NFTTransferGrowthHigh`](#vectoruniswapv4nfttransfergrowthhigh),
+covering the one writer that rule excludes: the `UniswapV4PosmTransferBackfill`
+runs on `uniswap-v4-position-bootstrap`. Between them the two rules watch every
+writer of `uniswap_v4_position_nft_transfer`, which a plain table owes
+(`stl-verify/db/migrations/AGENTS.md`).
+
+### What it means
+
+The backfill has written above 3M rows/day into
+`uniswap_v4_position_nft_transfer` for two hours. Nothing is broken — this is a
+volume signal on a plain table, not a fault.
+
+Why the threshold is so much higher than the live rule's 2.9 rows/s: the two
+measure different things. A live indexer's rate is a *regime* that continues; the
+backfill's is a **bounded burst that ends**. One chain's whole posm history is
+~490k rows (487,908 on mainnet, 2026-09) and takes ~7.5h, which is 5.7 rows/s
+averaged over the 24h window. A rerun on the same build adds close to nothing,
+because the insert conflicts away and this counter counts rows *persisted* — so
+**a backfill looping on one build cannot fire this**. A rerun from a new build
+re-records the range, which is one history's worth per run and still well inside
+the budget; several of those in a day is what the threshold is set for.
+
+| | |
+|---|---|
+| One mainnet posm history | ~490k rows → 5.7 rows/s over 24h |
+| Alert threshold | 3M rows/day = **34.7 rows/s**, about 6 histories in a day |
+| Plain-table comfort ceiling | ~100M rows (shared with the live rule) |
+
+### First checks
+
+1. **Which chains are being backfilled, and how much each contributed.**
+   `created_at` is the insertion time, so it is what shows where the growth
+   landed — a backfill writes rows whose `block_timestamp` is years old:
+
+   ```sql
+   SELECT m.chain_id,
+          date_trunc('hour', t.created_at) AS hour,
+          count(*)                         AS rows_inserted
+   FROM uniswap_v4_position_nft_transfer t
+   JOIN uniswap_v4_position_manager m ON m.id = t.position_manager_id
+   WHERE t.created_at > now() - INTERVAL '2 days'
+   GROUP BY 1, 2 ORDER BY 2, 1;
+   ```
+
+2. **Confirm the runs are deliberate.** Temporal UI, namespace `vector`, workflow
+   type `UniswapV4PosmTransferBackfill`, on each chain's own task queue —
+   `uniswap-v4-position-bootstrap` for mainnet and
+   `<chain>-uniswap-v4-position-bootstrap` for every other, so a seeding run on
+   one chain is not missed by looking only at mainnet's. A run closes with one
+   `uniswap-v4 posm transfer backfill finished` line carrying `transfersWritten`.
+   Several chains being seeded in one day is the expected cause.
+
+3. **The real row count**, which is what the conversion decision turns on:
+
+   ```sql
+   SELECT n_live_tup, pg_size_pretty(pg_total_relation_size(relid)) AS total_size
+   FROM pg_stat_user_tables
+   WHERE relname = 'uniswap_v4_position_nft_transfer';
+   ```
+
+### Common causes
+
+- **Several chains backfilled the same day** — the expected cause. Let the runs
+  finish; the rate decays out of the 24h window on its own.
+- **A chain with far more posm history than mainnet.** Legitimate, and exactly
+  the measurement the plain-table decision was deferred to: take the row count
+  from step 3 to the conversion path below.
+- **A rerun from a different `build_id`** where you expected a no-op. Every deploy
+  is a new build, and a rerun on one re-records the whole history as new
+  `processing_version` rows: the row count moves, the holder answers do not. Only a
+  same-build rerun conflicts away to `transfersWritten=0`.
+
+### Remediation
+
+Nothing to remediate unless step 3's row count is approaching ~100M, in which
+case the conversion is the one in
+[`VectorUniswapV4NFTTransferGrowthHigh`](#remediation--converting-to-a-hypertable).
+Its caveat applies unchanged: **no tiering policy**, because the holder read has
+no lower bound and `timescaledb.enable_tiered_reads` is off.
+
+### Verify recovery
+
+The rule clears once the 24h window no longer holds the burst — up to a day after
+the last run finishes. `sum by (service_name) (rate(uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector"}[24h]))`
+splits the backfill's contribution from the live indexers'.
+
+---
+
 ## VectorUniswapV4AppendOnChangeGrowthHigh
 
 **Severity:** warning · **For:** 6h
@@ -3235,7 +3607,7 @@ decide whether anything changed, and that read can only be bounded by
 `block_number <= N`: there is no lower bound the planner could use, because the
 previous observation of a position may be arbitrarily old. On a plain table that
 is one bounded index descent. On a hypertable it becomes a descent *per chunk* —
-with 1-day chunks and a year of retention, ~365 probes per key per block, and
+with 30-day chunks and a year of retention, ~12 probes per key per block, and
 worse once chunks compress (locate a segment, then decompress it). That is the
 fan-out profile VEC-541 measured for the `processing_version` triggers (4,410 ms
 vs 148 ms for one 721-row batch at ~2,000 chunks). Every other `uniswap_v4_*`
@@ -4016,87 +4388,113 @@ have consciously accepted.
 
 ### What it means
 
-More than 3 adapter memberships were **inferred from an allocation** in 6 hours on
-the labelled `chain`. An `Allocate` / `Deallocate` proves its adapter is in the
-vault's set — the contract cannot allocate to an unregistered adapter — so when the
-membership log has no answer at that position the indexer classifies the adapter
-on-chain and records the membership the event implies, rather than hard-failing and
-poisoning the FIFO queue.
+At least one adapter membership was **inferred from an allocation** in 6 hours on the
+labelled `chain` **in a block where that vault's adapter set was not being enumerated**.
+An `Allocate` / `Deallocate` proves its adapter is in the vault's set — the contract
+cannot allocate to an unregistered adapter — so when the membership log has no answer at
+that position the indexer classifies the adapter on-chain and records the membership the
+event implies, rather than hard-failing and poisoning the FIFO queue.
 
-A `RemoveAdapter` for an unknown adapter is **not** part of this path and does not
-count here: it is recorded as one untyped `is_member = false` observation, which is
-the truthful record and needs no classification.
+A `RemoveAdapter` for an unknown adapter is **not** part of this path and does not count
+here: it is recorded as one untyped `is_member = false` observation, which is the
+truthful record and needs no classification.
 
-The inference itself is correct. What it *signals* is a discovery gap: vault
-discovery enumerates the vault's **current** adapter set (`adaptersLength()` /
-`adapters(i)`, hash-pinned) and records every entry, so once a vault is discovered
-the log already answers every allocation, nothing is appended, and this counter's
-steady-state rate is **zero**.
+The inference itself is correct. What it *signals* is a discovery gap: vault discovery
+enumerates the vault's **current** adapter set (`adaptersLength()` / `adapters(i)`,
+hash-pinned) and records every entry, so once a vault is discovered the log already
+answers every allocation and nothing is appended.
 
-**The one benign source is deterministic, not a race.** Discovery records its
-enumeration at `log_index = EndOfBlockLogIndex` (MaxInt32) so it orders above every
-log in the discovery block, while the membership read is position-scoped
-(`(block_number, block_version, log_index) <= …`). A VaultV2 emits `AccrueInterest`
-— the discovery trigger — first in the very transaction that allocates, so every
-allocation in that same block reads strictly *below* the seed, finds no answer, and
-appends. Expect exactly one append per adapter allocated in the discovery block,
-every single time; nothing has to have changed between two reads. Its signature in
-the query below is `blocks_after_discovery = 0`.
+**The one benign source is excluded at the source, not by a threshold.** Discovery
+records its enumeration at `log_index = EndOfBlockLogIndex` (MaxInt32) so it orders above
+every log in the discovery block, while the membership read is position-scoped
+(`(block_number, block_version, log_index) <= …`). A VaultV2 emits `AccrueInterest` — the
+discovery trigger — first in the very transaction that allocates, so every allocation in
+that same block reads strictly *below* the seed, finds no answer, and appends. That is
+deterministic, not a race. The indexer asks whether an end-of-block enumeration exists for
+that adapter at that block and labels the append `at_discovery_block="true"` or `"false"`;
+**this rule reads `"false"` only**, so the benign source never reaches it and the
+comparison is `> 0`.
+
+> **Before 2026-09 this rule was `> 3` over 6h with no label.** It had to tolerate the
+> benign source in bulk, and a burst of 4–5 newly discovered VaultV2 vaults on base — by
+> then ordinary — fired it three times in 14 days with nothing wrong. If you are reading
+> a series from before the label shipped, `at_discovery_block` is absent on those samples
+> and the rule matches none of them.
 
 It also costs data quality — but not the way a mutable registry did. Nothing is
 approximated: an adapter known only from an `Allocate` simply has **no**
-`add_adapter_event` observation, so its add block is NULL until its history is
-replayed. Current membership and classification are correct in the meantime.
+`add_adapter_event` observation, so its add block is NULL until its history is replayed.
+Current membership and classification are correct in the meantime.
 
-**Replays are excluded.** The rule counts every `service_name` except the two
-on-demand replay workers —
-`service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"` — so a chain
-added later needs no edit here. Every rule in the `vector-morpho-v2` group
-carries the same exclusion. `morpho-vault-backfill` and `morpho-v2-bootstrap` run
-historical `Allocate` logs through the same handlers under their own
-`service_name`, and replaying a mid-life discovery is exactly how the missing
-`add_adapter_event` history gets filled in — so a run drives this counter by
-design, and firing on it would page for the fix. The question the alert asks — is
-the LIVE enumeration missing adapters — is only answerable from the live indexer's
-own series.
+**Replays are excluded.** The rule counts every `service_name` except the two on-demand
+replay workers — `service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"` — so
+a chain added later needs no edit here. Every rule in the `vector-morpho-v2` group carries
+the same exclusion. `morpho-vault-backfill` and `morpho-v2-bootstrap` run historical
+`Allocate` logs through the same handlers under their own `service_name`, and replaying a
+mid-life discovery is exactly how the missing `add_adapter_event` history gets filled in —
+so a run drives this counter by design, and firing on it would page for the fix. The
+question the alert asks — is the LIVE enumeration missing adapters — is only answerable
+from the live indexer's own series.
 
 ### First checks
 
-1. **Is it one new vault or many?** A mid-life discovery produces one append per
-   adapter the vault allocates to in the discovery block — deterministically, per
-   the mechanism above — so a wave of new vaults produces a small, one-off burst.
-   Correlate with the discovery path:
-   `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total{service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[6h]))`
-   — `allocation_event` observations with **no** matching `vault_discovery`
-   traffic in the same window are the suspicious case.
-2. **Identify them** — the indexer logs one WARN per inference:
-   `kubectl -n vector logs -l 'app in (morpho-indexer,base-morpho-indexer)' | grep "membership inferred from an Allocate"`
+1. **Confirm the split.** The benign appends still happen; they are just labelled and no
+   longer alert. Compare the two:
+   `sum by (at_discovery_block) (increase(morpho_v2_adapter_registrations_total{observed_via="allocation_event", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[6h]))`
+   — only the `"false"` series is a fault. A non-zero `"false"` alongside heavy `"true"`
+   traffic means a discovery wave is also underway, not that the wave caused it.
+2. **Identify them** — the indexer logs one WARN per inference, carrying the same split:
+   `kubectl -n vector logs -l 'app in (morpho-indexer,base-morpho-indexer)' | grep "membership inferred from an Allocate" | grep 'at_discovery_block=false'`
    (carries vault, adapter, block).
-3. **Was the vault genuinely new?** Compare the block the membership was inferred
-   at against its vault's first-seen block (`db-query`):
+3. **Confirm against the DB** — metrics could be lying. Compare the block the membership
+   was inferred at against the block its vault's set was actually **enumerated** at
+   (`db-query`):
 
    ```sql
-   SELECT '0x' || encode(v.address, 'hex') AS vault,
-          v.created_at_block AS vault_first_seen_block,
+   SELECT m.timestamp,
+          '0x' || encode(v.address, 'hex') AS vault,
           '0x' || encode(a.address, 'hex') AS adapter,
-          MIN(m.block_number) FILTER (WHERE m.observed_via = 'allocation_event') AS inferred_at_block,
-          MIN(m.block_number) FILTER (WHERE m.is_member AND m.observed_via = 'add_adapter_event') AS added_at_block,
-          MIN(m.block_number) FILTER (WHERE m.observed_via = 'allocation_event') - v.created_at_block
-              AS blocks_after_discovery
+          m.block_number AS inferred_at_block,
+          (e.morpho_adapter_id IS NOT NULL) AS at_discovery_block,
+          (SELECT MIN(d.block_number) FROM morpho_adapter_membership d
+            WHERE d.morpho_adapter_id = m.morpho_adapter_id
+              AND d.log_index = 2147483647) AS ever_enumerated_at_block,
+          (SELECT MIN(x.block_number) FROM morpho_adapter_membership x
+            WHERE x.morpho_adapter_id = m.morpho_adapter_id
+              AND x.is_member AND x.observed_via = 'add_adapter_event') AS added_at_block
    FROM morpho_adapter_membership m
    JOIN morpho_adapter a ON a.id = m.morpho_adapter_id
    JOIN morpho_vault v ON v.id = a.morpho_vault_id
-   WHERE v.vault_version = 3
-   GROUP BY v.address, v.created_at_block, a.address
-   HAVING MIN(m.block_number) FILTER (WHERE m.observed_via = 'allocation_event') IS NOT NULL
-   ORDER BY blocks_after_discovery DESC
-   LIMIT 50;
+   LEFT JOIN morpho_adapter_membership e
+          ON e.morpho_adapter_id = m.morpho_adapter_id
+         AND e.block_number = m.block_number
+         AND e.block_version = m.block_version
+         AND e.log_index = 2147483647           -- EndOfBlockLogIndex
+   WHERE m.observed_via = 'allocation_event'
+     AND v.vault_version = 3
+     AND m.timestamp > now() - interval '7 days'
+   ORDER BY m.timestamp DESC;
    ```
 
-   `blocks_after_discovery = 0` is the same-block signature above — benign, and the
-   expected shape, not a coincidence. A large positive value on a long-known vault
-   means enumeration missed the adapter, which is the bug. A NULL `added_at_block`
-   is the replay backlog, not a second fault.
+   `at_discovery_block` is the metric label, recomputed from the table — the two must
+   agree, and `false` rows are the ones the alert counted. A `false` row is a real gap:
+   the adapter was inferred at a block its vault's set enumeration did not cover.
+   `ever_enumerated_at_block IS NULL` is the worst shape — **no** enumeration for that
+   adapter at any block, so discovery never ran for the vault or never returned the
+   adapter. A NULL `added_at_block` is the replay backlog, not a second fault.
+
+   Widen the interval to sweep the whole backlog, but expect history: a chain onboarded
+   before its vaults were ever enumerated carries a standing population of `false` rows
+   (staging mainnet, 2026-08-24 → 08-27: 37 of them), and they clear by replay, not on
+   their own.
+
+   **Do not compare against `morpho_vault.created_at_block`.** It is the vault's creation
+   block, not the block this indexer enumerated it at: `GetOrCreateVault` returns a
+   pre-existing row untouched, so a vault re-discovered long after it was first written
+   shows a gap of millions of blocks and reads as a catastrophic regression. Measured on
+   the staging database in 2026-09, that framing made 177 of 194 healthy mainnet rows look
+   broken; every one of them had its `add_adapter_event` history written by a replay
+   *after* the live append, which is the design working.
 4. **Cross-check the chain** — for a suspect vault, ask the contract directly and
    compare with the registry:
 
@@ -4107,21 +4505,27 @@ own series.
 
 ### Common causes
 
-- A wave of newly discovered V2 vaults → benign and expected: each contributes one
-  append per adapter allocated in its discovery block. Confirm via
-  `blocks_after_discovery = 0` and let it clear.
 - `readV2Adapters` enumeration regression (truncated list, wrong selector, a
   failed sub-read defaulting to empty) → adapters are missing from every newly
   discovered vault; this is the bug the alert exists to catch.
+- A vault whose row predates the V2 discovery path → it is already in the registry, so
+  discovery never enumerates it, and every adapter it holds is learned one `Allocate` at a
+  time. `ever_enumerated_at_block IS NULL` with a long-established vault is this shape; replay
+  the vault.
 - Vault registry losing known vaults (e.g. repeated re-discovery after restarts)
   → adapters look absent on every restart.
+- A wave of newly discovered V2 vaults is **not** a cause any more — those appends carry
+  `at_discovery_block="true"` and the rule does not read them. Seeing this alert during a
+  discovery wave means something else is also wrong.
 
 ### Verify recovery
 
-`increase(morpho_v2_adapter_registrations_total{observed_via="allocation_event", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[6h]) <= 3`
-for the affected chain. If the cause was an enumeration bug, also replay the
-affected vaults: the replay appends each adapter's real `AddAdapter` observation
-at its own block, which is what turns a NULL add block into the true one.
+`increase(morpho_v2_adapter_registrations_total{observed_via="allocation_event", at_discovery_block="false", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[6h])`
+returns **no data or 0** for the affected chain. Recovered is usually *no data*: the
+`"false"` series only exists once something appended one, so do not read an empty result
+as a broken query — the `"true"` series beside it proves the counter is still reporting.
+Also replay the affected vaults: the replay appends each adapter's real `AddAdapter`
+observation at its own block, which is what turns a NULL add block into the true one.
 
 ---
 
