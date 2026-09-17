@@ -369,12 +369,17 @@ def gen_tiebreak(lines, filename):
 
 def gen_constraint(lines, filename):
     i = 0
+    in_function = False
     while i < len(lines):
         line = lines[i]
         stripped = line.strip()
 
-        # Skip comments
-        if stripped.startswith("--") or stripped.startswith("COMMENT"):
+        dollar_count = line.count("$$")
+        if dollar_count % 2 == 1:
+            in_function = not in_function
+
+        # Skip comments and function bodies
+        if stripped.startswith("--") or stripped.startswith("COMMENT") or in_function:
             i += 1
             continue
 
@@ -411,18 +416,31 @@ def gen_constraint(lines, filename):
 
         # Inline CHECK (processing_version >= 0)
         if "CHECK" in line and "CONSTRAINT" not in stripped and "CREATE" not in line:
-            # Inline check on a column definition
-            check_match = re.search(r"\s+CHECK\s*\([^)]+\)", line)
-            if check_match:
-                new_line = line[:check_match.start()] + line[check_match.end():]
-                # Clean up trailing comma if needed
-                new_line = re.sub(r",\s*,", ",", new_line)
-                col_match = re.search(r"^\s+(\w+)", line)
-                col = col_match.group(1) if col_match else "unknown"
-                table = _find_table(lines, i)
-                mut("constraint", f"delete_inline_check_{col}",
-                    table, filename,
-                    [{"line": i + 1, "old": line, "new": new_line}])
+            start = line.find("CHECK")
+            if start >= 0:
+                # Balance parens to find the full CHECK (…) including nested IN (…)
+                depth = 0
+                j = line.index("(", start)
+                for k in range(j, len(line)):
+                    if line[k] == "(":
+                        depth += 1
+                    elif line[k] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            # k is the closing paren
+                            # remove from the whitespace before CHECK to the closing paren
+                            ws_start = start
+                            while ws_start > 0 and line[ws_start - 1] == " ":
+                                ws_start -= 1
+                            new_line = line[:ws_start] + line[k + 1:]
+                            new_line = re.sub(r",\s*,", ",", new_line)
+                            col_match = re.search(r"^\s+(\w+)", line)
+                            col = col_match.group(1) if col_match else "unknown"
+                            table = _find_table(lines, i)
+                            mut("constraint", f"delete_inline_check_{col}",
+                                table, filename,
+                                [{"line": i + 1, "old": line, "new": new_line}])
+                            break
 
         # REFERENCES (foreign key)
         if "REFERENCES" in line and "CONSTRAINT" not in stripped and "COMMENT" not in line:
