@@ -403,9 +403,9 @@ BEGIN
         pre_image := pre_image || jsonb_build_object('supersedes_content_hash', encode(parent_hash, 'hex'));
     END IF;
 
-    -- Four-eyes (NFR-2), after the supersedes resolution so an unresolvable pointer still reports
-    -- itself rather than being pre-empted by a missing approver. change_reason_vocabulary said
-    -- which codes require one from the day it was seeded; nothing read it until now.
+    -- CR-3.3 / four-eyes (NFR-2), VEC-793: the vocabulary has said which codes need an approver
+    -- since wave 1 seeded it, and nothing read it. Placed after the supersedes resolution so an
+    -- unresolvable pointer still reports itself rather than being pre-empted by a missing approver.
     SELECT v.requires_approval INTO needs_approval
       FROM change_reason_vocabulary v WHERE v.code = NEW.change_reason_code;
     IF coalesce(needs_approval, false) THEN
