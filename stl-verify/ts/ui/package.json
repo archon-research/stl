@@ -35,7 +35,7 @@
     "doctor": "uikit-cli doctor --codegen"
   },
   "dependencies": {
-    "@archon-research/charting": "0.11.0",
+    "@archon-research/charting": "0.12.0-rohit-brush-band-scale-r2.1",
     "@archon-research/design-system": "0.11.0",
     "@archon-research/http-client-core": "0.11.0",
     "@archon-research/http-client-react": "0.11.0",
