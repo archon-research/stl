@@ -52,6 +52,12 @@ The deployment ships at `replicas: 0`. Before bumping it to 1:
 While a run is longer than `MATERIALIZE_INTERVAL`, the ticks that fall inside it are skipped rather than
 queued; the bootstrap skips several. That is expected, not a stall.
 
+Every tick re-reads each view's whole history. On staging (2026-09-17) the two view reads alone took
+19.4 s for `morpho_vault_position` (9.9M rows, ~1.7 GB of temp spill) and 8.4 s for
+`morpho_market_position` (1.4M rows); each call also holds its transaction id for at least that long.
+The cost grows with the source tables. If a tick's read passes about 10 minutes, raise
+`MATERIALIZE_INTERVAL` or bound the read (VEC-566).
+
 ---
 
 ## VectorPositionMaterializerSilentlyEmpty

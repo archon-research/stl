@@ -48,12 +48,9 @@ func NewPositionMaterializerRepository(pool *pgxpool.Pool, logger *slog.Logger) 
 // ON CONFLICT DO NOTHING), so a retry re-runs safely: a deadlocked attempt
 // committed nothing, and a redundant attempt inserts zero rows.
 //
-// Config matches blockstate_repository.go rather than being tuned here. Worth a
-// reviewer's eye: those values were chosen for row-level contention and give
-// roughly half a second of total backoff, while a compression job can hold a
-// chunk lock for longer than that (~900ms observed for one run_job over 100
-// chunks). If that proves too short in practice the values want raising, but not
-// by guesswork ahead of a measurement from a real runner.
+// Config matches blockstate_repository.go. Only deadlocks and serialization failures are retried; the
+// pool sets no lock_timeout, so a chunk lock held by a compression job is waited on, and the backoff
+// need not outlast it (TestMaterialize_WaitsOutALockLongerThanTheRetryBackoff).
 func (r *PositionMaterializerRepository) Materialize(ctx context.Context, materializer string, buildID int, runID int64) (int64, error) {
 	cfg := retry.Config{
 		MaxRetries:     10,
