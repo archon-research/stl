@@ -326,10 +326,14 @@ patches:
         path: /metadata/annotations/tailscale.com~1hostname
         value: python-api-staging
 
+  # verify-staging becomes the edge's UI name (ADR-015): the alias Service must
+  # release it before the Tailscale Ingress can claim it. Prod keeps its alias.
   - target:
       kind: Service
       name: python-api-verify
     patch: |
-      - op: add
-        path: /metadata/annotations/tailscale.com~1hostname
-        value: verify-staging
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: python-api-verify
+      $patch: delete
