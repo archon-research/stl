@@ -129,25 +129,16 @@ async function main() {
       assert.equal(groups[0].vaultAddress, null);
     }
 
-    // The primary proxy is the mainnet row even when it is not first in the
-    // input order.
+    // Every prime-scoped read is addressed to the prime itself. Picking one of
+    // its proxies was how a prime-wide figure used to be asked for, before the
+    // API answered whole-prime from any of the prime's identifiers.
     {
       const [group] = groupPrimesByVault([
         sparkAvalanche,
         sparkBase,
         sparkMainnet,
       ]);
-      assert.equal(group.primaryProxyAddress, sparkMainnet.address);
-    }
-
-    // With no mainnet row present, the primary proxy falls back to the first
-    // proxy address in ascending order, so the pick is deterministic.
-    {
-      const [group] = groupPrimesByVault([sparkBase, sparkAvalanche]);
-      const expected = [sparkBase.address, sparkAvalanche.address].sort(
-        byText,
-      )[0];
-      assert.equal(group.primaryProxyAddress, expected);
+      assert.equal(group.primeId, group.name);
     }
 
     // A URL's prime segment resolves through every address that denotes the
