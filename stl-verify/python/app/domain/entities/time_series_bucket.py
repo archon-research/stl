@@ -11,6 +11,16 @@ from datetime import datetime
 from decimal import Decimal
 
 
+def _validate_entity_counts(priced_entity_count: int | None, entity_count: int | None) -> None:
+    """Shared invariant for a bucket's priced-vs-total coverage counts."""
+    if priced_entity_count is not None and priced_entity_count < 0:
+        raise ValueError(f"priced_entity_count must be non-negative, got {priced_entity_count}")
+    if entity_count is not None and entity_count < 0:
+        raise ValueError(f"entity_count must be non-negative, got {entity_count}")
+    if priced_entity_count is not None and entity_count is not None and priced_entity_count > entity_count:
+        raise ValueError(f"priced_entity_count {priced_entity_count} exceeds entity_count {entity_count}")
+
+
 @dataclass(frozen=True)
 class AllocationActivityBucket:
     """Allocation activity aggregated into a single time bucket.
@@ -27,13 +37,16 @@ class AllocationActivityBucket:
     share-price move appears in ``balance_usd`` on a day with no transaction,
     and in ``net_flow_usd`` not at all.
 
-    ``balance_usd`` totals only the entities whose current state can be priced.
-    ``priced_entity_count`` and ``entity_count`` say how many that was of how
-    many the bucket knows about, so a caller can tell a complete total from a
-    partial one -- the two are equal when every position is priced. Pricing is
+    ``priced_entity_count`` and ``entity_count`` say how many receipt-token
+    entities the reported total (``balance_usd`` or ``net_flow_usd``,
+    whichever series ran) accounts for, of how many the bucket knows about --
+    equal when the total is complete. On ``series="balance"`` pricing is
     all-or-nothing per token, so one token without an enabled oracle makes
-    every position in it unpriceable (VEC-536, VEC-537); retiring the partial
-    state once that is fixed is VEC-782.
+    every position in it unpriceable (VEC-536, VEC-537); retiring that partial
+    state once fixed is VEC-782. On both series, a bucket predating a token's
+    own first in-window price is unpriced the same way rather than silently
+    zeroed (VEC-763); direct (non-receipt-token) holdings need no price by
+    design and are excluded from both counts.
     """
 
     bucket_start: datetime
@@ -51,16 +64,7 @@ class AllocationActivityBucket:
             raise ValueError(f"total_tx_amount must be non-negative, got {self.total_tx_amount}")
         if self.balance_usd is not None and self.balance_usd < 0:
             raise ValueError(f"balance_usd must be non-negative, got {self.balance_usd}")
-        if self.priced_entity_count is not None and self.priced_entity_count < 0:
-            raise ValueError(f"priced_entity_count must be non-negative, got {self.priced_entity_count}")
-        if self.entity_count is not None and self.entity_count < 0:
-            raise ValueError(f"entity_count must be non-negative, got {self.entity_count}")
-        if (
-            self.priced_entity_count is not None
-            and self.entity_count is not None
-            and self.priced_entity_count > self.entity_count
-        ):
-            raise ValueError(f"priced_entity_count {self.priced_entity_count} exceeds entity_count {self.entity_count}")
+        _validate_entity_counts(self.priced_entity_count, self.entity_count)
 
 
 @dataclass(frozen=True)
@@ -115,14 +119,23 @@ class ExposureBucket:
     """A prime's priced receipt-token exposure for a single time bucket (LOCF gap-filled).
 
     ``exposure_usd`` is the sum across the prime's receipt-token positions of the
-    last observed balance carried forward into the bucket, valued at the latest
-    underlying oracle price. ``None`` for leading buckets before the first
-    observation.
+    last observed balance carried forward into the bucket, valued at the
+    underlying oracle price AT THAT BUCKET (VEC-763). ``None`` for leading
+    buckets before the first observation.
+
+    ``priced_entity_count`` and ``entity_count`` say how many receipt-token
+    positions ``exposure_usd`` accounts for, of how many the bucket has
+    observed -- equal when the total is complete. A bucket predating a
+    position's own underlying's first in-window price is unpriced rather than
+    silently zeroed, same as the allocation-activity balance series.
     """
 
     bucket_start: datetime
     exposure_usd: Decimal | None
+    priced_entity_count: int | None = None
+    entity_count: int | None = None
 
     def __post_init__(self) -> None:
         if self.exposure_usd is not None and self.exposure_usd < 0:
             raise ValueError(f"exposure_usd must be non-negative, got {self.exposure_usd}")
+        _validate_entity_counts(self.priced_entity_count, self.entity_count)

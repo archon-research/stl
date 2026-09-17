@@ -9,9 +9,25 @@ the query's own bucket grid, rather than a lateral re-probe per bucket (which
 was tried and measured at ~17s/request -- the per-bucket-per-token lateral
 count that made the pre-728 bug expensive in the first place).
 
-Bind parameters are fixed by name, matching ``_time_window``: ``from_timestamp``,
-``to_timestamp`` (TIMESTAMPTZ) and ``bucket_seconds`` (float seconds).
+``from_timestamp``/``to_timestamp`` are interpolated as literals, not bound:
+``onchain_token_price`` is a hypertable, and a bound window defeats chunk
+exclusion at plan time (db/migrations/AGENTS.md, VEC-672). ``bucket_seconds``
+is still the ``:bucket_seconds`` bind param matching ``_time_window``, since
+gapfill runs over this CTE's own output, not the hypertable.
 """
+
+from datetime import UTC, datetime
+
+
+def _timestamptz_literal(value: datetime, *, name: str) -> str:
+    """Render a caller-supplied bound as a SQL literal, never a bind param.
+
+    A naive value is rejected rather than assumed UTC: interpolated literally,
+    it would otherwise read in whatever timezone happens to sit next to it.
+    """
+    if value.tzinfo is None:
+        raise ValueError(f"{name} {value.isoformat()} carries no timezone")
+    return f"CAST('{value.astimezone(UTC).isoformat()}' AS TIMESTAMPTZ)"
 
 
 def historical_price_buckets_cte(
@@ -22,6 +38,8 @@ def historical_price_buckets_cte(
     token_id_column: str,
     protocol_id_column: str | None,
     oracle_asset_as_of: str,
+    from_timestamp: datetime,
+    to_timestamp: datetime,
 ) -> str:
     """Return a CTE chain resolving ``{prefix}_buckets(<key_columns>, bucket, price_usd)``.
 
@@ -38,10 +56,16 @@ def historical_price_buckets_cte(
     ``{prefix}_points`` (their union) and ``{prefix}_buckets`` (locf-gapfilled
     onto the bucket grid, mirroring how position quantities are bucketed
     elsewhere in this file).
+
+    ``oracle_asset_as_of`` resolves once for the whole series, not per bucket:
+    a series spanning an oracle's enable/disable transition sees only the
+    state resolved at call time, not the state as of each bucket.
     """
     pk_cols = ", ".join(f"pk.{c}" for c in key_columns)
     bare_cols = ", ".join(key_columns)
     order_cols = f"{pk_cols}, otp.timestamp"
+    from_literal = _timestamptz_literal(from_timestamp, name="from_timestamp")
+    to_literal = _timestamptz_literal(to_timestamp, name="to_timestamp")
 
     if protocol_id_column:
         seed_join = (
@@ -65,7 +89,7 @@ def historical_price_buckets_cte(
         SELECT otp.price_usd
         FROM onchain_token_price otp
         {seed_join}WHERE otp.token_id = pk.{token_id_column}
-          AND otp.timestamp < CAST(:from_timestamp AS TIMESTAMPTZ)
+          AND otp.timestamp < {from_literal}
           AND EXISTS (
               SELECT 1 FROM {oracle_asset_as_of} oa
               WHERE oa.oracle_id = otp.oracle_id AND oa.token_id = otp.token_id AND oa.enabled
@@ -83,8 +107,8 @@ def historical_price_buckets_cte(
     FROM {keys_cte} pk
     {changes_join}JOIN onchain_token_price otp
         ON otp.token_id = pk.{token_id_column} AND {oracle_predicate}
-    WHERE otp.timestamp >= CAST(:from_timestamp AS TIMESTAMPTZ)
-      AND otp.timestamp <= CAST(:to_timestamp AS TIMESTAMPTZ)
+    WHERE otp.timestamp >= {from_literal}
+      AND otp.timestamp <= {to_literal}
       AND EXISTS (
           SELECT 1 FROM {oracle_asset_as_of} oa
           WHERE oa.oracle_id = otp.oracle_id AND oa.token_id = otp.token_id AND oa.enabled
@@ -93,7 +117,7 @@ def historical_price_buckets_cte(
              otp.processing_version DESC, otp.oracle_id DESC
 ),
 {prefix}_points AS (
-    SELECT {bare_cols}, CAST(:from_timestamp AS TIMESTAMPTZ) AS timestamp, price_usd
+    SELECT {bare_cols}, {from_literal} AS timestamp, price_usd
     FROM {prefix}_seed
     WHERE price_usd IS NOT NULL
     UNION ALL
@@ -104,7 +128,7 @@ def historical_price_buckets_cte(
         {bare_cols},
         time_bucket_gapfill(
             make_interval(secs => :bucket_seconds), timestamp,
-            CAST(:from_timestamp AS TIMESTAMPTZ), CAST(:to_timestamp AS TIMESTAMPTZ)
+            {from_literal}, {to_literal}
         ) AS bucket,
         locf(last(price_usd, timestamp)) AS price_usd
     FROM {prefix}_points

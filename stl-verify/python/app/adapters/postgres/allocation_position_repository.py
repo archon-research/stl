@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from opentelemetry import trace
-from sqlalchemy import bindparam, text
+from sqlalchemy import TextClause, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres._historical_price import historical_price_buckets_cte
@@ -55,7 +55,7 @@ _USDS_ADDRESS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
 #     members.
 # A deliberately curated set (VEC-450): the general widening to every vault,
 # and syrupUSDC, are owned separately. Add addresses here to widen. The
-# balance series (_ALLOCATION_BALANCE_BUCKETS_SQL) does not consult this set:
+# balance series (_allocation_balance_buckets_sql) does not consult this set:
 # its last valuation arm prices ANY direct holding this way once the token's
 # own price is missing, and VEC-782 holds the two reads to agree.
 _UNDERLYING_VALUE_TOKEN_HEXES = frozenset(
@@ -826,10 +826,14 @@ class AllocationRepository:
         ``series="flow"`` keeps the historical behaviour: event counts,
         tx-amount sums and the signed USD net flow. ``series="balance"`` runs
         the checkpoint read instead and returns ``balance_usd`` — a different
-        and much cheaper measure, see ``_ALLOCATION_BALANCE_BUCKETS_SQL``.
+        and much cheaper measure, see ``_allocation_balance_buckets_sql``.
 
         Exactly one query runs per call, so the fields belonging to the other
         series come back ``None`` rather than being computed alongside.
+        ``priced_entity_count``/``entity_count`` are populated for both series:
+        each prices its receipt-token entities at their own bucket, and a
+        bucket predating an entity's first in-window price is unpriced rather
+        than silently zeroed (VEC-763).
         """
         params = {
             "proxy_addrs": (None if proxy_addresses is None else [a.to_bytes() for a in proxy_addresses]),
@@ -851,7 +855,11 @@ class AllocationRepository:
             window = to_timestamp - from_timestamp
             params["seed_from"] = from_timestamp - max(window, _BALANCE_SEED_REACH)
 
-        statement = _ALLOCATION_BALANCE_BUCKETS_SQL if series == "balance" else _ALLOCATION_ACTIVITY_BUCKETS_SQL
+        statement = (
+            _allocation_balance_buckets_sql(from_timestamp, to_timestamp)
+            if series == "balance"
+            else _allocation_activity_buckets_sql(from_timestamp, to_timestamp)
+        )
         try:
             async with self._engine.connect() as conn:
                 result = await conn.execute(statement, self._reference.params(**params))
@@ -888,8 +896,8 @@ class AllocationRepository:
                     if series == "balance" and row.balance_usd is not None
                     else None
                 ),
-                priced_entity_count=(row.priced_entity_count if series == "balance" else None),
-                entity_count=(row.entity_count if series == "balance" else None),
+                priced_entity_count=row.priced_entity_count,
+                entity_count=row.entity_count,
             )
             for row in rows
         ]
@@ -1153,11 +1161,12 @@ class AllocationRepository:
         then summed across positions (VEC-763): both the position size and the
         price are historical, each carried forward (locf) from its own last
         known observation, not today's spot. A bucket predating the token's
-        first known oracle price is unpriced (excluded from the sum via
-        ``COALESCE(..., 0)``) rather than back-filled from a later price.
-        Leading buckets before the first position observation are ``None``.
-        Direct holdings (no receipt token) are excluded, matching the exposure
-        basis of the risk-capital endpoint.
+        first known oracle price is unpriced -- excluded from the sum rather
+        than counted as zero, with ``priced_entity_count``/``entity_count``
+        telling a caller a partial total from a complete one, same as the
+        activity-buckets balance series. Leading buckets before the first
+        position observation are ``None``. Direct holdings (no receipt token)
+        are excluded, matching the exposure basis of the risk-capital endpoint.
 
         Windows spanning the ``underlying_value`` rollout boundary show a
         valuation-basis step: buckets fed by pre-rollout rows carry the share
@@ -1172,9 +1181,10 @@ class AllocationRepository:
             "limit": clamp_limit(limit, _ALLOCATION_ACTIVITY_LIMIT),
         }
 
+        statement = _exposure_buckets_sql(from_timestamp, to_timestamp)
         try:
             async with self._engine.connect() as conn:
-                result = await conn.execute(_EXPOSURE_BUCKETS_SQL, self._reference.params(**params))
+                result = await conn.execute(statement, self._reference.params(**params))
                 rows = result.fetchall()
         except asyncio.CancelledError:
             raise
@@ -1200,6 +1210,8 @@ class AllocationRepository:
                     if row.exposure_usd is not None
                     else None
                 ),
+                priced_entity_count=row.priced_entity_count,
+                entity_count=row.entity_count,
             )
             for row in rows
         ]
@@ -1240,7 +1252,7 @@ class AllocationRepository:
 # are unchanged (their underlying_value equals balance by construction).
 # Flow-level reads (``net_flow_usd``) convert each flow at its row's share
 # ratio, borrowing the nearest same-token row's when the row lacks one; see
-# ``_ALLOCATION_ACTIVITY_BUCKETS_SQL``.
+# ``_allocation_activity_buckets_sql``.
 #
 # The underlying is priced via the registry's ``receipt_token.underlying_token_id``,
 # not the position's own ``underlying_token_id`` (verified identical on every
@@ -1803,7 +1815,7 @@ LIMIT :limit
 # at the flow's block, not a per-leg execution price. Acceptable because a
 # yield vault's share ratio moves slowly, so the same-block position ratio is
 # indistinguishable from the execution price at this read's resolution.
-# Balance counterpart of _ALLOCATION_ACTIVITY_BUCKETS_SQL, for series=balance
+# Balance counterpart of _allocation_activity_buckets_sql, for series=balance
 # (VEC-760). Same filters, same buckets, but it READS each bucket's recorded
 # position state instead of summing the flows into it.
 #
@@ -1847,7 +1859,9 @@ LIMIT :limit
 _BALANCE_SEED_REACH = timedelta(days=30)
 
 
-_ALLOCATION_BALANCE_BUCKETS_SQL = text(f"""
+def _allocation_balance_buckets_sql(from_timestamp: datetime, to_timestamp: datetime) -> TextClause:
+    """Build the balance-buckets query, with its price CTEs' window as a literal (VEC-672)."""
+    return text(f"""
 WITH window_rows AS MATERIALIZED (
     -- Deduped to the newest processing_version per identity for the same reason
     -- the flow read is (VEC-758): last() below picks a per-bucket winner by
@@ -2088,15 +2102,17 @@ receipt_price_keys AS (
     WHERE underlying_token_id IS NOT NULL
 ),
 {
-    historical_price_buckets_cte(
-        prefix="receipt_price",
-        keys_cte="receipt_price_keys",
-        key_columns=("underlying_token_id", "protocol_id"),
-        token_id_column="underlying_token_id",
-        protocol_id_column="protocol_id",
-        oracle_asset_as_of=ORACLE_ASSET_AS_OF,
-    )
-},
+        historical_price_buckets_cte(
+            prefix="receipt_price",
+            keys_cte="receipt_price_keys",
+            key_columns=("underlying_token_id", "protocol_id"),
+            token_id_column="underlying_token_id",
+            protocol_id_column="protocol_id",
+            oracle_asset_as_of=ORACLE_ASSET_AS_OF,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+        )
+    },
 direct_price_keys AS (
     SELECT DISTINCT token_id
     FROM token_context
@@ -2104,15 +2120,17 @@ direct_price_keys AS (
       AND has_direct_price
 ),
 {
-    historical_price_buckets_cte(
-        prefix="direct_price",
-        keys_cte="direct_price_keys",
-        key_columns=("token_id",),
-        token_id_column="token_id",
-        protocol_id_column=None,
-        oracle_asset_as_of=ORACLE_ASSET_AS_OF,
-    )
-},
+        historical_price_buckets_cte(
+            prefix="direct_price",
+            keys_cte="direct_price_keys",
+            key_columns=("token_id",),
+            token_id_column="token_id",
+            protocol_id_column=None,
+            oracle_asset_as_of=ORACLE_ASSET_AS_OF,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+        )
+    },
 underlying_price_keys AS (
     SELECT DISTINCT tracker_underlying_token_id AS underlying_token_id
     FROM valued_rows
@@ -2121,15 +2139,17 @@ underlying_price_keys AS (
       AND NOT has_direct_price
 ),
 {
-    historical_price_buckets_cte(
-        prefix="underlying_price",
-        keys_cte="underlying_price_keys",
-        key_columns=("underlying_token_id",),
-        token_id_column="underlying_token_id",
-        protocol_id_column=None,
-        oracle_asset_as_of=ORACLE_ASSET_AS_OF,
-    )
-}
+        historical_price_buckets_cte(
+            prefix="underlying_price",
+            keys_cte="underlying_price_keys",
+            key_columns=("underlying_token_id",),
+            token_id_column="underlying_token_id",
+            protocol_id_column=None,
+            oracle_asset_as_of=ORACLE_ASSET_AS_OF,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+        )
+    }
 SELECT
     pe.bucket_start,
     CAST(NULL AS INTEGER) AS event_count,
@@ -2188,7 +2208,9 @@ LIMIT :limit
 """)
 
 
-_ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
+def _allocation_activity_buckets_sql(from_timestamp: datetime, to_timestamp: datetime) -> TextClause:
+    """Build the flow-buckets query, with its price CTE's window as a literal (VEC-672)."""
+    return text(f"""
 WITH window_rows AS MATERIALIZED (
     -- The activity rows this read aggregates. Fenced so the hypertable is
     -- scanned once; token_context and the outer query both read this set.
@@ -2269,15 +2291,17 @@ price_keys AS (
     WHERE underlying_token_id IS NOT NULL
 ),
 {
-    historical_price_buckets_cte(
-        prefix="price",
-        keys_cte="price_keys",
-        key_columns=("underlying_token_id", "protocol_id"),
-        token_id_column="underlying_token_id",
-        protocol_id_column="protocol_id",
-        oracle_asset_as_of=ORACLE_ASSET_AS_OF,
-    )
-}
+        historical_price_buckets_cte(
+            prefix="price",
+            keys_cte="price_keys",
+            key_columns=("underlying_token_id", "protocol_id"),
+            token_id_column="underlying_token_id",
+            protocol_id_column="protocol_id",
+            oracle_asset_as_of=ORACLE_ASSET_AS_OF,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+        )
+    }
 SELECT
     ap.bucket_start,
     COUNT(*) AS event_count,
@@ -2295,8 +2319,21 @@ SELECT
                 THEN ap.underlying_value / ap.balance
             ELSE COALESCE(nearest_ratio.ratio, 1)
         END
-        * COALESCE(pb.price_usd, 0)
-    ), 0) AS net_flow_usd
+        -- pb.price_usd, not COALESCE(..., 0): an unknown price already nets to
+        -- 0 via SUM's NULL-skip, same as priced_entity_count's own check on it.
+        * pb.price_usd
+    ), 0) AS net_flow_usd,
+    -- Excludes direct holdings (no price needed) and refused rows (own
+    -- underlying diverges, see the CASE above) -- neither is a coverage gap.
+    COUNT(*) FILTER (
+        WHERE tc.underlying_token_id IS NOT NULL
+          AND NOT (ap.underlying_token_id IS NOT NULL AND ap.underlying_token_id <> tc.underlying_token_id)
+          AND pb.price_usd IS NOT NULL
+    ) AS priced_entity_count,
+    COUNT(*) FILTER (
+        WHERE tc.underlying_token_id IS NOT NULL
+          AND NOT (ap.underlying_token_id IS NOT NULL AND ap.underlying_token_id <> tc.underlying_token_id)
+    ) AS entity_count
 FROM window_rows ap
 JOIN prime p ON p.id = ap.prime_id
 JOIN token_context tc ON tc.chain_id = ap.chain_id AND tc.token_id = ap.token_id
@@ -2366,7 +2403,9 @@ LIMIT :limit
 
 # Priced receipt-token exposure per time bucket; semantics on
 # ``AllocationRepository.list_exposure_buckets``.
-_EXPOSURE_BUCKETS_SQL = text(f"""
+def _exposure_buckets_sql(from_timestamp: datetime, to_timestamp: datetime) -> TextClause:
+    """Build the exposure-buckets query, with its price CTE's window as a literal (VEC-672)."""
+    return text(f"""
 WITH position_buckets AS (
     SELECT
         rt.id AS receipt_token_id,
@@ -2418,18 +2457,30 @@ price_keys AS (
     FROM position_buckets
 ),
 {
-    historical_price_buckets_cte(
-        prefix="price",
-        keys_cte="price_keys",
-        key_columns=("underlying_token_id", "protocol_id"),
-        token_id_column="underlying_token_id",
-        protocol_id_column="protocol_id",
-        oracle_asset_as_of=ORACLE_ASSET_AS_OF,
-    )
-}
+        historical_price_buckets_cte(
+            prefix="price",
+            keys_cte="price_keys",
+            key_columns=("underlying_token_id", "protocol_id"),
+            token_id_column="underlying_token_id",
+            protocol_id_column="protocol_id",
+            oracle_asset_as_of=ORACLE_ASSET_AS_OF,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+        )
+    }
 SELECT
     b.bucket AS bucket_start,
-    SUM(b.valuation_units * COALESCE(pb.price_usd, 0)) AS exposure_usd
+    SUM(
+        CASE WHEN b.valuation_units = 0 THEN 0 ELSE b.valuation_units * pb.price_usd END
+    ) FILTER (
+        WHERE b.valuation_units IS NOT NULL AND (b.valuation_units = 0 OR pb.price_usd IS NOT NULL)
+    ) AS exposure_usd,
+    -- Unpriced before the underlying's own first in-window price, not
+    -- silently zeroed (VEC-763) -- same shape as the balance series.
+    COUNT(*) FILTER (
+        WHERE b.valuation_units IS NOT NULL AND (b.valuation_units = 0 OR pb.price_usd IS NOT NULL)
+    ) AS priced_entity_count,
+    COUNT(*) FILTER (WHERE b.valuation_units IS NOT NULL) AS entity_count
 FROM position_buckets b
 LEFT JOIN price_buckets pb
     ON pb.underlying_token_id = b.underlying_token_id
