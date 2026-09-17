@@ -14,9 +14,9 @@ from pydantic import PlainSerializer, TypeAdapter, WithJsonSchema
 # fields would degrade to a bare ``string`` without restating pydantic's own
 # schema for a ``Decimal``. Derived rather than copied: a pydantic upgrade that
 # changes (or drops) the numeric-string ``pattern`` follows through here instead
-# of silently drifting the committed ``openapi-schema.json``, which nothing in
-# CI regenerates. One ``TypeAdapter`` build at import; pydantic hands out a copy
-# per use, so sharing the dict across every field is safe.
+# of silently drifting the committed ``openapi-schema.json``. One ``TypeAdapter``
+# build at import; pydantic hands out a copy per use, so sharing the dict across
+# every field is safe.
 _DECIMAL_SERIALIZATION_SCHEMA = TypeAdapter(Decimal).json_schema(mode="serialization")
 
 
