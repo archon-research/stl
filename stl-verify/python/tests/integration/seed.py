@@ -3398,6 +3398,9 @@ BS_PROXY_DIRECT_DISABLED_ORACLE = "8b" * 20
 BS_PROXY_SEED_TIEBREAK = "9b" * 20
 BS_PROXY_WINDOW_TIEBREAK = "ac" * 20
 BS_PROXY_ZERO_UNPRICEABLE = "bc" * 20
+BS_PROXY_UNDERLYING_ONLY = "cc" * 20
+BS_PROXY_UNDERLYING_UNPRICED = "dc" * 20
+BS_PROXY_OWN_PRICE_WINS = "ec" * 20
 
 BS_VAULT_HEX = "b0" * 20
 _BS_PROTOCOL_HEX = "b1" * 20
@@ -3407,6 +3410,9 @@ _BS_ALT_UNDERLYING_HEX = "b4" * 20
 _BS_RECEIPT_HEX = "b5" * 20
 _BS_DIRECT_HEX = "b6" * 20
 _BS_DISABLED_DIRECT_HEX = "b7" * 20
+_BS_VAULT_SHARE_HEX = "b8" * 20
+_BS_POOL_POSITION_HEX = "b9" * 20
+_BS_UNPRICED_UNDERLYING_HEX = "ba" * 20
 
 # Deliberately not 1.0, so a value that skipped the price multiply is visibly
 # wrong rather than coincidentally right.
@@ -3423,6 +3429,9 @@ BS_SUMMED_UNDERLYING_VALUE = Decimal("20")
 BS_SUMMED_DIRECT_BALANCE = Decimal("5")
 BS_DISABLED_DIRECT_BALANCE = Decimal("13")
 BS_DISABLED_DIRECT_PRICE = Decimal("17")
+BS_UNDERLYING_ONLY_VALUE = Decimal("23")
+BS_OWN_PRICE_WINS_BALANCE = Decimal("9")
+BS_OWN_PRICE_WINS_UNDERLYING_VALUE = Decimal("1000")
 
 # Same-block pairs (identical created_at, VEC-760) of a sweep row -- always
 # log_index 0, the tracker never sets it for a sweep -- and a flow row at a
@@ -3468,6 +3477,16 @@ async def seed_balance_series_positions(db_url: str) -> None:
       state, not whichever one it returns arbitrarily.
     * ``BS_PROXY_WINDOW_TIEBREAK`` the same sweep/flow pair, in-window -> the
       per-bucket winner must resolve the same way.
+    * ``BS_PROXY_UNDERLYING_ONLY`` a direct holding with no receipt row and no
+      price of its own, whose row carries a tracker-computed
+      ``underlying_value`` in a PRICED underlying (an ERC-4626 share read
+      through convertToAssets, or a pool position) -> valued as
+      ``underlying_value`` times the underlying's price, the last arm.
+    * ``BS_PROXY_UNDERLYING_UNPRICED`` the same shape but the underlying has
+      no price either -> still unpriceable; the arm cannot invent a price.
+    * ``BS_PROXY_OWN_PRICE_WINS`` a direct holding that HAS a price of its own
+      and also carries an ``underlying_value`` -> its own price times balance,
+      so the fallback never overrides an arm above it.
     """
     conn = await asyncpg.connect(db_url)
     try:
@@ -3730,5 +3749,60 @@ async def seed_balance_series_positions(db_url: str) -> None:
                     created_at=three_days_ago,
                     tx_amount=0,
                 )
+
+            # A vault share the registry does not know and no oracle prices:
+            # the tracker still recorded what it redeems for, in the priced
+            # underlying's units (sparkPrimeUSDC1 and the AUSD/USDC Uni V3
+            # position on mainnet are this shape).
+            vault_share_id = await insert_token(conn, "bsVAULT", 6, bytes.fromhex(_BS_VAULT_SHARE_HEX))
+            await insert_allocation_position(
+                conn,
+                token_id=vault_share_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_UNDERLYING_ONLY,
+                balance=Decimal("21"),
+                block=1000,
+                tx="d0" * 32,
+                direction="sweep",
+                underlying_value=BS_UNDERLYING_ONLY_VALUE,
+                underlying_token_id=underlying_id,
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            # The same shape with an underlying nothing prices: still unpriceable.
+            unpriced_underlying_id = await insert_token(conn, "bsNOPX", 6, bytes.fromhex(_BS_UNPRICED_UNDERLYING_HEX))
+            pool_position_id = await insert_token(conn, "bsPOOL", 6, bytes.fromhex(_BS_POOL_POSITION_HEX))
+            await insert_allocation_position(
+                conn,
+                token_id=pool_position_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_UNDERLYING_UNPRICED,
+                balance=Decimal("21"),
+                block=1000,
+                tx="d1" * 32,
+                direction="sweep",
+                underlying_value=Decimal("23"),
+                underlying_token_id=unpriced_underlying_id,
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            # A priced direct holding that also carries an underlying_value:
+            # its own price must still be the one used.
+            await insert_allocation_position(
+                conn,
+                token_id=direct_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_OWN_PRICE_WINS,
+                balance=BS_OWN_PRICE_WINS_BALANCE,
+                block=1000,
+                tx="d2" * 32,
+                direction="sweep",
+                underlying_value=BS_OWN_PRICE_WINS_UNDERLYING_VALUE,
+                underlying_token_id=underlying_id,
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
     finally:
         await conn.close()

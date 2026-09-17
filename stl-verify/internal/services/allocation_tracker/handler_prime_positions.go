@@ -302,7 +302,7 @@ func (h *PrimePositionHandler) poolPairSymbol(token, pool common.Address) (strin
 // underlyingValuation applies the per-token-type denomination policy
 // (VEC-307). Only types whose read result is a value in a known asset's units
 // get a valuation. NAV/RWA share tokens (buidl, securitize, superstate,
-// centrifuge, proxy) and curve pool positions stay nil: their balanceOf is a
+// centrifuge, centrifuge_feeder, proxy) and curve pool positions stay nil: their balanceOf is a
 // share count, and denominating it in the entry's asset_address (a pricing
 // hint, e.g. USTB->USDC) would be plausible-but-wrong data. The empty reason
 // means "nil by design, not a failure".

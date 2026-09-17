@@ -1,0 +1,103 @@
+// Renovate configuration
+// Supply chain security: all dependencies must be ≥7 days old
+// (matches min-release-age in .npmrc and the npm cooldown in dependabot.yml)
+{
+  extends: [
+    "config:recommended",
+  ],
+
+  // Scope is held to this repository by RENOVATE_AUTODISCOVER and
+  // RENOVATE_REPOSITORIES in .github/workflows/renovate.yml; both are global
+  // options and a repo config cannot set them.
+
+  timezone: "Europe/Berlin",
+
+  // gomod edits go.mod through the Go tooling, so the directive bump arrives
+  // tidied; make tidy-check rejects a raw text edit.
+  postUpdateOptions: ["gomodTidy"],
+
+  // Skip packages released less than 7 days ago
+  minimumReleaseAge: "7 days",
+
+  // Keep major updates separate from minor/patch grouping
+  separateMajorMinor: true,
+
+  // Dependabot keeps github-actions and npm (.github/dependabot.yml). Anything
+  // outside this list stays with it, or with nobody by choice: gomod's module
+  // dependencies, and the images in k8s/dev-infra.
+  enabledManagers: ["dockerfile", "devcontainer", "gomod", "nodenv", "pyenv", "custom.regex"],
+
+  customManagers: [
+    {
+      // `.go-version` is a bare version string with no manager of its own.
+      // golang-version tracks upstream Go releases and is the datasource the
+      // built-in gomod manager uses for the toolchain directive.
+      customType: "regex",
+      managerFilePatterns: ["/^\\.go-version$/"],
+      matchStrings: ["^(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      depNameTemplate: "go",
+      datasourceTemplate: "golang-version",
+    },
+  ],
+
+  // Renovate merges packageRules in array order and the LAST matching rule wins
+  // for any field set by more than one match, groupName included. The gomod
+  // pair below turns on that ordering: everything from the manager is disabled,
+  // then the golang depType alone is re-enabled.
+  packageRules: [
+    {
+      // gomod is here only to move go.mod's `go` directive and tidy afterwards.
+      // Everything else it finds — 119 module dependencies — stays out of the
+      // bot's hands; the enable below re-opens just the directive, and a later
+      // rule wins over an earlier one.
+      matchManagers: ["gomod"],
+      enabled: false,
+    },
+    {
+      matchManagers: ["gomod"],
+      matchDepTypes: ["golang"],
+      enabled: true,
+      rangeStrategy: "bump",
+    },
+    {
+      // Base images are referenced as tag@digest (VEC-783); pinDigests keeps
+      // new and unpinned references that way. Scoped to the dockerfile manager:
+      // the devcontainer image is not on the ship path.
+      matchManagers: ["dockerfile"],
+      pinDigests: true,
+    },
+    {
+      // The Go toolchain is written in .go-version, in Dockerfile.common, in
+      // go.mod and in the devcontainer image; grouping them puts the bump in
+      // one branch so it lands as a single commit.
+      matchPackageNames: ["go", "golang", "mcr.microsoft.com/devcontainers/go"],
+      groupName: "go toolchain",
+    },
+    {
+      // .python-version and python/Dockerfile's py-base stage.
+      matchPackageNames: ["python"],
+      groupName: "python toolchain",
+    },
+    {
+      // .node-version and python/Dockerfile's ui-builder stage. The tag there
+      // must stay a full patch version for the check to compare it.
+      matchPackageNames: ["node"],
+      groupName: "node toolchain",
+    },
+    {
+      // Go and Python number a language move as a semver minor — go 1.26 to
+      // 1.27, python 3.12 to 3.14 — so a combined minor and patch stream offers
+      // only the language move. Splitting them makes the patch, 1.26.8,
+      // available on its own. Node is here for the same reason: its LTS line
+      // moves in the minor position.
+      matchPackageNames: [
+        "go",
+        "golang",
+        "mcr.microsoft.com/devcontainers/go",
+        "python",
+        "node",
+      ],
+      separateMinorPatch: true,
+    },
+  ],
+}

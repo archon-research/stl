@@ -1,6 +1,6 @@
 {
   "name": "stl-verify",
-  "image": "mcr.microsoft.com/devcontainers/go:1.25",
+  "image": "mcr.microsoft.com/devcontainers/go:1.27",
   "features": {
     "ghcr.io/devcontainers/features/aws-cli:1": {},
     "ghcr.io/devcontainers/features/github-cli:1": {},

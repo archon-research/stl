@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -433,10 +434,91 @@ func TestCurveRepository_LoadPools(t *testing.T) {
 	}
 }
 
-// TestCurveRepository_LoadPools_HasAPrecise verifies that curve_pool.has_a_precise
-// round-trips through LoadPools: FALSE by default and TRUE once curated, since it
-// gates the A_precise snapshot read (replacing the old startup capability probe).
-func TestCurveRepository_LoadPools_HasAPrecise(t *testing.T) {
+// TestCurveRepository_LoadPools_CuratedCapabilities verifies that each curated
+// capability column round-trips through LoadPools: FALSE by default and TRUE once
+// curated. Both gate snapshot reads that revert on the pools lacking them.
+func TestCurveRepository_LoadPools_CuratedCapabilities(t *testing.T) {
+	tests := []struct {
+		name   string
+		column string
+		// kind, when set, is applied before the flag: curve_pool CHECKs restrict
+		// some flags to a pool class.
+		kind string
+		read func(outbound.CurvePoolRow) bool
+	}{
+		{
+			name:   "has_a_precise gates A_precise()",
+			column: "has_a_precise",
+			read:   func(r outbound.CurvePoolRow) bool { return r.HasAPrecise },
+		},
+		{
+			name:   "has_no_arg_oracle_getters gates the five no-arg oracle reads",
+			column: "has_no_arg_oracle_getters",
+			kind:   "plain_ng",
+			read:   func(r outbound.CurvePoolRow) bool { return r.HasNoArgOracleGetters },
+		},
+		{
+			name:   "has_future_fee gates future_fee()",
+			column: "has_future_fee",
+			read:   func(r outbound.CurvePoolRow) bool { return r.HasFutureFee },
+		},
+		{
+			name:   "has_offpeg_fee_multiplier gates offpeg_fee_multiplier()",
+			column: "has_offpeg_fee_multiplier",
+			read:   func(r outbound.CurvePoolRow) bool { return r.HasOffpegFeeMultiplier },
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			repo := newCurveRepo(t)
+			poolID := seedCurvePool(t, ctx)
+
+			loadPool := func() outbound.CurvePoolRow {
+				t.Helper()
+				pools, err := repo.LoadPools(ctx, 999)
+				if err != nil {
+					t.Fatalf("LoadPools: %v", err)
+				}
+				for _, p := range pools {
+					if p.ID == poolID {
+						return p
+					}
+				}
+				t.Fatalf("seeded pool id=%d not found", poolID)
+				return outbound.CurvePoolRow{}
+			}
+
+			if tc.kind != "" {
+				if _, err := curveTestPool.Exec(ctx,
+					`UPDATE curve_pool SET pool_kind = $2 WHERE id = $1`, poolID, tc.kind,
+				); err != nil {
+					t.Fatalf("set pool_kind=%s: %v", tc.kind, err)
+				}
+			}
+
+			if tc.read(loadPool()) {
+				t.Errorf("%s = true, want false (default for a freshly seeded pool)", tc.column)
+			}
+
+			if _, err := curveTestPool.Exec(ctx,
+				fmt.Sprintf(`UPDATE curve_pool SET %s = TRUE WHERE id = $1`, tc.column), poolID,
+			); err != nil {
+				t.Fatalf("set %s: %v", tc.column, err)
+			}
+
+			if !tc.read(loadPool()) {
+				t.Errorf("%s = false, want true after curating it TRUE", tc.column)
+			}
+		})
+	}
+}
+
+// TestCurveRepository_LoadPools_CalcTokenAmountDynArray verifies that the curated
+// argument shape round-trips through LoadPools as a tri-state: nil when unprobed
+// (which gates the read out), and the curated boolean once set.
+func TestCurveRepository_LoadPools_CalcTokenAmountDynArray(t *testing.T) {
 	ctx := context.Background()
 	repo := newCurveRepo(t)
 	poolID := seedCurvePool(t, ctx)
@@ -456,18 +538,20 @@ func TestCurveRepository_LoadPools_HasAPrecise(t *testing.T) {
 		return outbound.CurvePoolRow{}
 	}
 
-	if loadPool().HasAPrecise {
-		t.Error("HasAPrecise = true, want false (default for a freshly seeded pool)")
+	if got := loadPool().CalcTokenAmountDynArray; got != nil {
+		t.Errorf("CalcTokenAmountDynArray = %v, want nil (unprobed by default)", *got)
 	}
 
-	if _, err := curveTestPool.Exec(ctx,
-		`UPDATE curve_pool SET has_a_precise = TRUE WHERE id = $1`, poolID,
-	); err != nil {
-		t.Fatalf("set has_a_precise: %v", err)
-	}
-
-	if !loadPool().HasAPrecise {
-		t.Error("HasAPrecise = false, want true after curating has_a_precise=TRUE")
+	for _, want := range []bool{false, true} {
+		if _, err := curveTestPool.Exec(ctx,
+			`UPDATE curve_pool SET calc_token_amount_dyn_array = $2 WHERE id = $1`, poolID, want,
+		); err != nil {
+			t.Fatalf("set calc_token_amount_dyn_array=%v: %v", want, err)
+		}
+		got := loadPool().CalcTokenAmountDynArray
+		if got == nil || *got != want {
+			t.Errorf("CalcTokenAmountDynArray = %v, want %v", got, want)
+		}
 	}
 }
 
@@ -814,6 +898,86 @@ func TestCurveRepository_StableswapConfig_AppendOnChange(t *testing.T) {
 	})
 	if got := countRows(); got != 2 {
 		t.Fatalf("after second unchanged repeat: rows = %d, want 2", got)
+	}
+}
+
+// TestCurveRepository_StableswapConfig_OffpegFeeMultiplier verifies that the
+// later-NG fee-schedule shape round-trips: offpeg_fee_multiplier is written and
+// read back, and a change in it alone appends a row. Every other config test
+// leaves it NULL, which would let a swapped Scan position or a dropped
+// comparison term pass.
+func TestCurveRepository_StableswapConfig_OffpegFeeMultiplier(t *testing.T) {
+	ctx := context.Background()
+	truncateCurveFactTables(t, ctx)
+	repo := newCurveRepo(t)
+	poolID := seedCurvePool(t, ctx)
+
+	countRows := func() int {
+		var n int
+		if err := curveTestPool.QueryRow(ctx,
+			`SELECT count(*) FROM curve_stableswap_config WHERE curve_pool_id=$1`, poolID,
+		).Scan(&n); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		return n
+	}
+
+	// The later NG shape: no future_fee, offpeg_fee_multiplier instead.
+	makeConfig := func(block int64, offpeg *big.Int) *entity.CurveStableswapConfig {
+		cfg, err := entity.NewCurveStableswapConfig(entity.CurveStableswapConfigParams{
+			CurvePoolID:         poolID,
+			BlockNumber:         block,
+			BlockVersion:        0,
+			Timestamp:           time.Unix(1700030000+block, 0).UTC(),
+			InitialA:            big.NewInt(2000000),
+			InitialATime:        0,
+			FutureA:             big.NewInt(2000000),
+			FutureATime:         0,
+			AdminFee:            big.NewInt(5000000000),
+			FutureFee:           nil,
+			OffpegFeeMultiplier: offpeg,
+		})
+		if err != nil {
+			t.Fatalf("NewCurveStableswapConfig: %v", err)
+		}
+		return cfg
+	}
+
+	saveBlockCommitted(t, ctx, repo, outbound.BlockWrites{
+		StableswapConfigs: []*entity.CurveStableswapConfig{makeConfig(2000, big.NewInt(200000000000))},
+	})
+	if got := countRows(); got != 1 {
+		t.Fatalf("after first write: rows = %d, want 1", got)
+	}
+
+	var futureFee *string
+	var offpeg string
+	if err := curveTestPool.QueryRow(ctx,
+		`SELECT future_fee::text, offpeg_fee_multiplier::text
+		 FROM curve_stableswap_config WHERE curve_pool_id=$1`, poolID,
+	).Scan(&futureFee, &offpeg); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if futureFee != nil {
+		t.Errorf("future_fee = %s, want NULL for a pool with no future_fee()", *futureFee)
+	}
+	if offpeg != "200000000000" {
+		t.Errorf("offpeg_fee_multiplier = %s, want 200000000000", offpeg)
+	}
+
+	saveBlockCommitted(t, ctx, repo, outbound.BlockWrites{
+		StableswapConfigs: []*entity.CurveStableswapConfig{makeConfig(2001, big.NewInt(200000000000))},
+	})
+	if got := countRows(); got != 1 {
+		t.Fatalf("after unchanged repeat: rows = %d, want 1", got)
+	}
+
+	// Only offpeg_fee_multiplier changes: the dedupe must notice.
+	saveBlockCommitted(t, ctx, repo, outbound.BlockWrites{
+		StableswapConfigs: []*entity.CurveStableswapConfig{makeConfig(2002, big.NewInt(100000000000))},
+	})
+	if got := countRows(); got != 2 {
+		t.Fatalf("after offpeg_fee_multiplier change: rows = %d, want 2", got)
 	}
 }
 

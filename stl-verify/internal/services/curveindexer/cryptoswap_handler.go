@@ -313,7 +313,7 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 	reads = append(reads, h.cryptoSwapXcpProfitAReads(blockNumber, acc)...)
 	reads = append(reads, h.cryptoSwapLastPricesTimestampReads(blockNumber, acc)...)
 	reads = append(reads, h.cryptoSwapGetDxReads(blockNumber, acc)...)
-	reads = append(reads, h.cryptoSwapCalcTokenAmountReads(acc)...)
+	reads = append(reads, h.cryptoSwapCalcTokenAmountReads(pool, acc)...)
 	reads = append(reads, h.cryptoSwapCalcWithdrawReads(blockNumber, acc)...)
 	reads = append(reads, h.cryptoSwapConfigGetterReads(blockNumber, acc)...)
 	return reads
@@ -802,8 +802,12 @@ func (h *CryptoswapHandler) cryptoSwapGetDxReads(blockNumber int64, acc *cryptos
 }
 
 // calc_token_amount(unit deposit of 10^decimals[i] per coin, is_deposit=true)
-func (h *CryptoswapHandler) cryptoSwapCalcTokenAmountReads(acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+func (h *CryptoswapHandler) cryptoSwapCalcTokenAmountReads(pool RegisteredPool, acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
 	var reads []shared.SnapshotRead[RegisteredPool]
+	if pool.CalcTokenAmountDynArray == nil {
+		return reads
+	}
+	dynArray := *pool.CalcTokenAmountDynArray
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "calc_token_amount",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -814,7 +818,7 @@ func (h *CryptoswapHandler) cryptoSwapCalcTokenAmountReads(acc *cryptoswapSnapsh
 				}
 				deposits[i] = new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(pool.CoinDecimals[i])), nil)
 			}
-			data, err := packCalcTokenAmount(deposits, true)
+			data, err := packCalcTokenAmount(deposits, true, dynArray)
 			if err != nil {
 				return nil, fmt.Errorf("packing calc_token_amount: %w", err)
 			}

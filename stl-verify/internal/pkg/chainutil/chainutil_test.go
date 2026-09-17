@@ -503,3 +503,49 @@ func TestChainSlug(t *testing.T) {
 		})
 	}
 }
+
+// One naming rule for every per-chain on-demand worker: the Deployment, the
+// Temporal task queue and the OTel service name are one string, so an operator
+// who can name the Deployment can start the run. The base is a placeholder — a
+// caller's own deployed name is pinned beside that caller. 43114 is the chain
+// worth pinning — its slug is `avalanche` while its metric label is `avalanche-c`, so
+// a queue built from the label would be one no worker polls.
+func TestTaskQueueName(t *testing.T) {
+	tests := []struct {
+		name            string
+		chainID         string
+		want            string
+		wantErrContains string
+	}{
+		{name: "ethereum polls the bare name", chainID: "1", want: "worker"},
+		{name: "base", chainID: "8453", want: "base-worker"},
+		{name: "arbitrum", chainID: "42161", want: "arbitrum-worker"},
+		{name: "optimism", chainID: "10", want: "optimism-worker"},
+		{name: "unichain", chainID: "130", want: "unichain-worker"},
+		{name: "robinhood", chainID: "4663", want: "robinhood-worker"},
+		{name: "avalanche is the slug, not the avalanche-c metric label", chainID: "43114", want: "avalanche-worker"},
+		{name: "a chain the repo does not watch", chainID: "999999", wantErrContains: "999999"},
+		{name: "an absent chain id", chainID: "", wantErrContains: "CHAIN_ID"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CHAIN_ID", tc.chainID)
+
+			got, err := TaskQueueName("worker")
+
+			if tc.wantErrContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrContains) {
+					t.Fatalf("error = %v, want one mentioning %q", err, tc.wantErrContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("TaskQueueName error = %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("TaskQueueName = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

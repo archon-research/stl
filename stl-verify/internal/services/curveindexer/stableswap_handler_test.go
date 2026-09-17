@@ -530,12 +530,14 @@ func TestStableswapHandler_SnapshotPreNG(t *testing.T) {
 	}
 	h := NewStableswapHandler(a)
 	pool := RegisteredPool{
-		ID:           1,
-		Address:      common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
-		Kind:         KindStableswapPreNG,
-		NCoins:       2,
-		CoinDecimals: []int{18, 18},
-		HasAPrecise:  true,
+		ID:                      1,
+		Address:                 common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
+		Kind:                    KindStableswapPreNG,
+		NCoins:                  2,
+		CoinDecimals:            []int{18, 18},
+		HasAPrecise:             true,
+		CalcTokenAmountDynArray: fixedCalcTokenAmount(),
+		HasFutureFee:            true,
 	}
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
 	st, cfg, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
@@ -603,12 +605,15 @@ func TestStableswapHandler_SnapshotNG(t *testing.T) {
 	}
 	h := NewStableswapHandler(a)
 	pool := RegisteredPool{
-		ID:           2,
-		Address:      common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
-		Kind:         KindStableswapNG,
-		NCoins:       2,
-		CoinDecimals: []int{18, 6},
-		HasAPrecise:  true,
+		ID:                      2,
+		Address:                 common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
+		Kind:                    KindStableswapNG,
+		NCoins:                  2,
+		CoinDecimals:            []int{18, 6},
+		HasAPrecise:             true,
+		HasNoArgOracleGetters:   true,
+		CalcTokenAmountDynArray: fixedCalcTokenAmount(),
+		HasFutureFee:            true,
 	}
 	mc := &fakeMulticaller{results: stableswapNGResults(t, a)}
 	st, cfg, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, common.Hash{}, time.Unix(2, 0).UTC())
@@ -657,6 +662,93 @@ func TestStableswapHandler_SnapshotNG(t *testing.T) {
 	}
 }
 
+// assertNotIssued fails if any captured call is one of the named no-arg methods.
+// A gated-out read must contribute no call at all, not a call whose revert is
+// tolerated.
+func assertNotIssued(t *testing.T, a *abi.ABI, captured []outbound.Call, methods ...string) {
+	t.Helper()
+	for _, m := range methods {
+		data, err := a.Pack(m)
+		if err != nil {
+			t.Fatalf("packing %s: %v", m, err)
+		}
+		for i, c := range captured {
+			if bytes.Equal(c.CallData, data) {
+				t.Errorf("call[%d] is %s, which must not be issued for this pool", i, m)
+			}
+		}
+	}
+}
+
+// issuedMethod reports whether any captured call is the named no-arg method.
+func issuedMethod(t *testing.T, a *abi.ABI, captured []outbound.Call, method string) bool {
+	t.Helper()
+	data, err := a.Pack(method)
+	if err != nil {
+		t.Fatalf("packing %s: %v", method, err)
+	}
+	for _, c := range captured {
+		if bytes.Equal(c.CallData, data) {
+			return true
+		}
+	}
+	return false
+}
+
+// calcTokenAmountIssued reports, per argument shape, whether that selector was
+// issued. The two shapes have different selectors and each reverts on a pool
+// implementing the other, so which one went out is the thing worth asserting.
+func calcTokenAmountIssued(t *testing.T, captured []outbound.Call, dynArray bool) bool {
+	t.Helper()
+	data, err := packCalcTokenAmount([]*big.Int{big.NewInt(1), big.NewInt(1)}, true, dynArray)
+	if err != nil {
+		t.Fatalf("packing calc_token_amount (dynArray=%v): %v", dynArray, err)
+	}
+	for _, c := range captured {
+		if len(c.CallData) >= 4 && bytes.Equal(c.CallData[:4], data[:4]) {
+			return true
+		}
+	}
+	return false
+}
+
+// assertCalcTokenAmountShape checks that exactly the curated selector went out.
+// wantDyn nil means the pool is unprobed and neither shape may be issued.
+func assertCalcTokenAmountShape(t *testing.T, captured []outbound.Call, wantDyn *bool) {
+	t.Helper()
+	for _, dynArray := range []bool{false, true} {
+		want := wantDyn != nil && *wantDyn == dynArray
+		if got := calcTokenAmountIssued(t, captured, dynArray); got != want {
+			t.Errorf("calc_token_amount(dynArray=%v) issued = %v, want %v", dynArray, got, want)
+		}
+	}
+}
+
+func assertStructuralNulls(t *testing.T, fields map[string]*big.Int) {
+	t.Helper()
+	for name, v := range fields {
+		if v != nil {
+			t.Errorf("%s = %v, want nil (structural NULL when gated off)", name, v)
+		}
+	}
+}
+
+// dropResults returns base without the entries at the given indices, so a canned
+// result list lines up with a call list that has reads gated out of it.
+func dropResults(base []outbound.Result, indices ...int) []outbound.Result {
+	drop := make(map[int]bool, len(indices))
+	for _, i := range indices {
+		drop[i] = true
+	}
+	out := make([]outbound.Result, 0, len(base)-len(drop))
+	for i, r := range base {
+		if !drop[i] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // capturingMulticaller records the calls it receives and returns preset results.
 // It is used to assert which Target address each call uses.
 type capturingMulticaller struct {
@@ -694,13 +786,15 @@ func TestStableswapHandler_SnapshotTotalSupplyTargetsLpToken(t *testing.T) {
 	poolAddr := common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022")
 	lpAddr := common.HexToAddress("0x06325440D014e39736583c165C2963BA99fAf14E")
 	pool := RegisteredPool{
-		ID:             1,
-		Address:        poolAddr,
-		Kind:           KindStableswapPreNG,
-		NCoins:         2,
-		CoinDecimals:   []int{18, 18},
-		LpTokenAddress: &lpAddr,
-		HasAPrecise:    true,
+		ID:                      1,
+		Address:                 poolAddr,
+		Kind:                    KindStableswapPreNG,
+		NCoins:                  2,
+		CoinDecimals:            []int{18, 18},
+		LpTokenAddress:          &lpAddr,
+		HasAPrecise:             true,
+		CalcTokenAmountDynArray: fixedCalcTokenAmount(),
+		HasFutureFee:            true,
 	}
 
 	mc := &capturingMulticaller{results: stableswapPreNGResults(t, a)}
@@ -742,13 +836,16 @@ func TestStableswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken(t *testin
 
 	poolAddr := common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022")
 	pool := RegisteredPool{
-		ID:             2,
-		Address:        poolAddr,
-		Kind:           KindStableswapNG,
-		NCoins:         2,
-		CoinDecimals:   []int{18, 18},
-		LpTokenAddress: nil, // pool is its own LP token
-		HasAPrecise:    true,
+		ID:                      2,
+		Address:                 poolAddr,
+		Kind:                    KindStableswapNG,
+		NCoins:                  2,
+		CoinDecimals:            []int{18, 18},
+		LpTokenAddress:          nil, // pool is its own LP token
+		HasAPrecise:             true,
+		HasNoArgOracleGetters:   true,
+		CalcTokenAmountDynArray: fixedCalcTokenAmount(),
+		HasFutureFee:            true,
 	}
 
 	mc := &capturingMulticaller{results: stableswapNGResults(t, a)}
@@ -774,12 +871,14 @@ func TestStableswapHandler_SnapshotRevertErrors(t *testing.T) {
 	}
 	h := NewStableswapHandler(a)
 	pool := RegisteredPool{
-		ID:           1,
-		Address:      common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
-		Kind:         KindStableswapPreNG,
-		NCoins:       2,
-		CoinDecimals: []int{18, 18},
-		HasAPrecise:  true,
+		ID:                      1,
+		Address:                 common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
+		Kind:                    KindStableswapPreNG,
+		NCoins:                  2,
+		CoinDecimals:            []int{18, 18},
+		HasAPrecise:             true,
+		CalcTokenAmountDynArray: fixedCalcTokenAmount(),
+		HasFutureFee:            true,
 	}
 
 	// Build results where the first balances call (required, AllowFailure=false) reverts.
@@ -797,9 +896,24 @@ func TestStableswapHandler_SnapshotRevertErrors(t *testing.T) {
 	}
 }
 
+// Indices of the five capability-gated calls in the NG 2-coin call list, in the
+// order stableswapNGResults documents.
+const (
+	ng2CoinPriceOracleIdx  = 8
+	ng2CoinLastPriceIdx    = 9
+	ng2CoinEmaPriceIdx     = 17
+	ng2CoinGetPIdx         = 18
+	ng2CoinOracleMethodIdx = 26
+	ng2CoinFutureFeeIdx    = 24
+)
+
 // preNG2CoinAPreciseIdx is the index of the A_precise call (call 8) in the pre-NG
 // 2-coin call list: 8 core reads (indices 0-7) then A_precise at index 8.
 const preNG2CoinAPreciseIdx = 8
+
+// preNG2CoinCalcTokenAmountIdx is the index of the calc_token_amount call: after
+// the 8 core reads, A_precise (8) and admin_balances x2 (9-10).
+const preNG2CoinCalcTokenAmountIdx = 11
 
 // preNG2CoinInitialAIdx is the index of the initial_A config getter: after the 8
 // core reads, A_precise (8), admin_balances x2 (9-10), calc_token_amount (11),
@@ -839,6 +953,127 @@ func TestStableswapHandler_SnapshotConfigGetterRevertErrors(t *testing.T) {
 	_, _, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err == nil {
 		t.Error("reverted required config getter must error, got nil")
+	}
+}
+
+// TestStableswapHandler_SnapshotUnprobedCalcTokenAmountGatesCall verifies that a
+// pool whose calc_token_amount argument shape has not been curated
+// (CalcTokenAmountDynArray=nil) issues no calc_token_amount call and leaves the
+// field a structural NULL. Guessing a shape would revert on half the pools and
+// stop every block on the chain.
+func TestStableswapHandler_SnapshotUnprobedCalcTokenAmountGatesCall(t *testing.T) {
+	_, a := newStableswapHandlerForTest(t)
+	h := NewStableswapHandler(a)
+	pool := stableswapPoolPreNG()
+	pool.CalcTokenAmountDynArray = nil
+
+	results := dropResults(stableswapPreNGResults(t, a), preNG2CoinCalcTokenAmountIdx)
+
+	mc := &capturingMulticaller{results: results}
+	st, _, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if st == nil {
+		t.Fatal("want stableswap state")
+	}
+
+	assertCalcTokenAmountShape(t, mc.captured, nil)
+	assertStructuralNulls(t, map[string]*big.Int{"calc_token_amount": st.CalcTokenAmount})
+	// Cursor stays aligned: fields after the gated-off read still decode.
+	if len(st.CalcWithdrawOneCoin) != 2 {
+		t.Errorf("calc_withdraw_one_coin len = %d, want 2", len(st.CalcWithdrawOneCoin))
+	}
+}
+
+// TestStableswapHandler_SnapshotLaterNGFeeSchedule verifies that a later
+// Stableswap-NG pool -- no no-arg oracle getters, no future_fee(),
+// offpeg_fee_multiplier() instead -- issues offpeg_fee_multiplier and not
+// future_fee, and records future_fee as a structural NULL. Issuing future_fee
+// would revert and stop every block on the chain.
+func TestStableswapHandler_SnapshotLaterNGFeeSchedule(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewStableswapHandler(a)
+	pool := stableswapPoolNG()
+	pool.HasNoArgOracleGetters = false
+	pool.CalcTokenAmountDynArray = dynCalcTokenAmount()
+	pool.HasFutureFee = false
+	pool.HasOffpegFeeMultiplier = true
+
+	const offpegValue = 200000000000
+	base := stableswapNGResults(t, a)
+	base[ng2CoinFutureFeeIdx] = packUint256Result(offpegValue) // same slot, different getter
+	results := dropResults(base,
+		ng2CoinPriceOracleIdx, ng2CoinLastPriceIdx,
+		ng2CoinEmaPriceIdx, ng2CoinGetPIdx, ng2CoinOracleMethodIdx)
+
+	mc := &capturingMulticaller{results: results}
+	_, cfg, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("want stableswap config")
+	}
+
+	assertNotIssued(t, a, mc.captured, "future_fee")
+	assertCalcTokenAmountShape(t, mc.captured, pool.CalcTokenAmountDynArray)
+	assertStructuralNulls(t, map[string]*big.Int{"future_fee": cfg.FutureFee})
+	if !issuedMethod(t, a, mc.captured, "offpeg_fee_multiplier") {
+		t.Error("offpeg_fee_multiplier was not issued, but the pool exposes it")
+	}
+	if cfg.OffpegFeeMultiplier == nil || cfg.OffpegFeeMultiplier.Int64() != offpegValue {
+		t.Errorf("offpeg_fee_multiplier = %v, want %d", cfg.OffpegFeeMultiplier, offpegValue)
+	}
+}
+
+// TestStableswapHandler_SnapshotNoArgOracleGettersGateCalls verifies that an NG
+// pool whose implementation lacks the no-arg oracle getters
+// (HasNoArgOracleGetters=false) issues none of the five, leaves them structural
+// NULLs, and still issues and decodes the NG reads that do not depend on them.
+// Issuing one would revert and stop every Curve block on the chain.
+func TestStableswapHandler_SnapshotNoArgOracleGettersGateCalls(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewStableswapHandler(a)
+	pool := stableswapPoolNG()
+	pool.HasNoArgOracleGetters = false
+
+	results := dropResults(stableswapNGResults(t, a),
+		ng2CoinPriceOracleIdx, ng2CoinLastPriceIdx,
+		ng2CoinEmaPriceIdx, ng2CoinGetPIdx, ng2CoinOracleMethodIdx)
+
+	mc := &capturingMulticaller{results: results}
+	st, cfg, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if st == nil || cfg == nil {
+		t.Fatal("want stableswap state and config")
+	}
+
+	assertNotIssued(t, a, mc.captured,
+		"price_oracle", "last_price", "ema_price", "get_p", "oracle_method")
+	assertStructuralNulls(t, map[string]*big.Int{
+		"price_oracle":  st.PriceOracle,
+		"last_price":    st.LastPrice,
+		"ema_price":     st.EmaPrice,
+		"get_p":         st.GetP,
+		"oracle_method": cfg.OracleMethod,
+	})
+
+	// The NG reads that do not depend on the no-arg selectors stay issued, and the
+	// decode cursor stays aligned across the five gaps.
+	if len(st.StoredRates) != 2 {
+		t.Errorf("stored_rates len = %d, want 2 (NG-gated, not capability-gated)", len(st.StoredRates))
+	}
+	if cfg.MaExpTime == nil {
+		t.Error("ma_exp_time must still populate (NG-gated, not capability-gated)")
 	}
 }
 

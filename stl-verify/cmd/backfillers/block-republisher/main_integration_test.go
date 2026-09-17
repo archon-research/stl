@@ -29,6 +29,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -663,13 +664,13 @@ func receiveOneSQSMessage(t *testing.T, ctx context.Context, sqsc *awssqs.Client
 func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
 	t.Setenv("CHAIN_ID", "1")
 
-	queue, err := taskQueueName()
+	queue, err := chainutil.TaskQueueName(queueBaseName)
 	if err != nil {
-		t.Fatalf("taskQueueName() error = %v", err)
+		t.Fatalf("TaskQueueName error = %v", err)
 	}
 
 	if queue != "block-republisher" {
-		t.Errorf("taskQueueName() = %q, want %q", queue, "block-republisher")
+		t.Errorf("TaskQueueName = %q, want %q", queue, "block-republisher")
 	}
 	if workflowTypeName != "BlockRepublish" {
 		t.Errorf("workflowTypeName = %q, want %q", workflowTypeName, "BlockRepublish")
