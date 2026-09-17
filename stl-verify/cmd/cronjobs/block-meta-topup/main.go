@@ -35,9 +35,8 @@ import (
 // queueBaseName is this component's deployed name, and the base of its per-chain task queue.
 const queueBaseName = "block-meta-topup"
 
-// defaultMaxBlocks bounds one tick. At the loader's measured throughput a tick of this size finishes
-// well inside the hourly interval, and a chain that has been bootstrapped never reaches it: the delta
-// between ticks is the blocks referenced in an hour. MAX_BLOCKS tunes it and must be positive.
+// defaultMaxBlocks bounds one tick well inside the hourly interval at the loader's measured throughput;
+// a bootstrapped chain's hourly delta never reaches it. MAX_BLOCKS tunes it and must be positive.
 const defaultMaxBlocks = 20000
 
 var (

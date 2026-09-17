@@ -563,9 +563,6 @@ func TestRun_PagingFailureSurfaces(t *testing.T) {
 	}
 }
 
-// The growth tripwire reads this counter, so it has to carry the run's real pending-set size and it
-// has to exist before the first run: an unseeded counter first appears at its first increment, and
-// rate() never observes the 0->1.
 // useManualMeter installs a manual metric reader as the global meter provider for one test.
 func useManualMeter(t *testing.T) *metricsdk.ManualReader {
 	t.Helper()
@@ -580,6 +577,8 @@ func useManualMeter(t *testing.T) *metricsdk.ManualReader {
 	return reader
 }
 
+// The growth tripwire reads this counter, so it must carry the real pending-set size and exist before
+// the first run: rate() never observes an unseeded counter's 0->1.
 func TestRun_RecordsTheWorkListRowsItPages(t *testing.T) {
 	reader := useManualMeter(t)
 

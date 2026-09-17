@@ -66,9 +66,8 @@ type workListArm struct {
 	sql     string // $1 = chain id, $2 = run id; %s = the window predicate on partCol
 }
 
-// armSQL builds one arm. parent is empty for a table carrying chain_id natively; otherwise the arm
-// joins parent on parentRef = table.parentKey and takes chain from there. Every row is stamped with
-// the enumerating run, and a block block_meta already holds is never written.
+// armSQL builds one arm, taking chain natively or from parent joined on parentRef = table.parentKey. Rows
+// carry the enumerating run, and a block block_meta already holds is never written.
 func armSQL(table, parent, parentKey, parentRef string) string {
 	const shape = `
 		INSERT INTO block_meta_worklist (chain_id, run_id, block_number, block_version)

@@ -43,8 +43,6 @@ func newLocalStackReader(t *testing.T, ctx context.Context, logger *slog.Logger)
 	})
 }
 
-// uploadBlock uploads a gzipped block JSON carrying the given hex timestamp to the
-// key the loader will read for (blockNum, version).
 // hexSeconds parses an on-chain hex timestamp to its epoch-second value.
 func hexSeconds(t *testing.T, hexTimestamp string) int64 {
 	t.Helper()

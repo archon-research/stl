@@ -109,11 +109,8 @@ func New(cfg Config, repo outbound.BlockMetaRepository, reader outbound.S3Reader
 	return &Service{cfg: cfg, repo: repo, reader: reader, logger: logger, metrics: metrics}, nil
 }
 
-// Run fills block_meta for cfg.ChainID until no referenced block is missing or cfg.MaxBlocks are read.
-// Returns rows upserted.
-// The pending set is enumerated once into a work list and paged with a keyset cursor, so the six-table
-// union is not re-run per batch; cancellation is checked between batches so a SIGTERM stops it promptly.
-// A block newly referenced mid-run is picked up by the next run, which is what a backfill needs.
+// Run fills block_meta for cfg.ChainID until no referenced block is missing or cfg.MaxBlocks are read,
+// returning rows upserted. The pending set is enumerated once and paged, so a block referenced mid-run is the next run's.
 func (s *Service) Run(ctx context.Context) (int64, error) {
 	var total int64
 	var misses []string
