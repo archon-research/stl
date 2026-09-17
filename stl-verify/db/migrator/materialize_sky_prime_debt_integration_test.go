@@ -67,6 +67,10 @@ BEGIN
     (pbid, 'ILK-A',    0, 100, 0, '2026-01-01T00:00:00Z', 0, 0),
     (pcid, 'ILK-A', 2000, 100, 0, '2026-01-01T00:00:00Z', 0, 0),
     (pcid, 'ILK-A',    0, 200, 0, '2026-01-02T00:00:00Z', 0, 0);
+  -- Header times deliberately differ from synced_at, so a view reading the receipt clock is caught.
+  INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp) VALUES
+    (1, 100, 0, '2025-12-31T23:00:00Z'),
+    (1, 200, 0, '2025-12-31T23:00:12Z');
 END $$;`
 	if _, err := pool.Exec(ctx, seed); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -270,7 +274,7 @@ func TestSkyPrimeDebtRefusesASnapshotItCannotKey(t *testing.T) {
 // Two prime_debt rows identical on (prime, ilk, block, version, processing_version) that differ only in
 // synced_at are one observation to the projection, and the EARLIER synced_at wins: it is the stable pick,
 // since a retry can only add a later row, whereas the latest would move and re-emit a stored key with a
-// changed block_timestamp on every later run.
+// changed quantity on every later run.
 func TestSkyPrimeDebtSameKeyEarlierSyncedAtWins(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -282,6 +286,7 @@ func TestSkyPrimeDebtSameKeyEarlierSyncedAtWins(t *testing.T) {
 	  INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id) VALUES
 	    (pid, 'TIE-A', 250, 500, 0, '2026-06-01T11:00:00Z', 0, 0),   -- the LATER sync is inserted first, so
 	    (pid, 'TIE-A', 100, 500, 0, '2026-06-01T10:00:00Z', 0, 0);   -- heap order cannot stand in for the ORDER BY
+	  INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp) VALUES (1, 500, 0, '2026-06-01T09:00:00Z');
 	END $s$`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -296,8 +301,8 @@ func TestSkyPrimeDebtSameKeyEarlierSyncedAtWins(t *testing.T) {
 	if rows != 1 {
 		t.Fatalf("same-key pair projected %d rows, want 1", rows)
 	}
-	if qty != "100" || !ts.Equal(time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)) {
-		t.Errorf("projection kept quantity %s at %s; want 100 at 2026-06-01T10:00Z -- the earlier synced_at is the stable pick", qty, ts.UTC().Format(time.RFC3339))
+	if qty != "100" || !ts.Equal(time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)) {
+		t.Errorf("projection kept quantity %s at %s; want 100 (the earlier synced_at) at the block's header time 2026-06-01T09:00Z", qty, ts.UTC().Format(time.RFC3339))
 	}
 }
 
@@ -406,5 +411,154 @@ func TestSkyPrimeDebtForwardsTheWindow(t *testing.T) {
 	}
 	if *window != "36:00:00" {
 		t.Errorf("the run recorded window %q; want the 36 hours the wrapper was called with", *window)
+	}
+}
+
+// block_timestamp is the block header time, never prime_debt.synced_at. On staging synced_at runs out of
+// order against block_number (a backfill received early blocks months late), which made the spine
+// withhold every Sky position; header times are ordered, so the same rows append.
+func TestSkyPrimeDebtReadsHeaderTimeNotReceiptTime(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	if _, err := pool.Exec(ctx, `
+	DO $s$ DECLARE pid bigint; BEGIN
+	  INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'late', '\x1111111111111111111111111111111111111111') RETURNING id INTO pid;
+	  INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id) VALUES
+	    (pid, 'LATE-A', 10, 1000, 0, '2026-05-21T08:10:14Z', 0, 0),  -- the lower block, received later
+	    (pid, 'LATE-A', 20, 1016, 0, '2026-03-23T10:04:01Z', 0, 0);
+	  INSERT INTO block_meta (chain_id, block_number, block_version, processing_version, block_timestamp) VALUES
+	    (1, 1000, 0, 0, '2026-03-01T00:00:00Z'),
+	    (1, 1016, 0, 0, '2026-03-01T00:03:12Z'),
+	    (1, 1016, 0, 1, '2026-03-01T00:03:24Z');  -- a corrected header: the highest processing_version wins
+	END $s$`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var appended int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_sky_prime_debt()`).Scan(&appended); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if appended != 2 {
+		t.Errorf("appended %d rows; want both observations, whose header times are in block order", appended)
+	}
+	var ts1000, ts1016 time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT max(block_timestamp) FILTER (WHERE block_number = 1000),
+		       max(block_timestamp) FILTER (WHERE block_number = 1016)
+		  FROM position_state`).Scan(&ts1000, &ts1016); err != nil {
+		t.Fatalf("read position_state: %v", err)
+	}
+	if !ts1000.Equal(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)) || !ts1016.Equal(time.Date(2026, 3, 1, 0, 3, 24, 0, time.UTC)) {
+		t.Errorf("block_timestamp = %s / %s; want the header times 00:00:00 and the corrected 00:03:24",
+			ts1000.UTC().Format(time.RFC3339), ts1016.UTC().Format(time.RFC3339))
+	}
+}
+
+// An observation whose block block_meta does not hold yet is not emitted, and a later run appends it once
+// the loader reaches the block. The loader holds the newest blocks back, so refusing instead would stop
+// every run.
+func TestSkyPrimeDebtAppendsABlockOnceItsHeaderTimeArrives(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	if _, err := pool.Exec(ctx, `
+	DO $s$ DECLARE pid bigint; BEGIN
+	  INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'wait', '\x2222222222222222222222222222222222222222') RETURNING id INTO pid;
+	  INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id) VALUES
+	    (pid, 'WAIT-A', 10, 2000, 0, '2026-04-01T00:00:00Z', 0, 0),
+	    (pid, 'WAIT-A', 20, 2010, 0, '2026-04-01T00:05:00Z', 0, 0);
+	  INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp) VALUES (1, 2000, 0, '2026-04-01T00:00:00Z');
+	END $s$`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var first, second int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_sky_prime_debt()`).Scan(&first); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if first != 1 {
+		t.Errorf("first run appended %d rows; want 1, block 2010 has no header time yet", first)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp) VALUES (1, 2010, 0, '2026-04-01T00:02:00Z')`); err != nil {
+		t.Fatalf("load block 2010: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT materialize_sky_prime_debt()`).Scan(&second); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if second != 1 {
+		t.Errorf("second run appended %d rows; want block 2010 now that its header time is loaded", second)
+	}
+}
+
+// block_meta on another chain, or at another block_version, is not this block's header.
+func TestSkyPrimeDebtIgnoresHeaderTimesForOtherChainsAndVersions(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	if _, err := pool.Exec(ctx, `
+	DO $s$ DECLARE pid bigint; BEGIN
+	  INSERT INTO chain (chain_id, name) VALUES (8453, 'base') ON CONFLICT DO NOTHING;
+	  INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'other', '\x3333333333333333333333333333333333333333') RETURNING id INTO pid;
+	  INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id) VALUES
+	    (pid, 'OTHER-A', 10, 3000, 0, '2026-04-01T00:00:00Z', 0, 0);
+	  INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp) VALUES
+	    (8453, 3000, 0, '2026-04-01T00:00:00Z'),
+	    (1, 3000, 1, '2026-04-01T00:00:00Z');
+	END $s$`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var rows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_sky_prime_debt WHERE holder_id = '3333333333333333333333333333333333333333'`).Scan(&rows); err != nil {
+		t.Fatalf("read projection: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("projected %d rows from header times on another chain or block_version; want 0", rows)
+	}
+}
+
+// Two processing_versions of one block are two observations, each emitted with its own block_number.
+func TestSkyPrimeDebtEmitsEachProcessingVersionAtItsBlock(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	if _, err := pool.Exec(ctx, `
+	DO $s$ DECLARE pid bigint; BEGIN
+	  INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), 'pv', '\x4444444444444444444444444444444444444444') RETURNING id INTO pid;
+	  INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id) VALUES
+	    (pid, 'PV-A', 10, 4000, 0, '2026-04-01T00:00:00Z', 0, 0),
+	    (pid, 'PV-A', 11, 4000, 0, '2026-04-01T00:00:00Z', 1, 1);
+	  INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp) VALUES (1, 4000, 0, '2026-04-01T00:00:00Z');
+	END $s$`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var rows, atBlock int
+	var qtys string
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*), count(*) FILTER (WHERE block_number = 4000), string_agg(quantity::text, ',' ORDER BY processing_version)
+		  FROM position_sky_prime_debt WHERE holder_id = '4444444444444444444444444444444444444444'`).Scan(&rows, &atBlock, &qtys); err != nil {
+		t.Fatalf("read projection: %v", err)
+	}
+	if rows != 2 || atBlock != 2 || qtys != "10,11" {
+		t.Errorf("projected rows=%d at block 4000=%d quantities=%q; want 2 rows at block 4000 with quantities 10,11", rows, atBlock, qtys)
+	}
+}
+
+// The wrapper pins tiered reads on, as the spine does, so its refusal check reads the same chunks as the run.
+func TestSkyPrimeDebtWrapperPinsTieredReads(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	var config []string
+	if err := pool.QueryRow(ctx, `
+		SELECT coalesce(proconfig, '{}') FROM pg_proc WHERE proname = 'materialize_sky_prime_debt'`).Scan(&config); err != nil {
+		t.Fatalf("read the wrapper's settings: %v", err)
+	}
+	found := false
+	for _, c := range config {
+		if c == "timescaledb.enable_tiered_reads=on" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("materialize_sky_prime_debt settings are %v; want timescaledb.enable_tiered_reads=on", config)
 	}
 }

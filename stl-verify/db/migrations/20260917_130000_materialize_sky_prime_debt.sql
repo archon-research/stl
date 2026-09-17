@@ -5,7 +5,7 @@ WITH obs AS (
     -- One row per observation key; the earliest synced_at is the stable pick (a retry can only add a later one).
     SELECT DISTINCT ON (pd.prime_id, pd.ilk_name, pd.block_number, pd.block_version, pd.processing_version)
            pd.prime_id, pd.ilk_name, pd.debt_wad,
-           pd.block_number, pd.block_version, pd.processing_version, pd.synced_at
+           pd.block_number, pd.block_version, pd.processing_version
     FROM prime_debt pd
     ORDER BY pd.prime_id, pd.ilk_name, pd.block_number, pd.block_version, pd.processing_version, pd.synced_at
 )
@@ -20,11 +20,18 @@ SELECT 1::integer                                                AS chain_id,
        o.block_number,
        o.block_version,
        o.processing_version,
-       o.synced_at                                               AS block_timestamp
+       bm.block_timestamp
 FROM obs o
-JOIN prime pr ON pr.id = o.prime_id;
+JOIN prime pr ON pr.id = o.prime_id
+-- The block header time; readers take the highest processing_version. A block the loader has not
+-- reached yet emits nothing, and a later run appends it.
+CROSS JOIN LATERAL (
+    SELECT m.block_timestamp FROM block_meta m
+     WHERE m.chain_id = 1 AND m.block_number = o.block_number AND m.block_version = o.block_version
+     ORDER BY m.processing_version DESC
+     LIMIT 1) bm;
 
-COMMENT ON VIEW position_sky_prime_debt IS '[Operational] VEC-406 projection: Sky prime debt as native position rows, one position per (prime, ilk) and one row per observation. Sky is the issuer and the Vat its ledger, not a protocol, so protocol_id is NULL, as for Anchorage. instrument_key = vat_address:ilk_name, the native pair (an ilk name is unique only within its Vat), with the MCD Vat in lowercase hex and no 0x; chain_id 1. holder_id = the prime vault address. quantity = debt_wad, wad-scaled, not normalised. deal_type BORROW. block_timestamp is prime_debt.synced_at, the indexer''s receipt time. prime_debt does not record the Vat, so the indexer refuses any Vat but the MCD Vat. prime_debt''s unique constraint omits ilk_name; the indexer resolves one ilk per prime vault, so it never writes a second ilk for a prime at one block. Closure is applied by materialize_position_projection().';
+COMMENT ON VIEW position_sky_prime_debt IS '[Operational] VEC-406 projection: Sky prime debt as native position rows, one position per (prime, ilk) and one row per observation. Sky is the issuer and the Vat its ledger, not a protocol, so protocol_id is NULL, as for Anchorage. instrument_key = vat_address:ilk_name, the native pair (an ilk name is unique only within its Vat), with the MCD Vat in lowercase hex and no 0x; chain_id 1. holder_id = the prime vault address. quantity = debt_wad, wad-scaled, not normalised. deal_type BORROW. block_timestamp is the block header time from block_meta; an observation whose block block_meta does not hold yet is not emitted until it does. prime_debt does not record the Vat, so the indexer refuses any Vat but the MCD Vat. prime_debt''s unique constraint omits ilk_name; the indexer resolves one ilk per prime vault, so it never writes a second ilk for a prime at one block. Closure is applied by materialize_position_projection().';
 
 -- Names every snapshot the view cannot resolve, then delegates to the shared materializer.
 DROP FUNCTION IF EXISTS materialize_sky_prime_debt(integer);
