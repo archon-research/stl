@@ -1065,6 +1065,6 @@ data:
   MATERIALIZE_SCHEDULE_OFFSET: "40m"
   # The materialize_<projection>() wrappers to run, each doing its projection's own
   # pre-flight refusals first (docs/runbooks/vector-position-materializer.md). The worker
-  # exits if one is not callable. Not yet deployed: materialize_morpho_market (#624) and
-  # materialize_morpho_vault (#626) must both merge and migrate before replicas go to 1.
+  # exits if one is not callable, so each wrapper's migration must be applied before
+  # replicas go to 1.
   POSITION_PROJECTIONS: "materialize_morpho_market,materialize_morpho_vault"

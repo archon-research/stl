@@ -23,10 +23,10 @@ type PositionMaterializer interface {
 	Materialize(ctx context.Context, materializer string, buildID int, runID int64) (int64, error)
 
 	// RefusedByProjection returns positions_refused from the latest run of each projection that runID
-	// completed at or after since. A projection that withholds positions still reports success, so this
-	// count is what shows it. A projection with no run in that span is absent: retired, run by hand, or
-	// failed this tick.
-	RefusedByProjection(ctx context.Context, runID int64, since time.Time) (map[string]int64, error)
+	// completed within the last `within`, measured on the database clock. A projection that withholds
+	// positions still reports success, so this count is what shows it. A projection with no run in that
+	// span is absent: retired, run by hand, or failed this tick.
+	RefusedByProjection(ctx context.Context, runID int64, within time.Duration) (map[string]int64, error)
 
 	// MissingMaterializers returns the names in materializers that Materialize could not call: absent,
 	// ambiguous, not returning one bigint, or not accepting a build and a writer run.

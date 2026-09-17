@@ -75,13 +75,13 @@ func (r *PositionMaterializerRepository) Materialize(ctx context.Context, materi
 }
 
 // RefusedByProjection reads positions_refused from the latest run row of each projection runID wrote
-// at or after since. A projection with no such row is absent rather than zero.
-func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context, runID int64, since time.Time) (map[string]int64, error) {
+// within the last `within`. created_at is set by the database clock, so the bound is taken from it too.
+func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context, runID int64, within time.Duration) (map[string]int64, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT DISTINCT ON (projection) projection, positions_refused
 		  FROM position_projection_run
-		 WHERE run_id = $1 AND created_at >= $2
-		 ORDER BY projection, created_at DESC`, runID, since)
+		 WHERE run_id = $1 AND created_at >= clock_timestamp() - make_interval(secs => $2)
+		 ORDER BY projection, created_at DESC`, runID, within.Seconds())
 	if err != nil {
 		return nil, fmt.Errorf("reading positions_refused: %w", err)
 	}

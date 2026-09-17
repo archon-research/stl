@@ -57,8 +57,7 @@ type DBConfig struct {
 	// latency-bounded services that should never run a long single statement.
 	StatementTimeout time.Duration
 
-	// NoticeLogger, if non-nil, receives the server's WARNINGs, which pgx otherwise discards. Unset by
-	// default, so a service that does not ask for them logs nothing new.
+	// NoticeLogger, if non-nil, receives the server's WARNINGs, which pgx otherwise discards.
 	NoticeLogger *slog.Logger
 
 	// MeterProvider supplies the pool's query metrics. Defaults to the global

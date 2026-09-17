@@ -96,9 +96,9 @@ func runStatus(ctx context.Context) string {
 	return statusError
 }
 
-// refusedReadSkew is subtracted from a tick's start when reading its run rows, so a pod clock ahead
-// of the database does not drop them. It must stay well below the schedule interval.
-const refusedReadSkew = time.Minute
+// refusedReadSlack widens the withheld read past the tick's elapsed time, covering the read's own
+// latency. It stays far below the schedule interval, so the previous tick's rows are never included.
+const refusedReadSlack = time.Minute
 
 // RunOnce runs every configured projection materializer once, sequentially.
 //
@@ -130,12 +130,15 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			"materializer", m, "rows_changed", changed, "duration", time.Since(start))
 		s.telemetry.RecordRun(ctx, m, statusOK, changed)
 	}
-	// Both reads are skipped on an ended context: the loop has recorded the abort, and a shutdown
-	// mid-run would otherwise count a read failure on every deploy.
-	if ctx.Err() == nil {
-		s.publishWithheld(ctx, tickStart.Add(-refusedReadSkew))
-		s.publishCacheRows(ctx)
+	// On an ended context both reads are skipped, so a shutdown does not count a read failure, and both
+	// gauges are cleared, so they do not keep the previous tick's levels.
+	if ctx.Err() != nil {
+		s.telemetry.SetRefused(nil)
+		s.telemetry.SetCacheRows(nil)
+		return errors.Join(errs...)
 	}
+	s.publishWithheld(ctx, time.Since(tickStart)+refusedReadSlack)
+	s.publishCacheRows(ctx)
 	return errors.Join(errs...)
 }
 
@@ -155,7 +158,7 @@ func (s *Service) publishCacheRows(ctx context.Context) {
 	s.telemetry.SetCacheRows(estimates)
 }
 
-// publishWithheld exports positions_refused for each projection that completed a run since since:
+// publishWithheld exports positions_refused for each projection that completed a run within the tick:
 // positions whose new observations were withheld, and positions whose re-emitted stored key was
 // declined. The shared function does both and reports success, so this level is what shows it; the
 // two classes are told apart by position_projection_refusal.reason.
@@ -163,8 +166,8 @@ func (s *Service) publishCacheRows(ctx context.Context) {
 // A projection that did not complete this tick is absent, so its gauge does not hold an old level.
 // A failed read does not fail the run: it is logged, counted in read_failures, and every level goes
 // absent until a read succeeds.
-func (s *Service) publishWithheld(ctx context.Context, since time.Time) {
-	refused, err := s.materializer.RefusedByProjection(ctx, s.runID, since)
+func (s *Service) publishWithheld(ctx context.Context, within time.Duration) {
+	refused, err := s.materializer.RefusedByProjection(ctx, s.runID, within)
 	if err != nil {
 		s.logger.Error("reading withheld positions failed; the projections themselves succeeded", "error", err)
 		s.telemetry.RecordReadFailure(ctx, readRefused)

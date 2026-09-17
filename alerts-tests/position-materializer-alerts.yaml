@@ -173,6 +173,27 @@ tests:
               description: "The refused read failed at least twice in 3h on c1. Its gauge is absent while the read fails, so the alert that reads it cannot fire."
               runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerlevelreadfailing"
 
+  - name: "LevelReadFailing: two failures an hour apart, the first near the window start, fires"
+    interval: 1m
+    input_series:
+      - series: 'position_materializer_read_failures_total{k8s_namespace_name="vector", cluster="c1", read="cache_rows"}'
+        values: '0x5 1x60 2x115'
+    alert_rule_test:
+      - eval_time: 2h59m
+        alertname: VectorPositionMaterializerLevelReadFailing
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              read: "cache_rows"
+              component: "position-materializer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations:
+              summary: "position-materializer cannot read its cache_rows level"
+              description: "The cache_rows read failed at least twice in 3h on c1. Its gauge is absent while the read fails, so the alert that reads it cannot fire."
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerlevelreadfailing"
+
   - name: "LevelReadFailing: one transient failure, quiet"
     interval: 1m
     input_series:
@@ -213,6 +234,49 @@ tests:
               summary: "Vector position_current outgrowing its plain-table budget"
               description: "position_current holds an estimated 60M rows on c1, past the 50M mark at which a plain table needs revisiting. Nothing is broken; the runbook carries the action. The figure is an estimate from planner statistics, so it moves with autovacuum rather than continuously."
               runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializercachetablegrowthhigh"
+
+  - name: "WithholdingPositions: two pods overlap, one at 0, the other at 5, fires on the max"
+    interval: 1m
+    input_series:
+      - series: 'position_materializer_positions_refused{k8s_namespace_name="vector", cluster="c1", projection="position_morpho_vault", k8s_pod_name="a"}'
+        values: '5x240'
+      - series: 'position_materializer_positions_refused{k8s_namespace_name="vector", cluster="c1", projection="position_morpho_vault", k8s_pod_name="b"}'
+        values: '0x240'
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: VectorPositionMaterializerWithholdingPositions
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              projection: "position_morpho_vault"
+              component: "position-materializer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations:
+              summary: "position-materializer is withholding positions in position_morpho_vault"
+              description: "position_morpho_vault has withheld or declined 5 position(s) on c1 for 3h. A withheld position reads as current downstream while sitting at a stale value; a declined correction means the view and the spine disagree. The runbook has a query per class."
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerwithholdingpositions"
+
+  - name: "CacheTableGrowthHigh: first reported 30m ago over budget, quiet"
+    interval: 1m
+    input_series:
+      - series: 'position_materializer_cache_rows{k8s_namespace_name="vector", cluster="c1", table="position_current"}'
+        values: '_x390 60000000x30'
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: VectorPositionMaterializerCacheTableGrowthHigh
+        exp_alerts: []
+
+  - name: "CacheTableGrowthHigh: under budget for part of the 6h window, quiet"
+    interval: 1m
+    input_series:
+      - series: 'position_materializer_cache_rows{k8s_namespace_name="vector", cluster="c1", table="position_current"}'
+        values: '60000000x240 40000000x60 60000000x120'
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: VectorPositionMaterializerCacheTableGrowthHigh
+        exp_alerts: []
 
   - name: "CacheTableGrowthHigh: under budget, quiet"
     interval: 1m

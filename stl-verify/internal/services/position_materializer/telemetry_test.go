@@ -9,7 +9,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 func newRecordingTelemetry(t *testing.T) (*Telemetry, sdkmetric.Reader) {
@@ -135,9 +134,8 @@ func TestTelemetry_NilSettersAreNoOps(t *testing.T) {
 	tel.RecordReadFailure(context.Background(), readRefused)
 }
 
-// A gauge exports only what the latest tick set. With a synchronous gauge the last level stood for
-// the life of the pod, so a projection that stopped completing, or a read that kept failing, still
-// exported its old withheld level and fired VectorPositionMaterializerWithholdingPositions on it.
+// A gauge exports only what the latest tick set: a projection that stops completing, a failed read, or
+// a cancelled tick leaves no series, so no alert reads an old level as current.
 func TestRunOnce_GaugesGoAbsentWhenTheLatestTickDidNotReportThem(t *testing.T) {
 	tel, reader := newRecordingTelemetry(t)
 	mm := &mockMaterializer{
@@ -155,20 +153,20 @@ func TestRunOnce_GaugesGoAbsentWhenTheLatestTickDidNotReportThem(t *testing.T) {
 		}
 	}
 	tick()
-	if got := gaugeLevels(t, reader, "position_materializer.positions_refused", "projection"); len(got) != 2 || got["public.position_a"] != 12 {
+	if got := testutil.CollectGaugeByAttrOrEmpty(t, reader, "position_materializer.positions_refused", "projection"); len(got) != 2 || got["public.position_a"] != 12 {
 		t.Fatalf("first tick levels = %v; want position_a 12 and position_b 0", got)
 	}
 
 	mm.refused = map[string]int64{"public.position_b": 0} // position_a did not complete this tick
 	tick()
-	if got := gaugeLevels(t, reader, "position_materializer.positions_refused", "projection"); len(got) != 1 {
+	if got := testutil.CollectGaugeByAttrOrEmpty(t, reader, "position_materializer.positions_refused", "projection"); len(got) != 1 {
 		t.Errorf("levels after position_a stopped completing = %v; want only position_b", got)
 	}
 
 	mm.refusedErr, mm.cacheErr = errors.New("permission denied"), errors.New("permission denied")
 	tick()
 	for name, key := range map[string]string{"position_materializer.positions_refused": "projection", "position_materializer.cache_rows": "table"} {
-		if got := gaugeLevels(t, reader, name, key); len(got) != 0 {
+		if got := testutil.CollectGaugeByAttrOrEmpty(t, reader, name, key); len(got) != 0 {
 			t.Errorf("%s after a failed read = %v; want absent", name, got)
 		}
 	}
@@ -178,29 +176,45 @@ func TestRunOnce_GaugesGoAbsentWhenTheLatestTickDidNotReportThem(t *testing.T) {
 	}
 }
 
-// gaugeLevels returns the int64 gauge levels of name by key, empty when the SDK exported no series.
-func gaugeLevels(t *testing.T, reader sdkmetric.Reader, name, key string) map[string]int64 {
-	t.Helper()
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collecting metrics: %v", err)
+func TestRunOnce_ACancelledTickClearsBothGauges(t *testing.T) {
+	tel, reader := newRecordingTelemetry(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mm := &mockMaterializer{
+		fn:        func(context.Context, string, int, int64) (int64, error) { return 0, nil },
+		refused:   map[string]int64{"public.position_a": 3},
+		cacheRows: map[string]int64{"position_current": 7},
 	}
-	out := map[string]int64{}
-	for _, scope := range rm.ScopeMetrics {
-		for _, m := range scope.Metrics {
-			if m.Name != name {
-				continue
-			}
-			g, ok := m.Data.(metricdata.Gauge[int64])
-			if !ok {
-				t.Fatalf("metric %q is %T, want metricdata.Gauge[int64]", name, m.Data)
-			}
-			for _, dp := range g.DataPoints {
-				out[testutil.AttrValue(dp, key)] = dp.Value
-			}
+	s, err := NewService([]string{"materialize_a"}, mm, 0, 77, nil, tel)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := s.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	mm.fn = func(context.Context, string, int, int64) (int64, error) { cancel(); return 0, context.Canceled }
+	_ = s.RunOnce(ctx) // the cancellation error is expected; the gauges are what is checked
+	for name, key := range map[string]string{"position_materializer.positions_refused": "projection", "position_materializer.cache_rows": "table"} {
+		if got := testutil.CollectGaugeByAttrOrEmpty(t, reader, name, key); len(got) != 0 {
+			t.Errorf("%s after a cancelled tick = %v; want absent", name, got)
 		}
 	}
-	return out
+}
+
+// The exported level is a copy: a caller reusing its map cannot change what is exported.
+func TestTelemetry_SettersCopyTheirInput(t *testing.T) {
+	tel, reader := newRecordingTelemetry(t)
+	refused := map[string]int64{"p": 3}
+	rows := map[string]int64{"position_current": 7}
+	tel.SetRefused(refused)
+	tel.SetCacheRows(rows)
+	refused["p"], rows["position_current"] = 99, 99
+	if got := testutil.CollectGaugeByAttr(t, reader, "position_materializer.positions_refused", "projection"); got["p"] != 3 {
+		t.Errorf("positions_refused = %v after the caller changed its map; want 3", got)
+	}
+	if got := testutil.CollectGaugeByAttr(t, reader, "position_materializer.cache_rows", "table"); got["position_current"] != 7 {
+		t.Errorf("cache_rows = %v after the caller changed its map; want 7", got)
+	}
 }
 
 // Recording must land on the seeded series. testutil.CollectCounterByAttr sums data points, so a

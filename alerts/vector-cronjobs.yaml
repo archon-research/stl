@@ -760,8 +760,8 @@ groups:
           runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializersilentlyempty"
 
       - alert: VectorPositionMaterializerWithholdingPositions
-        # Every sample in 3h > 0, with samples 90m-3h back and in the last 65m. min_over_time, not for:,
-        # because a restart leaves the gauge absent for up to a tick, and an absent sample resets for:.
+        # Every sample in 3h > 0, with samples 90m-3h back and in the last 65m. A restart leaves the gauge
+        # absent for up to a tick, so the window is read with min_over_time and does not use for:.
         expr: |
           min_over_time((max by (projection, cluster) (
             position_materializer_positions_refused{k8s_namespace_name="vector"}
@@ -871,7 +871,7 @@ groups:
       - alert: VectorPositionMaterializerCacheTableGrowthHigh
         # Tripwire for plain caches fed by position_state triggers (db/migrations/AGENTS.md). Threshold:
         # half the ~100M plain-table budget (VectorUniswapV4AppendOnChangeGrowthHigh), so conversion is
-        # planned early. min_over_time for the same restart gap as WithholdingPositions.
+        # planned early. Read with min_over_time over the restart gap, as WithholdingPositions is.
         expr: |
           min_over_time((max by (table, cluster) (
             position_materializer_cache_rows{k8s_namespace_name="vector"}

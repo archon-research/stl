@@ -219,17 +219,17 @@ func TestPositionMaterializer_RefusedByProjection(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO position_projection_run
 		    (projection, created_at, build_id, run_id, block_timestamp, rows_emitted, rows_appended, positions_refused)
-		VALUES ('public.position_a',       '2026-09-01T00:00:00Z', 0, 42, NULL, 10, 10, 0),
-		       ('public.position_a',       '2026-09-01T01:00:00Z', 0, 42, NULL, 10,  0, 4),
-		       ('public.position_a',       '2026-09-01T02:00:00Z', 0, 41, NULL, 10,  0, 9),
-		       ('public.position_b',       '2026-09-01T00:30:00Z', 0, 42, NULL,  5,  5, 0),
-		       ('public.position_retired', '2026-09-01T00:30:00Z', 0, 41, NULL,  5,  0, 7),
-		       ('public.position_stale',   '2026-09-01T00:10:00Z', 0, 42, NULL,  5,  0, 12)`); err != nil {
+		VALUES ('public.position_a',       now() - interval '30 minutes', 0, 42, NULL, 10, 10, 0),
+		       ('public.position_a',       now() - interval '10 minutes', 0, 42, NULL, 10,  0, 4),
+		       ('public.position_a',       now() - interval '5 minutes',  0, 41, NULL, 10,  0, 9),
+		       ('public.position_b',       now() - interval '20 minutes', 0, 42, NULL,  5,  5, 0),
+		       ('public.position_retired', now() - interval '20 minutes', 0, 41, NULL,  5,  0, 7),
+		       ('public.position_stale',   now() - interval '2 hours',    0, 42, NULL,  5,  0, 12)`); err != nil {
 		t.Fatalf("seeding runs: %v", err)
 	}
 
 	repo := postgres.NewPositionMaterializerRepository(pool, slog.Default())
-	got, err := repo.RefusedByProjection(ctx, 42, time.Date(2026, 9, 1, 0, 15, 0, 0, time.UTC))
+	got, err := repo.RefusedByProjection(ctx, 42, time.Hour)
 	if err != nil {
 		t.Fatalf("RefusedByProjection: %v", err)
 	}

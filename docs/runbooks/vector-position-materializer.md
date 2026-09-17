@@ -49,7 +49,7 @@ Before bumping an environment to 1:
 
 1. Every entry in `POSITION_PROJECTIONS` exists in the target database. The worker checks this at
    startup and exits naming the ones it cannot call; `materialize_morpho_market` and
-   `materialize_morpho_vault` are not deployed yet: they ship with #624 and #626, and both must be migrated.
+   `materialize_morpho_vault` each ship with their own migration, which must be applied first.
 2. Time one projection by hand and watch its transaction. The call holds a snapshot and a transaction
    id, and with them the vacuum horizon for every table in the database, for its whole duration:
 
@@ -85,7 +85,9 @@ Before bumping an environment to 1:
 While a run is longer than `MATERIALIZE_INTERVAL`, the ticks that fall inside it are skipped rather than
 queued; the bootstrap skips several. That is expected, not a stall.
 
-The activity heartbeat carries a Temporal cancellation to the running query while the pod is alive. A pod
+The activity heartbeat carries a Temporal cancellation to the running query while the pod is alive. The
+pool sets no `client_connection_check_interval`: `DATABASE_URL` is the pooler, so the server would be checking
+pgbouncer's connection, not the pod's. A pod
 that is killed outright leaves its query running behind the pooler until it finishes, holding its locks
 and transaction id; check `pg_stat_activity` before starting another run by hand.
 
@@ -151,7 +153,8 @@ backfill command exists or is needed — the full projection *is* the backfill.
 other positions land, and these sit at whatever was last stored, which every downstream reader treats
 as current. `position_projection_run.positions_refused` is the per-run count the alert reads, taken from
 each projection's run in the latest tick under the running pod's writer run. It fires when every reading
-over 3 hours is above zero and one arrived in the last 65 minutes, so a restart does not reset it and a
+over 3 hours is above zero, readings exist 90 minutes to 3 hours back, and one arrived in the last 65
+minutes, so a restart does not reset it and a level first seen minutes ago does not fire it and a
 projection that has stopped completing stops firing it (`ViewFailing` or `ViewNotCompleting` takes over).
 
 **Which positions.** The refusal table holds one row per refused observation for the life of the
@@ -246,7 +249,8 @@ but the gauge is absent, so its alert cannot fire.
 
 **Triage.** The pod logs carry the error (`reading withheld positions failed` or
 `reading cache row estimates failed`). The usual causes are a changed grant on `position_projection_run`
-for the worker's role, or a renamed or dropped cache table. Run the same read as that role to confirm:
+for the worker's role, or a renamed or dropped cache table. As that role, this simplified read (the worker
+also filters on its run and the tick) confirms the grant:
 
 ```sql
 SELECT DISTINCT ON (projection) projection, positions_refused

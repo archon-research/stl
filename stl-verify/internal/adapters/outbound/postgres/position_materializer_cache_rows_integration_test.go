@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -145,8 +146,9 @@ func TestCacheRowEstimates_ANameWithNoRelationIsAbsentNotAnError(t *testing.T) {
 	}
 }
 
-// Every trigger on position_state feeds a cache the tripwire must watch. A trigger's target is only in
-// its function body, so this reads the body for a name from positionStateCaches.
+// A trigger on position_state that writes a table must write one in positionStateCaches, and each cache
+// there must be written by one. A trigger that only reads, or delegates the write to another function,
+// is not seen.
 func TestPositionStateCaches_NamesEveryTriggerFedCache(t *testing.T) {
 	rows, err := positionMaterializerPool.Query(context.Background(), `
 		SELECT t.tgname, p.prosrc
@@ -156,32 +158,37 @@ func TestPositionStateCaches_NamesEveryTriggerFedCache(t *testing.T) {
 		t.Fatalf("reading triggers on position_state: %v", err)
 	}
 	defer rows.Close()
-	covered := map[string]bool{}
-	triggers := 0
+	write := regexp.MustCompile(`(?i)\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(?:public\.)?([a-z_][a-z0-9_]*)`)
+	known := map[string]bool{}
+	for _, cache := range positionStateCaches {
+		known[cache] = false
+	}
+	writers := 0
 	for rows.Next() {
 		var name, body string
 		if err := rows.Scan(&name, &body); err != nil {
 			t.Fatalf("scanning trigger: %v", err)
 		}
-		triggers++
-		named := false
-		for _, cache := range positionStateCaches {
-			if regexp.MustCompile(`\b` + cache + `\b`).MatchString(body) {
-				covered[cache], named = true, true
+		for _, m := range write.FindAllStringSubmatch(body, -1) {
+			if strings.EqualFold(m[1], "set") { // ON CONFLICT ... DO UPDATE SET writes the INSERT's table
+				continue
 			}
-		}
-		if !named {
-			t.Errorf("trigger %s on position_state writes no table in positionStateCaches; add its cache", name)
+			writers++
+			if _, ok := known[m[1]]; !ok {
+				t.Errorf("trigger %s on position_state writes %s, which positionStateCaches does not name", name, m[1])
+				continue
+			}
+			known[m[1]] = true
 		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterating triggers: %v", err)
 	}
-	if triggers == 0 {
-		t.Fatal("position_state has no triggers; the check read nothing")
+	if writers == 0 {
+		t.Fatal("no trigger on position_state writes a table; the check read nothing")
 	}
-	for _, cache := range positionStateCaches {
-		if !covered[cache] {
+	for cache, written := range known {
+		if !written {
 			t.Errorf("positionStateCaches names %s, which no trigger on position_state writes", cache)
 		}
 	}
