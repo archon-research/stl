@@ -145,7 +145,7 @@ class AllocationService:
         """The prime's treasury series, read once over its SubProxy wallets.
 
         Total capital is SHARED, so the wallet set scopes one read rather than
-        being fanned out per wallet and summed — see ``app.domain.prime_scope``.
+        being fanned out per wallet and summed — see ``PrimeScope``.
         """
         return await self._repository.list_total_capital_buckets(
             scope.subproxies,

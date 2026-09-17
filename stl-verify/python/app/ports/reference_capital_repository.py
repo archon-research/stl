@@ -31,7 +31,7 @@ class ReferenceCapitalRepository(Protocol):
         """Return the last upstream observation per time bucket (LOCF gap-filled).
 
         Keyed on the resolved ``prime.id``. Upstream publishes one figure per
-        prime, so this is a SHARED quantity (``app.domain.prime_scope``) and
+        prime, so this is a SHARED quantity (see ``PrimeScope``) and
         there is no proxy to pick.
 
         The series starts when the syncer first ran, not when the prime did:

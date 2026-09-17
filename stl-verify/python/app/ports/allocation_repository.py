@@ -166,8 +166,10 @@ class AllocationRepositoryPort(Protocol):
         """Return the prime's treasury USDS balance aggregated into time buckets.
 
         Scoped to the prime's SubProxy wallets, which the caller resolves
-        prime-wide. Total capital is shared rather than additive
-        (``app.domain.prime_scope``): an empty set answers an empty series.
+        prime-wide. Total capital is shared rather than additive (see
+        ``PrimeScope``): an empty set matches no rows, and the window is
+        gapfilled either way, so the series is the same shape however little is
+        known.
         """
         ...
 

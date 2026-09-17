@@ -42,6 +42,21 @@ class ProxyWallet:
 class PrimeScope:
     """Every wallet a prime-scoped read may touch, resolved once per request.
 
+    A prime is a set of wallets — a vault, one ALM proxy per chain, a SubProxy
+    treasury — so every prime-scoped figure is answered from more than one of
+    them, and how they fold together is a property of the figure. An ADDITIVE
+    one is held per wallet and summed over ``alm_proxies``, with ``None``
+    meaning unobserved rather than zero, so a sum of nothing is ``None`` and
+    never a ``"0"`` that would assert the prime holds nothing where the truth is
+    that nothing was indexed. A SHARED one is a single figure for the prime, so
+    the wallet set scopes one read — ``subproxies`` for the treasury, the
+    resolved ``identity.id`` for debt, custody and the upstream figures —
+    because summing it across a prime's proxies multiplies it by their number
+    and still reads as a plausible result.
+
+    Each read names its kind and is written the way that kind requires. The
+    guarantee is the scoped query, not a check that runs afterwards.
+
     ``alm_proxies`` and ``subproxies`` are address-sorted and de-duplicated, so
     two identifiers naming one prime produce equal scopes — which is what makes
     "identical whichever form you pass" a property of the type rather than of

@@ -608,11 +608,11 @@ class AllocationRepository:
     def _record_empty_total_capital(subproxies: Sequence[EthAddress], buckets: list[TotalCapitalBucket]) -> None:
         """Surface a total-capital series that gapfilled to all-``None``.
 
-        The prime resolved and has treasury wallets, but total capital is read
-        from a narrower row set — their USDS scoped by ``_USDS_ADDRESS_HEX``. If
-        that set is empty (treasury not yet indexed, or the USDS address
-        drifting out of the ``token`` registry) the gapfill still returns a full
-        window of buckets, every one ``None``. That is a valid 200 for a
+        The prime resolved, but total capital is read from a narrower row set —
+        its SubProxy wallets' USDS scoped by ``_USDS_ADDRESS_HEX``. If that set
+        is empty (no SubProxy declared for the prime, treasury not yet indexed,
+        or the USDS address drifting out of the ``token`` registry) the gapfill
+        still returns a full window of buckets, every one ``None``. That is a valid 200 for a
         brand-new prime but is indistinguishable from a coverage regression, so
         record it for alerting rather than letting it surface as a blank chart.
         """
@@ -906,13 +906,13 @@ class AllocationRepository:
         prior value forward; leading buckets before the first observation are
         ``None``.
 
-        Total capital is a SHARED quantity (``app.domain.prime_scope``): a prime
+        Total capital is a SHARED quantity (see ``PrimeScope``): a prime
         has one treasury, so the wallet set scopes the read rather than being
-        fanned out and summed. An empty set is a prime with no treasury wallet,
-        which answers an empty series rather than every prime's treasury.
+        fanned out and summed. An empty set matches no rows rather than every
+        prime's treasury, and still gapfills the window, so a prime with no
+        treasury wallet reads as a series of ``None`` like any other prime
+        nothing has been observed for.
         """
-        if not subproxies:
-            return []
         distinct_on, version_order = _DISTINCT_ON_AP, _VERSION_ORDER_AP
         time_window = required_time_window_clause("ap.created_at")
         query = text(
@@ -926,7 +926,10 @@ class AllocationRepository:
                 SELECT {distinct_on} ap.balance, ap.created_at
                 FROM allocation_position ap
                 JOIN token t ON t.id = ap.token_id
-                WHERE ap.proxy_address IN :subproxy_addrs
+                -- ANY over an array rather than an expanding IN: the wallet set
+                -- is empty for a prime with no declared SubProxy, and an empty
+                -- IN renders as a typeless subquery the driver rejects.
+                WHERE ap.proxy_address = ANY(CAST(:subproxy_addrs AS BYTEA[]))
                   AND t.address = decode(:usds_hex, 'hex')
                   {time_window}
                 ORDER BY {version_order}
@@ -944,7 +947,7 @@ class AllocationRepository:
             ORDER BY bucket_start DESC
             LIMIT :limit
             """
-        ).bindparams(bindparam("subproxy_addrs", expanding=True))
+        )
 
         params = {
             "from_timestamp": from_timestamp,

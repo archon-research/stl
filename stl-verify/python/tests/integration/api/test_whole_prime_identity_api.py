@@ -103,13 +103,18 @@ def test_the_treasury_is_counted_once_rather_than_per_proxy(client: TestClient, 
 
 
 @pytest.mark.parametrize("route", WHOLE_PRIME_ROUTES)
-def test_a_prime_with_no_proxies_answers_an_empty_series_not_a_404(client: TestClient, route: str) -> None:
+def test_a_prime_with_no_proxies_answers_a_series_not_a_404(client: TestClient, route: str) -> None:
     """obex is a vault with no declared proxies. Whole-prime aggregation over an
-    empty wallet set is an answer, not an error."""
+    empty wallet set is an answer, not an error — and the same shape as a prime
+    whose wallets have nothing indexed, so a chart gets a window either way."""
     response = client.get(f"/v1/primes/obex/{route}", params=_PINNED_WINDOW)
 
     assert response.status_code == 200
-    assert response.json()["data"] == []
+    buckets = response.json()["data"]
+    # Guards the null assertion below from passing on an empty list.
+    assert buckets, "an empty wallet set must still gapfill the window"
+    observed = [value for bucket in buckets for key, value in bucket.items() if key != "bucket_start"]
+    assert all(value is None for value in observed)
 
 
 @pytest.mark.parametrize("route", WHOLE_PRIME_ROUTES)
