@@ -84,5 +84,32 @@
       matchUpdateTypes: ["major"],
       dependencyDashboardApproval: true,
     },
+    {
+      // Go and Python number a language move as a semver minor — go 1.26 to
+      // 1.27, python 3.12 to 3.14 — so the rule above never reaches the jumps
+      // that actually carry work. Splitting patch from minor is what makes
+      // 1.26.8 available on its own; gating the minor puts 1.27 on the
+      // dashboard beside the majors, where a migration belongs. Node is here
+      // for the same reason: its LTS line moves in the minor position.
+      matchPackageNames: [
+        "go",
+        "golang",
+        "mcr.microsoft.com/devcontainers/go",
+        "python",
+        "node",
+      ],
+      separateMinorPatch: true,
+    },
+    {
+      matchPackageNames: [
+        "go",
+        "golang",
+        "mcr.microsoft.com/devcontainers/go",
+        "python",
+        "node",
+      ],
+      matchUpdateTypes: ["minor"],
+      dependencyDashboardApproval: true,
+    },
   ],
 }
