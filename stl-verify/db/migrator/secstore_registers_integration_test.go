@@ -311,13 +311,35 @@ func TestInstrumentRegisterAcceptsTheSameKeyOnAnotherChain(t *testing.T) {
 	defer cleanup()
 
 	const key = "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"
-	mainnet := newInstrumentRow(key, "sec-multi")
-	base := newInstrumentRow(key, "sec-multi")
+	mainnet := newInstrumentRow(key, "sec-multi-mainnet")
+	base := newInstrumentRow(key, "sec-multi-base")
 	base.chainID = chainID(8453)
 	base.validFrom = "2026-06-01"
 
 	mustInsertInstrument(ctx, t, pool, mainnet)
 	mustInsertInstrument(ctx, t, pool, base)
+
+	// Distinct securities per chain, asserted per chain: two inserts not erroring says only that
+	// the guard let them through, not that each deployment still resolves to its own security.
+	for _, tc := range []struct {
+		chain int32
+		want  string
+	}{
+		{chain: 1, want: "sec-multi-mainnet"},
+		{chain: 8453, want: "sec-multi-base"},
+	} {
+		var got string
+		if err := pool.QueryRow(ctx, `
+			SELECT security_id FROM instrument_register_current
+			WHERE instrument_key = $1 AND chain_scope = $2`, key, tc.chain,
+		).Scan(&got); err != nil {
+			t.Errorf("chain %d does not resolve: %v", tc.chain, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("chain %d resolves %s, want %s", tc.chain, got, tc.want)
+		}
+	}
 }
 
 // TestInstrumentRegisterRefusesASecondRowOnOneWindow is the shadow-row defect, found in review.
