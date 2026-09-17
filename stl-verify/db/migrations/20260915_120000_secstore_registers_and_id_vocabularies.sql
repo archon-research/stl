@@ -108,6 +108,13 @@ COMMENT ON COLUMN instrument_register.content_hash IS 'Roles: Audit, Derived. sh
 -- processing_version DESC, ingest_xid DESC, record_id DESC. Columns AND directions must match the
 -- whole key or the DISTINCT ON degrades to a full scan plus sort on every resolution (as
 -- sec_node_resolve_idx).
+-- A row is superseded at most once. The supersession guard only checks that the named row is on
+-- the window being landed on, so A-open, B-closes-A, C-also-closes-A all pass it and B becomes
+-- unreachable — the shadow row again, one level up. Declarative rather than another trigger
+-- branch: a fork is a uniqueness violation, not a policy decision (VEC-823 covers the same hole
+-- on sec_node / sec_edge, which are untouched here).
+CREATE UNIQUE INDEX instrument_register_supersedes_once_idx
+    ON instrument_register (supersedes_record_id) WHERE supersedes_record_id IS NOT NULL;
 CREATE INDEX instrument_register_resolve_idx ON instrument_register (instrument_key, chain_scope, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC);
 -- Reverse lookup (which keys mean this security) and the DQ sweeps, both of which read the base
 -- table; the resolved views scan and filter, so this index does not serve them.
@@ -174,6 +181,9 @@ COMMENT ON COLUMN alias_register.approved_by IS 'Roles: Audit. Approver where th
 COMMENT ON COLUMN alias_register.supersedes_record_id IS 'Roles: FK-shaped→alias_register.record_id (enforced by the append guard), Audit. Not consulted by the resolved reads.';
 COMMENT ON COLUMN alias_register.source_system IS 'Roles: Audit. Where the alias came from.';
 COMMENT ON COLUMN alias_register.content_hash IS 'Roles: Audit, Derived. See instrument_register.content_hash.';
+-- See instrument_register_supersedes_once_idx.
+CREATE UNIQUE INDEX alias_register_supersedes_once_idx
+    ON alias_register (supersedes_record_id) WHERE supersedes_record_id IS NOT NULL;
 CREATE INDEX alias_register_resolve_idx ON alias_register (id_scheme, id_value, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC);
 CREATE INDEX alias_register_node_idx ON alias_register (node_id);
 

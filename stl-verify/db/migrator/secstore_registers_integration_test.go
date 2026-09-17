@@ -389,6 +389,15 @@ func TestInstrumentRegisterRefusesASecondRowOnOneWindow(t *testing.T) {
 		}
 	})
 
+	// A-open, B-closes-A, C-also-closes-A: all three pass the supersession guard, because C names
+	// a row that IS on the window. B then becomes unreachable — the shadow row one level up. A
+	// partial unique index answers it declaratively: a row is superseded at most once.
+	t.Run("a second row superseding the same predecessor is refused", func(t *testing.T) {
+		if err := second(opened, "sec-fork", "2026-10-01"); !uniqueViolation(err) {
+			t.Fatalf("a fork on record %d gave %v, want a unique violation — two rows cannot both close one row", opened, err)
+		}
+	})
+
 	t.Run("only the original row on the window names nothing", func(t *testing.T) {
 		var n int
 		if err := pool.QueryRow(ctx, `
