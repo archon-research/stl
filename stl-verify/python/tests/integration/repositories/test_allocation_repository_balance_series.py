@@ -52,6 +52,8 @@ from tests.integration.seed import (
     BS_FLIP_LATER_UNDERLYING_VALUE,
     BS_MIXED_DIRECT_BALANCE,
     BS_OWN_PRICE_WINS_BALANCE,
+    BS_PRICE_GAP_PRICE,
+    BS_PRICE_GAP_UNDERLYING_VALUE,
     BS_PROXY_CARRY,
     BS_PROXY_CORRECTED,
     BS_PROXY_DIRECT,
@@ -59,6 +61,7 @@ from tests.integration.seed import (
     BS_PROXY_DIVERGENT,
     BS_PROXY_MIXED,
     BS_PROXY_OWN_PRICE_WINS,
+    BS_PROXY_PRICE_GAP,
     BS_PROXY_SEED_TIEBREAK,
     BS_PROXY_SEEDED,
     BS_PROXY_SUMMED,
@@ -229,6 +232,33 @@ async def test_a_fully_priced_proxy_reports_equal_counts(repo: AllocationReposit
     assert all(b.priced_entity_count == 0 for b in buckets if not b.entity_count)
 
 
+async def test_bucket_before_the_underlyings_first_price_is_unpriced_not_zeroed(
+    repo: AllocationRepository,
+) -> None:
+    """A bucket predating the underlying's first-ever price is unpriced, not a silent zero (VEC-763).
+
+    Every other balance-series underlying is seeded at
+    ``HISTORICAL_PRICE_SEED_AT``, so the seed probe (bounded to
+    ``otp.timestamp < :from_timestamp``) always finds a carry-in. Here the
+    underlying's ONLY observation lands inside the window, so the buckets
+    before it must report ``priced_entity_count`` below ``entity_count`` --
+    otherwise a real, held position is indistinguishable from one that was
+    never priced.
+    """
+    buckets = await _buckets(repo, BS_PROXY_PRICE_GAP)
+    observed = [b for b in buckets if b.entity_count]
+    assert observed, "expected buckets after the first observation"
+
+    unpriced = [b for b in observed if b.priced_entity_count == 0]
+    priced = [b for b in observed if b.priced_entity_count == b.entity_count]
+    assert unpriced, "expected leading buckets before the underlying's first price"
+    assert priced, "expected buckets once the underlying's price appears"
+    assert all(b.balance_usd is None for b in unpriced), [b.balance_usd for b in unpriced]
+    assert all(b.balance_usd == BS_PRICE_GAP_UNDERLYING_VALUE * BS_PRICE_GAP_PRICE for b in priced), [
+        b.balance_usd for b in priced
+    ]
+
+
 async def test_multiple_entities_under_one_proxy_are_summed(repo: AllocationRepository) -> None:
     # BS_PROXY_SUMMED holds two different cleanly-priced entities; the total
     # must be their sum, not just whichever one a wrong query happened to pick.
@@ -244,7 +274,7 @@ async def test_direct_holding_priced_by_its_own_token_price(repo: AllocationRepo
 
 async def test_protocol_name_filters_the_balance_series(repo: AllocationRepository) -> None:
     # VEC-760 I2: protocol_name was silently ignored on this query -- present
-    # in _ALLOCATION_ACTIVITY_BUCKETS_SQL but absent from the balance one.
+    # in _allocation_activity_buckets_sql but absent from the balance one.
     expected = BS_CARRY_UNDERLYING_VALUE * BS_UNDERLYING_PRICE
     matched = await _buckets(repo, BS_PROXY_CARRY, protocol_name="bsLike")
     assert matched[0].balance_usd == expected

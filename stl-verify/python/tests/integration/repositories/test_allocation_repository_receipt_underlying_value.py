@@ -50,6 +50,9 @@ from tests.integration.seed import (
     RUV_PRICE_CHANGE_BALANCE,
     RUV_PRICE_CHANGE_BEFORE,
     RUV_PRICE_CHANGE_PROXY_HEX,
+    RUV_PRICE_GAP_BALANCE,
+    RUV_PRICE_GAP_PRICE,
+    RUV_PRICE_GAP_PROXY_HEX,
     RUV_PROXY_HEX,
     RUV_SYRUP_LIKE_BALANCE,
     RUV_SYRUP_LIKE_UNDERLYING_VALUE,
@@ -324,6 +327,36 @@ async def test_exposure_bucket_prices_at_its_own_historical_price_not_latest(rep
     assert by_start[RUV_LOCF_BASE_TS] == before_change_usd
     assert by_start[RUV_LOCF_BASE_TS + dt.timedelta(hours=1)] == before_change_usd
     assert by_start[RUV_LOCF_BASE_TS + dt.timedelta(hours=2)] == after_change_usd
+
+
+@pytest.mark.asyncio
+async def test_exposure_bucket_before_the_underlyings_first_price_is_unpriced_not_zeroed(repo) -> None:
+    """A bucket predating the underlying's first-ever price is unpriced, not a silent zero (VEC-763).
+
+    Unlike ``RUV_PRICE_CHANGE`` above, this position's underlying has no price
+    at all before the window: the seed probe (bounded to
+    ``otp.timestamp < :from_timestamp``) finds nothing, so the leading buckets
+    must report ``priced_entity_count`` below ``entity_count`` -- otherwise a
+    real, held position is indistinguishable from one that was never priced.
+    """
+    buckets = await repo.list_exposure_buckets(
+        [EthAddress(f"0x{RUV_PRICE_GAP_PROXY_HEX}")],
+        from_timestamp=RUV_LOCF_BASE_TS,
+        to_timestamp=RUV_LOCF_BASE_TS + dt.timedelta(hours=3),
+        bucket_seconds=3600.0,
+        limit=10,
+    )
+    by_start = {b.bucket_start: b for b in buckets}
+
+    unpriced = by_start[RUV_LOCF_BASE_TS]
+    assert unpriced.exposure_usd is None
+    assert unpriced.entity_count == 1
+    assert unpriced.priced_entity_count == 0, "unpriced, not silently zeroed as if fully accounted for"
+
+    priced = by_start[RUV_LOCF_BASE_TS + dt.timedelta(hours=2)]
+    assert priced.exposure_usd == RUV_PRICE_GAP_BALANCE * RUV_PRICE_GAP_PRICE
+    assert priced.entity_count == 1
+    assert priced.priced_entity_count == 1
 
 
 @pytest.mark.asyncio

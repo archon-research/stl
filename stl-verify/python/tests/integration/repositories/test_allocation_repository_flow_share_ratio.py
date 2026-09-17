@@ -52,6 +52,8 @@ from tests.integration.seed import (
     FR_PRICE_CHANGE_BEFORE,
     FR_PRICE_CHANGE_TX_AMOUNT_AFTER,
     FR_PRICE_CHANGE_TX_AMOUNT_BEFORE,
+    FR_PRICE_GAP_PRICE,
+    FR_PRICE_GAP_TX_AMOUNT_AFTER,
     FR_PROXY_ATOKEN,
     FR_PROXY_DISTANCE,
     FR_PROXY_DIVERGENT,
@@ -62,6 +64,7 @@ from tests.integration.seed import (
     FR_PROXY_MIXED,
     FR_PROXY_NEVER_VALUED,
     FR_PROXY_PRICE_CHANGE,
+    FR_PROXY_PRICE_GAP,
     FR_PROXY_RATIO,
     FR_PROXY_SAME_BLOCK,
     FR_PROXY_TIE,
@@ -264,6 +267,40 @@ async def test_flow_bucket_prices_at_its_own_historical_price_not_latest(repo) -
     bucket_0 = FR_BUCKET_TS.replace(minute=0, second=0, microsecond=0)
     assert by_start[bucket_0] == before_change_usd
     assert by_start[bucket_0 + dt.timedelta(hours=1)] == after_change_usd
+
+
+@pytest.mark.asyncio
+async def test_flow_bucket_before_the_underlyings_first_price_is_unpriced_not_zeroed(repo) -> None:
+    """A bucket predating the underlying's first-ever price is unpriced, not a silent zero (VEC-763).
+
+    Every other price-change fixture seeds a carry-in at
+    ``HISTORICAL_PRICE_SEED_AT``, so the seed probe (bounded to
+    ``otp.timestamp < :from_timestamp``) always finds one. Here the
+    underlying's ONLY observation lands inside the window, so the first bucket
+    must come back with ``priced_entity_count`` below ``entity_count`` --
+    otherwise a real held position is indistinguishable from one that was
+    never priced at all.
+    """
+    buckets = await repo.list_activity_buckets(
+        proxy_addresses=[EthAddress(f"0x{FR_PROXY_PRICE_GAP}")],
+        from_timestamp=FR_BUCKET_TS - dt.timedelta(minutes=30),
+        to_timestamp=FR_BUCKET_TS + dt.timedelta(hours=1, minutes=30),
+        bucket_seconds=3600.0,
+        limit=10,
+    )
+    by_start = {b.bucket_start: b for b in buckets}
+    bucket_0 = FR_BUCKET_TS.replace(minute=0, second=0, microsecond=0)
+    bucket_1 = bucket_0 + dt.timedelta(hours=1)
+
+    before = by_start[bucket_0]
+    assert before.net_flow_usd == Decimal(0)
+    assert before.entity_count == 1
+    assert before.priced_entity_count == 0, "unpriced, not silently zeroed as if fully accounted for"
+
+    after = by_start[bucket_1]
+    assert after.net_flow_usd == FR_PRICE_GAP_TX_AMOUNT_AFTER * FR_PRICE_GAP_PRICE
+    assert after.entity_count == 1
+    assert after.priced_entity_count == 1
 
 
 @pytest.mark.asyncio
