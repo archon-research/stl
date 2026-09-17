@@ -1004,6 +1004,59 @@ func TestProcessBlockEvent_AdapterRegistration_RecordsProvenanceAndType(t *testi
 	}
 }
 
+// Discovery seeds the set enumeration at EndOfBlockLogIndex, above an allocation in the
+// same block, so that append is benign and labelled "true" — the alert fires on "false".
+func TestProcessBlockEvent_Allocate_LabelsLazyRegistrationAgainstTheBlocksEnumeration(t *testing.T) {
+	tests := []struct {
+		name       string
+		version    int
+		enumerated bool
+		wantLabel  string
+	}{
+		{"allocation in the vault's own discovery block", 0, true, "true"},
+		{"the set enumeration never covered the adapter", 0, false, "false"},
+		{"a reorged allocation asks about its own block version", 3, false, "false"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+			reader := h.recordMetrics(t)
+			h.stubUnregisteredAdapterAllocation(entity.MorphoAdapterTypeMarketV1, big.NewInt(5000))
+			h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+				return 42, true, nil
+			}
+			var askedID int64
+			var askedAt entity.BlockPosition
+			h.morphoRepo.AdapterSetEnumeratedAtFn = func(_ context.Context, _ pgx.Tx, adapterID int64, at entity.BlockPosition) (bool, error) {
+				askedID, askedAt = adapterID, at
+				return tt.enumerated, nil
+			}
+
+			log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr,
+				[]common.Hash{addrTopic(testCaller), addrTopic(testAdapterAddr)},
+				big.NewInt(5000), hashSlice(common.HexToHash("0xaa")), big.NewInt(5000))
+			if err := h.processBlock(t, 1, 20000000, tt.version, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+				t.Fatalf("processBlock: %v", err)
+			}
+
+			if askedID != 42 {
+				t.Errorf("asked about adapter %d, want 42 (the id the observation resolved)", askedID)
+			}
+			if askedAt.BlockNumber != 20000000 {
+				t.Errorf("asked about block %d, want 20000000 (the allocation's own block)", askedAt.BlockNumber)
+			}
+			if askedAt.BlockVersion != tt.version {
+				t.Errorf("asked about block version %d, want %d (the allocation's own version)", askedAt.BlockVersion, tt.version)
+			}
+			want := map[string]string{"observed_via": string(entity.MembershipFromAllocation), "at_discovery_block": tt.wantLabel}
+			if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 1 {
+				t.Errorf("morpho.v2.adapter.registrations%v = %d, want 1", want, got)
+			}
+		})
+	}
+}
+
 // TestProcessBlockEvent_V2Snapshots_RecordSnapshotType verifies every
 // event-driven structured write increments morpho.v2.snapshots.written under its
 // own snapshot.type. VectorMorphoV2NoSnapshotsWritten compares this counter

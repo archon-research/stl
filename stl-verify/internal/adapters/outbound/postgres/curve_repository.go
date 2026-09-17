@@ -46,7 +46,7 @@ func NewCurveRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildre
 // LoadPools returns all pools for the given chain with their coin decimals in coin_index order.
 func (r *CurveRepository) LoadPools(ctx context.Context, chainID int64) ([]outbound.CurvePoolRow, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT cp.id, cp.protocol_id, cp.pool_address, cp.pool_kind, cp.n_coins, cp.deploy_block, cp.lp_token_address, cp.has_a_precise, t.decimals
+		`SELECT cp.id, cp.protocol_id, cp.pool_address, cp.pool_kind, cp.n_coins, cp.deploy_block, cp.lp_token_address, cp.has_a_precise, cp.has_no_arg_oracle_getters, cp.calc_token_amount_dyn_array, cp.has_future_fee, cp.has_offpeg_fee_multiplier, t.decimals
 		 FROM curve_pool cp
 		 JOIN curve_pool_coin cpc ON cpc.curve_pool_id = cp.id
 		 JOIN token t ON t.id = cpc.token_id
@@ -64,17 +64,21 @@ func (r *CurveRepository) LoadPools(ctx context.Context, chainID int64) ([]outbo
 
 	for rows.Next() {
 		var (
-			poolID      int64
-			protocolID  int64
-			poolAddress []byte
-			kind        string
-			nCoins      int
-			deployBlock *int64
-			lpToken     []byte
-			hasAPrecise bool
-			decimals    int
+			poolID                int64
+			protocolID            int64
+			poolAddress           []byte
+			kind                  string
+			nCoins                int
+			deployBlock           *int64
+			lpToken               []byte
+			hasAPrecise           bool
+			hasNoArgOracleGetters bool
+			calcTokenAmountDyn    *bool
+			hasFutureFee          bool
+			hasOffpegFee          bool
+			decimals              int
 		)
-		if err := rows.Scan(&poolID, &protocolID, &poolAddress, &kind, &nCoins, &deployBlock, &lpToken, &hasAPrecise, &decimals); err != nil {
+		if err := rows.Scan(&poolID, &protocolID, &poolAddress, &kind, &nCoins, &deployBlock, &lpToken, &hasAPrecise, &hasNoArgOracleGetters, &calcTokenAmountDyn, &hasFutureFee, &hasOffpegFee, &decimals); err != nil {
 			return nil, fmt.Errorf("scanning curve pool row: %w", err)
 		}
 
@@ -96,14 +100,19 @@ func (r *CurveRepository) LoadPools(ctx context.Context, chainID int64) ([]outbo
 			idx = len(result)
 			index[poolID] = idx
 			result = append(result, outbound.CurvePoolRow{
-				ID:             poolID,
-				ProtocolID:     protocolID,
-				Address:        common.BytesToAddress(poolAddress),
-				Kind:           kind,
-				NCoins:         nCoins,
-				DeployBlock:    db,
-				LpTokenAddress: lpAddr,
-				HasAPrecise:    hasAPrecise,
+				ID:                    poolID,
+				ProtocolID:            protocolID,
+				Address:               common.BytesToAddress(poolAddress),
+				Kind:                  kind,
+				NCoins:                nCoins,
+				DeployBlock:           db,
+				LpTokenAddress:        lpAddr,
+				HasAPrecise:           hasAPrecise,
+				HasNoArgOracleGetters: hasNoArgOracleGetters,
+
+				CalcTokenAmountDynArray: calcTokenAmountDyn,
+				HasFutureFee:            hasFutureFee,
+				HasOffpegFeeMultiplier:  hasOffpegFee,
 			})
 		}
 		result[idx].CoinDecimals = append(result[idx].CoinDecimals, decimals)
@@ -607,21 +616,23 @@ func (r *CurveRepository) writeStableswapConfig(ctx context.Context, tx pgx.Tx, 
 				futureAdminFee pgtype.Numeric
 				maExpTime      *int64
 				oracleMethod   pgtype.Numeric
+				offpegFeeMult  pgtype.Numeric
 			)
 			err := tx.QueryRow(ctx,
 				`SELECT initial_a, initial_a_time, future_a, future_a_time,
-				        admin_fee, future_fee, future_admin_fee, ma_exp_time, oracle_method
+				        admin_fee, future_fee, future_admin_fee, ma_exp_time, oracle_method,
+				        offpeg_fee_multiplier
 				 FROM curve_stableswap_config
 				 WHERE curve_pool_id = $1
 				 ORDER BY block_number DESC, block_version DESC, processing_version DESC
 				 LIMIT 1`,
 				cfg.CurvePoolID,
 			).Scan(&initialA, &initialATime, &futureA, &futureATime,
-				&adminFee, &futureFee, &futureAdminFee, &maExpTime, &oracleMethod)
+				&adminFee, &futureFee, &futureAdminFee, &maExpTime, &oracleMethod, &offpegFeeMult)
 			switch {
 			case err == nil:
 				values, convErr := toStableswapConfigValues(initialA, initialATime, futureA, futureATime,
-					adminFee, futureFee, futureAdminFee, maExpTime, oracleMethod)
+					adminFee, futureFee, futureAdminFee, maExpTime, oracleMethod, offpegFeeMult)
 				if convErr != nil {
 					return nil, fmt.Errorf("reading latest stableswap config for pool %d: %w", cfg.CurvePoolID, convErr)
 				}
@@ -640,15 +651,17 @@ func (r *CurveRepository) writeStableswapConfig(ctx context.Context, tx pgx.Tx, 
 				`INSERT INTO curve_stableswap_config
 				   (curve_pool_id, block_number, block_version, block_timestamp,
 				    initial_a, initial_a_time, future_a, future_a_time,
-				    admin_fee, future_fee, future_admin_fee, ma_exp_time, oracle_method, build_id)
-				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+				    admin_fee, future_fee, future_admin_fee, ma_exp_time, oracle_method,
+				    offpeg_fee_multiplier, build_id)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 				 ON CONFLICT (curve_pool_id, block_number, block_version, processing_version) DO NOTHING`,
 				cfg.CurvePoolID, cfg.BlockNumber, cfg.BlockVersion, cfg.Timestamp,
 				BigIntToNullableNumeric(cfg.InitialA), cfg.InitialATime,
 				BigIntToNullableNumeric(cfg.FutureA), cfg.FutureATime,
 				BigIntToNullableNumeric(cfg.AdminFee), BigIntToNullableNumeric(cfg.FutureFee),
 				BigIntToNullableNumeric(cfg.FutureAdminFee), cfg.MaExpTime,
-				BigIntToNullableNumeric(cfg.OracleMethod), int(r.buildID),
+				BigIntToNullableNumeric(cfg.OracleMethod),
+				BigIntToNullableNumeric(cfg.OffpegFeeMultiplier), int(r.buildID),
 			); err != nil {
 				return fmt.Errorf("inserting stableswap config for pool %d: %w", cfg.CurvePoolID, err)
 			}
@@ -667,12 +680,13 @@ type stableswapConfigValues struct {
 	futureAdminFee *big.Int
 	maExpTime      *int64
 	oracleMethod   *big.Int
+	offpegFeeMult  *big.Int
 }
 
 func toStableswapConfigValues(
 	initialA pgtype.Numeric, initialATime int64, futureA pgtype.Numeric, futureATime int64,
 	adminFee pgtype.Numeric, futureFee pgtype.Numeric, futureAdminFee pgtype.Numeric,
-	maExpTime *int64, oracleMethod pgtype.Numeric,
+	maExpTime *int64, oracleMethod pgtype.Numeric, offpegFeeMult pgtype.Numeric,
 ) (stableswapConfigValues, error) {
 	var v stableswapConfigValues
 	var err error
@@ -694,6 +708,9 @@ func toStableswapConfigValues(
 	if v.oracleMethod, err = NumericToNullableBigInt(oracleMethod); err != nil {
 		return v, fmt.Errorf("oracle_method: %w", err)
 	}
+	if v.offpegFeeMult, err = NumericToNullableBigInt(offpegFeeMult); err != nil {
+		return v, fmt.Errorf("offpeg_fee_multiplier: %w", err)
+	}
 	v.initialATime = initialATime
 	v.futureATime = futureATime
 	v.maExpTime = maExpTime
@@ -709,7 +726,8 @@ func stableswapConfigUnchanged(latest stableswapConfigValues, cfg *entity.CurveS
 		bigIntEqual(latest.futureFee, cfg.FutureFee) &&
 		bigIntEqual(latest.futureAdminFee, cfg.FutureAdminFee) &&
 		int64PtrEqual(latest.maExpTime, cfg.MaExpTime) &&
-		bigIntEqual(latest.oracleMethod, cfg.OracleMethod)
+		bigIntEqual(latest.oracleMethod, cfg.OracleMethod) &&
+		bigIntEqual(latest.offpegFeeMult, cfg.OffpegFeeMultiplier)
 }
 
 func (r *CurveRepository) writeCryptoswapConfig(ctx context.Context, tx pgx.Tx, cfg *entity.CurveCryptoswapConfig) error {

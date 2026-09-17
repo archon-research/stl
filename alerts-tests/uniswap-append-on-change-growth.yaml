@@ -1,0 +1,177 @@
+# Unit tests for the append-on-change row-growth tripwires on the deliberately
+# plain uniswap_v3_tick / uniswap_v4_tick / uniswap_v4_position tables.
+#
+# The budget is 2.9 rows/s (250k rows/day), read over a 6h rate window and held
+# for 6h, so every case runs a *sustained* rate over 12h of samples and asserts
+# at the end: 180 rows/min is 3.0 rows/s and breaches, 168 rows/min is 2.8 and
+# does not.
+rule_files:
+  - ../alerts/vector-indexers.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: "v3: a sustained rate over the table's budget fires"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v3_tick_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+180x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV3AppendOnChangeGrowthHigh
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "uniswap-v3-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: &v3_growth
+              description: |
+                Append-on-change write rate into `uniswap_v3_tick` has exceeded
+                250k rows/day (2.9 rows/s) sustained for 6h — about 90M rows/year
+                against the ~100M-row budget that deliberately-plain (non-hypertable)
+                table was sized for. Nothing is broken; this is the tripwire on that
+                design choice. Check the real row count, and if the rate is the new
+                normal plan the hypertable conversion described in the runbook.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3appendonchangegrowthhigh"
+              summary: "Vector uniswap_v3_tick outgrowing its plain-table budget"
+
+  - name: "v3: a sustained rate under the table's budget stays quiet"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v3_tick_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+168x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV3AppendOnChangeGrowthHigh
+        exp_alerts: []
+
+  # `sum by (cluster)` without `chain`: the budget belongs to the table, and one
+  # uniswap_v3_tick holds every chain's rows.
+  - name: "v3: two chains writing into the one table are summed"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v3_tick_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+90x720'
+      - series: 'uniswap_v3_tick_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="base"}'
+        values: '0+90x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV3AppendOnChangeGrowthHigh
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "uniswap-v3-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: *v3_growth
+
+  - name: "v3: the v4 counter over budget is not the v3 rule's business"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_tick_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+180x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV3AppendOnChangeGrowthHigh
+        exp_alerts: []
+
+  - name: "v4: the v3 counter over budget is not the v4 rule's business"
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x720'
+      - series: 'uniswap_v3_tick_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+180x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV4AppendOnChangeGrowthHigh
+        exp_alerts: []
+
+  - name: "v4: the tick and position terms are added"
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x720'
+      - series: 'uniswap_v4_tick_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+90x720'
+      - series: 'uniswap_v4_position_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+90x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV4AppendOnChangeGrowthHigh
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: &v4_growth
+              description: |
+                Combined append-on-change write rate into `uniswap_v4_tick` +
+                `uniswap_v4_position` has exceeded 250k rows/day (2.9 rows/s)
+                sustained for 6h — about 90M rows/year against the ~100M-row budget
+                those deliberately-plain (non-hypertable) tables were sized for.
+                Nothing is broken; this is the tripwire on that design choice. Check
+                the real row counts, and if the rate is the new normal plan the
+                hypertable conversion migration described in the runbook.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4appendonchangegrowthhigh"
+              summary: "Vector uniswap_v4 append-on-change tables outgrowing their plain-table budget"
+
+  # The V4 rule sums a tick and a position term, so an absent position series
+  # would empty the whole sum; it is zero-filled from kube-state instead.
+  - name: "v4: kube-state zero-fills the term whose series never arrived"
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x720'
+      - series: 'uniswap_v4_tick_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+180x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV4AppendOnChangeGrowthHigh
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: *v4_growth
+
+  - name: "v4: without kube-state the zero-fill has nothing to read and the sum empties"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_tick_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="mainnet"}'
+        values: '0+180x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV4AppendOnChangeGrowthHigh
+        exp_alerts: []
+
+  # The discriminating multi-chain case: one term reporting, the other absent, on
+  # a fleet whose only V4 Deployment is a prefixed one. The zero-fill has to match
+  # that Deployment or the addition has no series on its right-hand side and the
+  # whole rule goes silent while the table grows. Against a mainnet-only
+  # `deployment="uniswap-v4-indexer"` selector this case does not fire.
+  - name: "v4: a second chain's Deployment zero-fills the term its counter is missing"
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{deployment="base-uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x720'
+      - series: 'uniswap_v4_tick_rows_written_total{k8s_namespace_name="vector", cluster="c1", chain="base"}'
+        values: '0+180x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorUniswapV4AppendOnChangeGrowthHigh
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: *v4_growth

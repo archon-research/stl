@@ -18,7 +18,7 @@ const (
 )
 
 // TokenTypeCentrifuge is the only token type asked to name the token it holds
-// (see shareResolver). centrifuge_feeder is a different mechanism, outside this.
+// (see shareResolver).
 const TokenTypeCentrifuge = "centrifuge"
 
 // TokenEntry represents a single known position from the TOKENS_DATA registry.

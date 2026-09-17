@@ -3,7 +3,17 @@
 //
 // The rule is the maintainer-set highest-version-wins one every read of the raw buckets
 // uses — stated in full on the morpho-vault-backfill's listHighestVersionReceipts, which
-// resolves the same version from the key it replays. The archive is asked, rather than
+// resolves the same version from the key it replays.
+//
+// Two properties of that archive put a 1 on a row with no reorg behind it, so never read
+// a reorg out of a replayed row's block_version: deep history is _1_-only because the
+// bulk downloader wrote it there, and one transition band (~24.25M-24.35M on mainnet)
+// holds hash-verified identical _0_/_1_ twins, because that downloader landed a second
+// copy on heights the watcher had already archived. A real reorg is watcher-written twins
+// whose hashes DIFFER, and there the higher version is the canonical re-publish, which
+// this rule selects correctly.
+//
+// The archive is asked, rather than
 // block_states, because it can also prove the version it names speaks for the block being
 // replayed, and because block_states cannot answer for most of a replay's range at all:
 // it carries add_retention_policy(…, INTERVAL '30 days')

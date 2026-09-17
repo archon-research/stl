@@ -53,6 +53,7 @@ jobs:
       python: ${{ steps.changed-files.outputs.python_any_changed }}
       ts: ${{ steps.changed-files.outputs.ts_any_changed }}
       k8s: ${{ steps.changed-files.outputs.k8s_any_changed }}
+      alerts: ${{ steps.changed-files.outputs.alerts_any_changed }}
       # ORB-362: a roster/renderer change must run the deploy even with no code
       # change — that is how a new image entry reaches the overlays.
       deploy: ${{ steps.changed-files.outputs.deploy_any_changed }}
@@ -138,6 +139,31 @@ jobs:
     uses: ./.github/workflows/go-ci.yml
     secrets: inherit
 
+  # VEC-802: promtool evaluates the shipped rules in alerts/ against the
+  # synthetic series in alerts-tests/. alerts.yml already syncs the rules to
+  # Mimir on `alerts/**`, but only `Success` below is a required check, so the
+  # tests hang off this graph to gate a merge.
+  alert-rules:
+    name: Alert Rules
+    needs: detect-changes
+    if: |
+      !cancelled() &&
+      (github.event_name == 'merge_group' ||
+       needs.detect-changes.outputs.alerts == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Pinned by tag and archive checksum in the root Makefile.
+      - name: Install promtool
+        run: make promtool
+
+      - name: Evaluate the shipped alert rules
+        run: make test-alerts
+
   python-ci:
     needs: detect-changes
     if: |
@@ -189,19 +215,52 @@ jobs:
         run: scripts/deploy/compare-image-layers.test.sh
 
       # VEC-783: the Dockerfiles pin base-image tag+digest together rather than
-      # interpolating the tag from .go-version/.python-version, so nothing else
-      # keeps them in step with a version-file bump.
-      - name: Base-image tags match .go-version / .python-version
+      # interpolating the tag from a version file, so nothing else keeps them in
+      # step with a version-file bump, or with each other.
+      - name: Base-image pins match the version files and each other
         run: scripts/deploy/check-base-image-version-consistency.sh
+
+      # The guard's dangerous failure is a reassuring one — "pinned identically"
+      # for a file it never opened, or for a FROM line whose digest survives only
+      # in a comment above it. Those trees cannot occur in a real checkout, so
+      # they are built as fixtures here. Needs no credentials and takes seconds.
+      - name: Base-image guard rejects the trees it must
+        run: scripts/deploy/check-base-image-version-consistency.test.sh
+
+  shell:
+    name: Shell
+    # Runs on every push: the check takes seconds, and a script can be broken
+    # by a change that touches no .sh file at all -- a sourced library moving,
+    # or a caller's flags changing.
+    if: '!cancelled()'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # -x follows `source` into scripts/deploy/lib, where the shared overlay
+      # parser lives (VEC-754); without it the library's only readers are
+      # invisible and its variables all look unused.
+      #
+      # shellcheck ships with the runner image, so its version moves when that
+      # image does; printing it makes a new finding traceable to that bump.
+      - name: Shell scripts pass shellcheck
+        run: |
+          shellcheck --version
+          git ls-files '*.sh' -z | xargs -0 -r shellcheck -x -S warning
 
   ci-passed:
     name: Success
     needs:
       - detect-changes
+      - shell
       - go-ci
       - python-ci
       - ts-ci
       - manifests
+      - alert-rules
     if: always()
     runs-on: ubuntu-latest
     steps:

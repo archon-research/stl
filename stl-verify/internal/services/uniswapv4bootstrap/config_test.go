@@ -23,6 +23,9 @@ func TestConfigWithDefaults_FillsEveryUnsetKnob(t *testing.T) {
 	if got.PositionBatch != DefaultPositionBatch {
 		t.Errorf("PositionBatch = %d, want %d", got.PositionBatch, DefaultPositionBatch)
 	}
+	if got.TransferBatch != DefaultTransferBatch {
+		t.Errorf("TransferBatch = %d, want %d", got.TransferBatch, DefaultTransferBatch)
+	}
 }
 
 func TestConfigWithDefaults_KeepsExplicitValues(t *testing.T) {
@@ -33,6 +36,7 @@ func TestConfigWithDefaults_KeepsExplicitValues(t *testing.T) {
 		MinWindow:     2,
 		MaxWindow:     20,
 		PositionBatch: 3,
+		TransferBatch: 4,
 	}
 	if got := cfg.withDefaults(); got != cfg {
 		t.Errorf("withDefaults() = %+v, want it unchanged", got)
@@ -55,6 +59,7 @@ func TestConfigValidate_RejectsUnusableSettings(t *testing.T) {
 		{"initial below min", func(c *Config) { c.InitialWindow = 1; c.MinWindow = 2 }, "initialWindow"},
 		{"initial above max", func(c *Config) { c.InitialWindow = 100; c.MaxWindow = 50 }, "initialWindow"},
 		{"zero position batch", func(c *Config) { c.PositionBatch = 0 }, "positionBatch"},
+		{"zero transfer batch", func(c *Config) { c.TransferBatch = 0 }, "transferBatch"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -84,5 +89,65 @@ func TestConfigValidate_ExportedFormAppliesTheDefaultsFirst(t *testing.T) {
 	}
 	if err := (Config{ChainID: 1, PositionBatch: -1}).Validate(); err == nil {
 		t.Fatal("expected an error: a negative batch is not filled by the defaults")
+	}
+}
+
+// Each log site in a batch holds one advisory lock to commit, from a cluster-wide
+// table, so the knob needs a ceiling as well as a floor.
+func TestConfigValidate_RejectsATransferBatchAboveTheLockBudget(t *testing.T) {
+	cfg := Config{ChainID: 1}.withDefaults()
+	cfg.TransferBatch = MaxTransferBatch + 1
+
+	err := cfg.validate()
+	if err == nil || !strings.Contains(err.Error(), "advisory lock") {
+		t.Fatalf("validate error = %v, want it to reject a batch above the lock budget", err)
+	}
+	cfg.TransferBatch = MaxTransferBatch
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate at the ceiling: %v", err)
+	}
+}
+
+func TestConfigWithDefaults_FinalityDepthDefaultsOnlyOnMainnet(t *testing.T) {
+	if got := (Config{ChainID: 8453}.withDefaults()).FinalityDepth; got != 0 {
+		t.Errorf("FinalityDepth on chain 8453 = %d, want 0 (no default off mainnet)", got)
+	}
+}
+
+func TestConfigValidate_OffMainnetNeedsAnExplicitFinalityDepth(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"no pin, no depth", Config{ChainID: 8453}},
+		{"pin but no depth", Config{ChainID: 8453, PinBlock: 100}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			for _, want := range []string{"finality depth", "8453"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %v, want it to name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestConfigValidate_OffMainnetAcceptsAnExplicitFinalityDepth(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"depth", Config{ChainID: 8453, FinalityDepth: 200}},
+		{"depth and pin", Config{ChainID: 8453, FinalityDepth: 200, PinBlock: 100}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.cfg.Validate(); err != nil {
+				t.Errorf("Validate: %v", err)
+			}
+		})
 	}
 }

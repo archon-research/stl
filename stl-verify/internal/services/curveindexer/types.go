@@ -38,6 +38,37 @@ type RegisteredPool struct {
 	// on this flag. Curated in the DB (curve_pool.has_a_precise) and carried through
 	// LoadPools; irrelevant (and false) for cryptoswap pools, which never call A_precise.
 	HasAPrecise bool
+	// HasNoArgOracleGetters records whether this plain_ng pool exposes the no-arg
+	// oracle getters price_oracle(), last_price(), ema_price(), get_p() and
+	// oracle_method(). Later stableswap-NG implementations expose only the indexed
+	// price_oracle(uint256) form and revert on the no-arg selector, and an issued
+	// read that reverts stops the block, so the snapshot gates all five on this
+	// flag. Curated in the DB (curve_pool.has_no_arg_oracle_getters) and carried
+	// through LoadPools; false for every non-NG pool, which never issues them.
+	HasNoArgOracleGetters bool
+	// CalcTokenAmountDynArray records the argument shape calc_token_amount takes on
+	// this pool: a dynamic uint256[] (true) or a fixed uint256[N] (false). The two
+	// have different selectors and each reverts on the other, and the shape cannot
+	// be read back from the chain, so it is curated in the DB
+	// (curve_pool.calc_token_amount_dyn_array) and carried through LoadPools. nil
+	// means "not probed": the snapshot then issues no calc_token_amount call at all
+	// rather than guessing a shape that could revert and stop the block.
+	CalcTokenAmountDynArray *bool
+	// HasFutureFee and HasOffpegFeeMultiplier record which fee-schedule getter this
+	// pool exposes. The pre-NG pools and the original NG implementation have
+	// future_fee(); later NG implementations dropped it for
+	// offpeg_fee_multiplier() and revert on future_fee(). No pool exposes both, and
+	// each read is gated on its own flag so neither is issued where it reverts.
+	// Curated in the DB and carried through LoadPools.
+	HasFutureFee           bool
+	HasOffpegFeeMultiplier bool
+}
+
+// hasNoArgOracleGetters reports whether the five no-arg oracle reads may be
+// issued for this pool. The curated flag is only meaningful for plain_ng, so the
+// class is checked here rather than at each of the three call sites.
+func (p RegisteredPool) hasNoArgOracleGetters() bool {
+	return p.Kind == KindStableswapNG && p.HasNoArgOracleGetters
 }
 
 // PoolID and DeployBlockNum implement dexconsumer.SnapshotPool, letting

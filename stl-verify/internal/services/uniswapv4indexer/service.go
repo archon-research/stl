@@ -90,7 +90,7 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 	if _, err := eventsByID(); err != nil {
 		return nil, err
 	}
-	if _, err := positionManagerTransferEvent(); err != nil {
+	if _, err := PositionManagerTransferEvent(); err != nil {
 		return nil, err
 	}
 	poolManager, err := PoolManagerFor(deps.Pools)
@@ -216,7 +216,11 @@ func PositionManagerFor(pools []RegisteredPool) (RegisteredPositionManager, erro
 	if first.PositionManager == (common.Address{}) || first.PositionManagerID <= 0 {
 		return RegisteredPositionManager{}, fmt.Errorf("pool %d carries no PositionManager registry row: address(0) matches no log, so every transfer would be dropped silently", first.ID)
 	}
-	return RegisteredPositionManager{ID: first.PositionManagerID, Address: first.PositionManager}, nil
+	return RegisteredPositionManager{
+		ID:          first.PositionManagerID,
+		Address:     first.PositionManager,
+		DeployBlock: first.PositionManagerDeployBlock,
+	}, nil
 }
 
 // ValidatePoolKeys has already rejected duplicate PoolIds.

@@ -1,0 +1,357 @@
+# Unit tests for the uniswap-v4-indexer liveness pair.
+#
+# Both rules derive `chain` from the Deployment NAME, because prod kube-state
+# exports no Deployment labels: the bare `uniswap-v4-indexer` is mainnet and
+# every other chain is `<chain>-uniswap-v4-indexer`, where `<chain>` is the
+# chainutil.ChainSlug value every deployed resource is named from. The worker
+# labels its own series with entity.ChainName, which differs only for 43114
+# (`avalanche` against `avalanche-c`), so the rules map that one prefix onto the
+# worker's value. The mainnet cases come first, then
+# the two-chain ones: per-chain labelling, the zero-fill and the replica gate
+# joining `on (chain, cluster)`, and the avalanche mapping.
+rule_files:
+  - ../alerts/vector-indexers.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: "stalled: an indexer consuming blocks with a replica up is silent"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
+        values: '0+5x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerStalled
+        exp_alerts: []
+
+  # Exported and not advancing: the counter is there, the consume loop is not.
+  - name: "stalled: a replica up with the block counter wedged pages for mainnet"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
+        values: '100x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerStalled
+        exp_alerts:
+          - exp_labels: &v4_stalled_mainnet_labels
+              chain: "mainnet"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "critical"
+              team: "vector"
+            exp_annotations: &v4_stalled_mainnet
+              description: |
+                The `mainnet` uniswap-v4-indexer Deployment is up but has
+                consumed no block for >15m (or its uniswap_v4_blocks_processed_total
+                series vanished). The SQS consume loop is wedged or the OTLP metric
+                export broke; Uniswap V4 pool state for `mainnet` in
+                TimescaleDB is going stale. Check the pod logs and SQS backlog.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerstalled"
+              summary: "Vector uniswap-v4-indexer stalled on mainnet (no block consumed >15m)"
+
+  - name: "down: no available replica pages for mainnet"
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerDown
+        exp_alerts:
+          - exp_labels: &v4_down_mainnet_labels
+              chain: "mainnet"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              deployment: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "critical"
+              team: "vector"
+            exp_annotations: &v4_down_mainnet
+              description: |
+                `uniswap-v4-indexer` Deployment has <1 available replica for >10m.
+                The worker is not running; no Uniswap V4 swaps, liquidity events,
+                pool state or ticks are being written for `mainnet` and
+                the SQS backlog is growing. A boot-time registry rejection looks
+                exactly like this — check the previous container's logs first.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerdown"
+              summary: "Vector uniswap-v4-indexer has no available replica on mainnet (uniswap-v4-indexer)"
+
+  # A canary or bootstrap Deployment carries the indexer's name and does not
+  # serve its traffic, so neither may page for the indexer being down. The
+  # chain-derivation regex is anchored for this reason: a suffixed look-alike is
+  # not a chain.
+  - name: "down: deployments that merely contain the indexer's name are ignored"
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer-canary", namespace="vector", cluster="c1"}'
+        values: '0x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer-bootstrap", namespace="vector", cluster="c1"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerDown
+        exp_alerts: []
+
+  # The indexer's own Deployment is the only replica count the rule reads, so a
+  # healthy look-alike beside a dead indexer still pages.
+  - name: "down: a healthy canary does not mask the indexer being down"
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '0x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer-canary", namespace="vector", cluster="c1"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerDown
+        exp_alerts:
+          - exp_labels: *v4_down_mainnet_labels
+            exp_annotations: *v4_down_mainnet
+
+  # ---------------------------------------------------------------------
+  # Two chains in one cluster. Against the mainnet-pinned pair these are the
+  # cases that went wrong: a second chain's stall was invisible and mainnet's
+  # health gated it.
+  # ---------------------------------------------------------------------
+
+  # The stall is one chain's. Mainnet keeps consuming and must not be named.
+  - name: "stalled: one chain stalls while the other runs"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
+        values: '0+5x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="base"}'
+        values: '100x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="base-uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerStalled
+        exp_alerts:
+          - exp_labels:
+              chain: "base"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "critical"
+              team: "vector"
+            exp_annotations:
+              description: |
+                The `base` uniswap-v4-indexer Deployment is up but has
+                consumed no block for >15m (or its uniswap_v4_blocks_processed_total
+                series vanished). The SQS consume loop is wedged or the OTLP metric
+                export broke; Uniswap V4 pool state for `base` in
+                TimescaleDB is going stale. Check the pod logs and SQS backlog.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerstalled"
+              summary: "Vector uniswap-v4-indexer stalled on base (no block consumed >15m)"
+
+  # base's pod is alive and its counter series never arrived: a bare rate() == 0
+  # returns no data, so the zero-fill carries it — and it is derived from the
+  # Deployment name, which is the only chain dimension kube-state has.
+  - name: "stalled: a second chain whose export died is zero-filled"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
+        values: '0+5x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="base-uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerStalled
+        exp_alerts:
+          - exp_labels:
+              chain: "base"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "critical"
+              team: "vector"
+            exp_annotations:
+              description: |
+                The `base` uniswap-v4-indexer Deployment is up but has
+                consumed no block for >15m (or its uniswap_v4_blocks_processed_total
+                series vanished). The SQS consume loop is wedged or the OTLP metric
+                export broke; Uniswap V4 pool state for `base` in
+                TimescaleDB is going stale. Check the pod logs and SQS backlog.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerstalled"
+              summary: "Vector uniswap-v4-indexer stalled on base (no block consumed >15m)"
+
+  # base's pod is dead, which is Down's case, not this one — and mainnet's
+  # healthy replica must not satisfy the gate on base's behalf.
+  - name: "stalled: the replica gate holds per chain"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="mainnet"}'
+        values: '0+5x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="base-uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerStalled
+        exp_alerts: []
+
+  # One chain's Deployment down while another's runs: the page names the dead
+  # one, and carries the Deployment to kubectl.
+  - name: "down: a second chain's dead Deployment pages under its own chain"
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="base-uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerDown
+        exp_alerts:
+          - exp_labels:
+              chain: "base"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              deployment: "base-uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "critical"
+              team: "vector"
+            exp_annotations:
+              description: |
+                `base-uniswap-v4-indexer` Deployment has <1 available replica for >10m.
+                The worker is not running; no Uniswap V4 swaps, liquidity events,
+                pool state or ticks are being written for `base` and
+                the SQS backlog is growing. A boot-time registry rejection looks
+                exactly like this — check the previous container's logs first.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerdown"
+              summary: "Vector uniswap-v4-indexer has no available replica on base (base-uniswap-v4-indexer)"
+
+  # 43114 is the one chain whose ChainSlug (`avalanche`, the name every
+  # Avalanche Deployment carries) differs from its entity.ChainName
+  # (`avalanche-c`, what the worker labels its own series with). Without the
+  # third label_replace this stall would page on a phantom `chain="avalanche"`.
+  - name: "stalled: the avalanche- prefix maps onto the worker's avalanche-c"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="avalanche-c"}'
+        values: '100x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="avalanche-uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerStalled
+        exp_alerts:
+          - exp_labels:
+              chain: "avalanche-c"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "critical"
+              team: "vector"
+            exp_annotations:
+              description: |
+                The `avalanche-c` uniswap-v4-indexer Deployment is up but has
+                consumed no block for >15m (or its uniswap_v4_blocks_processed_total
+                series vanished). The SQS consume loop is wedged or the OTLP metric
+                export broke; Uniswap V4 pool state for `avalanche-c` in
+                TimescaleDB is going stale. Check the pod logs and SQS backlog.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerstalled"
+              summary: "Vector uniswap-v4-indexer stalled on avalanche-c (no block consumed >15m)"
+
+  - name: "down: the avalanche- prefix maps onto the worker's avalanche-c"
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{deployment="avalanche-uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerDown
+        exp_alerts:
+          - exp_labels:
+              chain: "avalanche-c"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              deployment: "avalanche-uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "critical"
+              team: "vector"
+            exp_annotations:
+              description: |
+                `avalanche-uniswap-v4-indexer` Deployment has <1 available replica for >10m.
+                The worker is not running; no Uniswap V4 swaps, liquidity events,
+                pool state or ticks are being written for `avalanche-c` and
+                the SQS backlog is growing. A boot-time registry rejection looks
+                exactly like this — check the previous container's logs first.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerdown"
+              summary: "Vector uniswap-v4-indexer has no available replica on avalanche-c (avalanche-uniswap-v4-indexer)"
+
+  # A chain whose Deployment name is the ChainName verbatim, which is every
+  # chain but 43114: no mapping, the prefix is the label.
+  - name: "stalled: the Deployment prefix is the chain name verbatim"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="arbitrum"}'
+        values: '100x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="arbitrum-uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerStalled
+        exp_alerts:
+          - exp_labels:
+              chain: "arbitrum"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "critical"
+              team: "vector"
+            exp_annotations:
+              description: |
+                The `arbitrum` uniswap-v4-indexer Deployment is up but has
+                consumed no block for >15m (or its uniswap_v4_blocks_processed_total
+                series vanished). The SQS consume loop is wedged or the OTLP metric
+                export broke; Uniswap V4 pool state for `arbitrum` in
+                TimescaleDB is going stale. Check the pod logs and SQS backlog.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerstalled"
+              summary: "Vector uniswap-v4-indexer stalled on arbitrum (no block consumed >15m)"
+
+  # The runbook tells an operator the indexer tolerates either Avalanche spelling
+  # (the rules bridge them), so the tolerated one is pinned too: tighten the
+  # third label_replace or the Deployment regex and this is what notices.
+  - name: "stalled: the avalanche-c- Deployment form the runbook allows also lands on avalanche-c"
+    interval: 1m
+    input_series:
+      - series: 'uniswap_v4_blocks_processed_total{k8s_namespace_name="vector", cluster="c1", status="success", chain="avalanche-c"}'
+        values: '100x40'
+      - series: 'kube_deployment_status_replicas_available{deployment="avalanche-c-uniswap-v4-indexer", namespace="vector", cluster="c1"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VectorUniswapV4IndexerStalled
+        exp_alerts:
+          - exp_labels:
+              chain: "avalanche-c"
+              cluster: "c1"
+              component: "uniswap-v4-indexer"
+              namespace: "vector"
+              severity: "critical"
+              team: "vector"
+            exp_annotations:
+              description: |
+                The `avalanche-c` uniswap-v4-indexer Deployment is up but has
+                consumed no block for >15m (or its uniswap_v4_blocks_processed_total
+                series vanished). The SQS consume loop is wedged or the OTLP metric
+                export broke; Uniswap V4 pool state for `avalanche-c` in
+                TimescaleDB is going stale. Check the pod logs and SQS backlog.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerstalled"
+              summary: "Vector uniswap-v4-indexer stalled on avalanche-c (no block consumed >15m)"
