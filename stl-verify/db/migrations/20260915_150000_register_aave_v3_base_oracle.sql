@@ -61,7 +61,7 @@ BEGIN
                     AND p.address = '\xA238Dd80C259a72e81d7e4664a9801593F98d1c5'::bytea
     JOIN oracle o ON o.id = po.oracle_id AND o.name = 'aave_v3_base';
     IF cnt < 1 THEN
-        RAISE EXCEPTION 'Aave V3 Base -> aave_v3_base protocol_oracle binding missing';
+        RAISE EXCEPTION 'pool 0xA238Dd80C259a72e81d7e4664a9801593F98d1c5 on chain 8453 -> aave_v3_base protocol_oracle binding missing';
     END IF;
 END $$;
 
