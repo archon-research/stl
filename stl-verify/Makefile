@@ -1482,7 +1482,8 @@ docker-release-all-staging:
 #   TIGERDATA_LOCAL_PORT -- avoids the kind cluster's host 5432, which
 #                     k8s/dev-infra/kind.yaml maps to the local database
 # Override any on the command line; ENV=sentinelprod (or
-# TIGERDATA_ENV=sentinelprod) switches environment. The app then connects at
+# TIGERDATA_ENV=sentinelprod) switches environment, and AWS_PROFILE must name that
+# account unless TIGERDATA_HOST is passed. The app then connects at
 # postgres://<user>:<pass>@localhost:$(TIGERDATA_LOCAL_PORT)/<db>
 # (python/.env -- gitignored; see .env.default).
 #
@@ -1502,6 +1503,9 @@ tigerdata-bastion-ip = tailscale status 2>/dev/null | grep -F '$(1)-bastion' | g
 # absent, so a schema change in the infrastructure repo fails here rather than
 # yielding the string "null" downstream -- but only where the caller checks the
 # status directly, since a pipe would mask it.
+#
+# Each environment's secrets live in its own AWS account, so AWS_PROFILE must name
+# one for $(1); another account fails the lookup as ResourceNotFoundException.
 tigerdata-pooler-url = aws secretsmanager get-secret-value --secret-id stl-$(1)-tigerdata-$(2) --query SecretString --output text | jq -er '.pooler_url'
 
 # Reduce a pooler URL to its bare host. Each step is scoped to the authority
@@ -1583,13 +1587,13 @@ endef
 # role that created the app users db-set-passwords goes on to alter.
 #
 # Run database migrations
-# Usage: make db-migrate ENV=sentinelstaging|sentinelprod
+# Usage: make db-migrate ENV=sentinelstaging|sentinelprod AWS_PROFILE=<that env's account>
 db-migrate: override TIGERDATA_ROLE = migrator
 db-migrate:
 	$(with-tigerdata-tunnel) go run ./cmd/util/migrate
 
 # Set database user passwords from Secrets Manager
-# Usage: make db-set-passwords ENV=sentinelstaging|sentinelprod
+# Usage: make db-set-passwords ENV=sentinelstaging|sentinelprod AWS_PROFILE=<that env's account>
 # Requires:
 #   1. Terraform applied (from infrastructure repo): make tf-apply ENV=sentinelstaging|sentinelprod (creates secrets with passwords)
 #   2. Migrations run: make db-migrate ENV=<env> (creates users with placeholder passwords)
@@ -1611,7 +1615,7 @@ db-set-passwords:
 	echo "==> Database user passwords configured successfully"
 
 # Test database connection with application user
-# Usage: make db-test-app-user ENV=sentinelstaging|sentinelprod
+# Usage: make db-test-app-user ENV=sentinelstaging|sentinelprod AWS_PROFILE=<that env's account>
 #
 # Asserts the connected role: the grants below are only evidence about the app
 # user, and a more privileged role would pass them while proving nothing.
