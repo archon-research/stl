@@ -725,6 +725,121 @@ func TestAliasRegisterClosesAWindowByAppending(t *testing.T) {
 	})
 }
 
+// TestRegistersReplayDoesNotLoseARowToALaterCorrection is the only fixture that can tell the
+// two snapshot implementations apart, and the reason the overloads must not read _latest.
+//
+// A correction landing on the SAME window as an existing row, after the snapshot:
+//
+//	row A  valid_from 2026-01-01  pv 0  sec-original   visible in the snapshot
+//	row B  valid_from 2026-01-01  pv 1  sec-corrected  written after it
+//
+// Both are in one group, because grouping is on (identity, valid_from). Filter first and B is
+// gone before the group is resolved, so A wins and the replay is faithful. Resolve first and B
+// wins its group on processing_version DESC, the snapshot filter then removes it, and the answer
+// is NOTHING — A was discarded before the filter ever ran. An absent security, not a wrong one,
+// on any replayed key that has since been corrected.
+//
+// TestRegistersReplayWhatWasKnownAtASnapshot cannot see this: its two rows have different
+// valid_from, so they are in different groups with one candidate each and both orders agree.
+func TestRegistersReplayDoesNotLoseARowToALaterCorrection(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	const key = "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+	var original int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO instrument_register
+			(instrument_key, key_namespace, security_id, chain_id, valid_from, valid_to, `+registerSpine+`)
+		VALUES ($1, 'token_address', 'sec-original', 1, '2026-01-01', 'infinity',
+		        'test', 'SEED_LOAD', 'what the calculation saw', 'test')
+		RETURNING record_id`, key).Scan(&original); err != nil {
+		t.Fatalf("insert the original: %v", err)
+	}
+
+	var snapshot string
+	if err := pool.QueryRow(ctx, `SELECT pg_current_snapshot()::text`).Scan(&snapshot); err != nil {
+		t.Fatalf("take snapshot: %v", err)
+	}
+
+	// Same valid_from, so it lands in the original's group; a correction run allocates
+	// processing_version 1, and the supersession guard requires it to name what it corrects.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO instrument_register
+			(instrument_key, key_namespace, security_id, chain_id, valid_from, valid_to,
+			 processing_version, supersedes_record_id, actor, change_reason_code, change_reason,
+			 approved_by, source_system)
+		VALUES ($1, 'token_address', 'sec-corrected', 1, '2026-01-01', 'infinity',
+		        1, $2, 'curator', 'RESTATEMENT', 'corrected after the calculation ran',
+		        'reviewer', 'test')`, key, original); err != nil {
+		t.Fatalf("insert the correction: %v", err)
+	}
+
+	t.Run("the replay still resolves what was known", func(t *testing.T) {
+		var got string
+		if err := pool.QueryRow(ctx, `
+			SELECT security_id FROM instrument_register_as_of('2026-06-01'::date, $1::pg_snapshot)
+			WHERE instrument_key = $2`, snapshot, key,
+		).Scan(&got); err != nil {
+			t.Fatalf("replay returned no row at all (%v) — the snapshot filter ran after the version resolution, so the corrected row won its group and was then filtered away", err)
+		}
+		if got != "sec-original" {
+			t.Errorf("replay resolves %s, want sec-original — a correction written after the snapshot must not change what it replays", got)
+		}
+	})
+
+	t.Run("without the snapshot the correction wins", func(t *testing.T) {
+		var got string
+		if err := pool.QueryRow(ctx, `
+			SELECT security_id FROM instrument_register_as_of('2026-06-01'::date)
+			WHERE instrument_key = $1`, key,
+		).Scan(&got); err != nil {
+			t.Fatalf("as_of without snapshot: %v", err)
+		}
+		if got != "sec-corrected" {
+			t.Errorf("as_of resolves %s, want sec-corrected", got)
+		}
+	})
+
+	t.Run("the alias register behaves the same way", func(t *testing.T) {
+		const value = "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d1"
+		var originalAlias int64
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO alias_register (id_scheme, id_value, node_id, valid_from, valid_to, `+registerSpine+`)
+			VALUES ('BLOCKCHAIN_ADDRESS', $1, 'em-original', '2026-01-01', 'infinity',
+			        'test', 'SEED_LOAD', 'what the calculation saw', 'test')
+			RETURNING record_id`, value).Scan(&originalAlias); err != nil {
+			t.Fatalf("insert the original alias: %v", err)
+		}
+
+		var snap string
+		if err := pool.QueryRow(ctx, `SELECT pg_current_snapshot()::text`).Scan(&snap); err != nil {
+			t.Fatalf("take snapshot: %v", err)
+		}
+
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO alias_register (id_scheme, id_value, node_id, valid_from, valid_to,
+			                            processing_version, supersedes_record_id, actor,
+			                            change_reason_code, change_reason, approved_by, source_system)
+			VALUES ('BLOCKCHAIN_ADDRESS', $1, 'em-corrected', '2026-01-01', 'infinity',
+			        1, $2, 'curator', 'RESTATEMENT', 'corrected after', 'reviewer', 'test')`,
+			value, originalAlias); err != nil {
+			t.Fatalf("insert the alias correction: %v", err)
+		}
+
+		var got string
+		if err := pool.QueryRow(ctx, `
+			SELECT node_id FROM alias_register_as_of('2026-06-01'::date, $1::pg_snapshot)
+			WHERE id_value = $2`, snap, value,
+		).Scan(&got); err != nil {
+			t.Fatalf("alias replay returned no row at all (%v) — see the instrument case above", err)
+		}
+		if got != "em-original" {
+			t.Errorf("alias replay resolves %s, want em-original", got)
+		}
+	})
+}
+
 // TestRegistersReplayWhatWasKnownAtASnapshot covers the _as_of(date, pg_snapshot) overload, which
 // nothing exercised before. It is the whole reason ingest_xid exists: a correction appended after
 // a calculation ran must not change what that calculation is replayed as having seen. The snapshot
