@@ -50,32 +50,43 @@ func collectEmitted(t *testing.T) emitted {
 		t.Fatalf("collecting metrics: %v", err)
 	}
 	out := emitted{metrics: map[string]bool{}, attrs: map[string]bool{}, statuses: map[string]bool{}}
-	addAttrs := func(set attribute.Set) {
-		for _, kv := range set.ToSlice() {
-			out.attrs[string(kv.Key)] = true
-			if kv.Key == "status" {
-				out.statuses[kv.Value.AsString()] = true
-			}
-		}
-	}
 	for _, scope := range rm.ScopeMetrics {
 		for _, m := range scope.Metrics {
 			out.metrics[strings.ReplaceAll(m.Name, ".", "_")] = true
-			switch data := m.Data.(type) {
-			case metricdata.Sum[int64]:
-				for _, dp := range data.DataPoints {
-					addAttrs(dp.Attributes)
-				}
-			case metricdata.Gauge[int64]:
-				for _, dp := range data.DataPoints {
-					addAttrs(dp.Attributes)
-				}
-			default:
-				t.Fatalf("metric %q is %T; teach collectEmitted its data points", m.Name, m.Data)
+			for _, set := range attributeSets(t, m) {
+				out.addAttrs(set)
 			}
 		}
 	}
 	return out
+}
+
+// attributeSets returns the attribute set of every data point of m.
+func attributeSets(t *testing.T, m metricdata.Metrics) []attribute.Set {
+	t.Helper()
+	var sets []attribute.Set
+	switch data := m.Data.(type) {
+	case metricdata.Sum[int64]:
+		for _, dp := range data.DataPoints {
+			sets = append(sets, dp.Attributes)
+		}
+	case metricdata.Gauge[int64]:
+		for _, dp := range data.DataPoints {
+			sets = append(sets, dp.Attributes)
+		}
+	default:
+		t.Fatalf("metric %q is %T; teach attributeSets its data points", m.Name, m.Data)
+	}
+	return sets
+}
+
+func (e emitted) addAttrs(set attribute.Set) {
+	for _, kv := range set.ToSlice() {
+		e.attrs[string(kv.Key)] = true
+		if kv.Key == "status" {
+			e.statuses[kv.Value.AsString()] = true
+		}
+	}
 }
 
 func alertsFile(t *testing.T) string {
@@ -120,26 +131,35 @@ func TestAlerts_GroupByLabelsThatExist(t *testing.T) {
 		}
 		checked++
 		name := strings.TrimSpace(strings.SplitN(block, "\n", 2)[0])
-		for _, by := range regexp.MustCompile(`by \(([^)]*)\)`).FindAllStringSubmatch(block, -1) {
-			for label := range strings.SplitSeq(by[1], ",") {
-				label = strings.TrimSpace(label)
-				if label == "" || e.attrs[label] || infraLabels[label] {
-					continue
-				}
-				t.Errorf("%s groups by %q, which is neither an emitted attribute nor an infra label", name, label)
-			}
-		}
-		// Any matcher, so status=~"ok|error" and status!="canceled" are checked too.
-		for _, sel := range regexp.MustCompile(`status(?:=|!=|=~|!~)"([^"]*)"`).FindAllStringSubmatch(block, -1) {
-			for status := range strings.SplitSeq(sel[1], "|") {
-				if !e.statuses[status] {
-					t.Errorf(`%s matches status %q; this worker records only %s`, name, status, sortedKeys(e.statuses))
-				}
-			}
-		}
+		checkGroupByLabels(t, name, block, e)
+		checkStatusMatchers(t, name, block, e)
 	}
 	if checked == 0 {
 		t.Fatal("no alert rule reads a position_materializer_ metric; the check read nothing")
+	}
+}
+
+func checkGroupByLabels(t *testing.T, name, block string, e emitted) {
+	t.Helper()
+	for _, by := range regexp.MustCompile(`by \(([^)]*)\)`).FindAllStringSubmatch(block, -1) {
+		for label := range strings.SplitSeq(by[1], ",") {
+			label = strings.TrimSpace(label)
+			if label != "" && !e.attrs[label] && !infraLabels[label] {
+				t.Errorf("%s groups by %q, which is neither an emitted attribute nor an infra label", name, label)
+			}
+		}
+	}
+}
+
+// checkStatusMatchers reads any matcher, so status=~"ok|error" and status!="canceled" are checked too.
+func checkStatusMatchers(t *testing.T, name, block string, e emitted) {
+	t.Helper()
+	for _, sel := range regexp.MustCompile(`status(?:=|!=|=~|!~)"([^"]*)"`).FindAllStringSubmatch(block, -1) {
+		for status := range strings.SplitSeq(sel[1], "|") {
+			if !e.statuses[status] {
+				t.Errorf(`%s matches status %q; this worker records only %s`, name, status, sortedKeys(e.statuses))
+			}
+		}
 	}
 }
 

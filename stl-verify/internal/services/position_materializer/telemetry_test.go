@@ -171,59 +171,18 @@ func TestRunOnce_ClassifiesAFailedProjection(t *testing.T) {
 		fail       func(ctx context.Context, cancel context.CancelFunc) error
 		wantStatus string
 	}{
-		{
-			name:   "parent cancelled mid-projection",
-			parent: func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
-			fail: func(ctx context.Context, cancel context.CancelFunc) error {
-				cancel()
-				return ctx.Err()
-			},
-			wantStatus: statusCanceled,
-		},
-		{
-			name:   "unrelated error while the parent is cancelled",
-			parent: func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
-			fail: func(_ context.Context, cancel context.CancelFunc) error {
-				cancel()
-				return boom
-			},
-			wantStatus: statusCanceled,
-		},
-		{
-			name:       "projection's own deadline on a live parent",
-			parent:     func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
-			fail:       func(context.Context, context.CancelFunc) error { return context.DeadlineExceeded },
-			wantStatus: statusError,
-		},
-		{
-			name: "parent deadline expires mid-projection",
-			parent: func() (context.Context, context.CancelFunc) {
-				return context.WithTimeout(context.Background(), 10*time.Millisecond)
-			},
-			fail: func(ctx context.Context, _ context.CancelFunc) error {
-				<-ctx.Done()
-				return ctx.Err()
-			},
-			wantStatus: statusError,
-		},
-		{
-			name:       "plain failure",
-			parent:     func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
-			fail:       func(context.Context, context.CancelFunc) error { return boom },
-			wantStatus: statusError,
-		},
+		{"parent cancelled mid-projection", cancellableParent, cancelThenReturnCtxErr, statusCanceled},
+		{"unrelated error while the parent is cancelled", cancellableParent, cancelThenReturn(boom), statusCanceled},
+		{"projection's own deadline on a live parent", cancellableParent, returnErr(context.DeadlineExceeded), statusError},
+		{"parent deadline expires mid-projection", shortDeadlineParent, waitForParent, statusError},
+		{"plain failure", cancellableParent, returnErr(boom), statusError},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tel, reader := newRecordingTelemetry(t)
 			ctx, cancel := tt.parent()
 			defer cancel()
-			mat := &mockMaterializer{fn: func(ctx context.Context, view string, _ int, _ int64) (int64, error) {
-				if view == "materialize_a" {
-					return 0, tt.fail(ctx, cancel)
-				}
-				return 1, nil
-			}}
+			mat := &mockMaterializer{fn: failFirstView(tt.fail, cancel)}
 			svc, err := NewService([]string{"materialize_a", "materialize_b"}, mat, 0, 77, nil, tel)
 			if err != nil {
 				t.Fatalf("NewService: %v", err)
@@ -231,29 +190,84 @@ func TestRunOnce_ClassifiesAFailedProjection(t *testing.T) {
 			if err := svc.RunOnce(ctx); err == nil {
 				t.Fatal("RunOnce = nil; want the failure surfaced")
 			}
-
-			runs := map[string]int64{}
-			for _, dp := range testutil.CollectSumDataPoints(t, reader, "position_materializer.projection_runs.total") {
-				runs[testutil.AttrValue(dp, "materializer")+"/"+testutil.AttrValue(dp, "status")] += dp.Value
-			}
-			for _, status := range runStatuses {
-				want := int64(0)
-				if status == tt.wantStatus {
-					want = 1
-				}
-				if got := runs["materialize_a/"+status]; got != want {
-					t.Errorf("materialize_a/%s = %d; want %d (all runs: %v)", status, got, want, runs)
-				}
-			}
-			// A view the cancellation skipped never ran, so it records nothing.
+			runs := runsByViewAndStatus(t, reader)
+			assertOneRunIn(t, runs, "materialize_a", tt.wantStatus)
 			if tt.wantStatus == statusCanceled {
-				for key, v := range runs {
-					if strings.HasPrefix(key, "materialize_b/") && v != 0 {
-						t.Errorf("%s = %d; want nothing recorded for a view that never ran", key, v)
-					}
-				}
+				// A view the cancellation skipped never ran, so it records nothing.
+				assertNoRuns(t, runs, "materialize_b")
 			}
 		})
+	}
+}
+
+func cancellableParent() (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.Background())
+}
+
+func shortDeadlineParent() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 10*time.Millisecond)
+}
+
+func cancelThenReturnCtxErr(ctx context.Context, cancel context.CancelFunc) error {
+	cancel()
+	return ctx.Err()
+}
+
+func cancelThenReturn(err error) func(context.Context, context.CancelFunc) error {
+	return func(_ context.Context, cancel context.CancelFunc) error {
+		cancel()
+		return err
+	}
+}
+
+func returnErr(err error) func(context.Context, context.CancelFunc) error {
+	return func(context.Context, context.CancelFunc) error { return err }
+}
+
+func waitForParent(ctx context.Context, _ context.CancelFunc) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// failFirstView fails materialize_a with fail and lets every other view succeed.
+func failFirstView(fail func(context.Context, context.CancelFunc) error, cancel context.CancelFunc) func(context.Context, string, int, int64) (int64, error) {
+	return func(ctx context.Context, view string, _ int, _ int64) (int64, error) {
+		if view == "materialize_a" {
+			return 0, fail(ctx, cancel)
+		}
+		return 1, nil
+	}
+}
+
+func runsByViewAndStatus(t *testing.T, reader sdkmetric.Reader) map[string]int64 {
+	t.Helper()
+	runs := map[string]int64{}
+	for _, dp := range testutil.CollectSumDataPoints(t, reader, "position_materializer.projection_runs.total") {
+		runs[testutil.AttrValue(dp, "materializer")+"/"+testutil.AttrValue(dp, "status")] += dp.Value
+	}
+	return runs
+}
+
+// assertOneRunIn checks view recorded exactly one run, in wantStatus, and none in any other status.
+func assertOneRunIn(t *testing.T, runs map[string]int64, view, wantStatus string) {
+	t.Helper()
+	for _, status := range runStatuses {
+		want := int64(0)
+		if status == wantStatus {
+			want = 1
+		}
+		if got := runs[view+"/"+status]; got != want {
+			t.Errorf("%s/%s = %d; want %d (all runs: %v)", view, status, got, want, runs)
+		}
+	}
+}
+
+func assertNoRuns(t *testing.T, runs map[string]int64, view string) {
+	t.Helper()
+	for key, v := range runs {
+		if strings.HasPrefix(key, view+"/") && v != 0 {
+			t.Errorf("%s = %d; want nothing recorded for a view that never ran", key, v)
+		}
 	}
 }
 
