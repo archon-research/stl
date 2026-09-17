@@ -4,10 +4,13 @@ package migrator_test
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -1203,30 +1206,136 @@ func TestMapleLoanPairsCyclesInOnePass(t *testing.T) {
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
 
-	rows, err := pool.Query(ctx, `EXPLAIN (COSTS OFF) SELECT * FROM position_maple_loan`)
-	if err != nil {
-		t.Fatalf("explaining position_maple_loan: %v", err)
-	}
-	defer rows.Close()
-	var plan []string
+	plan := explainLines(ctx, t, pool, `SELECT * FROM position_maple_loan`)
 	scans := map[string]int{}
-	for rows.Next() {
-		var line string
-		if err := rows.Scan(&line); err != nil {
-			t.Fatalf("scanning a plan line: %v", err)
-		}
-		plan = append(plan, line)
+	for _, line := range plan {
 		for _, cte := range []string{"cycle", "instant"} {
 			if strings.Contains(line, "CTE Scan on "+cte+" ") || strings.HasSuffix(line, "CTE Scan on "+cte) {
 				scans[cte]++
 			}
 		}
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("reading the plan: %v", err)
-	}
 	if scans["instant"] != 0 || scans["cycle"] != 3 {
 		t.Errorf("the plan scans instant %d and cycle %d times; want 0 and exactly 3, so each cycle is paired with its successor by lead() in one pass, not a self-join:\n%s",
 			scans["instant"], scans["cycle"], strings.Join(plan, "\n"))
+	}
+}
+
+// explainLines returns the plan of query, one line per element.
+func explainLines(ctx context.Context, t *testing.T, pool *pgxpool.Pool, query string) []string {
+	t.Helper()
+	rows, err := pool.Query(ctx, "EXPLAIN (COSTS OFF) "+query)
+	if err != nil {
+		t.Fatalf("explaining %s: %v", query, err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("scanning a plan line: %v", err)
+		}
+		plan = append(plan, line)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading the plan: %v", err)
+	}
+	return plan
+}
+
+// seedPlacementVolume gives the planner enough rows to choose the shapes it chooses at staging volume:
+// a dense block series with reorged heights, and cycles spread across it.
+func seedPlacementVolume(t *testing.T, f *mapleFixture) {
+	t.Helper()
+	f.blocks(t, 1, 1000, "2026-06-16T00:00:00Z", 15000, 12)
+	f.exec(t, `INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
+	           SELECT chain_id, block_number, 1, block_timestamp + interval '1 second'
+	           FROM block_meta WHERE chain_id = 1 AND block_number % 97 = 0`)
+	f.exec(t, `INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, build_id)
+	           SELECT l.id, '2026-06-16T00:05:00Z'::timestamptz + k * interval '10 minutes', 'Active', 100, 0
+	           FROM maple_loan l CROSS JOIN generate_series(0, 280) k`)
+	f.exec(t, `ANALYZE block_meta`)
+	f.exec(t, `ANALYZE maple_loan_state`)
+}
+
+// A cycle is placed at the surviving block at or before its synced_at. Selecting the survivors in a
+// DISTINCT ON first leaves the time bound above it, so every cycle sorted the whole chain; the bound
+// must be an index condition on block_meta_chain_time_idx.
+func TestMapleLoanPlacementReadsTheTimeIndex(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	f := seedMaple(ctx, t, pool, map[string]int{"a": 1, "b": 1, "c": 1})
+	seedPlacementVolume(t, f)
+
+	plan := explainLines(ctx, t, pool, `SELECT * FROM position_maple_loan`)
+	bounded := false
+	for i, line := range plan {
+		if !strings.Contains(line, "block_meta_chain_time_idx") {
+			continue
+		}
+		for _, next := range plan[i+1:] {
+			if strings.Contains(next, "->") {
+				break
+			}
+			if strings.Contains(next, "Index Cond:") && strings.Contains(next, "block_timestamp <=") {
+				bounded = true
+			}
+		}
+	}
+	if !bounded {
+		t.Errorf("placement does not bound block_meta_chain_time_idx by block_timestamp, so each cycle scans the chain's blocks:\n%s", strings.Join(plan, "\n"))
+	}
+}
+
+// pairwiseFilter is a join or scan filter bounding block_timestamp by synced_at, in either operand order.
+var pairwiseFilter = regexp.MustCompile(`Filter: .*(block_timestamp <= \S*synced_at|synced_at >= \S*block_timestamp)`)
+
+// No statement a run executes may compare cycles with blocks outside an index condition: as a join or
+// scan filter, block_timestamp against synced_at is evaluated for every pair. Every plan the run
+// executes is captured, since the guards live inside the function where EXPLAIN cannot reach.
+func TestMapleLoanRunComparesNoCycleWithEveryBlock(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	f := seedMaple(ctx, t, pool, map[string]int{"a": 1, "b": 1, "c": 1})
+	seedPlacementVolume(t, f)
+
+	cfg := pool.Config().ConnConfig.Copy()
+	var plans []string
+	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
+		if strings.Contains(n.Message, "plan:") {
+			plans = append(plans, n.Message)
+		}
+	}
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("connecting: %v", err)
+	}
+	defer conn.Close(ctx)
+	for _, stmt := range []string{
+		`LOAD 'auto_explain'`,
+		`SET auto_explain.log_min_duration = 0`,
+		`SET auto_explain.log_nested_statements = on`,
+		`SET auto_explain.log_level = notice`,
+		`SET client_min_messages = notice`,
+	} {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if _, err := conn.Exec(ctx, `SELECT materialize_maple_loan(p_build_id => 0)`); err != nil {
+		t.Fatalf("materialize_maple_loan: %v", err)
+	}
+
+	if len(plans) == 0 {
+		t.Fatal("auto_explain captured no plans, so nothing was checked")
+	}
+	for _, plan := range plans {
+		for _, line := range strings.Split(plan, "\n") {
+			if pairwiseFilter.MatchString(line) {
+				t.Errorf("a statement compares block_timestamp with synced_at outside an index condition, so cycles meet blocks pairwise:\n%s", plan)
+			}
+		}
 	}
 }

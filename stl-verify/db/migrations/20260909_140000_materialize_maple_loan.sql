@@ -7,7 +7,7 @@
 -- so pairing synced_at with another block's number would break the logical observation key.
 
 -- Reverse lookup for the placement. block_meta carries only its PK, which leads with block_number.
--- Four columns so the pick is an index-only scan: the SELECT list is exactly the trailing three.
+-- Every column the pick and its survivor check read, so both are index-only scans.
 DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
                 WHERE c.relname = 'block_meta_chain_time_idx' AND NOT i.indisvalid) THEN
@@ -21,15 +21,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS block_meta_chain_time_idx
 COMMENT ON INDEX block_meta_chain_time_idx IS '[Dimension] Serves the date-or-instant to block-height lookup that position_maple_loan (VEC-405) performs per sync cycle; block_meta''s PK leads with block_number and cannot. Column order matches that view''s ORDER BY so the pick is an index-only scan. Following 20260818_130000''s note on position_state, which defers a reverse-lookup index to the PR of its first consumer.';
 
 CREATE OR REPLACE VIEW position_maple_loan AS
-WITH canonical AS (
-    -- One row per (chain, height): the surviving block. Mixing reorg versions puts an orphan and its
-    -- replacement on one timeline, whose header times run backwards against height, which wedges the
-    -- spine's monotonic gate permanently -- position_state has no update channel to repair it.
-    SELECT DISTINCT ON (m.chain_id, m.block_number)
-           m.chain_id, m.block_number, m.block_version, m.block_timestamp
-    FROM block_meta m
-    ORDER BY m.chain_id, m.block_number, m.block_version DESC, m.processing_version DESC
-), cycle AS (
+WITH cycle AS (
     SELECT s.maple_loan_id, s.synced_at, s.principal_owed, s.processing_version,
            l.chain_id, l.protocol_id, l.loan_address, l.borrower_user_id
     FROM maple_loan_state s
@@ -79,8 +71,14 @@ WITH canonical AS (
     -- refused there, on the snapshot it materialized. Dropping it here would start a loan late.
     LEFT JOIN LATERAL (
         SELECT m.block_timestamp, m.block_number, m.block_version
-        FROM canonical m
+        FROM block_meta m
         WHERE m.chain_id = c.chain_id AND m.block_timestamp <= c.synced_at
+          -- Surviving versions only: an orphan beside its replacement runs header time backwards against
+          -- height and wedges the spine's monotonic gate. Filtered here, not in a DISTINCT ON CTE, so the
+          -- time bound reaches block_meta_chain_time_idx instead of sorting the chain once per cycle.
+          AND NOT EXISTS (SELECT 1 FROM block_meta o
+                           WHERE o.chain_id = m.chain_id AND o.block_number = m.block_number
+                             AND (o.block_version, o.processing_version) > (m.block_version, m.processing_version))
         ORDER BY m.block_timestamp DESC, m.block_number DESC
         LIMIT 1) b ON true
     ORDER BY c.maple_loan_id, b.block_number, b.block_version, c.processing_version, c.synced_at
@@ -106,7 +104,7 @@ SELECT p.chain_id,
 FROM placed p
 JOIN "user" u ON u.id = p.borrower_user_id;
 
-COMMENT ON VIEW position_maple_loan IS '[Operational] VEC-405 projection: Maple Open Term Loan state as native position rows, at the grain (loan, resolved block_number, block_version, processing_version). instrument_key is the loan contract address as hex, the bare native id its sibling projections use; chain qualification is the instrument register''s decision (VEC-616), not this view''s; holder_id is the borrower''s address; quantity is principal_owed, a raw integer in the POOL asset''s native decimals (maple_loan.maple_pool_id -> maple_pool.asset_token_id -> token.decimals), which the row itself does not carry; deal_type is BORROW, because the holder is the borrower and the quantity is what they owe. The source carries no block, so each cycle is placed at the last surviving (highest block_version) block_meta block at or before its synced_at and takes that block''s timestamp; reorg versions are collapsed first because a mixed timeline runs header time backwards against height. Cycles sharing a resolved block collapse to one observation, earliest synced_at winning, so any later reading inside that block window is DISCARDED and appears at no block -- the collapse rate is a property of block_meta density, not of this view. A repaid loan is closed from its ABSENCE, which maple_loan_state''s COMMENT defines as no longer active, but only when it had peers, every one of those peers is still reported at the cycle it vanished from, and at least two further cycles passed without it returning. The two-cycle rule is what stops a single bad response; peer retention is what stops a persistent partial fetch, which a count of peers did not, because a concurrent origination refills it. Two cases this cannot resolve, both for want of a completeness signal in the source: two or more loans vanishing in one cycle are never closed and stay open at their last principal, and a truncation that drops only this loan while retaining every peer is indistinguishable from the loan repaying, so it still closes. Emits the shared position_state column contract; closure is applied by materialize_position_projection().';
+COMMENT ON VIEW position_maple_loan IS '[Operational] VEC-405 projection: Maple Open Term Loan state as native position rows, at the grain (loan, resolved block_number, block_version, processing_version). instrument_key is the loan contract address as hex, the bare native id its sibling projections use; chain qualification is the instrument register''s decision (VEC-616), not this view''s; holder_id is the borrower''s address; quantity is principal_owed, a raw integer in the POOL asset''s native decimals (maple_loan.maple_pool_id -> maple_pool.asset_token_id -> token.decimals), which the row itself does not carry; deal_type is BORROW, because the holder is the borrower and the quantity is what they owe. The source carries no block, so each cycle is placed at the last surviving (highest block_version, then processing_version) block_meta block at or before its synced_at and takes that block''s timestamp; only the surviving version of a height is eligible, because a mixed timeline runs header time backwards against height. Cycles sharing a resolved block collapse to one observation, earliest synced_at winning, so any later reading inside that block window is DISCARDED and appears at no block -- the collapse rate is a property of block_meta density, not of this view. A repaid loan is closed from its ABSENCE, which maple_loan_state''s COMMENT defines as no longer active, but only when it had peers, every one of those peers is still reported at the cycle it vanished from, and at least two further cycles passed without it returning. The two-cycle rule is what stops a single bad response; peer retention is what stops a persistent partial fetch, which a count of peers did not, because a concurrent origination refills it. Two cases this cannot resolve, both for want of a completeness signal in the source: two or more loans vanishing in one cycle are never closed and stay open at their last principal, and a truncation that drops only this loan while retaining every peer is indistinguishable from the loan repaying, so it still closes. Emits the shared position_state column contract; closure is applied by materialize_position_projection().';
 
 -- Dropped rather than replaced: keeping an old argument list beside the new one makes a call that
 -- omits a trailing argument ambiguous, as it did for the spine.
@@ -160,8 +158,10 @@ BEGIN
                       l.chain_id, count(*), min(s.synced_at)) AS msg
         FROM public.maple_loan_state s
         JOIN public.maple_loan l ON l.id = s.maple_loan_id
-        WHERE NOT EXISTS (SELECT 1 FROM public.block_meta m
-                           WHERE m.chain_id = l.chain_id AND m.block_timestamp <= s.synced_at)
+        -- Before the chain's first block, as one indexed min per row; a NOT EXISTS on the inequality
+        -- can plan as a pairwise anti-join.
+        WHERE s.synced_at < coalesce((SELECT min(m.block_timestamp) FROM public.block_meta m
+                                       WHERE m.chain_id = l.chain_id), 'infinity')
         GROUP BY l.chain_id) z;
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'materialize_maple_loan: % chain(s) have cycles no block_meta block precedes, so their history would start late; backfill earlier blocks: %', v_chains, v_bad;
