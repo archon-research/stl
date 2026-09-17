@@ -20,6 +20,10 @@ export type TimeRangeSelection = {
   rangePreset: RangePreset;
   timeRange: TimeRange;
   onRangeChange: (preset: RangePreset, range: TimeRange) => void;
+  // Named apart from `onRangeChange` rather than given a third argument: a
+  // drag is a different event than a picker choice, and it pushes instead of
+  // replacing (see the implementation below).
+  onCustomRangeSelect: (range: TimeRange) => void;
 };
 
 /**
@@ -78,9 +82,25 @@ export function TimeRangeProvider({ children }: { children: ReactNode }) {
     [updateSearch],
   );
 
+  const onCustomRangeSelect = useCallback(
+    (range: TimeRange) => {
+      // A drag is easy to trigger by accident and a reader expects Back to
+      // undo it, unlike a deliberate picker choice — so this pushes.
+      updateSearch(
+        {
+          range: undefined,
+          from: range.from_timestamp,
+          to: range.to_timestamp,
+        },
+        { push: true },
+      );
+    },
+    [updateSearch],
+  );
+
   const value = useMemo<TimeRangeSelection>(
-    () => ({ rangePreset, timeRange, onRangeChange }),
-    [onRangeChange, rangePreset, timeRange],
+    () => ({ rangePreset, timeRange, onRangeChange, onCustomRangeSelect }),
+    [onCustomRangeSelect, onRangeChange, rangePreset, timeRange],
   );
 
   return (
