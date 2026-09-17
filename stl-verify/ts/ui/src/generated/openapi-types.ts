@@ -974,7 +974,7 @@ export interface components {
       underlying_token_id?: number | null;
       /**
        * Wallet Address
-       * @description The ALM proxy holding this position, as upstream reports it. Populated on reference rows only, and `null` there where several of a prime's proxies hold the position: upstream reports those per wallet and they are served as one summed row. Also `null` on an indexed row, which is already scoped to a single queried proxy.
+       * @description The ALM proxy holding this position, as upstream reports it. Populated on reference rows only, and `null` there where several of a prime's proxies hold the position: upstream reports those per wallet and they are served as one summed row. Also `null` on an indexed row: indexed results cover the whole prime and do not name a proxy.
        * @example 0x1234567890abcdef1234567890abcdef12345678
        */
       wallet_address?: string | null;
