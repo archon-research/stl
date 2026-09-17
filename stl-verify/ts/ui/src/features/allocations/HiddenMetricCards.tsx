@@ -34,8 +34,8 @@ export function ExposureCard({
   isChartsLoading: boolean;
 }) {
   const exposure = preferredFigure(
-    riskCapital.reference_prime_exposure_usd,
-    riskCapital.prime_exposure_usd,
+    riskCapital.reference_exposure_usd,
+    riskCapital.exposure_usd,
   );
 
   return (

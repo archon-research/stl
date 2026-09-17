@@ -87,7 +87,6 @@ def reference_client(request):
         reference_service.get.return_value = request.param
 
     self_service = AsyncMock(spec=PrimeRiskCapitalService)
-    self_service.prime_exists.return_value = True
 
     async def _self_dep():
         yield self_service
@@ -246,7 +245,7 @@ def _self_result(total_risk_capital_usd: Decimal = Decimal("100"), per_allocatio
     from app.domain.entities.prime_risk_capital import PrimeRiskCapital
 
     return PrimeRiskCapital(
-        proxy_address=_VALID_ADDR,
+        prime_name="spark",
         model="gap_sweep",
         exposure_usd=Decimal("1000"),
         total_risk_capital_usd=total_risk_capital_usd,
@@ -288,7 +287,7 @@ def test_both_keeps_each_provenance_in_its_own_fields(reference_client):
     body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=both").json()
 
     assert body["source"] == "both"
-    assert body["prime_exposure_usd"] != body["reference_prime_exposure_usd"]
+    assert body["exposure_usd"] != body["reference_exposure_usd"]
     assert body["reference_total_risk_capital_usd"] == "48142491.08"
     # Sky reports these and STL models none of them.
     assert body["junior_risk_capital_usd"] is not None
@@ -353,7 +352,7 @@ def test_both_serves_stl_own_model_for_a_prime_with_no_reference_data(reference_
     body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=both").json()
 
     assert body["source"] == "indexed"
-    assert body["reference_prime_exposure_usd"] is None
+    assert body["reference_exposure_usd"] is None
     assert body["reference_synced_at"] is None
 
 
@@ -415,7 +414,7 @@ def test_encumbrance_contributions_decompose_the_prime_ratio(reference_client):
 
     contributions = [Decimal(row["encumbrance_contribution"]) for row in body["per_allocation"]]
     assert len(contributions) == 2
-    expected = Decimal(body["prime_required_risk_capital_usd"]) / Decimal(body["total_risk_capital_usd"])
+    expected = Decimal(body["required_risk_capital_usd"]) / Decimal(body["total_risk_capital_usd"])
     assert sum(contributions) == expected
 
 

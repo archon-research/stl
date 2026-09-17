@@ -33,15 +33,6 @@ import {
 } from './registry.ts';
 import type { PrimeName } from './registry.ts';
 
-const SPARK_PROXIES = [
-  SPARK_MAINNET_PROXY,
-  SPARK_BASE_PROXY,
-  '0x345e368fccd62266b3f5f37c9a131fd1c39f5869',
-  '0x876664f0c9ff24d1aa355ce9f1680ae1a5bf36fb',
-  '0x92afd6f2385a90e44da3a8b60fe36f6cbe1d8709',
-  SPARK_AVALANCHE_PROXY,
-];
-
 /**
  * A priced row: `applied`, `model` and `unpriced_reason` are the same on all of
  * them, and `symbol` is the receipt token's, so the builder fills those four and
@@ -119,8 +110,7 @@ const GROVE_PER_ALLOCATION: readonly AllocationRiskCapital[] =
   GROVE_PRICED_ROWS.map(pricedAllocation);
 
 type PerChainRow = readonly [
-  proxy_address: ChainRiskCapital['proxy_address'],
-  chain: Exclude<ChainRiskCapital['chain'], undefined>,
+  chain: ChainRiskCapital['chain'],
   exposure_usd: Exclude<ChainRiskCapital['exposure_usd'], undefined>,
   required_risk_capital_usd: Exclude<
     ChainRiskCapital['required_risk_capital_usd'],
@@ -130,8 +120,7 @@ type PerChainRow = readonly [
 ];
 
 function perChain(rows: readonly PerChainRow[]): ChainRiskCapital[] {
-  return rows.map(([proxy, chain, exposure, rrc, count]): ChainRiskCapital => ({
-    proxy_address: proxy,
+  return rows.map(([chain, exposure, rrc, count]): ChainRiskCapital => ({
     chain,
     exposure_usd: exposure,
     required_risk_capital_usd: rrc,
@@ -144,38 +133,24 @@ function perChain(rows: readonly PerChainRow[]): ChainRiskCapital[] {
  * unindexed (`null`, not `'0'`) — the distinction the UI must not flatten.
  */
 const SPARK_PER_CHAIN_ROWS: readonly PerChainRow[] = [
-  [
-    SPARK_MAINNET_PROXY,
-    'mainnet',
-    '1656538061.841276418798473974',
-    '44692696.19',
-    14,
-  ],
-  [SPARK_BASE_PROXY, 'base', '0', '0', 0],
-  ['0x345e368fccd62266b3f5f37c9a131fd1c39f5869', 'unichain', null, null, null],
-  ['0x876664f0c9ff24d1aa355ce9f1680ae1a5bf36fb', 'optimism', null, null, null],
-  ['0x92afd6f2385a90e44da3a8b60fe36f6cbe1d8709', 'arbitrum', null, null, null],
-  [SPARK_AVALANCHE_PROXY, 'avalanche-c', '0.156324898675310000', '0', 1],
+  ['arbitrum', null, null, null],
+  ['avalanche-c', '0.156324898675310000', '0', 1],
+  ['base', '0', '0', 0],
+  ['mainnet', '1656538061.841276418798473974', '44692696.19', 14],
+  ['optimism', null, null, null],
+  ['unichain', null, null, null],
 ];
 
 const GROVE_PER_CHAIN_ROWS: readonly PerChainRow[] = [
-  [
-    GROVE_MAINNET_PROXY,
-    'mainnet',
-    '124481521.310000000000000000',
-    '5564324.20',
-    1,
-  ],
-  [GROVE_BASE_PROXY, 'base', '0', '0', 0],
-  [GROVE_AVALANCHE_PROXY, 'avalanche-c', '0', '0', 0],
+  ['avalanche-c', '0', '0', 0],
+  ['base', '0', '0', 0],
+  ['mainnet', '124481521.310000000000000000', '5564324.20', 1],
 ];
 
 const SPARK_RISK_CAPITAL: PrimeRiskCapital = {
-  prime_id: SPARK_MAINNET_PROXY,
-  proxy_address: SPARK_MAINNET_PROXY,
   model: 'gap_sweep',
   source: 'indexed',
-  exposure_usd: '1656538061.841276418798473974',
+  exposure_usd: '1656538061.997601317473783974',
   total_risk_capital_usd: '48142491.085806286854722044',
   required_risk_capital_usd: '44692696.19',
   encumbrance_ratio: '0.9283',
@@ -183,19 +158,11 @@ const SPARK_RISK_CAPITAL: PrimeRiskCapital = {
   modeled_pct: '1.0000',
   per_allocation: [...SPARK_PER_ALLOCATION],
   prime_name: 'spark',
-  prime_exposure_usd: '1656538061.997601317473783974',
-  prime_required_risk_capital_usd: '44692696.19',
-  prime_modeled_exposure_usd: '1656538061.841275418928473974',
-  prime_modeled_pct: '1.0000',
-  prime_encumbrance_ratio: '0.9283',
-  prime_proxies: SPARK_PROXIES,
   prime_per_chain: perChain(SPARK_PER_CHAIN_ROWS),
   prime_unserved_chains: ['unichain', 'optimism', 'arbitrum'],
 };
 
 const GROVE_RISK_CAPITAL: PrimeRiskCapital = {
-  prime_id: GROVE_MAINNET_PROXY,
-  proxy_address: GROVE_MAINNET_PROXY,
   model: 'gap_sweep',
   source: 'indexed',
   exposure_usd: '124481521.310000000000000000',
@@ -206,60 +173,22 @@ const GROVE_RISK_CAPITAL: PrimeRiskCapital = {
   modeled_pct: '1.0000',
   per_allocation: [...GROVE_PER_ALLOCATION],
   prime_name: 'grove',
-  prime_exposure_usd: '124481521.310000000000000000',
-  prime_required_risk_capital_usd: '5564324.20',
-  prime_modeled_exposure_usd: '124481521.310000000000000000',
-  prime_modeled_pct: '1.0000',
-  prime_encumbrance_ratio: '0.6045',
-  prime_proxies: [GROVE_MAINNET_PROXY, GROVE_BASE_PROXY, GROVE_AVALANCHE_PROXY],
   prime_per_chain: perChain(GROVE_PER_CHAIN_ROWS),
   prime_unserved_chains: [],
 };
 
 /**
- * Every ALM proxy of a prime answers with that prime's figures, per the
- * endpoint's `prime_*` contract. Keyed by lower-cased proxy address.
+ * Every identifier of a prime answers with the same whole-prime figures
+ * (VEC-722). Keyed by lower-cased proxy address.
  */
 export const RISK_CAPITAL_BY_PROXY: Readonly<Record<string, PrimeRiskCapital>> =
   {
     [SPARK_MAINNET_PROXY]: SPARK_RISK_CAPITAL,
-    [SPARK_BASE_PROXY]: {
-      ...SPARK_RISK_CAPITAL,
-      prime_id: SPARK_BASE_PROXY,
-      proxy_address: SPARK_BASE_PROXY,
-      exposure_usd: '0',
-      required_risk_capital_usd: '0',
-      modeled_exposure_usd: '0',
-      per_allocation: [],
-    },
-    [SPARK_AVALANCHE_PROXY]: {
-      ...SPARK_RISK_CAPITAL,
-      prime_id: SPARK_AVALANCHE_PROXY,
-      proxy_address: SPARK_AVALANCHE_PROXY,
-      exposure_usd: '0.156324898675310000',
-      required_risk_capital_usd: '0',
-      modeled_exposure_usd: '0.156324898675310000',
-      per_allocation: [],
-    },
+    [SPARK_BASE_PROXY]: SPARK_RISK_CAPITAL,
+    [SPARK_AVALANCHE_PROXY]: SPARK_RISK_CAPITAL,
     [GROVE_MAINNET_PROXY]: GROVE_RISK_CAPITAL,
-    [GROVE_BASE_PROXY]: {
-      ...GROVE_RISK_CAPITAL,
-      prime_id: GROVE_BASE_PROXY,
-      proxy_address: GROVE_BASE_PROXY,
-      exposure_usd: '0',
-      required_risk_capital_usd: '0',
-      modeled_exposure_usd: '0',
-      per_allocation: [],
-    },
-    [GROVE_AVALANCHE_PROXY]: {
-      ...GROVE_RISK_CAPITAL,
-      prime_id: GROVE_AVALANCHE_PROXY,
-      proxy_address: GROVE_AVALANCHE_PROXY,
-      exposure_usd: '0',
-      required_risk_capital_usd: '0',
-      modeled_exposure_usd: '0',
-      per_allocation: [],
-    },
+    [GROVE_BASE_PROXY]: GROVE_RISK_CAPITAL,
+    [GROVE_AVALANCHE_PROXY]: GROVE_RISK_CAPITAL,
   };
 
 /**
@@ -470,12 +399,10 @@ export function toCompositeRiskCapital(
     ...self,
     source: 'both',
     per_allocation: compositePerAllocation(self),
-    reference_prime_exposure_usd: reference.prime_exposure_usd,
-    reference_prime_required_risk_capital_usd:
-      reference.prime_required_risk_capital_usd,
+    reference_exposure_usd: reference.exposure_usd,
+    reference_required_risk_capital_usd: reference.required_risk_capital_usd,
     reference_total_risk_capital_usd: reference.total_risk_capital_usd ?? null,
-    reference_prime_encumbrance_ratio:
-      reference.prime_encumbrance_ratio ?? null,
+    reference_encumbrance_ratio: reference.encumbrance_ratio ?? null,
     // Sky reports these and STL models none of them, so the merged answer
     // carries them whole.
     junior_risk_capital_usd: reference.junior_risk_capital_usd ?? null,
@@ -510,13 +437,10 @@ export function toReferenceRiskCapital(
     source: 'reference',
     model: null,
     per_allocation: rows.map(referenceAllocation),
-    prime_exposure_usd: primeExposureUsd,
-    prime_required_risk_capital_usd: primeRequiredRiskCapitalUsd,
-    prime_modeled_exposure_usd: primeExposureUsd,
     exposure_usd: primeExposureUsd,
     required_risk_capital_usd: primeRequiredRiskCapitalUsd,
-    modeled_exposure_usd: self.prime_modeled_exposure_usd,
-    encumbrance_ratio: self.prime_encumbrance_ratio ?? null,
+    modeled_exposure_usd: primeExposureUsd,
+    encumbrance_ratio: self.encumbrance_ratio ?? null,
     junior_risk_capital_usd: usdFigure(junior),
     senior_risk_capital_usd: usdFigure(senior),
     internal_junior_risk_capital_usd: usdFigure(juniorInternal),

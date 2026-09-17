@@ -64,22 +64,19 @@ class AllocationRiskCapital:
 
 @dataclass(frozen=True)
 class ChainRiskCapital:
-    """One ALM proxy's contribution to its prime's aggregated figures.
+    """One chain's contribution to its prime's aggregated figures.
 
     Carried so a consumer can audit the prime-level sum, and so a chain
-    contributing nothing is visibly present rather than absent. ``chain`` is
-    ``None`` for a proxy absent from the axis-synome contract, which has no
-    discoverable chain.
+    contributing nothing is visibly present rather than absent.
 
-    The figures are ``None`` — not ``0`` — for a proxy on a chain no allocation
-    tracker serves. Such a proxy has no ``allocation_position`` rows at all, so a
-    zero would claim the prime holds nothing there when the truth is that STL does
-    not know: the two must not read alike, because the difference moves the
-    prime's encumbrance in the direction that looks safe.
+    The figures are ``None`` — not ``0`` — for a chain no allocation tracker
+    serves. The prime has no ``allocation_position`` rows there at all, so a zero
+    would claim it holds nothing when the truth is that STL does not know: the
+    two must not read alike, because the difference moves the prime's
+    encumbrance in the direction that looks safe.
     """
 
-    proxy_address: str
-    chain: str | None
+    chain: str
     exposure_usd: Decimal | None
     required_risk_capital_usd: Decimal | None
     allocation_count: int | None
@@ -89,29 +86,23 @@ class ChainRiskCapital:
 class PrimeRiskCapital:
     """Self-computed capital metrics for a prime.
 
+    Every figure is whole-prime: additive quantities are summed across the
+    prime's ALM proxies and shared ones are read once, per
+    ``app.domain.prime_scope``. Nothing here is scoped to a single proxy, so the
+    answer is identical whichever of the prime's identifiers was passed.
+
     ``exposure_usd`` sums the prime's priced receipt-token allocations (the set
     the model is applied over), which is distinct from total allocation (that
     also includes bare/direct holdings). ``modeled_pct`` is the share of that
-    exposure the model could price. ``encumbrance_ratio`` is ``None`` when
-    Total Risk Capital is absent or zero.
+    exposure the model could price. ``encumbrance_ratio`` is ``None`` when Total
+    Risk Capital is absent or zero.
 
-    Fields without a prefix are scoped to the **queried proxy**. Fields prefixed
-    ``prime_`` are scoped to the whole prime and are identical whichever of its
-    proxies was queried. They aggregate the prime's ALM proxies on chains an
-    allocation tracker serves; the rest contribute nothing and are named in
+    The aggregate covers the prime's ALM proxies on chains an allocation tracker
+    serves; the rest contribute nothing and are named in
     ``prime_unserved_chains``, so a consumer can see that the total is bounded by
     what STL indexes rather than by what the prime holds.
-    ``total_risk_capital_usd`` is prime-wide despite carrying
-    no prefix (it predates the convention) and must never be summed.
-    ``encumbrance_ratio`` divides a proxy-scoped numerator by that prime-wide
-    denominator, so it is meaningless; it is retained unchanged for backwards
-    compatibility and superseded by ``prime_encumbrance_ratio``.
     """
 
-    # The proxy the unprefixed figures are scoped to — the address that was
-    # queried, not the prime. Named for what it holds: the API serves it as both
-    # `proxy_address` and, for backwards compatibility, the misnamed `prime_id`.
-    proxy_address: str
     model: ModelName
     exposure_usd: Decimal
     total_risk_capital_usd: Decimal | None
@@ -120,12 +111,6 @@ class PrimeRiskCapital:
     modeled_exposure_usd: Decimal
     modeled_pct: Decimal | None
     per_allocation: list[AllocationRiskCapital]
-    prime_name: str | None = None
-    prime_exposure_usd: Decimal = Decimal("0")
-    prime_required_risk_capital_usd: Decimal = Decimal("0")
-    prime_modeled_exposure_usd: Decimal = Decimal("0")
-    prime_modeled_pct: Decimal | None = None
-    prime_encumbrance_ratio: Decimal | None = None
-    prime_proxies: tuple[str, ...] = ()
+    prime_name: str
     prime_per_chain: tuple[ChainRiskCapital, ...] = ()
     prime_unserved_chains: tuple[str, ...] = ()

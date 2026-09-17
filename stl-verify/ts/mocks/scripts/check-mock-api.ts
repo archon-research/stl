@@ -1541,7 +1541,7 @@ async function checkAReadCanBeMadeToFail() {
     'risk-capital before the failure is installed',
   );
   assert.ok(
-    healthy.prime_exposure_usd !== undefined,
+    healthy.exposure_usd !== undefined,
     'the read has to succeed first, or the 503 below proves nothing',
   );
 

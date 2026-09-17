@@ -15,12 +15,14 @@ The result is model-derived and partial by design (see
 """
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 
-from app.domain.chain_names import chain_is_served
+from app.domain.chain_names import chain_name_for
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown
+from app.domain.entities.prime import PrimeScope, ProxyWallet
 from app.domain.entities.prime_risk_capital import (
     AllocationRiskCapital,
     ChainRiskCapital,
@@ -30,7 +32,6 @@ from app.domain.entities.prime_risk_capital import (
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import ModelName, RrcResult
 from app.domain.exceptions import AllocationUnpricedError, ModelDataUnavailableError
-from app.domain.prime_registry import alm_proxies_for_prime, prime_name_for
 from app.domain.provenance import Provenance
 from app.logging import get_logger
 from app.ports.allocation_repository import AllocationRepositoryPort
@@ -155,31 +156,47 @@ def _assemble_allocations(
     return exposure, modeled_exposure, required, per_allocation
 
 
-def _chain_row(proxy_address: str, chain: str | None, totals: "_ProxyTotals | None") -> ChainRiskCapital:
-    """One ``prime_per_chain`` row, ``null`` throughout when the chain went unqueried."""
-    if totals is None:
-        return ChainRiskCapital(
-            proxy_address=proxy_address,
-            chain=chain,
-            exposure_usd=None,
-            required_risk_capital_usd=None,
-            allocation_count=None,
+def _chain_of(wallet: ProxyWallet) -> str:
+    """The wallet's internal chain name, or a loud failure.
+
+    ``prime_proxy.chain_id`` references the ``chain`` registry, and
+    ``CHAIN_ID_TO_NAME`` is held in lockstep with the Go tracker's vocabulary by
+    ``test_chain_names.py``. A miss means a chain was onboarded without teaching
+    this side its name, which would silently drop a wallet's exposure out of the
+    per-chain audit while leaving it in the total.
+    """
+    chain = chain_name_for(wallet.chain_id)
+    if chain is None:
+        raise ValueError(
+            f"prime_proxy lists wallet {wallet.address} on chain id {wallet.chain_id}, "
+            f"which app.domain.chain_names has no name for"
         )
+    return chain
+
+
+def _chain_row(chain: str, contributions: "Sequence[_ProxyTotals]") -> ChainRiskCapital:
+    """One ``prime_per_chain`` row, summed over the prime's wallets on that chain.
+
+    No contributions means the chain went unqueried — it is served by no
+    tracker — so every figure is ``null`` rather than a zero that would claim
+    the prime holds nothing there.
+    """
+    if not contributions:
+        return ChainRiskCapital(chain=chain, exposure_usd=None, required_risk_capital_usd=None, allocation_count=None)
     return ChainRiskCapital(
-        proxy_address=proxy_address,
         chain=chain,
-        exposure_usd=totals.exposure,
-        required_risk_capital_usd=totals.required,
-        allocation_count=len(totals.per_allocation),
+        exposure_usd=sum((totals.exposure for totals in contributions), Decimal("0")),
+        required_risk_capital_usd=sum((totals.required for totals in contributions), Decimal("0")),
+        allocation_count=sum(len(totals.per_allocation) for totals in contributions),
     )
 
 
 @dataclass(frozen=True)
 class _ProxyTotals:
-    """One proxy's contribution, before folding into the prime-level result."""
+    """One wallet's contribution, before folding into the prime-level result."""
 
     proxy_address: str
-    chain: str | None
+    chain: str
     exposure: Decimal
     modeled_exposure: Decimal
     required: Decimal
@@ -191,72 +208,31 @@ class PrimeRiskCapitalService:
         self._repository = repository
         self._registry = registry
 
-    async def prime_exists(self, prime_id: EthAddress) -> bool:
-        return await self._repository.prime_exists(prime_id)
+    async def compute(self, scope: PrimeScope, source: Provenance = Provenance.INDEXED) -> PrimeRiskCapital:
+        """Compute the whole prime's figures over its resolved wallet set.
 
-    async def compute(self, prime_id: EthAddress, source: Provenance = Provenance.INDEXED) -> PrimeRiskCapital:
-        """Compute the queried proxy's figures plus the prime-wide aggregates.
-
-        The unprefixed fields stay scoped to ``prime_id`` so existing consumers
-        see unchanged numbers. The ``prime_*`` fields sum the numerator across the
-        prime's ALM proxies on served chains so they match
-        ``total_risk_capital_usd``, which is prime-wide and read once.
+        Exposure, modeled exposure and Required Risk Capital are ADDITIVE, so
+        they sum across the prime's ALM proxies; Total Risk Capital is SHARED
+        and is read once over its SubProxy treasury wallets
+        (``app.domain.prime_scope``). Nothing is scoped to one proxy, so the
+        answer is identical whichever identifier named the prime.
 
         ``source`` is the caller's resolved provenance (``indexed`` or ``both``
         — never ``reference``, which runs no model and never reaches this
         method) and picks the model preference order via ``_model_preference``.
         """
-        prime_name, proxies = self._proxies_to_aggregate(prime_id)
-
         per_proxy, total_rc = await asyncio.gather(
-            asyncio.gather(
-                *(
-                    self._compute_for_proxy(proxy, chain, source)
-                    for proxy, chain in self._proxies_to_query(prime_id, proxies)
-                )
-            ),
-            self._repository.get_latest_total_capital_usd(prime_id),
+            asyncio.gather(*(self._compute_for_proxy(wallet, source) for wallet in scope.alm_wallets)),
+            self._repository.get_latest_total_capital_usd(scope.subproxies),
         )
 
-        return self._assemble_result(prime_id, prime_name, proxies, per_proxy, total_rc, source)
+        return self._assemble_result(scope, per_proxy, total_rc, source)
 
-    @staticmethod
-    def _proxies_to_query(
-        prime_id: EthAddress, proxies: tuple[tuple[EthAddress, str | None], ...]
-    ) -> tuple[tuple[EthAddress, str | None], ...]:
-        """Narrow the prime's proxies to the ones a query can answer for.
-
-        A proxy on a chain no allocation tracker serves has no
-        ``allocation_position`` rows at all, so computing it spends a connection
-        per proxy to learn nothing and returns zeros that read as a genuine zero.
-        Skipping it is what lets ``prime_per_chain`` report ``null`` for that chain
-        instead. The queried proxy is always included: the unprefixed fields are
-        its own, and ``prime_exists`` has already established it has rows.
-        """
-        queried = str(prime_id).lower()
-        return tuple(
-            (proxy, chain) for proxy, chain in proxies if chain_is_served(chain) or str(proxy).lower() == queried
-        )
-
-    async def _compute_for_proxy(
-        self, proxy_address: EthAddress, chain: str | None, source: Provenance
-    ) -> _ProxyTotals:
+    async def _compute_for_proxy(self, wallet: ProxyWallet, source: Provenance) -> _ProxyTotals:
         """Run the per-allocation model pipeline over one ALM proxy's positions."""
+        proxy_address = wallet.address
+        chain = _chain_of(wallet)
         positions = await self._repository.list_receipt_token_positions(proxy_address)
-
-        # Positions on a chain declared unserved mean the declaration is stale: a
-        # tracker is writing rows for a chain SERVED_TRACKER_CHAINS says nothing
-        # indexes, so every sibling on that chain is being skipped and reported as
-        # null. Only reachable for the queried proxy, which is computed regardless.
-        # A proxy absent from the contract has no chain to be stale about.
-        if positions and chain is not None and not chain_is_served(chain):
-            logger.warning(
-                "prime risk-capital: proxy %s has %d positions on unserved chain %s; "
-                "SERVED_TRACKER_CHAINS is stale against the deployed trackers",
-                proxy_address,
-                len(positions),
-                chain,
-            )
 
         # A zero-balance position contributes no required risk capital, so skip
         # its model compute entirely (each compute is several DB round trips).
@@ -320,42 +296,13 @@ class PrimeRiskCapitalService:
         )
 
     @staticmethod
-    def _proxies_to_aggregate(prime_id: EthAddress) -> tuple[str | None, tuple[tuple[EthAddress, str | None], ...]]:
-        """Resolve the queried proxy to its prime's full set of ALM proxies.
-
-        Returns ``(prime_name, ((proxy, chain), ...))`` with the queried proxy
-        first. Order here is incidental to aggregation (``_assemble_result``
-        locates the queried proxy's own totals by address, not by position) and
-        is re-sorted by address before it reaches ``prime_proxies`` /
-        ``prime_per_chain``, so those prime-scoped fields read identically
-        whichever proxy was queried. A proxy absent from the axis-synome
-        contract has no discoverable siblings and aggregates over itself alone.
-        """
-        prime_name = prime_name_for(prime_id)
-        if prime_name is None:
-            return None, ((prime_id, None),)
-
-        siblings = [
-            (EthAddress(entry.address), entry.chain)
-            for entry in alm_proxies_for_prime(prime_name)
-            if entry.address != str(prime_id).lower()
-        ]
-        queried_chain = next(
-            (entry.chain for entry in alm_proxies_for_prime(prime_name) if entry.address == str(prime_id).lower()),
-            None,
-        )
-        return prime_name, ((prime_id, queried_chain), *siblings)
-
-    @staticmethod
     def _assemble_result(
-        prime_id: EthAddress,
-        prime_name: str | None,
-        proxies: tuple[tuple[EthAddress, str | None], ...],
+        scope: PrimeScope,
         per_proxy: list[_ProxyTotals],
         total_rc: Decimal | None,
         source: Provenance,
     ) -> PrimeRiskCapital:
-        """Build the response from the queried proxy's totals plus the prime-wide sums.
+        """Fold the per-wallet contributions into the prime's figures.
 
         ``model`` reports the top of this view's preference order (always
         ``core_model``), not a per-position tally — individual allocations can
@@ -363,51 +310,34 @@ class PrimeRiskCapitalService:
         the same way the field always named ``gap_sweep`` before there was a
         second model to prefer.
         """
-        # Looked up by address, not read off index 0: per_proxy puts the queried
-        # proxy first (see _proxies_to_aggregate), but prime_proxies/prime_per_chain
-        # below are address-sorted, and the unprefixed fields must stay pinned to
-        # the queried proxy regardless of where that sort places it.
-        queried_address = str(prime_id).lower()
-        computed = {totals.proxy_address.lower(): totals for totals in per_proxy}
-        queried = computed[queried_address]
+        by_chain: dict[str, list[_ProxyTotals]] = {}
+        for totals in per_proxy:
+            by_chain.setdefault(totals.chain, []).append(totals)
+        # An unserved chain is present-but-null rather than missing: its absence
+        # would be indistinguishable from a prime that has no proxy there at all.
+        for chain in scope.unserved_chains:
+            by_chain.setdefault(chain, [])
 
-        # prime_ fields are reconciliation keys: identical from every proxy of a
-        # prime, so a consumer can dedupe on them. Sorting by address (matching
-        # alm_proxies_for_prime) makes prime_proxies/prime_per_chain identical
-        # element-for-element too, not just as sets, regardless of which proxy
-        # was queried. Built from the prime's whole proxy set rather than from the
-        # computed subset, so an unserved chain is present-but-null instead of
-        # missing — its absence would be indistinguishable from a prime that has no
-        # proxy there at all.
-        ordered = sorted(proxies, key=lambda entry: str(entry[0]).lower())
-
-        prime_exposure = sum((totals.exposure for totals in per_proxy), Decimal("0"))
-        prime_modeled = sum((totals.modeled_exposure for totals in per_proxy), Decimal("0"))
-        prime_required = sum((totals.required for totals in per_proxy), Decimal("0"))
+        exposure = sum((totals.exposure for totals in per_proxy), Decimal("0"))
+        modeled = sum((totals.modeled_exposure for totals in per_proxy), Decimal("0"))
+        required = sum((totals.required for totals in per_proxy), Decimal("0"))
 
         return PrimeRiskCapital(
-            proxy_address=str(prime_id),
             model=_model_preference(source)[0],
-            exposure_usd=queried.exposure,
+            exposure_usd=exposure,
             total_risk_capital_usd=total_rc,
-            required_risk_capital_usd=queried.required,
-            encumbrance_ratio=_ratio(queried.required, total_rc),
-            modeled_exposure_usd=queried.modeled_exposure,
-            modeled_pct=_ratio(queried.modeled_exposure, queried.exposure),
-            per_allocation=queried.per_allocation,
-            prime_name=prime_name,
-            prime_exposure_usd=prime_exposure,
-            prime_required_risk_capital_usd=prime_required,
-            prime_modeled_exposure_usd=prime_modeled,
-            prime_modeled_pct=_ratio(prime_modeled, prime_exposure),
-            prime_encumbrance_ratio=_ratio(prime_required, total_rc),
-            prime_proxies=tuple(str(proxy).lower() for proxy, _ in ordered),
-            prime_per_chain=tuple(
-                _chain_row(str(proxy).lower(), chain, computed.get(str(proxy).lower())) for proxy, chain in ordered
+            required_risk_capital_usd=required,
+            encumbrance_ratio=_ratio(required, total_rc),
+            modeled_exposure_usd=modeled,
+            modeled_pct=_ratio(modeled, exposure),
+            per_allocation=sorted(
+                (allocation for totals in per_proxy for allocation in totals.per_allocation),
+                key=lambda allocation: allocation.exposure_usd,
+                reverse=True,
             ),
-            prime_unserved_chains=tuple(
-                sorted({chain for _, chain in ordered if chain is not None and not chain_is_served(chain)})
-            ),
+            prime_name=scope.identity.name,
+            prime_per_chain=tuple(_chain_row(chain, by_chain[chain]) for chain in sorted(by_chain)),
+            prime_unserved_chains=scope.unserved_chains,
         )
 
     async def _prefetch_crypto_lending_inputs(

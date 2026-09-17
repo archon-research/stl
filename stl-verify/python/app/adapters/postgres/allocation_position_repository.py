@@ -1071,26 +1071,23 @@ class AllocationRepository:
 
         return "0x" + row.address if row is not None else None
 
-    async def get_latest_total_capital_usd(self, prime_address: EthAddress) -> Decimal | None:
+    async def get_latest_total_capital_usd(self, subproxies: Sequence[EthAddress]) -> Decimal | None:
         """Return the prime's latest treasury USDS balance (Total Risk Capital), or None.
 
-        The treasury is the USDS held in the prime's SubProxy wallet (shares the
-        prime's ``prime_id``, distinct ``proxy_address``). USDS is dollar-pegged,
-        so the balance is the USD figure. Returns ``None`` when the prime has no
-        SubProxy treasury position.
+        The treasury is the USDS held in the prime's SubProxy wallets, which the
+        caller resolves prime-wide. USDS is dollar-pegged, so the balance is the
+        USD figure. Total Risk Capital is SHARED (``app.domain.prime_scope``):
+        the wallet set scopes one read rather than being summed per wallet.
+        Returns ``None`` when the prime has no SubProxy treasury position.
         """
-        subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
+        if not subproxies:
+            return None
         query = text(
             """
             SELECT ap.balance
             FROM allocation_position ap
             JOIN token t ON t.id = ap.token_id
-            WHERE ap.prime_id = (
-                SELECT prime_id FROM prime_proxy
-                WHERE proxy_address = decode(:address_hex, 'hex')
-                LIMIT 1
-            )
-              AND ap.proxy_address IN :subproxy_addrs
+            WHERE ap.proxy_address IN :subproxy_addrs
               AND t.address = decode(:usds_hex, 'hex')
             -- Stays on the history: it needs prime_id, which the cache does not
             -- carry. Newer-wins order per _RECEIPT_TOKEN_POSITIONS_SQL.
@@ -1101,8 +1098,7 @@ class AllocationRepository:
             """
         ).bindparams(bindparam("subproxy_addrs", expanding=True))
         params = {
-            "address_hex": prime_address.hex,
-            "subproxy_addrs": subproxies,
+            "subproxy_addrs": [address.to_bytes() for address in subproxies],
             "usds_hex": _USDS_ADDRESS_HEX,
         }
 
@@ -1117,17 +1113,15 @@ class AllocationRepository:
                 extra={
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
-                    "prime_address": str(prime_address),
+                    "subproxies": [str(address) for address in subproxies],
                 },
                 exc_info=True,
             )
-            raise ValueError(
-                f"Database query failed while fetching latest total capital for prime {prime_address}: {exc}"
-            ) from exc
+            raise ValueError(f"Database query failed while fetching latest total capital: {exc}") from exc
 
         if row is None or row.balance is None:
             return None
-        return _safe_decimal(row.balance, "balance", f"prime_id={prime_address}")
+        return _safe_decimal(row.balance, "balance", "total_capital")
 
     async def list_exposure_buckets(
         self,

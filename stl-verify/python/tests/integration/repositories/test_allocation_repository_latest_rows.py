@@ -44,6 +44,7 @@ from tests.integration.seed import (
     RTL_LATEST_ACTIONS,
     RTL_LATEST_BALANCES,
     RTL_PROXY_HEX,
+    RTL_SUB_PROXY_HEX,
     RTL_TREASURY_BALANCE,
     RTL_UNDERLYING_PRICE,
     RTL_WALLET_FALLBACK_RECEIPT_HEX,
@@ -511,7 +512,7 @@ async def test_usd_exposure_breaks_an_exact_tie_on_direction(repo, receipt_token
 @pytest.mark.asyncio
 async def test_latest_total_capital_breaks_an_exact_tie_on_direction(repo) -> None:
     """The treasury read resolves the sweep tie the same way; USDS is the USD figure."""
-    assert await repo.get_latest_total_capital_usd(_PROXY) == RTL_TREASURY_BALANCE
+    assert await repo.get_latest_total_capital_usd([EthAddress(f"0x{RTL_SUB_PROXY_HEX}")]) == RTL_TREASURY_BALANCE
 
 
 @pytest.mark.asyncio

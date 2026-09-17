@@ -6,12 +6,14 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.domain.entities.allocation import EthAddress
+from app.domain.entities.prime import PrimeScope, ProxyWallet
 from app.domain.exceptions import MissingShareError, ModelDataUnavailableError, StaleShareError
+from app.domain.prime_registry import ProxyKind
 from app.domain.provenance import Provenance
 from app.ports.allocation_repository import AllocationRepositoryPort
 from app.services.model_registry import ModelRegistry
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
-from tests.factories import make_receipt_token_position
+from tests.factories import make_prime_identity, make_receipt_token_position
 
 
 class _AppliesTo(Protocol):
@@ -97,6 +99,36 @@ _GROVE_ROBINHOOD_ALM = "0x29626c2d8ca49a51e4deceec5499e52983c42bd5"
 _GROVE_PLUME_ALM = "0x1db91ad50446a671e2231f77e00948e68876f812"
 
 
+def _scope(name: str, alm: list[tuple[str, int]], unserved: tuple[str, ...] = ()) -> PrimeScope:
+    """A resolved scope naming ``alm`` as the prime's proxies, plus a treasury."""
+    return PrimeScope.build(
+        make_prime_identity(name=name),
+        [
+            *(
+                ProxyWallet(address=EthAddress(address), chain_id=chain_id, kind=ProxyKind.ALM)
+                for address, chain_id in alm
+            ),
+            ProxyWallet(address=EthAddress("0x" + "22" * 20), chain_id=1, kind=ProxyKind.SUB_PROXY),
+        ],
+        unserved,
+    )
+
+
+def _prime_scope() -> PrimeScope:
+    """The single-proxy scope the model-dispatch tests drive, where the prime's
+    topology is irrelevant and only the dispatch matters."""
+    return _scope("spark", [(str(_PRIME), 1)])
+
+
+def _spark_scope() -> PrimeScope:
+    return _scope("spark", [(_SPARK_MAINNET_ALM, 1), (_SPARK_AVALANCHE_ALM, 43114)])
+
+
+def _grove_scope() -> PrimeScope:
+    """Grove's indexed mainnet proxy, with the contract's unindexed chains named."""
+    return _scope("grove", [(_GROVE_MAINNET_ALM, 1)], unserved=("monad", "plasma", "plume"))
+
+
 def _repo_by_proxy(positions_by_proxy: dict[str, list], total_rc: Decimal | None):
     """Repository stub that answers per queried proxy address.
 
@@ -179,132 +211,93 @@ def _registry_leaving_asset_two_unmodeled() -> _FakeRegistry:
 
 
 @pytest.mark.asyncio
-async def test_compute_leaves_the_proxy_scoped_required_risk_capital_unchanged():
+async def test_compute_sums_required_risk_capital_across_the_alm_proxies():
     service = _service(_two_chain_spark_repo(), _two_asset_registry())
 
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    result = await service.compute(_spark_scope())
 
-    assert result.required_risk_capital_usd == Decimal("40")
+    assert result.required_risk_capital_usd == Decimal("42")
 
 
 @pytest.mark.asyncio
-async def test_compute_leaves_the_proxy_scoped_exposure_unchanged():
+async def test_compute_sums_exposure_across_the_alm_proxies():
     service = _service(_two_chain_spark_repo(), _two_asset_registry())
 
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    result = await service.compute(_spark_scope())
 
-    assert result.exposure_usd == Decimal("400")
+    assert result.exposure_usd == Decimal("420")
 
 
 @pytest.mark.asyncio
-async def test_compute_leaves_the_deprecated_encumbrance_ratio_unchanged():
+async def test_compute_carries_every_wallets_allocations():
+    """Per-allocation is the whole prime's rows, largest exposure first: a
+    breakdown scoped to one proxy under a prime-wide headline is the mismatch
+    this ticket removes."""
     service = _service(_two_chain_spark_repo(), _two_asset_registry())
 
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    result = await service.compute(_spark_scope())
 
-    assert result.encumbrance_ratio == Decimal("0.4000")
+    assert [alloc.receipt_token_id for alloc in result.per_allocation] == [1, 2]
 
 
 @pytest.mark.asyncio
-async def test_compute_leaves_per_allocation_scoped_to_the_queried_proxy():
-    service = _service(_two_chain_spark_repo(), _two_asset_registry())
-
-    result = await service.compute(EthAddress(_SPARK_AVALANCHE_ALM))
-
-    assert {alloc.receipt_token_id for alloc in result.per_allocation} == {2}
-
-
-@pytest.mark.asyncio
-async def test_compute_sums_prime_required_risk_capital_across_the_alm_proxies():
-    service = _service(_two_chain_spark_repo(), _two_asset_registry())
-
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
-
-    assert result.prime_required_risk_capital_usd == Decimal("42")
-
-
-@pytest.mark.asyncio
-async def test_compute_sums_prime_exposure_across_the_alm_proxies():
-    service = _service(_two_chain_spark_repo(), _two_asset_registry())
-
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
-
-    assert result.prime_exposure_usd == Decimal("420")
-
-
-@pytest.mark.asyncio
-async def test_compute_sums_prime_modeled_exposure_across_the_alm_proxies():
+async def test_compute_sums_modeled_exposure_across_the_alm_proxies():
     service = _service(_partly_modeled_two_chain_spark_repo(), _registry_leaving_asset_two_unmodeled())
 
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    result = await service.compute(_spark_scope())
 
-    assert result.prime_modeled_exposure_usd == Decimal("400")
-
-
-@pytest.mark.asyncio
-async def test_compute_divides_prime_modeled_exposure_by_prime_exposure():
-    service = _service(_partly_modeled_two_chain_spark_repo(), _registry_leaving_asset_two_unmodeled())
-
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
-
-    assert result.prime_modeled_pct == Decimal("0.8000")
+    assert result.modeled_exposure_usd == Decimal("400")
 
 
 @pytest.mark.asyncio
-async def test_compute_leaves_the_proxy_scoped_modeled_figures_unchanged():
+async def test_compute_divides_modeled_exposure_by_exposure():
     service = _service(_partly_modeled_two_chain_spark_repo(), _registry_leaving_asset_two_unmodeled())
 
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    result = await service.compute(_spark_scope())
 
-    assert result.modeled_exposure_usd == Decimal("300")
-    assert result.modeled_pct == Decimal("0.7500")
-
-
-@pytest.mark.asyncio
-async def test_compute_reports_the_same_prime_modeled_figures_from_every_proxy():
-    service = _service(_partly_modeled_two_chain_spark_repo(), _registry_leaving_asset_two_unmodeled())
-
-    from_mainnet = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
-    from_avalanche = await service.compute(EthAddress(_SPARK_AVALANCHE_ALM))
-
-    assert from_avalanche.prime_modeled_exposure_usd == from_mainnet.prime_modeled_exposure_usd
-    assert from_avalanche.prime_modeled_pct == from_mainnet.prime_modeled_pct
+    assert result.modeled_pct == Decimal("0.8000")
 
 
 @pytest.mark.asyncio
 async def test_compute_divides_the_summed_rrc_by_the_prime_wide_treasury():
     service = _service(_two_chain_spark_repo(), _two_asset_registry())
 
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    result = await service.compute(_spark_scope())
 
-    assert result.prime_encumbrance_ratio == Decimal("0.4200")
+    assert result.encumbrance_ratio == Decimal("0.4200")
 
 
 @pytest.mark.asyncio
-async def test_compute_takes_total_risk_capital_once_rather_than_per_proxy():
-    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+async def test_compute_reads_total_risk_capital_over_the_subproxy_wallets():
+    """Total Risk Capital is SHARED: one read over the treasury wallets, never
+    one per ALM proxy summed."""
+    repo = _two_chain_spark_repo()
+    service = _service(repo, _two_asset_registry())
+    scope = _spark_scope()
 
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    result = await service.compute(scope)
 
     assert result.total_risk_capital_usd == Decimal("100")
+    repo.get_latest_total_capital_usd.assert_awaited_once_with(scope.subproxies)
 
 
 @pytest.mark.asyncio
-async def test_compute_reports_the_same_prime_figures_from_every_proxy():
+async def test_compute_answers_identically_for_two_scopes_of_one_prime():
+    """The property the whole ticket is for: the scope is a value, so two
+    identifiers naming one prime cannot produce different figures."""
     service = _service(_two_chain_spark_repo(), _two_asset_registry())
 
-    from_mainnet = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
-    from_avalanche = await service.compute(EthAddress(_SPARK_AVALANCHE_ALM))
+    first = await service.compute(_spark_scope())
+    second = await service.compute(_spark_scope())
 
-    assert from_avalanche.prime_required_risk_capital_usd == from_mainnet.prime_required_risk_capital_usd
-    assert from_avalanche.prime_encumbrance_ratio == from_mainnet.prime_encumbrance_ratio
+    assert first == second
 
 
 @pytest.mark.asyncio
 async def test_compute_reports_a_per_chain_breakdown_of_the_aggregation():
     service = _service(_two_chain_spark_repo(), _two_asset_registry())
 
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    result = await service.compute(_spark_scope())
 
     by_chain = {row.chain: row.required_risk_capital_usd for row in result.prime_per_chain}
     assert by_chain["mainnet"] == Decimal("40")
@@ -313,7 +306,7 @@ async def test_compute_reports_a_per_chain_breakdown_of_the_aggregation():
 
 @pytest.mark.asyncio
 async def test_compute_reports_null_not_zero_for_a_chain_no_tracker_serves():
-    """The distinction the prime-wide totals rest on.
+    """The distinction the whole-prime totals rest on.
 
     Grove's monad, plasma and plume proxies have no ``allocation_position`` rows
     because no tracker indexes those chains. Reported as ``0`` they would claim the
@@ -322,157 +315,74 @@ async def test_compute_reports_null_not_zero_for_a_chain_no_tracker_serves():
     """
     service = _service(_grove_repo(), _two_asset_registry())
 
-    result = await service.compute(EthAddress(_GROVE_MAINNET_ALM))
+    result = await service.compute(_grove_scope())
 
     unserved = [row for row in result.prime_per_chain if row.chain == "plume"]
     assert len(unserved) == 1
     assert unserved[0].exposure_usd is None
     assert unserved[0].required_risk_capital_usd is None
-    assert unserved[0].allocation_count is None
 
 
 @pytest.mark.asyncio
 async def test_compute_names_the_chains_its_totals_exclude():
     service = _service(_grove_repo(), _two_asset_registry())
 
-    result = await service.compute(EthAddress(_GROVE_MAINNET_ALM))
+    result = await service.compute(_grove_scope())
 
     assert result.prime_unserved_chains == ("monad", "plasma", "plume")
 
 
 @pytest.mark.asyncio
-async def test_compute_does_not_query_a_proxy_on_an_unserved_chain():
-    """Each skipped proxy is a pooled connection not taken; see Settings.db_pool_size."""
-    repo = _grove_repo()
-    service = _service(repo, _two_asset_registry())
+async def test_compute_covers_every_chain_of_the_prime_in_the_per_chain_breakdown():
+    """Served or not, a chain is present: absence would read as "no proxy there"."""
+    service = _service(_grove_repo(), _two_asset_registry())
 
-    await service.compute(EthAddress(_GROVE_MAINNET_ALM))
+    result = await service.compute(_grove_scope())
 
-    queried = {str(call.args[0]).lower() for call in repo.list_receipt_token_positions.await_args_list}
-    assert queried == {_GROVE_MAINNET_ALM, _GROVE_AVALANCHE_ALM, _GROVE_BASE_ALM, _GROVE_ROBINHOOD_ALM}
-
-
-@pytest.mark.asyncio
-async def test_compute_covers_every_proxy_of_the_prime_in_the_per_chain_breakdown():
-    """Served or not, a proxy is present: absence would read as "no proxy there"."""
-    service = _service(_two_chain_spark_repo(), _two_asset_registry())
-
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
-
-    assert len(result.prime_per_chain) == 6
-    assert tuple(row.proxy_address for row in result.prime_per_chain) == result.prime_proxies
+    assert [row.chain for row in result.prime_per_chain] == ["mainnet", "monad", "plasma", "plume"]
 
 
 @pytest.mark.asyncio
 async def test_compute_totals_equal_the_sum_of_the_per_chain_rows_that_carry_figures():
     """`prime_per_chain` is sold as making the total auditable, so the sum must tie.
 
-    The totals are summed from ``per_proxy`` while the rows are built from the
-    prime's proxy list, so this is two derivations of one figure meeting.
+    The totals are summed from the per-wallet contributions while the rows are
+    grouped by chain, so this is two derivations of one figure meeting.
     """
     service = _service(_two_chain_spark_repo(), _two_asset_registry())
 
-    result = await service.compute(EthAddress(_SPARK_AVALANCHE_ALM))
+    result = await service.compute(_spark_scope())
 
     assert sum(row.exposure_usd for row in result.prime_per_chain if row.exposure_usd is not None) == (
-        result.prime_exposure_usd
+        result.exposure_usd
     )
     assert (
         sum(
             row.required_risk_capital_usd for row in result.prime_per_chain if row.required_risk_capital_usd is not None
         )
-        == result.prime_required_risk_capital_usd
+        == result.required_risk_capital_usd
     )
-
-
-@pytest.mark.asyncio
-async def test_compute_warns_when_a_proxy_holds_positions_on_a_chain_declared_unserved():
-    """A stale SERVED_TRACKER_CHAINS silently nulls real per-chain figures."""
-    repo = _repo_by_proxy(
-        {_GROVE_PLUME_ALM: [make_receipt_token_position(receipt_token_id=1, amount_usd=Decimal("400"))]},
-        Decimal("100"),
-    )
-    service = _service(repo, _two_asset_registry())
-
-    with patch("app.services.prime_risk_capital_service.logger") as mock_logger:
-        await service.compute(EthAddress(_GROVE_PLUME_ALM))
-
-    assert "unserved chain" in mock_logger.warning.call_args.args[0]
-
-
-@pytest.mark.asyncio
-async def test_compute_orders_prime_proxies_identically_regardless_of_which_was_queried():
-    service = _service(_two_chain_spark_repo(), _two_asset_registry())
-
-    from_mainnet = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
-    from_avalanche = await service.compute(EthAddress(_SPARK_AVALANCHE_ALM))
-
-    assert from_avalanche.prime_proxies == from_mainnet.prime_proxies
 
 
 @pytest.mark.asyncio
 async def test_compute_names_the_prime_it_aggregated_over():
     service = _service(_two_chain_spark_repo(), _two_asset_registry())
 
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    result = await service.compute(_spark_scope())
 
     assert result.prime_name == "spark"
 
 
 @pytest.mark.asyncio
-async def test_compute_lists_every_proxy_it_aggregated_over():
-    service = _service(_two_chain_spark_repo(), _two_asset_registry())
-
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
-
-    lowered = {address.lower() for address in result.prime_proxies}
-    assert _SPARK_MAINNET_ALM in lowered
-    assert _SPARK_AVALANCHE_ALM in lowered
-
-
-@pytest.mark.asyncio
-async def test_compute_falls_back_to_the_queried_proxy_when_it_is_not_in_the_contract():
-    unknown = "0x" + "cd" * 20
-    repo = _repo_by_proxy(
-        {unknown: [make_receipt_token_position(receipt_token_id=1, amount_usd=Decimal("400"))]},
-        Decimal("100"),
-    )
+async def test_compute_refuses_a_wallet_on_a_chain_it_has_no_name_for():
+    """Silently dropping it would leave its exposure in the total but out of the
+    per-chain audit, so the sum the audit is sold on would stop tying."""
+    unknown_chain_id = 999999
+    repo = _repo_by_proxy({_SPARK_MAINNET_ALM: []}, Decimal("100"))
     service = _service(repo, _two_asset_registry())
 
-    result = await service.compute(EthAddress(unknown))
-
-    assert result.prime_required_risk_capital_usd == Decimal("40")
-    assert result.prime_name is None
-    assert result.prime_proxies == (unknown,)
-
-
-@pytest.mark.asyncio
-async def test_compute_resolves_siblings_for_a_mixed_case_queried_address():
-    assert _SPARK_MAINNET_ALM_MIXED_CASE.lower() == _SPARK_MAINNET_ALM
-    service = _service(_two_chain_spark_repo(), _two_asset_registry())
-
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM_MIXED_CASE))
-
-    assert result.prime_name == "spark"
-    assert result.prime_required_risk_capital_usd == Decimal("42")
-
-
-@pytest.mark.asyncio
-async def test_compute_normalises_prime_scoped_addresses_for_a_mixed_case_queried_address():
-    """The prime-scoped lists are reconciliation keys, so they must be byte-identical.
-
-    ``EthAddress`` preserves the caller's casing and siblings come from the
-    contract lowercased, so a checksummed query would otherwise emit one
-    mixed-case element among lowercase ones — leaving a consumer that dedupes by
-    comparing or hashing these lists seeing two different primes.
-    """
-    service = _service(_two_chain_spark_repo(), _two_asset_registry())
-
-    from_mixed_case = await service.compute(EthAddress(_SPARK_MAINNET_ALM_MIXED_CASE))
-    from_lowercase = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
-
-    assert from_mixed_case.prime_proxies == from_lowercase.prime_proxies
-    assert from_mixed_case.prime_per_chain == from_lowercase.prime_per_chain
+    with pytest.raises(ValueError, match=str(unknown_chain_id)):
+        await service.compute(_scope("spark", [(_SPARK_MAINNET_ALM, unknown_chain_id)]))
 
 
 @pytest.mark.asyncio
@@ -485,7 +395,7 @@ async def test_compute_mixes_modeled_and_unmodeled_allocations():
     registry = _FakeRegistry([_FakeModel("gap_sweep", {1}, rrc=Decimal("30"), crr=Decimal("5"))])
     service = _service(_repo(positions, Decimal("100")), registry)
 
-    result = await service.compute(_PRIME)
+    result = await service.compute(_prime_scope())
 
     # The top-level ``model`` names indexed's preference (core_model), not what
     # actually priced this prime's positions — see the model-preference tests
@@ -516,7 +426,7 @@ async def test_compute_encumbrance_none_when_no_total_risk_capital():
     registry = _FakeRegistry([_FakeModel("gap_sweep", {1}, rrc=Decimal("30"), crr=Decimal("5"))])
     service = _service(_repo(positions, None), registry)
 
-    result = await service.compute(_PRIME)
+    result = await service.compute(_prime_scope())
 
     assert result.total_risk_capital_usd is None
     assert result.encumbrance_ratio is None
@@ -528,7 +438,7 @@ async def test_compute_empty_positions_yields_zeroes_and_null_ratios():
     registry = _FakeRegistry([_FakeModel("gap_sweep", set(), rrc=Decimal("0"), crr=Decimal("0"))])
     service = _service(_repo([], Decimal("100")), registry)
 
-    result = await service.compute(_PRIME)
+    result = await service.compute(_prime_scope())
 
     assert result.exposure_usd == Decimal("0")
     assert result.required_risk_capital_usd == Decimal("0")
@@ -548,7 +458,7 @@ async def test_compute_skips_zero_exposure_positions():
     model = _FakeModel("gap_sweep", {1, 2}, rrc=Decimal("30"), crr=Decimal("5"))
     service = _service(_repo(positions, Decimal("100")), _FakeRegistry([model]))
 
-    result = await service.compute(_PRIME)
+    result = await service.compute(_prime_scope())
 
     # The zero-exposure position must be reported as not modeled and, crucially,
     # must never trigger a (costly) model compute.
@@ -568,7 +478,7 @@ async def test_compute_ignores_non_default_models():
     registry = _FakeRegistry([_FakeModel("suraf", {1}, rrc=Decimal("99"), crr=Decimal("9"))])
     service = _service(_repo(positions, Decimal("100")), registry)
 
-    result = await service.compute(_PRIME)
+    result = await service.compute(_prime_scope())
 
     assert result.required_risk_capital_usd == Decimal("0")
     assert result.per_allocation[0].applied is False
@@ -630,7 +540,7 @@ async def test_prime_compute_uses_batch_get_shares_and_skips_per_asset_get_share
     registry = _FakeRegistry([model])
     service = _service(_repo(positions, Decimal("1000")), registry)
 
-    result = await service.compute(_PRIME)
+    result = await service.compute(_prime_scope())
 
     # batch_get_shares hit once, get_share never hit.
     reader.batch_get_shares.assert_awaited_once()
@@ -658,7 +568,7 @@ async def test_prime_compute_batches_breakdowns_and_skips_per_asset_fetch():
     reader.batch_get_breakdowns.return_value = {1: empty, 2: empty}
     service = _service(_repo(positions, Decimal("1000")), _FakeRegistry([_crypto_lending_service(reader)]))
 
-    await service.compute(_PRIME)
+    await service.compute(_prime_scope())
 
     reader.batch_get_breakdowns.assert_awaited_once()
     reader.get_breakdown.assert_not_awaited()
@@ -679,7 +589,7 @@ async def test_prime_compute_logs_missing_receipt_token():
         patch("app.services.prime_risk_capital_service.logger") as mock_logger,
         pytest.raises(ValueError, match="receipt token not found"),
     ):
-        await service.compute(_PRIME)
+        await service.compute(_prime_scope())
 
     reader.batch_get_shares.assert_not_awaited()
     mock_logger.warning.assert_called_once()
@@ -727,7 +637,7 @@ async def test_prime_compute_degrades_share_error_to_unpriced(share_error, expec
     service = _service(_repo(positions, Decimal("1000")), _FakeRegistry([_crypto_lending_service(reader)]))
 
     with patch("app.services.prime_risk_capital_service.logger") as mock_logger:
-        result = await service.compute(_PRIME)  # must not raise
+        result = await service.compute(_prime_scope())  # must not raise
 
     by_id = {a.receipt_token_id: a for a in result.per_allocation}
     assert by_id[1].applied is False
@@ -766,7 +676,7 @@ async def test_prime_compute_swallows_share_error_for_empty_breakdown():
     registry = _FakeRegistry([model])
     service = _service(_repo(positions, Decimal("1000")), registry)
 
-    result = await service.compute(_PRIME)
+    result = await service.compute(_prime_scope())
 
     assert result.required_risk_capital_usd == Decimal("0")
     # The position is still reported (with zero RRC), matching the un-batched
@@ -825,7 +735,7 @@ async def test_prime_compute_degrades_price_data_missing_to_unpriced():
     service = _service(_repo(positions, Decimal("1000")), _FakeRegistry([_crypto_lending_service(reader)]))
 
     with patch("app.services.prime_risk_capital_service.logger") as mock_logger:
-        result = await service.compute(_PRIME)  # must not raise
+        result = await service.compute(_prime_scope())  # must not raise
 
     by_id = {a.receipt_token_id: a for a in result.per_allocation}
     assert by_id[1].applied is False
@@ -850,7 +760,7 @@ async def test_prime_compute_unaffected_for_non_crypto_lending_models():
     fake = _FakeModel("gap_sweep", {1}, rrc=Decimal("7"), crr=Decimal("1"))
     service = _service(_repo(positions, Decimal("100")), _FakeRegistry([fake]))
 
-    result = await service.compute(_PRIME)
+    result = await service.compute(_prime_scope())
 
     assert fake.computed_ids == [1]
     assert result.required_risk_capital_usd == Decimal("7")
@@ -872,7 +782,7 @@ async def test_compute_indexed_prefers_core_model_over_gap_sweep():
     )
     service = _service(_repo(positions, Decimal("1000")), registry)
 
-    result = await service.compute(_PRIME, Provenance.INDEXED)
+    result = await service.compute(_prime_scope(), Provenance.INDEXED)
 
     assert result.per_allocation[0].model == "core_model"
     assert result.required_risk_capital_usd == Decimal("50")
@@ -885,7 +795,7 @@ async def test_compute_indexed_falls_back_to_gap_sweep_when_core_does_not_apply(
     registry = _FakeRegistry([_FakeModel("gap_sweep", {1}, rrc=Decimal("30"), crr=Decimal("5"))])
     service = _service(_repo(positions, Decimal("1000")), registry)
 
-    result = await service.compute(_PRIME, Provenance.INDEXED)
+    result = await service.compute(_prime_scope(), Provenance.INDEXED)
 
     assert result.per_allocation[0].model == "gap_sweep"
     assert result.required_risk_capital_usd == Decimal("30")
@@ -903,7 +813,7 @@ async def test_compute_indexed_falls_back_to_gap_sweep_when_core_has_no_data():
     )
     service = _service(_repo(positions, Decimal("1000")), registry)
 
-    result = await service.compute(_PRIME, Provenance.INDEXED)
+    result = await service.compute(_prime_scope(), Provenance.INDEXED)
 
     alloc = result.per_allocation[0]
     assert alloc.applied is True
@@ -919,7 +829,7 @@ async def test_compute_indexed_reports_no_model_when_every_preferred_model_is_un
     registry = _FakeRegistry([_UnavailableModel("core_model", {1})])
     service = _service(_repo(positions, Decimal("1000")), registry)
 
-    result = await service.compute(_PRIME, Provenance.INDEXED)
+    result = await service.compute(_prime_scope(), Provenance.INDEXED)
 
     alloc = result.per_allocation[0]
     assert alloc.applied is False
@@ -940,7 +850,7 @@ async def test_compute_both_uses_core_model_and_never_gap_sweep():
     )
     service = _service(_repo(positions, Decimal("1000")), registry)
 
-    result = await service.compute(_PRIME, Provenance.BOTH)
+    result = await service.compute(_prime_scope(), Provenance.BOTH)
 
     assert result.per_allocation[0].model == "core_model"
     assert result.required_risk_capital_usd == Decimal("50")
@@ -960,7 +870,7 @@ async def test_compute_both_leaves_the_allocation_null_when_core_model_has_no_da
     )
     service = _service(_repo(positions, Decimal("1000")), registry)
 
-    result = await service.compute(_PRIME, Provenance.BOTH)
+    result = await service.compute(_prime_scope(), Provenance.BOTH)
 
     alloc = result.per_allocation[0]
     assert alloc.applied is False
@@ -978,6 +888,6 @@ async def test_compute_names_indexed_preference_as_the_top_level_model(source):
     registry = _FakeRegistry([_FakeModel("gap_sweep", {1}, rrc=Decimal("30"), crr=Decimal("5"))])
     service = _service(_repo(positions, Decimal("1000")), registry)
 
-    result = await service.compute(_PRIME, source)
+    result = await service.compute(_prime_scope(), source)
 
     assert result.model == "core_model"

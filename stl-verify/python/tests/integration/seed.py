@@ -2824,6 +2824,9 @@ RTL_LATEST_ACTIONS = {
 
 # The direct-holdings read dedups on token_id alone, so it gets its own bare-held
 # tokens: one versioned across blocks, one whose sweep ties an event row.
+# A real registry SubProxy: `classify_proxy` reads the contract, so the wallet
+# has to be one for the resolved scope to hold it as the prime's treasury.
+RTL_SUB_PROXY_HEX = sorted(subproxy_addresses())[1][2:]
 RTL_TREASURY_BALANCE = Decimal("5678")
 
 RTL_DIRECT_BALANCES = {
@@ -3153,12 +3156,12 @@ async def _rtl_seed_treasury_tie(conn: asyncpg.Connection, *, prime_id: int) -> 
     That read scopes to the SubProxy wallets rather than the ALM proxy, so it
     needs its own rows; USDS is dollar-pegged, so the balance IS the USD figure.
     """
+    await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=RTL_SUB_PROXY_HEX)
     usds_id = await conn.fetchval(
         "SELECT id FROM token WHERE chain_id = 1 AND address = $1", bytes.fromhex(_FAN_OUT_USDS_HEX)
     )
     if usds_id is None:
         raise RuntimeError("USDS token not seeded by migrations")
-    subproxy_hex = sorted(subproxy_addresses())[0][2:]
     for balance, tx, direction in (
         (Decimal("1234"), _rtl_tx(110), "in"),
         (RTL_TREASURY_BALANCE, _rtl_tx(0), "sweep"),
@@ -3167,7 +3170,7 @@ async def _rtl_seed_treasury_tie(conn: asyncpg.Connection, *, prime_id: int) -> 
             conn,
             token_id=usds_id,
             prime_id=prime_id,
-            proxy_hex=subproxy_hex,
+            proxy_hex=RTL_SUB_PROXY_HEX,
             balance=balance,
             block=_RTL_DECISIVE_BLOCK,
             created_at=rtl_block_time(_RTL_DECISIVE_BLOCK),

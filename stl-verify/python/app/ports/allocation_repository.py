@@ -173,8 +173,12 @@ class AllocationRepositoryPort(Protocol):
         """
         ...
 
-    async def get_latest_total_capital_usd(self, prime_address: EthAddress) -> Decimal | None:
-        """Return the prime's latest treasury USDS balance (Total Risk Capital), or None."""
+    async def get_latest_total_capital_usd(self, subproxies: Sequence[EthAddress]) -> Decimal | None:
+        """Return the prime's latest treasury USDS balance (Total Risk Capital), or None.
+
+        Scoped to the prime's SubProxy wallets like
+        ``list_total_capital_buckets``; an empty set answers ``None``.
+        """
         ...
 
     async def list_prime_proxy_addresses(self, prime_address: EthAddress) -> list[EthAddress]:

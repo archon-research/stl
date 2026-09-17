@@ -43,7 +43,7 @@ SPARK_IDENTIFIERS = [
 ]
 
 #: Routes already carrying whole-prime semantics. VEC-722 adds one per slice.
-WHOLE_PRIME_ROUTES = ["total-capital", "exposure", "debt"]
+WHOLE_PRIME_ROUTES = ["total-capital", "exposure", "debt", "risk-capital"]
 
 #: Pinned around the seeded observation: a defaulted window is now-relative, so
 #: two requests a millisecond apart would differ in `window` alone.
@@ -105,7 +105,7 @@ def test_the_treasury_is_counted_once_rather_than_per_proxy(client: TestClient) 
     assert all(float(value) == float(FAN_OUT_TREASURY) for value in observed)
 
 
-@pytest.mark.parametrize("route", WHOLE_PRIME_ROUTES)
+@pytest.mark.parametrize("route", [r for r in WHOLE_PRIME_ROUTES if r != "risk-capital"])
 def test_a_prime_with_no_proxies_answers_a_series_not_a_404(client: TestClient, route: str) -> None:
     """obex is a vault with no declared proxies. Whole-prime aggregation over an
     empty wallet set is an answer, not an error."""
@@ -174,3 +174,12 @@ def test_exposure_sums_across_the_primes_chains(client: TestClient) -> None:
 
     assert observed
     assert all(Decimal(value) == Decimal(FAN_OUT_PRIME_EXPOSURE_USD) for value in observed)
+
+
+def test_a_prime_with_no_proxies_reports_zero_risk_capital_rather_than_404(client: TestClient) -> None:
+    """obex has a vault and no proxies: aggregating over an empty wallet set is
+    zero exposure, not an error."""
+    body = client.get("/v1/primes/obex/risk-capital").json()
+
+    assert body["exposure_usd"] == "0"
+    assert body["prime_per_chain"] == []
