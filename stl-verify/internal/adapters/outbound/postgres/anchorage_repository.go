@@ -3,12 +3,10 @@ package postgres
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -219,24 +217,32 @@ func insertOperationBatch(ctx context.Context, tx pgx.Tx, batch []entity.Anchora
 	return nil
 }
 
-// GetLastCursor returns the pagination cursor for the most recent operation,
-// in the format Anchorage expects: "unix_seconds|operation_id".
-// Returns empty string if no operations exist.
-func (r *AnchorageRepository) GetLastCursor(ctx context.Context, primeID int64) (string, error) {
-	var operationID string
-	var createdAt time.Time
-	err := r.pool.QueryRow(ctx,
-		"SELECT operation_id, created_at FROM anchorage_operation WHERE prime_id = $1 ORDER BY created_at DESC LIMIT 1",
+// KnownOperationIDs returns the set of operation_ids already stored for the
+// prime. The operations feed is tiny (tens of rows per quarter), so the sync
+// fetches the full list from Anchorage each run and skips these; the API's
+// `afterId` cursor for this endpoint is undocumented (`timestamp|id` with an
+// unknown unit and sort direction) and a synthesised one returned nothing for
+// five months (VEC-826).
+func (r *AnchorageRepository) KnownOperationIDs(ctx context.Context, primeID int64) (map[string]struct{}, error) {
+	rows, err := r.pool.Query(ctx,
+		"SELECT DISTINCT operation_id FROM anchorage_operation WHERE prime_id = $1",
 		primeID,
-	).Scan(&operationID, &createdAt)
-
+	)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", nil
-		}
-		return "", fmt.Errorf("get last cursor: %w", err)
+		return nil, fmt.Errorf("list known operation ids: %w", err)
 	}
+	defer rows.Close()
 
-	ts := fmt.Sprintf("%d", createdAt.UTC().Unix())
-	return ts + "|" + operationID, nil
+	known := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan operation id: %w", err)
+		}
+		known[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate operation ids: %w", err)
+	}
+	return known, nil
 }

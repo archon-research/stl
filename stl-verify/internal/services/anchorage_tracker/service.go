@@ -13,7 +13,7 @@ import (
 // AnchorageClient defines the interface for fetching data from the Anchorage API.
 type AnchorageClient interface {
 	FetchPackages(ctx context.Context) ([]Package, error)
-	ForEachOperationsPage(ctx context.Context, afterID string, fn func([]Operation) error) error
+	ForEachOperationsPage(ctx context.Context, fn func([]Operation) error) error
 }
 
 // Service fetches Anchorage collateral data and persists it.
@@ -56,9 +56,8 @@ func (s *Service) Run(ctx context.Context) error {
 	return nil
 }
 
-// BackfillOperations fetches all operations from the Anchorage API and stores them.
-// If operations already exist, it resumes from the last known cursor.
-// Returns the number of operations stored.
+// BackfillOperations fetches all operations from the Anchorage API and stores
+// the ones not already present. Returns the number of operations stored.
 func (s *Service) BackfillOperations(ctx context.Context) (int, error) {
 	s.logger.Info("starting operations backfill")
 	n, err := s.syncOperations(ctx)
@@ -69,21 +68,43 @@ func (s *Service) BackfillOperations(ctx context.Context) (int, error) {
 	return n, nil
 }
 
-// syncOperations fetches new operations page by page, persisting each page
-// immediately to avoid unbounded memory accumulation during large backfills.
+// syncOperations fetches the full operation list page by page and persists
+// only the operations whose id is not already stored for the prime. Each page
+// is saved immediately so memory stays bounded on a large backfill.
+//
+// The full fetch is deliberate. Anchorage's operations endpoint takes an
+// `afterId` cursor of the form `timestamp|id`, but the timestamp unit and the
+// sort direction are undocumented; the previous implementation synthesised
+// `unix_seconds|operation_id` and received an empty list on every run after
+// the first backfill, so no operation after 2026-04-07 was ever stored
+// (VEC-826). The feed is tens of rows per quarter, so re-reading it every run
+// costs one or two requests. The id filter lives here rather than in the
+// INSERT's ON CONFLICT clause because the processing_version trigger assigns
+// a fresh version to a re-insert from a different build, which would make a
+// naive re-insert append a duplicate row instead of being ignored.
 func (s *Service) syncOperations(ctx context.Context) (int, error) {
-	cursor, err := s.operationRepo.GetLastCursor(ctx, s.primeID)
+	known, err := s.operationRepo.KnownOperationIDs(ctx, s.primeID)
 	if err != nil {
-		return 0, fmt.Errorf("get last cursor: %w", err)
+		return 0, fmt.Errorf("list known operations: %w", err)
 	}
 
-	if cursor != "" {
-		s.logger.Debug("fetching operations after", "cursor", cursor)
-	}
+	var fetched, stored int
+	err = s.client.ForEachOperationsPage(ctx, func(ops []Operation) error {
+		fetched += len(ops)
 
-	var total int
-	err = s.client.ForEachOperationsPage(ctx, cursor, func(ops []Operation) error {
-		entities, err := toOperationEntities(ops, s.primeID)
+		fresh := make([]Operation, 0, len(ops))
+		for _, op := range ops {
+			if _, seen := known[op.ID]; seen {
+				continue
+			}
+			known[op.ID] = struct{}{}
+			fresh = append(fresh, op)
+		}
+		if len(fresh) == 0 {
+			return nil
+		}
+
+		entities, err := toOperationEntities(fresh, s.primeID)
 		if err != nil {
 			return fmt.Errorf("convert operations: %w", err)
 		}
@@ -92,17 +113,15 @@ func (s *Service) syncOperations(ctx context.Context) (int, error) {
 			return fmt.Errorf("save operations: %w", err)
 		}
 
-		total += len(entities)
+		stored += len(entities)
 		return nil
 	})
 	if err != nil {
 		return 0, fmt.Errorf("sync operations: %w", err)
 	}
 
-	if total > 0 {
-		s.logger.Info("synced operations", "count", total)
-	}
-	return total, nil
+	s.logger.Info("synced operations", "fetched", fetched, "stored", stored)
+	return stored, nil
 }
 
 // poll fetches all packages from the Anchorage API and stores snapshots.
