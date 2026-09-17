@@ -193,35 +193,41 @@ func NewCurveCryptoswapState(p CurveCryptoswapStateParams) (*CurveCryptoswapStat
 }
 
 type CurveStableswapConfigParams struct {
-	CurvePoolID    int64
-	BlockNumber    int64
-	BlockVersion   int
-	Timestamp      time.Time
-	InitialA       *big.Int
-	InitialATime   int64
-	FutureA        *big.Int
-	FutureATime    int64
-	AdminFee       *big.Int
+	CurvePoolID  int64
+	BlockNumber  int64
+	BlockVersion int
+	Timestamp    time.Time
+	InitialA     *big.Int
+	InitialATime int64
+	FutureA      *big.Int
+	FutureATime  int64
+	AdminFee     *big.Int
+	// FutureFee is nullable: later Stableswap-NG implementations expose no
+	// future_fee() and the read is not issued for them.
 	FutureFee      *big.Int
 	FutureAdminFee *big.Int // nullable: pre-NG only
 	MaExpTime      *int64   // nullable: NG only
 	OracleMethod   *big.Int // nullable: NG only
+	// OffpegFeeMultiplier is nullable: only later Stableswap-NG implementations
+	// expose offpeg_fee_multiplier(), which replaces future_fee on them.
+	OffpegFeeMultiplier *big.Int
 }
 
 type CurveStableswapConfig struct {
-	CurvePoolID    int64
-	BlockNumber    int64
-	BlockVersion   int
-	Timestamp      time.Time
-	InitialA       *big.Int
-	InitialATime   int64
-	FutureA        *big.Int
-	FutureATime    int64
-	AdminFee       *big.Int
-	FutureFee      *big.Int
-	FutureAdminFee *big.Int
-	MaExpTime      *int64
-	OracleMethod   *big.Int
+	CurvePoolID         int64
+	BlockNumber         int64
+	BlockVersion        int
+	Timestamp           time.Time
+	InitialA            *big.Int
+	InitialATime        int64
+	FutureA             *big.Int
+	FutureATime         int64
+	AdminFee            *big.Int
+	FutureFee           *big.Int
+	FutureAdminFee      *big.Int
+	MaExpTime           *int64
+	OracleMethod        *big.Int
+	OffpegFeeMultiplier *big.Int
 }
 
 func NewCurveStableswapConfig(p CurveStableswapConfigParams) (*CurveStableswapConfig, error) {
@@ -230,26 +236,27 @@ func NewCurveStableswapConfig(p CurveStableswapConfigParams) (*CurveStableswapCo
 	}
 	for name, v := range map[string]*big.Int{
 		"initial_a": p.InitialA, "future_a": p.FutureA,
-		"admin_fee": p.AdminFee, "future_fee": p.FutureFee,
+		"admin_fee": p.AdminFee,
 	} {
 		if v == nil {
 			return nil, fmt.Errorf("curve stableswap config: %s must not be nil", name)
 		}
 	}
 	return &CurveStableswapConfig{
-		CurvePoolID:    p.CurvePoolID,
-		BlockNumber:    p.BlockNumber,
-		BlockVersion:   p.BlockVersion,
-		Timestamp:      p.Timestamp,
-		InitialA:       p.InitialA,
-		InitialATime:   p.InitialATime,
-		FutureA:        p.FutureA,
-		FutureATime:    p.FutureATime,
-		AdminFee:       p.AdminFee,
-		FutureFee:      p.FutureFee,
-		FutureAdminFee: p.FutureAdminFee,
-		MaExpTime:      p.MaExpTime,
-		OracleMethod:   p.OracleMethod,
+		CurvePoolID:         p.CurvePoolID,
+		BlockNumber:         p.BlockNumber,
+		BlockVersion:        p.BlockVersion,
+		Timestamp:           p.Timestamp,
+		InitialA:            p.InitialA,
+		InitialATime:        p.InitialATime,
+		FutureA:             p.FutureA,
+		FutureATime:         p.FutureATime,
+		AdminFee:            p.AdminFee,
+		FutureFee:           p.FutureFee,
+		FutureAdminFee:      p.FutureAdminFee,
+		MaExpTime:           p.MaExpTime,
+		OracleMethod:        p.OracleMethod,
+		OffpegFeeMultiplier: p.OffpegFeeMultiplier,
 	}, nil
 }
 

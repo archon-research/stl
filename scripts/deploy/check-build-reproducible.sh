@@ -61,8 +61,9 @@
 #   --image go      build a Go service from Dockerfile.common (all Go services
 #                   share it, so one stands in for every one of them)
 #   --image python  build the python-api image from python/Dockerfile
-#   --image migrate build the migrate image from Dockerfile.migrate — its own
-#                   Dockerfile, not covered by the go leg above
+#   --image migrate build the migrate image — Dockerfile.common with
+#                   RUNTIME_PAYLOAD=migrations, the only caller of that stage,
+#                   so the go leg above does not cover it
 #   --keep          leave the built images behind for inspection
 #
 # END-HELP (sentinel for the -h/--help case below; do not remove — moving it
@@ -235,12 +236,15 @@ build() {
       $BUILD_EXTRA_ARGS \
       -f "${BUILD_DIR}/Dockerfile.common" -t "$tag" --load "$BUILD_DIR"
   elif [ "$IMAGE" = "migrate" ]; then
-    # Dockerfile.migrate's build target is hardcoded and it stamps nothing
-    # (ADR-0008), so commit/build_time are accepted for build()'s uniform
-    # signature but unused here.
     run_build --platform linux/arm64 \
+      --build-arg CMD_PATH=cmd/util/migrate \
+      --build-arg BIN=migrate \
+      --build-arg RUNTIME_PAYLOAD=migrations \
+      --build-arg GIT_COMMIT="$commit" \
+      --build-arg GIT_BRANCH="repro-check-${suffix}" \
+      --build-arg BUILD_TIME="$build_time" \
       $BUILD_EXTRA_ARGS \
-      -f "${BUILD_DIR}/Dockerfile.migrate" -t "$tag" --load "$BUILD_DIR"
+      -f "${BUILD_DIR}/Dockerfile.common" -t "$tag" --load "$BUILD_DIR"
   else
     run_build --platform linux/arm64 \
       --build-arg GIT_COMMIT="$commit" \

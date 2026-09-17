@@ -1,7 +1,9 @@
 # On-demand Uniswap V4 backfill worker (VEC-639, VEC-790).
 #
 # A long-running Deployment, not a k8s Job or CronJob: it polls the Temporal task
-# queue "uniswap-v4-position-bootstrap" and stays idle until someone starts a run
+# queue it derives from its CHAIN_ID -- "uniswap-v4-position-bootstrap" here,
+# "<chain>-uniswap-v4-position-bootstrap" for another chain's copy of this base --
+# and stays idle until someone starts a run
 # from the Temporal UI. It registers NO schedule, so an always-on pod costs
 # nothing but a poller. It hosts two workflow types, both hand-started:
 # UniswapV4PositionBootstrap snapshots every historical position key at one
