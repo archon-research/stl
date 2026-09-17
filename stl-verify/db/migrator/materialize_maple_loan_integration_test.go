@@ -4,7 +4,9 @@ package migrator_test
 
 import (
 	"context"
+	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -12,54 +14,83 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/archon-research/stl/stl-verify/db/migrator"
 )
 
-// VEC-405: position_maple_loan places each maple_loan_state cron cycle at the surviving block_meta
-// block at or before its synced_at, collapses cycles sharing a block, and closes a loan from its
-// absence. Every mutation named in a subtest's comment was run against that subtest; the mutation
-// table lives in the PR, because a subtest can only claim what its own assertions pin.
+// VEC-405: position_maple_loan places each maple_loan_state cycle at the surviving block_meta block at
+// or before its synced_at, collapses cycles sharing a block, and closes a loan from its absence at a
+// cycle whose pool reports a principal_out equal to the loans it returned.
 
 const mapleTolerance = "10 minutes"
+
+type mapleLoanSpec struct {
+	chain int
+	pool  string
+}
 
 type mapleFixture struct {
 	pool  *pgxpool.Pool
 	ctx   context.Context
 	loans map[string]int64
+	// loanPool maps a loan to its pool tag, so a fetch can write every pool's principal_out.
+	loanPool map[string]string
+	pools    map[string]int64
 }
 
-// seedMaple builds the registry: two chains, and the named loans on the chain given for each. Loan
-// addresses are derived from the name, so every lookup below is by address and never by chain alone.
-func seedMaple(ctx context.Context, t *testing.T, pool *pgxpool.Pool, loans map[string]int) *mapleFixture {
+// seedMaple builds the registry once per test function: two chains, the named pools on the chain their
+// tag starts with, and the named loans in them. Every subtest then resets the time-series tables.
+func seedMaple(ctx context.Context, t *testing.T, pool *pgxpool.Pool, loans map[string]mapleLoanSpec) *mapleFixture {
 	t.Helper()
-	f := &mapleFixture{pool: pool, ctx: ctx, loans: map[string]int64{}}
+	f := &mapleFixture{pool: pool, ctx: ctx, loans: map[string]int64{}, loanPool: map[string]string{}, pools: map[string]int64{}}
 	f.exec(t, `INSERT INTO protocol (chain_id, address, name, protocol_type)
 	           SELECT c, decode(md5('maple-protocol' || c) || 'a1b2c3d4', 'hex'), 'Maple', 'lending'
 	           FROM (VALUES (1), (8453)) v(c) ON CONFLICT DO NOTHING`)
 	f.exec(t, `INSERT INTO token (chain_id, address, symbol, decimals)
 	           SELECT c, decode(md5('maple-asset' || c) || 'a1b2c3d4', 'hex'), 'MPLUSDC', 6
 	           FROM (VALUES (1), (8453)) v(c) ON CONFLICT DO NOTHING`)
-	f.exec(t, `INSERT INTO maple_pool (chain_id, protocol_id, address, asset_token_id)
-	           SELECT p.chain_id, p.id, decode(md5('maple-pool' || p.chain_id) || 'a1b2c3d4', 'hex'), tk.id
-	           FROM protocol p JOIN token tk ON tk.chain_id = p.chain_id AND tk.symbol = 'MPLUSDC'
-	           WHERE p.name = 'Maple' ON CONFLICT DO NOTHING`)
-	for name, chain := range loans {
+	names := make([]string, 0, len(loans))
+	for name := range loans {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		spec := loans[name]
+		f.ensurePool(t, spec.chain, spec.pool)
 		f.exec(t, `INSERT INTO "user" (chain_id, address) VALUES ($1, decode(md5($2) || 'a1b2c3d4', 'hex'))
-		           ON CONFLICT DO NOTHING`, chain, "borrower-"+name)
+		           ON CONFLICT DO NOTHING`, spec.chain, "borrower-"+name)
 		f.exec(t, `INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
-		           SELECT $1, p.id, decode(md5($2) || 'a1b2c3d4', 'hex'), mp.id, u.id
+		           SELECT $1, p.id, decode(md5($2) || 'a1b2c3d4', 'hex'), $4, u.id
 		           FROM protocol p
-		           JOIN maple_pool mp ON mp.chain_id = p.chain_id
 		           JOIN "user" u ON u.chain_id = $1 AND u.address = decode(md5($3) || 'a1b2c3d4', 'hex')
-		           WHERE p.chain_id = $1 AND p.name = 'Maple' ON CONFLICT DO NOTHING`,
-			chain, "loan-"+name, "borrower-"+name)
+		           WHERE p.chain_id = $1 AND p.name = 'Maple'`,
+			spec.chain, "loan-"+name, "borrower-"+name, f.pools[spec.pool])
 		var id int64
 		if err := pool.QueryRow(ctx,
 			`SELECT id FROM maple_loan WHERE loan_address = decode(md5($1) || 'a1b2c3d4', 'hex')`, "loan-"+name).Scan(&id); err != nil {
 			t.Fatalf("seeding loan %s: %v", name, err)
 		}
 		f.loans[name] = id
+		f.loanPool[name] = spec.pool
 	}
 	return f
+}
+
+func (f *mapleFixture) ensurePool(t *testing.T, chain int, tag string) {
+	t.Helper()
+	if _, ok := f.pools[tag]; ok {
+		return
+	}
+	var id int64
+	if err := f.pool.QueryRow(f.ctx,
+		`INSERT INTO maple_pool (chain_id, protocol_id, address, asset_token_id)
+		 SELECT p.chain_id, p.id, decode(md5('maple-pool-' || $2) || 'a1b2c3d4', 'hex'), tk.id
+		 FROM protocol p JOIN token tk ON tk.chain_id = p.chain_id AND tk.symbol = 'MPLUSDC'
+		 WHERE p.chain_id = $1 AND p.name = 'Maple'
+		 RETURNING id`, chain, tag).Scan(&id); err != nil {
+		t.Fatalf("seeding pool %s: %v", tag, err)
+	}
+	f.pools[tag] = id
 }
 
 func (f *mapleFixture) exec(t *testing.T, sql string, args ...any) {
@@ -69,8 +100,18 @@ func (f *mapleFixture) exec(t *testing.T, sql string, args ...any) {
 	}
 }
 
-// blocks seeds a dense series: count blocks from startBN at stepSec apart. Density is what keeps a
-// placement honest, so the fixtures below stay inside the wrapper's skew tolerance on purpose.
+// reset empties every table a run reads or writes, so each subtest stands alone and can run by itself.
+func (f *mapleFixture) reset(t *testing.T) {
+	t.Helper()
+	for _, table := range []string{
+		"position_current", "position_state", "position_projection_refusal", "position_projection_run",
+		"maple_loan_state", "maple_pool_state", "block_meta",
+	} {
+		f.exec(t, "DELETE FROM "+table)
+	}
+}
+
+// blocks seeds count blocks from startBN, stepSec apart.
 func (f *mapleFixture) blocks(t *testing.T, chain, startBN int, startTS string, count, stepSec int) {
 	t.Helper()
 	f.exec(t, `INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
@@ -81,21 +122,52 @@ func (f *mapleFixture) blocks(t *testing.T, chain, startBN int, startTS string, 
 
 func (f *mapleFixture) block(t *testing.T, chain, bn, bv int, ts string) {
 	t.Helper()
-	f.exec(t, `INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
-	           VALUES ($1, $2, $3, $4::timestamptz) ON CONFLICT DO NOTHING`, chain, bn, bv, ts)
+	f.blockPV(t, chain, bn, bv, 0, ts)
 }
 
+func (f *mapleFixture) blockPV(t *testing.T, chain, bn, bv, pv int, ts string) {
+	t.Helper()
+	f.exec(t, `INSERT INTO block_meta (chain_id, block_number, block_version, processing_version, block_timestamp)
+	           VALUES ($1, $2, $3, $4, $5::timestamptz)`, chain, bn, bv, pv, ts)
+}
+
+// cycle writes one loan row. build distinguishes a reprocessed cycle, which the source versions.
 func (f *mapleFixture) cycle(t *testing.T, loan, ts, principal string, build int) {
 	t.Helper()
 	f.exec(t, `INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, build_id)
 	           VALUES ($1, $2::timestamptz, 'Active', $3::numeric, $4)`, f.loans[loan], ts, principal, build)
 }
 
-// cycleState seeds a non-Active row, which the indexer never writes but stl_readwrite can.
 func (f *mapleFixture) cycleState(t *testing.T, loan, ts, state, principal string) {
 	t.Helper()
 	f.exec(t, `INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, build_id)
 	           VALUES ($1, $2::timestamptz, $3, $4::numeric, 0)`, f.loans[loan], ts, state, principal)
+}
+
+func (f *mapleFixture) poolCycle(t *testing.T, tag, ts string, principalOut int64, build int) {
+	t.Helper()
+	f.exec(t, `INSERT INTO maple_pool_state (maple_pool_id, synced_at, liquid_assets, principal_out, utilization, build_id)
+	           VALUES ($1, $2::timestamptz, 0, $3, 0, $4)`, f.pools[tag], ts, principalOut, build)
+}
+
+// fetch writes one sync cycle as the indexer does: the loans the loan query returned, and for every pool
+// a principal_out that also counts the loans the query missed. An empty missed map is a complete fetch.
+func (f *mapleFixture) fetch(t *testing.T, ts string, reported, missed map[string]int64) {
+	t.Helper()
+	out := map[string]int64{}
+	for tag := range f.pools {
+		out[tag] = 0
+	}
+	for loan, owed := range reported {
+		f.cycle(t, loan, ts, fmt.Sprint(owed), 1)
+		out[f.loanPool[loan]] += owed
+	}
+	for loan, owed := range missed {
+		out[f.loanPool[loan]] += owed
+	}
+	for tag, total := range out {
+		f.poolCycle(t, tag, ts, total, 1)
+	}
 }
 
 func (f *mapleFixture) runWith(t *testing.T, tolerance string) (int64, error) {
@@ -107,9 +179,7 @@ func (f *mapleFixture) runWith(t *testing.T, tolerance string) (int64, error) {
 
 func (f *mapleFixture) run(t *testing.T) (int64, error) {
 	t.Helper()
-	var n int64
-	err := f.pool.QueryRow(f.ctx, `SELECT materialize_maple_loan(p_build_id => 0, p_max_skew => $1::interval)`, mapleTolerance).Scan(&n)
-	return n, err
+	return f.runWith(t, mapleTolerance)
 }
 
 func (f *mapleFixture) mustRun(t *testing.T) int64 {
@@ -117,6 +187,36 @@ func (f *mapleFixture) mustRun(t *testing.T) int64 {
 	n, err := f.run(t)
 	if err != nil {
 		t.Fatalf("materialize_maple_loan: %v", err)
+	}
+	return n
+}
+
+// mustRefuse runs and returns the refusal, failing unless it contains want.
+func (f *mapleFixture) mustRefuse(t *testing.T, tolerance, want string) string {
+	t.Helper()
+	_, err := f.runWith(t, tolerance)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("want a refusal containing %q, got %v", want, err)
+	}
+	return err.Error()
+}
+
+// text renders a SQL expression in the session's own formatting, so an expected message does not
+// depend on IntervalStyle, DateStyle or TimeZone.
+func (f *mapleFixture) text(t *testing.T, expr string) string {
+	t.Helper()
+	var s string
+	if err := f.pool.QueryRow(f.ctx, `SELECT (`+expr+`)::text`).Scan(&s); err != nil {
+		t.Fatalf("rendering %s: %v", expr, err)
+	}
+	return s
+}
+
+func (f *mapleFixture) count(t *testing.T, sql string, args ...any) int {
+	t.Helper()
+	var n int
+	if err := f.pool.QueryRow(f.ctx, sql, args...).Scan(&n); err != nil {
+		t.Fatalf("%s: %v", sql, err)
 	}
 	return n
 }
@@ -133,7 +233,7 @@ type mapleRow struct {
 	bv, pv     int
 }
 
-// rows reads the spine for one named loan, so every assertion is over real materialized output.
+// rows reads the spine for one named loan.
 func (f *mapleFixture) rows(t *testing.T, loan string) []mapleRow {
 	t.Helper()
 	rs, err := f.pool.Query(f.ctx,
@@ -162,61 +262,70 @@ func (f *mapleFixture) rows(t *testing.T, loan string) []mapleRow {
 	return out
 }
 
-// viewQty reads the VIEW rather than the spine, which is the only way to see the two diverge.
-func (f *mapleFixture) viewQty(t *testing.T, loan string, bn int64) []string {
+// mustRows reads the spine for a loan and fails unless it holds exactly want rows.
+func (f *mapleFixture) mustRows(t *testing.T, loan string, want int) []mapleRow {
 	t.Helper()
-	rs, err := f.pool.Query(f.ctx,
-		`SELECT v.quantity::text FROM position_maple_loan v
-		 JOIN maple_loan l ON v.instrument_key = encode(l.loan_address, 'hex')
-		 WHERE l.id = $1 AND v.block_number = $2 ORDER BY v.processing_version`, f.loans[loan], bn)
-	if err != nil {
-		t.Fatal(err)
+	rs := f.rows(t, loan)
+	if len(rs) != want {
+		t.Fatalf("loan %s stored %d rows, want %d: %+v", loan, len(rs), want, rs)
 	}
-	defer rs.Close()
-	var out []string
-	for rs.Next() {
-		var q string
-		if err := rs.Scan(&q); err != nil {
-			t.Fatal(err)
+	return rs
+}
+
+func (f *mapleFixture) zeros(t *testing.T, loan string) []mapleRow {
+	t.Helper()
+	var out []mapleRow
+	for _, r := range f.rows(t, loan) {
+		if r.qty == "0" {
+			out = append(out, r)
 		}
-		out = append(out, q)
 	}
 	return out
+}
+
+// blockAt is the oracle for a placement: the surviving block at or before ts, computed independently.
+func (f *mapleFixture) blockAt(t *testing.T, chain int, ts string) int64 {
+	t.Helper()
+	var bn int64
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT block_number FROM (
+		    SELECT DISTINCT ON (block_number) block_number, block_timestamp
+		    FROM block_meta WHERE chain_id = $1
+		    ORDER BY block_number, block_version DESC, processing_version DESC) s
+		WHERE block_timestamp <= $2::timestamptz
+		ORDER BY block_timestamp DESC, block_number DESC LIMIT 1`, chain, ts).Scan(&bn); err != nil {
+		t.Fatalf("no block at or before %s on chain %d: %v", ts, chain, err)
+	}
+	return bn
 }
 
 func TestMapleLoanPlacement(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-	f := seedMaple(ctx, t, pool, map[string]int{"a": 1, "b": 8453, "c": 1})
+	f := seedMaple(ctx, t, pool, map[string]mapleLoanSpec{"a": {1, "p1"}, "b": {8453, "p8453"}, "c": {1, "p1"}})
 
-	// Blocks every 2 minutes from 08:00, cycles every 10, so nothing is ever stale beyond tolerance.
-	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
-	f.blocks(t, 8453, 500, "2026-06-16T08:01:00Z", 60, 120)
+	// Blocks every 2 minutes from 08:00 on chain 1, offset a minute on 8453; cycles sit inside tolerance.
+	seedBlocks := func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
+		f.blocks(t, 8453, 500, "2026-06-16T08:01:00Z", 60, 120)
+	}
 
-	t.Run("a cycle is placed at the last block at or before it and takes that block's timestamp", func(t *testing.T) {
-		// 08:35 falls between block 1017 (08:34) and 1018 (08:36). Kills nearest-block, next-block
-		// and synced_at-as-block_timestamp: all three place it elsewhere or stamp 08:35.
+	t.Run("a cycle is placed at the last block at or before it, with that block's timestamp and the loan's identity", func(t *testing.T) {
+		seedBlocks(t)
+		// 08:35 falls between block 1017 (08:34) and 1018 (08:36).
 		f.cycle(t, "a", "2026-06-16T08:35:00Z", "500", 1)
 		if n := f.mustRun(t); n != 1 {
 			t.Fatalf("appended %d rows, want 1", n)
 		}
-		rs := f.rows(t, "a")
-		if len(rs) != 1 {
-			t.Fatalf("want one observation, got %d", len(rs))
+		r := f.mustRows(t, "a", 1)[0]
+		if r.bn != 1017 || !r.ts.Equal(time.Date(2026, 6, 16, 8, 34, 0, 0, time.UTC)) {
+			t.Errorf("placed at block %d stamped %s; want block 1017 stamped its own 08:34", r.bn, r.ts)
 		}
-		if rs[0].bn != 1017 || !rs[0].ts.Equal(time.Date(2026, 6, 16, 8, 34, 0, 0, time.UTC)) {
-			t.Errorf("placed at block %d stamped %s; want block 1017 stamped its own 08:34", rs[0].bn, rs[0].ts)
+		if r.qty != "500" || r.dealType != "BORROW" || r.chain != 1 {
+			t.Errorf("qty=%s deal_type=%s chain=%d; want 500 / BORROW / 1", r.qty, r.dealType, r.chain)
 		}
-		if rs[0].qty != "500" || rs[0].dealType != "BORROW" || rs[0].chain != 1 {
-			t.Errorf("qty=%s deal_type=%s chain=%d; want 500 / BORROW / 1", rs[0].qty, rs[0].dealType, rs[0].chain)
-		}
-	})
-
-	t.Run("identity carries the loan's protocol, its chain-qualified address and the borrower", func(t *testing.T) {
-		// protocol_id and instrument_key both feed position_id, so a wrong value silently re-keys the
-		// position. Nothing else in the suite reads protocol_id, and a min(protocol.id) mutation
-		// survives without this.
 		var wantProto int64
 		var wantAddr, wantHolder string
 		if err := pool.QueryRow(ctx,
@@ -225,463 +334,215 @@ func TestMapleLoanPlacement(t *testing.T) {
 			f.loans["a"]).Scan(&wantProto, &wantAddr, &wantHolder); err != nil {
 			t.Fatal(err)
 		}
-		rs := f.rows(t, "a")
-		if rs[0].protocolID != wantProto {
-			t.Errorf("protocol_id=%d; want the loan's own %d", rs[0].protocolID, wantProto)
-		}
-		if rs[0].instrument != wantAddr {
-			t.Errorf("instrument_key=%s; want the bare loan address %s", rs[0].instrument, wantAddr)
-		}
-		if rs[0].holder != wantHolder {
-			t.Errorf("holder_id=%s; want the borrower's address %s", rs[0].holder, wantHolder)
+		if r.protocolID != wantProto || r.instrument != wantAddr || r.holder != wantHolder {
+			t.Errorf("identity %d/%s/%s; want the loan's protocol %d, address %s and borrower %s",
+				r.protocolID, r.instrument, r.holder, wantProto, wantAddr, wantHolder)
 		}
 	})
 
 	t.Run("a cycle at a block's exact header instant belongs to that block", func(t *testing.T) {
-		// The `<=` boundary. A `<` mutation places this at 1019 instead.
+		seedBlocks(t)
 		f.cycle(t, "a", "2026-06-16T08:40:00Z", "600", 1)
 		f.mustRun(t)
-		rs := f.rows(t, "a")
-		last := rs[len(rs)-1]
-		if last.bn != 1020 || last.qty != "600" {
-			t.Errorf("a cycle exactly at 08:40 placed at block %d qty %s; want block 1020 qty 600", last.bn, last.qty)
+		if r := f.mustRows(t, "a", 1)[0]; r.bn != 1020 {
+			t.Errorf("a cycle exactly at 08:40 placed at block %d; want 1020", r.bn)
 		}
 	})
 
 	t.Run("cycles sharing a block collapse to one observation, the earliest synced_at winning", func(t *testing.T) {
-		// Three cycles inside block 1030's two-minute window, seeded out of order and all present
-		// before loan c's FIRST run, so the pick itself is under test rather than the spine's dedupe.
-		// Asserts the winner IS min(synced_at) read from the source, so the oracle is independent of
-		// plan order: dropping the ORDER BY pick key entirely then fails, not just reversing it.
+		seedBlocks(t)
+		// Seeded out of order and all present before the first run, so the pick is under test.
 		f.cycle(t, "c", "2026-06-16T09:01:30Z", "700", 1)
 		f.cycle(t, "c", "2026-06-16T09:00:10Z", "710", 1)
 		f.cycle(t, "c", "2026-06-16T09:00:50Z", "720", 1)
 		f.mustRun(t)
-		rs := f.rows(t, "c")
-		if len(rs) != 1 {
-			t.Fatalf("three cycles in one block must be one observation, got %d: %+v", len(rs), rs)
-		}
-		var wantQty string
-		if err := pool.QueryRow(ctx,
-			`SELECT principal_owed::text FROM maple_loan_state
-			 WHERE maple_loan_id = $1 ORDER BY synced_at LIMIT 1`, f.loans["c"]).Scan(&wantQty); err != nil {
-			t.Fatal(err)
-		}
-		if rs[0].qty != wantQty {
-			t.Errorf("quantity=%s; want %s, the principal of min(synced_at) in that block", rs[0].qty, wantQty)
+		if r := f.mustRows(t, "c", 1)[0]; r.qty != "710" {
+			t.Errorf("quantity=%s; want 710, the principal of the earliest cycle in that block", r.qty)
 		}
 	})
 
 	t.Run("blocks sharing a header timestamp resolve to the highest height", func(t *testing.T) {
-		// Two blocks at one instant: the tie-break. Dropping `block_number DESC` from the LATERAL's
-		// ORDER BY survives every other subtest, because no other fixture has an equal-timestamp pair.
+		seedBlocks(t)
 		f.block(t, 1, 5000, 0, "2026-06-16T12:00:00Z")
 		f.block(t, 1, 5001, 0, "2026-06-16T12:00:00Z")
 		f.cycle(t, "a", "2026-06-16T12:00:30Z", "800", 1)
 		f.mustRun(t)
-		rs := f.rows(t, "a")
-		last := rs[len(rs)-1]
-		if last.bn != 5001 {
-			t.Errorf("placed at block %d; want 5001, the highest height sharing that header instant", last.bn)
+		if r := f.mustRows(t, "a", 1)[0]; r.bn != 5001 {
+			t.Errorf("placed at block %d; want 5001, the highest height sharing that header instant", r.bn)
 		}
 	})
 
-	t.Run("a reorg keeps only the surviving version, so height and header time cannot invert", func(t *testing.T) {
-		// The wedge case. A depth-2 reorg from height 6000: orphans 6000/v0 and 6001/v0 carry EARLIER
-		// header times than the replacements. Resolving over a mixed timeline places a later cycle at
-		// a LOWER height with a HIGHER timestamp, which trips the spine's monotonic gate forever.
-		// Dense enough to stay inside the skew tolerance, so this subtest tests the timeline and not
-		// the coverage guard: 5950 is the canonical block the first cycle must land on.
+	t.Run("a reorg keeps only the surviving block_version, so height and header time cannot invert", func(t *testing.T) {
+		seedBlocks(t)
 		f.block(t, 1, 5950, 0, "2026-06-16T13:00:00Z")
 		f.block(t, 1, 6000, 0, "2026-06-16T13:00:10Z")
 		f.block(t, 1, 6001, 0, "2026-06-16T13:00:20Z")
 		f.block(t, 1, 6000, 1, "2026-06-16T13:00:30Z")
 		f.block(t, 1, 6001, 1, "2026-06-16T13:00:40Z")
-		// 13:00:25 sits after orphan 6001/v0 (13:00:20) but before replacement 6000/v1 (13:00:30), so
-		// on a mixed timeline it picks height 6001 and the next cycle picks the LOWER height 6000 at a
-		// LATER time. That is the inversion; both cycles after 13:00:30 would never expose it.
+		// 13:00:25 sits after orphan 6001/v0 but before replacement 6000/v1.
 		f.cycle(t, "a", "2026-06-16T13:00:25Z", "900", 1)
 		f.cycle(t, "a", "2026-06-16T13:00:35Z", "910", 1)
 		if _, err := f.run(t); err != nil {
 			t.Fatalf("a depth-2 reorg must not wedge the run: %v", err)
 		}
-		rs := f.rows(t, "a")
-		var prevBN int64
-		var prevTS time.Time
-		for _, r := range rs {
-			if r.bn < prevBN && r.ts.After(prevTS) {
-				t.Errorf("block %d at %s follows block %d at %s: height and header time invert, which wedges the spine's gate",
-					r.bn, r.ts, prevBN, prevTS)
-			}
-			prevBN, prevTS = r.bn, r.ts
+		rs := f.mustRows(t, "a", 2)
+		if rs[0].bn != 5950 || rs[1].bn != 6000 || rs[1].bv != 1 {
+			t.Errorf("placed at %d/%d then %d/%d; want 5950/0 then 6000/1", rs[0].bn, rs[0].bv, rs[1].bn, rs[1].bv)
 		}
-		last := rs[len(rs)-1]
-		if last.bn != 6000 || last.bv != 1 {
-			t.Errorf("last placement %d/%d; want 6000/1, the surviving block at or before 13:00:35", last.bn, last.bv)
+	})
+
+	t.Run("a block_meta reprocess keeps only the highest processing_version of a height", func(t *testing.T) {
+		seedBlocks(t)
+		// 7000 is reprocessed with a later header time, past the cycle, so only the pv=0 row precedes it.
+		f.block(t, 1, 6999, 0, "2026-06-16T14:00:00Z")
+		f.blockPV(t, 1, 7000, 0, 0, "2026-06-16T14:00:10Z")
+		f.blockPV(t, 1, 7000, 0, 1, "2026-06-16T14:00:40Z")
+		f.cycle(t, "a", "2026-06-16T14:00:20Z", "950", 1)
+		f.mustRun(t)
+		if r := f.mustRows(t, "a", 1)[0]; r.bn != 6999 {
+			t.Errorf("placed at block %d; want 6999, since 7000's surviving version is after the cycle", r.bn)
 		}
 	})
 
 	t.Run("the block lookup is scoped to the loan's own chain", func(t *testing.T) {
-		// Chain 1's series is offset a minute earlier, so at 08:36 chain 1 has a block AT 08:36 while
-		// chain 8453's latest is 08:35. An unscoped lookup therefore picks chain 1's, and this is the
-		// only fixture where the two chains' candidates differ -- an equal one would pass either way.
+		seedBlocks(t)
+		// At 08:36 chain 1 has a block AT 08:36 while chain 8453's latest is 08:35.
 		f.cycle(t, "b", "2026-06-16T08:36:00Z", "42", 1)
 		f.mustRun(t)
-		rs := f.rows(t, "b")
-		if len(rs) != 1 {
-			t.Fatalf("want one observation for loan b, got %d", len(rs))
-		}
-		if rs[0].chain != 8453 || rs[0].bn != 517 || !rs[0].ts.Equal(time.Date(2026, 6, 16, 8, 35, 0, 0, time.UTC)) {
-			t.Errorf("loan b placed at chain %d block %d (%s); want chain 8453 block 517 at 08:35",
-				rs[0].chain, rs[0].bn, rs[0].ts.UTC())
+		r := f.mustRows(t, "b", 1)[0]
+		if r.chain != 8453 || r.bn != 517 || !r.ts.Equal(time.Date(2026, 6, 16, 8, 35, 0, 0, time.UTC)) {
+			t.Errorf("loan b placed at chain %d block %d (%s); want chain 8453 block 517 at 08:35", r.chain, r.bn, r.ts.UTC())
 		}
 	})
 
-	t.Run("two loans on one chain in one run do not cross-contaminate", func(t *testing.T) {
-		aRows, cRows := f.rows(t, "a"), f.rows(t, "c")
-		if len(aRows) == 0 || len(cRows) == 0 {
-			t.Fatalf("both loans must have observations, got %d and %d", len(aRows), len(cRows))
-		}
-		if aRows[0].instrument == cRows[0].instrument || aRows[0].holder == cRows[0].holder {
-			t.Errorf("loans a and c share an instrument_key or holder: %s / %s", aRows[0].instrument, cRows[0].instrument)
+	t.Run("two loans on one chain in one run keep their own identities", func(t *testing.T) {
+		seedBlocks(t)
+		f.cycle(t, "a", "2026-06-16T08:35:00Z", "500", 1)
+		f.cycle(t, "c", "2026-06-16T08:35:00Z", "501", 1)
+		f.mustRun(t)
+		a, c := f.mustRows(t, "a", 1)[0], f.mustRows(t, "c", 1)[0]
+		if a.instrument == c.instrument || a.holder == c.holder || a.qty != "500" || c.qty != "501" {
+			t.Errorf("loans a and c cross-contaminate: %+v / %+v", a, c)
 		}
 	})
 
-	t.Run("a distinct processing_version at one block is a distinct observation", func(t *testing.T) {
-		// The source's trigger versions a re-synced cycle by build_id; both are real observations.
+	t.Run("a reprocess of the winning cycle is a new observation at its block carrying the reprocessed value", func(t *testing.T) {
+		seedBlocks(t)
+		f.cycle(t, "a", "2026-06-16T08:35:00Z", "500", 1)
+		f.mustRun(t)
 		f.cycle(t, "a", "2026-06-16T08:35:00Z", "550", 2)
 		f.mustRun(t)
-		var at []mapleRow
-		for _, r := range f.rows(t, "a") {
-			if r.bn == 1017 {
-				at = append(at, r)
-			}
+		rs := f.mustRows(t, "a", 2)
+		if rs[0].bn != 1017 || rs[1].bn != 1017 || rs[0].pv != 0 || rs[1].pv != 1 || rs[1].qty != "550" {
+			t.Errorf("want 500@pv0 then 550@pv1 at block 1017, got %+v", rs)
 		}
-		if len(at) != 2 || at[0].pv == at[1].pv {
-			t.Fatalf("want two processing_versions at block 1017, got %+v", at)
+	})
+
+	t.Run("a reprocess of a later cycle in the same block does not move that block's observation", func(t *testing.T) {
+		seedBlocks(t)
+		// Cycles at 08:34:10 and 08:35:00 both resolve to block 1017; only the later one is reprocessed.
+		f.cycle(t, "a", "2026-06-16T08:34:10Z", "100", 1)
+		f.cycle(t, "a", "2026-06-16T08:35:00Z", "200", 1)
+		f.cycle(t, "a", "2026-06-16T08:35:00Z", "205", 2)
+		f.mustRun(t)
+		if r := f.mustRows(t, "a", 1)[0]; r.qty != "100" || r.pv != 0 {
+			t.Errorf("block 1017 reads %s at pv %d; want the earliest cycle's 100 at pv 0", r.qty, r.pv)
 		}
-		if at[1].qty != "550" {
-			t.Errorf("the reprocessed version carries %s; want 550", at[1].qty)
+	})
+
+	t.Run("reprocessing the earlier cycle after a later one raises no refusal", func(t *testing.T) {
+		seedBlocks(t)
+		f.cycle(t, "a", "2026-06-16T08:34:10Z", "100", 1)
+		f.cycle(t, "a", "2026-06-16T08:35:00Z", "200", 1)
+		f.cycle(t, "a", "2026-06-16T08:35:00Z", "205", 2)
+		f.mustRun(t)
+		f.cycle(t, "a", "2026-06-16T08:34:10Z", "105", 2)
+		f.mustRun(t)
+		f.mustRun(t)
+		if n := f.count(t, `SELECT count(*) FROM position_projection_refusal`); n != 0 {
+			t.Errorf("%d refusals recorded; a reprocess must not drift a stored key", n)
+		}
+		rs := f.mustRows(t, "a", 2)
+		if rs[1].qty != "105" || rs[1].pv != 1 {
+			t.Errorf("want the reprocessed 105 at pv 1, got %+v", rs[1])
 		}
 	})
 
 	t.Run("re-running with no new source rows appends nothing", func(t *testing.T) {
-		// Guarded against passing vacuously: the spine must be non-empty first, so this cannot be
-		// satisfied by a run that never materialized anything.
-		var before int64
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&before); err != nil {
-			t.Fatal(err)
-		}
-		if before == 0 {
-			t.Fatal("nothing was materialized, so idempotence is not under test")
+		seedBlocks(t)
+		f.cycle(t, "a", "2026-06-16T08:35:00Z", "500", 1)
+		if n := f.mustRun(t); n != 1 {
+			t.Fatalf("first run appended %d rows, want 1", n)
 		}
 		if n := f.mustRun(t); n != 0 {
-			t.Errorf("re-running appended %d rows; want 0 with %d already stored", n, before)
+			t.Errorf("re-running appended %d rows; want 0", n)
 		}
 	})
 
 	t.Run("the run records the batch's own latest block_timestamp and build id", func(t *testing.T) {
-		// count(*) > 0 was satisfied by any prior success, including runs that emitted nothing.
-		var runTS, spineTS time.Time
+		seedBlocks(t)
+		f.cycle(t, "a", "2026-06-16T08:35:00Z", "500", 1)
+		f.cycle(t, "c", "2026-06-16T09:05:00Z", "501", 1)
+		f.mustRun(t)
+		var runTS time.Time
 		var buildID int
 		if err := pool.QueryRow(ctx,
 			`SELECT block_timestamp, build_id FROM position_projection_run
 			 WHERE projection = 'public.position_maple_loan' ORDER BY created_at DESC LIMIT 1`).Scan(&runTS, &buildID); err != nil {
 			t.Fatalf("no run recorded under the view's qualified name: %v", err)
 		}
-		if err := pool.QueryRow(ctx,
-			`SELECT max(ps.block_timestamp) FROM position_state ps
-			 JOIN maple_loan l ON ps.instrument_key = encode(l.loan_address, 'hex')`).Scan(&spineTS); err != nil {
-			t.Fatal(err)
+		if !runTS.Equal(time.Date(2026, 6, 16, 9, 4, 0, 0, time.UTC)) || buildID != 0 {
+			t.Errorf("run recorded %s build %d; want block 1032's 09:04 and build 0", runTS, buildID)
 		}
-		if !runTS.Equal(spineTS) {
-			t.Errorf("run recorded block_timestamp %s; want the projection's own max %s", runTS, spineTS)
+	})
+
+	t.Run("a block added later closer to a cycle re-places it as a second observation", func(t *testing.T) {
+		// The limit the wrapper's COMMENT states: idempotent only for a fixed block_meta.
+		f.reset(t)
+		f.block(t, 1, 100, 0, "2026-06-16T08:30:00Z")
+		f.cycle(t, "a", "2026-06-16T08:35:00Z", "500", 1)
+		f.mustRun(t)
+		f.block(t, 1, 101, 0, "2026-06-16T08:34:00Z")
+		if n := f.mustRun(t); n != 1 {
+			t.Errorf("appended %d rows; want 1, the cycle re-placed at block 101", n)
 		}
-		if buildID != 0 {
-			t.Errorf("build_id=%d; want the 0 passed to the wrapper", buildID)
+		rs := f.mustRows(t, "a", 2)
+		if rs[0].bn != 100 || rs[1].bn != 101 {
+			t.Errorf("want observations at 100 and 101, got %+v", rs)
 		}
 	})
 }
 
-func TestMapleLoanRefusals(t *testing.T) {
+func TestMapleLoanView(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-	f := seedMaple(ctx, t, pool, map[string]int{"a": 1, "b": 8453})
+	f := seedMaple(ctx, t, pool, map[string]mapleLoanSpec{"a": {1, "p1"}})
 
-	t.Run("a cycle no block precedes is refused by name, and nothing is appended", func(t *testing.T) {
-		f.blocks(t, 1, 1000, "2026-06-16T10:00:00Z", 10, 120)
+	t.Run("the view emits an unplaceable cycle with a NULL block rather than dropping it", func(t *testing.T) {
+		f.reset(t)
+		f.block(t, 1, 1000, 0, "2026-06-16T10:00:00Z")
 		f.cycle(t, "a", "2026-06-16T09:00:00Z", "500", 1)
-		_, err := f.run(t)
-		if err == nil || !strings.Contains(err.Error(), "no block_meta block precedes") {
-			t.Fatalf("want the unplaceable-cycle refusal, got %v", err)
-		}
-		if !strings.Contains(err.Error(), "chain 1") || !strings.Contains(err.Error(), "2026-06-16 09:00:00") {
-			t.Errorf("the refusal must name the chain and the earliest offending cycle: %v", err)
-		}
-		var n int64
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		if n != 0 {
-			t.Errorf("a refused run appended %d rows; want none", n)
-		}
-	})
-
-	t.Run("the unplaceable check is scoped per chain and names only the offending one", func(t *testing.T) {
-		// Chain 8453's cycle precedes all of ITS blocks while chain 1 has an earlier block. Dropping
-		// the chain predicate from the pre-check lets chain 1's coverage vouch for chain 8453.
-		f.blocks(t, 8453, 500, "2026-06-16T11:00:00Z", 10, 120)
-		f.cycle(t, "b", "2026-06-16T10:30:00Z", "42", 1)
-		_, err := f.run(t)
-		if err == nil || !strings.Contains(err.Error(), "chain 8453") {
-			t.Fatalf("want a refusal naming chain 8453, got %v", err)
-		}
-		f.exec(t, `DELETE FROM maple_loan_state WHERE synced_at = '2026-06-16T10:30:00Z'::timestamptz`)
-	})
-
-	t.Run("a cycle at the earliest block's exact instant is placeable, not refused", func(t *testing.T) {
-		// The pre-check's own `<=`. Tightening it to `<` refuses a cycle the view places fine, and no
-		// other fixture catches that because every other cycle has a strictly earlier block.
-		f.exec(t, `DELETE FROM maple_loan_state`)
-		f.exec(t, `DELETE FROM block_meta`)
-		f.block(t, 1, 1900, 0, "2026-06-16T08:00:00Z")
-		f.blocks(t, 1, 2000, "2026-06-16T10:00:00Z", 5, 120)
-		f.cycle(t, "a", "2026-06-16T10:00:00Z", "500", 1)
-		if _, err := f.run(t); err != nil {
-			t.Fatalf("a cycle exactly at the earliest block's instant must be placeable: %v", err)
-		}
-	})
-
-	t.Run("coverage too sparse to place a cycle closely is refused, naming the gap", func(t *testing.T) {
-		// The silent back-dating case: one block far in the past absorbs a whole history without it.
-		f.exec(t, `DELETE FROM maple_loan_state`)
-		f.exec(t, `DELETE FROM position_state`)
-		f.exec(t, `DELETE FROM block_meta`)
-		f.block(t, 1, 100, 0, "2026-01-01T00:00:00Z")
-		f.cycle(t, "a", "2026-06-16T08:00:00Z", "500", 1)
-		_, err := f.run(t)
-		if err == nil || !strings.Contains(err.Error(), "too sparse") {
-			t.Fatalf("want the sparse-coverage refusal, got %v", err)
-		}
-		if !strings.Contains(err.Error(), "166 days") {
-			t.Errorf("the refusal must quantify the gap it is refusing: %v", err)
-		}
-		var n int64
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		if n != 0 {
-			t.Errorf("a refused run appended %d rows; want none", n)
-		}
-	})
-
-	t.Run("a widened tolerance is the only way to accept that gap", func(t *testing.T) {
-		var n int64
-		if err := pool.QueryRow(ctx,
-			`SELECT materialize_maple_loan(p_build_id => 0, p_max_skew => INTERVAL '200 days')`).Scan(&n); err != nil {
-			t.Fatalf("an explicitly widened tolerance must accept it: %v", err)
-		}
+		n := f.count(t, `SELECT count(*) FROM position_maple_loan WHERE block_number IS NULL AND quantity = 500`)
 		if n != 1 {
-			t.Errorf("appended %d rows, want 1", n)
+			t.Errorf("the view emits %d NULL-block rows for a cycle no block precedes; want 1, so the spine refuses it", n)
 		}
 	})
 
-	t.Run("block_meta header times that invert against height are refused", func(t *testing.T) {
-		// A mis-parsed header time. Unrefused, it silently wins the placement when it is the only
-		// candidate, and wedges the spine's monotonic gate when it is not.
-		f.exec(t, `DELETE FROM maple_loan_state`)
-		f.exec(t, `DELETE FROM position_state`)
-		f.exec(t, `DELETE FROM block_meta`)
-		f.blocks(t, 1, 3000, "2026-06-16T08:00:00Z", 10, 120)
-		f.block(t, 1, 2500, 0, "2026-06-16T08:19:00Z")
-		f.cycle(t, "a", "2026-06-16T08:18:30Z", "500", 1)
-		_, err := f.run(t)
-		if err == nil || !strings.Contains(err.Error(), "invert against height") {
-			t.Fatalf("want the inverted-header refusal, got %v", err)
-		}
-		if !strings.Contains(err.Error(), "2500") {
-			t.Errorf("the refusal must name the offending block: %v", err)
-		}
-	})
-
-	t.Run("an orphaned reorg version does not count as an inversion", func(t *testing.T) {
-		// Only surviving versions form the timeline, so a superseded row with an odd time is ignored
-		// rather than blocking every future run. Dropping the version guard from the check refuses here.
-		f.exec(t, `DELETE FROM block_meta WHERE block_number = 2500`)
-		f.block(t, 1, 2500, 0, "2026-06-16T08:19:00Z")
-		f.block(t, 1, 2500, 1, "2026-06-16T07:50:00Z")
-		if _, err := f.run(t); err != nil {
-			t.Fatalf("a superseded version must not be read as an inversion: %v", err)
-		}
-	})
-
-	t.Run("a non-Active source row is refused rather than projected as an open position", func(t *testing.T) {
-		// The indexer only writes Active, but stl_readwrite can INSERT directly and the sibling FTL
-		// query already fetches four states. Projected silently, a Repaid loan reads as still owing.
-		f.exec(t, `DELETE FROM maple_loan_state`)
-		f.exec(t, `DELETE FROM position_state`)
-		f.cycleState(t, "a", "2026-06-16T08:10:00Z", "Repaid", "777")
-		_, err := f.run(t)
-		if err == nil || !strings.Contains(err.Error(), "Repaid") {
-			t.Fatalf("want a refusal naming the unexpected state, got %v", err)
-		}
-	})
-}
-
-func TestMapleLoanAbsenceClose(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	f := seedMaple(ctx, t, pool, map[string]int{"gone": 1, "peer1": 1, "peer2": 1, "lonely": 8453})
-	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
-	f.blocks(t, 8453, 500, "2026-06-16T08:00:00Z", 60, 120)
-
-	// Four cycle instants ten minutes apart. `gone` stops after the first; its peers continue, so the
-	// absence is attributable to the loan and not to a truncated cycle.
-	instants := []string{"2026-06-16T08:05:00Z", "2026-06-16T08:15:00Z", "2026-06-16T08:25:00Z", "2026-06-16T08:35:00Z"}
-
-	t.Run("no close is emitted while too few cycles have passed since the loan vanished", func(t *testing.T) {
-		// Persistence guard: one missed cycle is not yet a repayment.
-		f.cycle(t, "gone", instants[0], "500", 1)
-		for _, ts := range instants[:2] {
-			f.cycle(t, "peer1", ts, "100", 1)
-			f.cycle(t, "peer2", ts, "200", 1)
-		}
-		f.mustRun(t)
-		rs := f.rows(t, "gone")
-		if len(rs) != 1 || rs[0].qty != "500" {
-			t.Fatalf("want the single open observation, got %+v", rs)
-		}
-	})
-
-	t.Run("absence closes the position once peers keep reporting and the absence persists", func(t *testing.T) {
-		// maple_loan_state's COMMENT makes absence the close signal; this is that signal acted on.
-		for _, ts := range instants[2:] {
-			f.cycle(t, "peer1", ts, "100", 1)
-			f.cycle(t, "peer2", ts, "200", 1)
-		}
-		f.mustRun(t)
-		rs := f.rows(t, "gone")
-		if len(rs) != 2 {
-			t.Fatalf("want the open observation and one close, got %d: %+v", len(rs), rs)
-		}
-		if rs[1].qty != "0" {
-			t.Errorf("the closing observation carries %s; want 0", rs[1].qty)
-		}
-		if rs[1].bn <= rs[0].bn {
-			t.Errorf("the close is at block %d, at or before the open at %d", rs[1].bn, rs[0].bn)
-		}
-	})
-
-	t.Run("exactly one close is emitted, and re-running adds no more", func(t *testing.T) {
-		// Closure keeps the first zero after a positive and drops repeats, so a second close would be
-		// a silent duplicate rather than a visible error.
-		if n := f.mustRun(t); n != 0 {
-			t.Errorf("re-running appended %d rows; want 0", n)
-		}
-		var zeros int
-		if err := pool.QueryRow(ctx,
-			`SELECT count(*) FROM position_state ps
-			 JOIN maple_loan l ON ps.instrument_key = encode(l.loan_address,'hex')
-			 WHERE l.id = $1 AND ps.quantity = 0`, f.loans["gone"]).Scan(&zeros); err != nil {
-			t.Fatal(err)
-		}
-		if zeros != 1 {
-			t.Errorf("got %d closing observations; want exactly 1", zeros)
-		}
-	})
-
-	t.Run("a loan whose cycles never had peers present is never closed", func(t *testing.T) {
-		// The peer guard. `lonely` is the only loan on its chain, so its absence is indistinguishable
-		// from a cycle that failed, and an unguarded close would zero it permanently.
-		f.cycle(t, "lonely", instants[0], "999", 1)
-		f.exec(t, `INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, build_id)
-		           SELECT $1, $2::timestamptz, 'Active', 1, 0`, f.loans["lonely"], instants[1])
-		f.exec(t, `DELETE FROM maple_loan_state WHERE maple_loan_id = $1 AND synced_at = $2::timestamptz`,
-			f.loans["lonely"], instants[1])
-		f.mustRun(t)
-		var zeros int
-		if err := pool.QueryRow(ctx,
-			`SELECT count(*) FROM position_state ps
-			 JOIN maple_loan l ON ps.instrument_key = encode(l.loan_address,'hex')
-			 WHERE l.id = $1 AND ps.quantity = 0`, f.loans["lonely"]).Scan(&zeros); err != nil {
-			t.Fatal(err)
-		}
-		if zeros != 0 {
-			t.Errorf("closed a loan with no peer observations (%d zeros); the guard must hold", zeros)
-		}
-	})
-
-	t.Run("a close needs peers at the closing cycle, not merely cycles that passed", func(t *testing.T) {
-		// The peer guard alone. On chain 8453 `lonely` vanishes after t0 and three further cycles pass,
-		// so the persistence guard is satisfied -- but each of those cycles observed only `solo`, so a
-		// truncated response is indistinguishable from a repayment and the close must not fire.
-		f.exec(t, `INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
-		           SELECT 8453, p.id, decode(md5('loan-solo') || 'a1b2c3d4', 'hex'), mp.id, u.id
-		           FROM protocol p JOIN maple_pool mp ON mp.chain_id = p.chain_id
-		           JOIN "user" u ON u.chain_id = 8453
-		           WHERE p.chain_id = 8453 AND p.name = 'Maple' LIMIT 1 ON CONFLICT DO NOTHING`)
-		if err := pool.QueryRow(ctx, `SELECT id FROM maple_loan WHERE loan_address = decode(md5('loan-solo') || 'a1b2c3d4', 'hex')`).Scan(new(int64)); err != nil {
-			t.Fatal(err)
-		}
-		var soloID int64
-		if err := pool.QueryRow(ctx, `SELECT id FROM maple_loan WHERE loan_address = decode(md5('loan-solo') || 'a1b2c3d4', 'hex')`).Scan(&soloID); err != nil {
-			t.Fatal(err)
-		}
-		f.loans["solo"] = soloID
-		for _, ts := range instants[1:] {
-			f.cycle(t, "solo", ts, "7", 1)
-		}
-		f.mustRun(t)
-		var zeros int
-		if err := pool.QueryRow(ctx,
-			`SELECT count(*) FROM position_state ps
-			 JOIN maple_loan l ON ps.instrument_key = encode(l.loan_address,'hex')
-			 WHERE l.id = $1 AND ps.quantity = 0`, f.loans["lonely"]).Scan(&zeros); err != nil {
-			t.Fatal(err)
-		}
-		if zeros != 0 {
-			t.Errorf("closed a loan whose absence no peer cycle corroborates (%d zeros)", zeros)
-		}
-	})
-
-	t.Run("a live loan reporting at the newest cycle is never closed", func(t *testing.T) {
-		for _, loan := range []string{"peer1", "peer2"} {
-			rs := f.rows(t, loan)
-			for _, r := range rs {
-				if r.qty == "0" {
-					t.Errorf("loan %s is still reporting but was closed at block %d", loan, r.bn)
-				}
-			}
-		}
-	})
-}
-
-func TestMapleLoanViewContract(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	f := seedMaple(ctx, t, pool, map[string]int{"a": 1})
-	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 30, 120)
-
-	t.Run("block_meta carries the four-column index the placement's ORDER BY needs", func(t *testing.T) {
+	t.Run("block_meta carries the index the placement's ORDER BY needs, in that column order", func(t *testing.T) {
 		var def string
 		if err := pool.QueryRow(ctx,
-			`SELECT indexdef FROM pg_indexes WHERE tablename = 'block_meta'
+			`SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'block_meta'
 			   AND indexname = 'block_meta_chain_time_idx'`).Scan(&def); err != nil {
 			t.Fatalf("block_meta_chain_time_idx is missing: %v", err)
 		}
-		for _, want := range []string{"chain_id", "block_timestamp DESC", "block_number DESC", "block_version DESC"} {
-			if !strings.Contains(def, want) {
-				t.Errorf("indexdef %s is missing %s; the pick then needs a sort node", def, want)
-			}
+		want := "(chain_id, block_timestamp DESC, block_number DESC, block_version DESC, processing_version DESC)"
+		if !strings.Contains(def, want) {
+			t.Errorf("indexdef %s; want columns %s", def, want)
 		}
 	})
 
 	t.Run("the view is not writable, by its shape rather than by a privilege", func(t *testing.T) {
-		// ALTER DEFAULT PRIVILEGES grants stl_readwrite INSERT and UPDATE on every new public view, so
-		// a privilege assertion here cannot fail and would not be evidence. The shape is what holds.
 		var insertable, updatable string
 		if err := pool.QueryRow(ctx,
 			`SELECT t.is_insertable_into, v.is_updatable FROM information_schema.tables t
@@ -692,533 +553,650 @@ func TestMapleLoanViewContract(t *testing.T) {
 		if insertable != "NO" || updatable != "NO" {
 			t.Errorf("is_insertable_into=%s is_updatable=%s; want NO/NO", insertable, updatable)
 		}
-		_, err := pool.Exec(ctx, `INSERT INTO position_maple_loan (chain_id) VALUES (1)`)
-		if err == nil || !strings.Contains(err.Error(), "cannot insert into view") {
-			t.Errorf("an INSERT through the view must be refused by Postgres, got %v", err)
-		}
-	})
-
-	t.Run("an inverted chain carrying no maple loans does not abort the run", func(t *testing.T) {
-		// The check is scoped to chains maple lends on. Without that scope any other indexer's
-		// mis-parsed block wedges maple materialization for good.
-		f.exec(t, `INSERT INTO chain (chain_id, name) VALUES (99, 'other') ON CONFLICT (chain_id) DO NOTHING`)
-		f.exec(t, `INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
-		           VALUES (99, 10, 0, '2026-06-16T10:00:00Z'), (99, 11, 0, '2026-06-16T09:00:00Z')
-		           ON CONFLICT DO NOTHING`)
-		if _, err := f.run(t); err != nil {
-			t.Fatalf("an inversion on a chain with no maple loans must not abort: %v", err)
-		}
-		f.exec(t, `INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
-		           VALUES (1, 100000, 0, '2026-01-01T00:00:00Z') ON CONFLICT DO NOTHING`)
-		if _, err := f.run(t); err == nil || !strings.Contains(err.Error(), "invert against height") {
-			t.Fatalf("the same shape on maple's own chain must abort, got %v", err)
-		}
-		f.exec(t, `DELETE FROM block_meta WHERE chain_id = 99 OR (chain_id = 1 AND block_number = 100000)`)
-	})
-
-	// The every-pair form of this check was quadratic and could not finish on a production block_meta.
-	// 40,000 blocks is ~1.6 billion pairs; the adjacent-pair form is one ordered pass.
-	t.Run("the inversion check stays linear in the number of blocks", func(t *testing.T) {
-		f.exec(t, `INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
-		           SELECT 1, 1000000 + g, 0, '2026-07-01T00:00:00Z'::timestamptz + (g * interval '12 seconds')
-		           FROM generate_series(1, 40000) g ON CONFLICT DO NOTHING`)
-		if _, err := pool.Exec(ctx, `SET statement_timeout = '30s'`); err != nil {
-			t.Fatal(err)
-		}
-		defer func() {
-			if _, err := pool.Exec(ctx, `SET statement_timeout = 0`); err != nil {
-				t.Fatal(err)
-			}
-		}()
-		if _, err := f.run(t); err != nil {
-			t.Fatalf("the pre-check must finish well inside 30s on 40,000 blocks: %v", err)
-		}
-		f.exec(t, `DELETE FROM block_meta WHERE chain_id = 1 AND block_number > 1000000`)
-	})
-
-	t.Run("a loan address that is not 20 bytes is refused by name", func(t *testing.T) {
-		// instrument_key is the bare loan address. A blank one raises inside position_key() naming no
-		// row; an over-length one passes every check and silently mints a wider key.
-		f.exec(t, `INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
-		           SELECT 1, p.id, '\x0badc0de'::bytea, mp.id, l.borrower_user_id
-		           FROM protocol p JOIN maple_pool mp ON mp.chain_id = p.chain_id
-		           JOIN maple_loan l ON l.chain_id = 1
-		           WHERE p.chain_id = 1 AND p.name = 'Maple' LIMIT 1`)
-		var badID int64
-		if err := pool.QueryRow(ctx, `SELECT id FROM maple_loan WHERE loan_address = '\x0badc0de'::bytea`).Scan(&badID); err != nil {
-			t.Fatal(err)
-		}
-		_, err := f.run(t)
-		if err == nil || !strings.Contains(err.Error(), "not a 20-byte EVM address") {
-			t.Fatalf("want the loan-address refusal, got %v", err)
-		}
-		if !strings.Contains(err.Error(), "4-byte loan address") {
-			t.Errorf("the refusal must name the loan address and its width: %v", err)
-		}
-		f.exec(t, `DELETE FROM maple_loan WHERE id = $1`, badID)
-		if _, err := f.run(t); err != nil {
-			t.Fatalf("removing the malformed loan must let the run proceed: %v", err)
-		}
-	})
-
-	t.Run("an oversize loan address is refused by name", func(t *testing.T) {
-		// Both width cases above are SHORT, so <> 20 weakened to < 20 passes them. 21 bytes is the
-		// case above the bound, and it is the one the comment calls out as silently minting a wider key.
-		f.exec(t, `INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
-		           SELECT 1, p.id, '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaff'::bytea, mp.id, l.borrower_user_id
-		           FROM protocol p JOIN maple_pool mp ON mp.chain_id = p.chain_id
-		           JOIN maple_loan l ON l.chain_id = 1
-		           WHERE p.chain_id = 1 AND p.name = 'Maple' LIMIT 1`)
-		var badID int64
-		if err := pool.QueryRow(ctx, `SELECT id FROM maple_loan WHERE loan_address = '\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaff'::bytea`).Scan(&badID); err != nil {
-			t.Fatal(err)
-		}
-		_, err := f.run(t)
-		if err == nil || !strings.Contains(err.Error(), "21-byte loan address") {
-			t.Fatalf("want the oversize loan-address refusal naming 21 bytes, got %v", err)
-		}
-		f.exec(t, `DELETE FROM maple_loan WHERE id = $1`, badID)
-		if _, err := f.run(t); err != nil {
-			t.Fatalf("removing the oversize loan must let the run proceed: %v", err)
-		}
-	})
-
-	t.Run("a borrower address that is not 20 bytes is refused by name", func(t *testing.T) {
-		// Without the guard this surfaces only as position_state_holder_hex_chk on a chunk, naming no
-		// loan, chain or user. "user" is written by every indexer, so one bad row poisons every run.
-		f.exec(t, `INSERT INTO "user" (chain_id, address) VALUES (1, '\x0badc0de')
-		           ON CONFLICT DO NOTHING`)
-		f.exec(t, `INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
-		           SELECT 1, p.id, decode(md5('loan-short') || 'a1b2c3d4', 'hex'), mp.id, u.id
-		           FROM protocol p JOIN maple_pool mp ON mp.chain_id = p.chain_id
-		           JOIN "user" u ON u.chain_id = 1 AND u.address = '\x0badc0de'
-		           WHERE p.chain_id = 1 AND p.name = 'Maple' ON CONFLICT DO NOTHING`)
-		var shortID int64
-		if err := pool.QueryRow(ctx, `SELECT id FROM maple_loan WHERE loan_address = decode(md5('loan-short') || 'a1b2c3d4', 'hex')`).Scan(&shortID); err != nil {
-			t.Fatal(err)
-		}
-		f.loans["short"] = shortID
-		f.cycle(t, "short", "2026-06-16T08:15:00Z", "5", 1)
-		_, err := f.run(t)
-		if err == nil || !strings.Contains(err.Error(), "not a 20-byte EVM address") {
-			t.Fatalf("want the borrower-address refusal, got %v", err)
-		}
-		if !strings.Contains(err.Error(), "4-byte") {
-			t.Errorf("the refusal must name the actual width: %v", err)
-		}
-		// The check reads maple_loan alone (114 rows on staging): scoping it to loans with state
-		// planned every chunk of maple_loan_state, 190,992 kB against 312 kB without. So a bad
-		// address is refused whether or not the loan has a cycle yet, and taking the loan out of
-		// scope means removing the loan, not its state.
-		f.exec(t, `DELETE FROM maple_loan_state WHERE maple_loan_id = $1`, shortID)
-		if _, err := f.run(t); err == nil || !strings.Contains(err.Error(), "4-byte") {
-			t.Fatalf("a bad borrower address with no state row must still be refused, got %v", err)
-		}
-		f.exec(t, `DELETE FROM maple_loan WHERE id = $1`, shortID)
-		delete(f.loans, "short")
-	})
-
-	t.Run("a backfilled earlier cycle diverges the view from the spine, and the run says so", func(t *testing.T) {
-		// The residual of the earliest-synced_at pick: the spine cannot revise an emitted observation,
-		// so a replayed earlier cycle changes the view alone. The materializer warns and keeps the
-		// stored row; this pins that the divergence is real and reported, not silently reconciled.
-		f.cycle(t, "a", "2026-06-16T08:35:00Z", "500", 1)
-		f.mustRun(t)
-		stored := f.rows(t, "a")
-		if len(stored) != 1 || stored[0].qty != "500" {
-			t.Fatalf("want one stored observation of 500, got %+v", stored)
-		}
-		f.cycle(t, "a", "2026-06-16T08:34:10Z", "999", 1)
-		if n := f.mustRun(t); n != 0 {
-			t.Errorf("a replayed earlier cycle appended %d rows; the observation key is unchanged", n)
-		}
-		if got := f.viewQty(t, "a", stored[0].bn); len(got) != 1 || got[0] != "999" {
-			t.Errorf("view now reports %v at block %d; want the replayed 999", got, stored[0].bn)
-		}
-		after := f.rows(t, "a")
-		if len(after) != 1 || after[0].qty != "500" {
-			t.Errorf("spine reports %+v; want the original 500 kept, since it cannot be revised", after)
-		}
 	})
 }
 
-// A partial fetch and a repayment look identical to a count floor: a truncated cycle holding
-// any two loans clears a floor of two. Five loans, then three cycles carrying only two of them,
-// must close nothing -- a false zero cannot be retracted on an append-only spine.
-func TestMapleLoanTruncatedCycleDoesNotClose(t *testing.T) {
+func TestMapleLoanClose(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-	f := seedMaple(ctx, t, pool, map[string]int{"l1": 1, "l2": 1, "l3": 1, "l4": 1, "l5": 1})
-	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
-
-	instants := []string{
-		"2026-06-16T08:05:00Z", "2026-06-16T08:15:00Z",
-		"2026-06-16T08:25:00Z", "2026-06-16T08:35:00Z",
-	}
-	for _, l := range []string{"l1", "l2", "l3", "l4", "l5"} {
-		f.cycle(t, l, instants[0], "100", 1)
-	}
-	// The fetch degrades and returns two of the five for every later cycle.
-	for _, ts := range instants[1:] {
-		f.cycle(t, "l1", ts, "100", 1)
-		f.cycle(t, "l2", ts, "100", 1)
-	}
-	f.mustRun(t)
-
-	for _, l := range []string{"l3", "l4", "l5"} {
-		rs := f.rows(t, l)
-		if len(rs) != 1 {
-			t.Errorf("%s: want only its open observation, got %d: %+v", l, len(rs), rs)
-			continue
-		}
-		if rs[0].qty != "100" {
-			t.Errorf("%s: stored %s, want the open 100", l, rs[0].qty)
-		}
-	}
-}
-
-// The peer count still has to fall for a close to be inferred at all, so a single repayment
-// out of five closes normally. Without this the truncation guard could pass by never closing.
-func TestMapleLoanSingleRepaymentAmongManyStillCloses(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	f := seedMaple(ctx, t, pool, map[string]int{"r1": 1, "r2": 1, "r3": 1, "r4": 1, "repaid": 1})
-	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
-
-	instants := []string{
-		"2026-06-16T08:05:00Z", "2026-06-16T08:15:00Z",
-		"2026-06-16T08:25:00Z", "2026-06-16T08:35:00Z",
-	}
-	for _, l := range []string{"r1", "r2", "r3", "r4", "repaid"} {
-		f.cycle(t, l, instants[0], "100", 1)
-	}
-	for _, ts := range instants[1:] {
-		for _, l := range []string{"r1", "r2", "r3", "r4"} {
-			f.cycle(t, l, ts, "100", 1)
-		}
-	}
-	f.mustRun(t)
-
-	rs := f.rows(t, "repaid")
-	if len(rs) != 2 {
-		t.Fatalf("want the open observation and one close, got %d: %+v", len(rs), rs)
-	}
-	if rs[1].qty != "0" {
-		t.Errorf("the closing observation carries %s; want 0", rs[1].qty)
-	}
-}
-
-// A count of peers cannot tell "still there" from "replaced": a fetch that loses two loans while
-// two others are originated reports the same number, so a count guard zeroes the two it lost.
-// The rule is peer retention, so the loans that were there must still be there.
-func TestMapleLoanOriginationDoesNotMaskATruncation(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	f := seedMaple(ctx, t, pool, map[string]int{
-		"x1": 1, "x2": 1, "x3": 1, "x4": 1, "x5": 1, "new6": 1, "new7": 1,
+	f := seedMaple(ctx, t, pool, map[string]mapleLoanSpec{
+		"gone": {1, "p1"}, "peer1": {1, "p1"}, "peer2": {1, "p1"},
+		"other": {1, "p2"}, "solo": {8453, "p8453"},
 	})
-	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
-
-	instants := []string{
-		"2026-06-16T08:05:00Z", "2026-06-16T08:15:00Z",
-		"2026-06-16T08:25:00Z", "2026-06-16T08:35:00Z",
-	}
-	for _, l := range []string{"x1", "x2", "x3", "x4", "x5"} {
-		f.cycle(t, l, instants[0], "100", 1)
-	}
-	// The fetch loses x4 and x5 while new6 and new7 are originated, so the count stays at five.
-	for _, ts := range instants[1:] {
-		for _, l := range []string{"x1", "x2", "x3", "new6", "new7"} {
-			f.cycle(t, l, ts, "100", 1)
-		}
-	}
-	f.mustRun(t)
-
-	for _, l := range []string{"x4", "x5"} {
-		rs := f.rows(t, l)
-		if len(rs) != 1 {
-			t.Errorf("%s: want only its open observation, got %d: %+v", l, len(rs), rs)
-			continue
-		}
-		if rs[0].qty != "100" {
-			t.Errorf("%s: stored %s, want the open 100", l, rs[0].qty)
-		}
-	}
-}
-
-// The retention rule must not stop a genuine repayment closing while other loans are originated
-// alongside it, or it would trade a false zero for a position that never closes.
-func TestMapleLoanARepaymentClosesAlongsideNewOriginations(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	f := seedMaple(ctx, t, pool, map[string]int{"k1": 1, "k2": 1, "gone": 1, "fresh": 1})
-	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
-
-	instants := []string{
-		"2026-06-16T08:05:00Z", "2026-06-16T08:15:00Z",
-		"2026-06-16T08:25:00Z", "2026-06-16T08:35:00Z",
-	}
-	for _, l := range []string{"k1", "k2", "gone"} {
-		f.cycle(t, l, instants[0], "100", 1)
-	}
-	// gone repays; k1 and k2 keep reporting and fresh is originated.
-	for _, ts := range instants[1:] {
-		for _, l := range []string{"k1", "k2", "fresh"} {
-			f.cycle(t, l, ts, "100", 1)
-		}
-	}
-	f.mustRun(t)
-
-	rs := f.rows(t, "gone")
-	if len(rs) != 2 {
-		t.Fatalf("want the open observation and one close, got %d: %+v", len(rs), rs)
-	}
-	if rs[1].qty != "0" {
-		t.Errorf("the closing observation carries %s; want 0", rs[1].qty)
-	}
-}
-
-// The wrapper is the only path the runner calls, so it has to forward the writer run to the spine or
-// every row this projection appends is provenance-free (ADR-0006 §2). The run record is the witness:
-// its run_id can only have arrived through the wrapper's own parameter.
-func TestMapleLoanForwardsTheWriterRun(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	f := seedMaple(ctx, t, pool, map[string]int{"run-fwd": 1})
-	f.blocks(t, 1, 100, "2026-04-01T00:00:00Z", 40, 3600)
-	f.cycle(t, "run-fwd", "2026-04-01T05:00:00Z", "1000", 0)
-	var n int64
-	if err := pool.QueryRow(ctx, `SELECT materialize_maple_loan(p_build_id => 7, p_max_skew => $1::interval, p_run_id => 9182)`, mapleTolerance).Scan(&n); err != nil {
-		t.Fatalf("materialize_maple_loan with a run: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("appended %d rows, want 1", n)
-	}
-	var stamped, unstamped int
-	if err := pool.QueryRow(ctx, `
-		SELECT count(*) FILTER (WHERE run_id = 9182 AND build_id = 7),
-		       count(*) FILTER (WHERE run_id IS DISTINCT FROM 9182)
-		  FROM position_state`).Scan(&stamped, &unstamped); err != nil {
-		t.Fatalf("read the appended rows: %v", err)
-	}
-	if stamped != 1 || unstamped != 0 {
-		t.Errorf("appended rows: %d carry run 9182 at build 7, %d do not, want 1 and 0", stamped, unstamped)
-	}
-	// The run record is the wrapper's other witness, and it is the only one the other six assert.
-	var runRecord *int64
-	if err := pool.QueryRow(ctx, `
-		SELECT run_id FROM position_projection_run
-		 WHERE projection = 'public.position_maple_loan'
-		 ORDER BY created_at DESC LIMIT 1`).Scan(&runRecord); err != nil {
-		t.Fatalf("read the run record: %v", err)
-	}
-	if runRecord == nil || *runRecord != 9182 {
-		t.Errorf("run record = %v, want 9182", runRecord)
-	}
-
-	// The runner passes the two provenance arguments BY NAME, so these parameter names are the
-	// contract: renaming one here leaves this migration valid and breaks that projection only.
-	var args []string
-	if err := pool.QueryRow(ctx, `
-		SELECT proargnames::text[] FROM pg_proc WHERE proname = 'materialize_maple_loan'`).Scan(&args); err != nil {
-		t.Fatalf("read the wrapper's parameter names: %v", err)
-	}
-	for _, want := range []string{"p_build_id", "p_run_id"} {
-		found := false
-		for _, a := range args {
-			if a == want {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("materialize_maple_loan declares %v, missing %s -- the runner calls it by name", args, want)
-		}
-	}
-}
-
-// Where the close LANDS is the whole of the close contract, and nothing pinned it: the zero must sit at
-// the first cycle the loan is missing from, carry pv=0, and follow the LAST sighting rather than the
-// first. Peers must still be reporting there, or a truncated fetch reads as a repayment.
-func TestMapleLoanClosePlacement(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	f := seedMaple(ctx, t, pool, map[string]int{"gone": 1, "peer1": 1, "peer2": 1})
-	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
-
-	// Five cycles ten minutes apart. `gone` is reported at the first THREE, then vanishes.
 	inst := []string{
 		"2026-06-16T08:05:00Z", "2026-06-16T08:15:00Z", "2026-06-16T08:25:00Z",
 		"2026-06-16T08:35:00Z", "2026-06-16T08:45:00Z",
 	}
-	for i, ts := range inst {
-		if i < 3 {
-			f.cycle(t, "gone", ts, "500", 1)
+	seed := func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
+		f.blocks(t, 8453, 500, "2026-06-16T08:00:00Z", 60, 120)
+	}
+	all := func() map[string]int64 {
+		return map[string]int64{"gone": 500, "peer1": 100, "peer2": 200, "other": 300, "solo": 700}
+	}
+	without := func(names ...string) map[string]int64 {
+		m := all()
+		for _, n := range names {
+			delete(m, n)
 		}
-		f.cycle(t, "peer1", ts, "100", 1)
-		f.cycle(t, "peer2", ts, "200", 1)
-	}
-	f.mustRun(t)
-
-	rows := f.rows(t, "gone")
-	if len(rows) == 0 {
-		t.Fatal("the loan stored nothing, so every assertion below would pass vacuously")
-	}
-	last := rows[len(rows)-1]
-	if last.qty != "0" {
-		t.Fatalf("the final row is %s, not a close; rows=%d", last.qty, len(rows))
-	}
-	if last.pv != 0 {
-		t.Errorf("the close carries processing_version %d; want 0, which is what lets a later positive at that block win the DISTINCT ON", last.pv)
+		return m
 	}
 
-	// The close must sit at the FOURTH cycle — the first one the loan is missing from — not the fifth,
-	// and not anywhere derived from the loan's first sighting.
-	var wantBN int64
-	if err := pool.QueryRow(ctx, `
-		SELECT b.block_number FROM block_meta b
-		WHERE b.chain_id = 1 AND b.block_timestamp <= $1::timestamptz
-		ORDER BY b.block_timestamp DESC, b.block_number DESC LIMIT 1`, inst[3]).Scan(&wantBN); err != nil {
-		t.Fatal(err)
-	}
-	if last.bn != wantBN {
-		t.Errorf("the close landed at block %d; want %d, the block behind the first cycle the loan is missing from (%s)",
-			last.bn, wantBN, inst[3])
-	}
-
-	// And the positives must be the three sightings, so last_synced_at is the LAST of them.
-	var positives int
-	for _, r := range rows {
-		if r.qty != "0" {
-			positives++
+	t.Run("a loan absent from a complete cycle closes there, at pv 0, after every sighting", func(t *testing.T) {
+		seed(t)
+		for _, ts := range inst[:3] {
+			f.fetch(t, ts, all(), nil)
 		}
-	}
-	if positives == 0 {
-		t.Fatal("no positive rows stored; the fixture is not exercising the close path")
-	}
-	if got := rows[positives-1].bn; got >= last.bn {
-		t.Errorf("the last positive is at block %d and the close at %d; the close must follow every sighting", got, last.bn)
-	}
+		for _, ts := range inst[3:] {
+			f.fetch(t, ts, without("gone"), nil)
+		}
+		f.mustRun(t)
+		rs := f.mustRows(t, "gone", 4)
+		last := rs[3]
+		if last.qty != "0" || last.pv != 0 {
+			t.Fatalf("the final row is %s at pv %d; want the close, 0 at pv 0", last.qty, last.pv)
+		}
+		if want := f.blockAt(t, 1, inst[3]); last.bn != want {
+			t.Errorf("the close landed at block %d; want %d, behind the first cycle the loan is missing from", last.bn, want)
+		}
+		if rs[2].bn >= last.bn || rs[2].qty != "500" {
+			t.Errorf("the last positive is %+v; the close must follow the last sighting", rs[2])
+		}
+	})
+
+	t.Run("a truncated fetch that drops only this loan closes nothing, and healing leaves no false zero", func(t *testing.T) {
+		seed(t)
+		f.fetch(t, inst[0], all(), nil)
+		f.fetch(t, inst[1], all(), nil)
+		// The loan query loses `gone` for two cycles while every peer is returned; the pool still counts it.
+		f.fetch(t, inst[2], without("gone"), map[string]int64{"gone": 500})
+		f.fetch(t, inst[3], without("gone"), map[string]int64{"gone": 500})
+		f.mustRun(t)
+		f.fetch(t, inst[4], all(), nil)
+		f.mustRun(t)
+		if z := f.zeros(t, "gone"); len(z) != 0 {
+			t.Errorf("stored %d false closes: %+v", len(z), z)
+		}
+	})
+
+	t.Run("every loan repaid in one cycle closes", func(t *testing.T) {
+		seed(t)
+		f.fetch(t, inst[0], all(), nil)
+		f.fetch(t, inst[1], without("gone", "peer1"), nil)
+		f.fetch(t, inst[2], without("gone", "peer1"), nil)
+		f.mustRun(t)
+		for _, loan := range []string{"gone", "peer1"} {
+			if z := f.zeros(t, loan); len(z) != 1 {
+				t.Errorf("%s: %d closes; want 1", loan, len(z))
+			}
+		}
+		if z := f.zeros(t, "peer2"); len(z) != 0 {
+			t.Errorf("peer2 still reports but was closed: %+v", z)
+		}
+	})
+
+	t.Run("a pool's only loan closes when the pool reports nothing outstanding", func(t *testing.T) {
+		seed(t)
+		f.fetch(t, inst[0], all(), nil)
+		f.fetch(t, inst[1], without("solo"), nil)
+		f.mustRun(t)
+		if z := f.zeros(t, "solo"); len(z) != 1 {
+			t.Errorf("%d closes; want 1, since p8453 reported 0 outstanding with no loans", len(z))
+		}
+	})
+
+	t.Run("a cycle where the loan query returned nothing for a pool that still has principal out closes nothing", func(t *testing.T) {
+		seed(t)
+		f.fetch(t, inst[0], all(), nil)
+		// The loan indexer is down: pools keep reporting, no loan rows are written at all.
+		for _, ts := range inst[1:] {
+			f.fetch(t, ts, nil, all())
+		}
+		f.mustRun(t)
+		for loan := range all() {
+			if z := f.zeros(t, loan); len(z) != 0 {
+				t.Errorf("%s closed during a loan-fetch outage: %+v", loan, z)
+			}
+		}
+	})
+
+	t.Run("a cycle with no pool row closes nothing", func(t *testing.T) {
+		seed(t)
+		f.fetch(t, inst[0], all(), nil)
+		for _, ts := range inst[1:] {
+			for loan, owed := range without("gone") {
+				f.cycle(t, loan, ts, fmt.Sprint(owed), 1)
+			}
+		}
+		f.mustRun(t)
+		if z := f.zeros(t, "gone"); len(z) != 0 {
+			t.Errorf("closed with no completeness evidence: %+v", z)
+		}
+	})
+
+	t.Run("completeness is per pool, so a loss in one pool is not offset by a gain in another", func(t *testing.T) {
+		seed(t)
+		f.fetch(t, inst[0], all(), nil)
+		// p1 drops `gone` (500) by truncation while p2's loan grows by exactly 500: the all-pool sum still agrees.
+		for _, ts := range inst[1:] {
+			reported := without("gone")
+			reported["other"] += 500
+			for loan, owed := range reported {
+				f.cycle(t, loan, ts, fmt.Sprint(owed), 1)
+			}
+			f.poolCycle(t, "p1", ts, 500+100+200, 1)
+			f.poolCycle(t, "p2", ts, 800, 1)
+			f.poolCycle(t, "p8453", ts, 700, 1)
+		}
+		f.mustRun(t)
+		if z := f.zeros(t, "gone"); len(z) != 0 {
+			t.Errorf("closed although p1's loans fall 500 short of its principal_out: %+v", z)
+		}
+	})
+
+	t.Run("completeness reads the pool's highest processing_version", func(t *testing.T) {
+		seed(t)
+		f.fetch(t, inst[0], all(), nil)
+		f.fetch(t, inst[1], without("gone"), nil)
+		// Reprocessed pool row at inst[1] now counts `gone` again, so that cycle is no longer complete.
+		f.poolCycle(t, "p1", inst[1], 800, 2)
+		f.mustRun(t)
+		if z := f.zeros(t, "gone"); len(z) != 0 {
+			t.Errorf("closed on a superseded pool row: %+v", z)
+		}
+		f.poolCycle(t, "p1", inst[1], 300, 3)
+		f.mustRun(t)
+		if z := f.zeros(t, "gone"); len(z) != 1 {
+			t.Errorf("%d closes; want 1 once the highest version agrees again", len(z))
+		}
+	})
+
+	t.Run("completeness reads each loan's highest processing_version", func(t *testing.T) {
+		seed(t)
+		f.fetch(t, inst[0], all(), nil)
+		for loan, owed := range without("gone") {
+			f.cycle(t, loan, inst[1], fmt.Sprint(owed), 1)
+		}
+		f.poolCycle(t, "p1", inst[1], 350, 1)
+		f.poolCycle(t, "p2", inst[1], 300, 1)
+		f.poolCycle(t, "p8453", inst[1], 700, 1)
+		f.mustRun(t)
+		if z := f.zeros(t, "gone"); len(z) != 0 {
+			t.Fatalf("closed while p1's loans sum to 300 against 350: %+v", z)
+		}
+		// peer1 is reprocessed to 150, so p1's latest loans now sum to 350.
+		f.cycle(t, "peer1", inst[1], "150", 2)
+		f.mustRun(t)
+		if z := f.zeros(t, "gone"); len(z) != 1 {
+			t.Errorf("%d closes; want 1 once the reprocessed loan completes the pool", len(z))
+		}
+	})
+
+	t.Run("a close whose first complete cycle shares the last sighting's block moves to a later block", func(t *testing.T) {
+		f.reset(t)
+		// Blocks every 30 minutes: 08:00, 08:30, 09:00.
+		f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 3, 1800)
+		f.blocks(t, 8453, 500, "2026-06-16T08:00:00Z", 3, 1800)
+		f.fetch(t, "2026-06-16T08:05:00Z", all(), nil)
+		for _, ts := range []string{"2026-06-16T08:15:00Z", "2026-06-16T08:25:00Z", "2026-06-16T08:35:00Z"} {
+			f.fetch(t, ts, without("gone"), nil)
+		}
+		if _, err := f.runWith(t, "30 minutes"); err != nil {
+			t.Fatal(err)
+		}
+		z := f.zeros(t, "gone")
+		if len(z) != 1 || z[0].bn != 1001 {
+			t.Errorf("closes %+v; want one at block 1001, the first block after the sighting's block 1000", z)
+		}
+	})
+
+	t.Run("a block at the last sighting's exact instant does not count as the next block", func(t *testing.T) {
+		f.reset(t)
+		// The sighting at 08:30 places at block 1001 (08:30); block 1002 is the first block after it.
+		f.block(t, 1, 1000, 0, "2026-06-16T08:00:00Z")
+		f.block(t, 1, 1001, 0, "2026-06-16T08:30:00Z")
+		f.block(t, 1, 1002, 0, "2026-06-16T08:40:00Z")
+		f.block(t, 8453, 500, 0, "2026-06-16T08:00:00Z")
+		f.fetch(t, "2026-06-16T08:30:00Z", all(), nil)
+		f.fetch(t, "2026-06-16T08:35:00Z", without("gone"), nil)
+		f.fetch(t, "2026-06-16T08:45:00Z", without("gone"), nil)
+		if _, err := f.runWith(t, "1 hour"); err != nil {
+			t.Fatal(err)
+		}
+		if z := f.zeros(t, "gone"); len(z) != 1 || z[0].bn != 1002 {
+			t.Errorf("closes %+v; want one at block 1002", z)
+		}
+	})
+
+	t.Run("no close is emitted until a block follows the last sighting, then it is", func(t *testing.T) {
+		f.reset(t)
+		f.block(t, 1, 1000, 0, "2026-06-16T08:00:00Z")
+		f.block(t, 8453, 500, 0, "2026-06-16T08:00:00Z")
+		f.fetch(t, "2026-06-16T08:05:00Z", all(), nil)
+		f.fetch(t, "2026-06-16T08:06:00Z", without("gone"), nil)
+		if _, err := f.runWith(t, "1 hour"); err != nil {
+			t.Fatal(err)
+		}
+		if z := f.zeros(t, "gone"); len(z) != 0 {
+			t.Fatalf("closed in the sighting's own block: %+v", z)
+		}
+		f.block(t, 1, 1001, 0, "2026-06-16T08:06:00Z")
+		if _, err := f.runWith(t, "1 hour"); err != nil {
+			t.Fatal(err)
+		}
+		if z := f.zeros(t, "gone"); len(z) != 1 || z[0].bn != 1001 {
+			t.Errorf("closes %+v; want one at block 1001", z)
+		}
+	})
+
+	t.Run("loans still reporting are never closed, and a re-run adds no second close", func(t *testing.T) {
+		seed(t)
+		f.fetch(t, inst[0], all(), nil)
+		for _, ts := range inst[1:] {
+			f.fetch(t, ts, without("gone"), nil)
+		}
+		f.mustRun(t)
+		if n := f.mustRun(t); n != 0 {
+			t.Errorf("re-running appended %d rows; want 0", n)
+		}
+		if z := f.zeros(t, "gone"); len(z) != 1 {
+			t.Errorf("%d closes; want exactly 1", len(z))
+		}
+		for loan := range without("gone") {
+			if z := f.zeros(t, loan); len(z) != 0 {
+				t.Errorf("%s is still reporting but was closed: %+v", loan, z)
+			}
+		}
+	})
 }
 
-// One cycle after the last sighting is not yet a close; two is. Both sides of that boundary, since a
-// premature zero is unrepairable in an append-only table.
-func TestMapleLoanCloseNeedsExactlyTwoFollowingCycles(t *testing.T) {
+func TestMapleLoanRefusals(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	f := seedMaple(ctx, t, pool, map[string]mapleLoanSpec{"a": {1, "p1"}, "b": {8453, "p8453"}})
+
+	appended := func(t *testing.T) {
+		t.Helper()
+		if n := f.count(t, `SELECT count(*) FROM position_state`); n != 0 {
+			t.Errorf("a refused run appended %d rows; want none", n)
+		}
+	}
+
+	t.Run("a cycle no block precedes is refused naming its chain and earliest cycle", func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 1000, "2026-06-16T10:00:00Z", 10, 120)
+		f.cycle(t, "a", "2026-06-16T09:00:00Z", "500", 1)
+		msg := f.mustRefuse(t, mapleTolerance, "no surviving block precedes")
+		want := fmt.Sprintf("chain 1: 1 cycle(s) that no surviving block precedes, earliest at %s",
+			f.text(t, `'2026-06-16T09:00:00Z'::timestamptz`))
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal %q; want it to contain %q", msg, want)
+		}
+		appended(t)
+	})
+
+	t.Run("the placement check names only the offending chain", func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
+		f.blocks(t, 8453, 500, "2026-06-16T11:00:00Z", 10, 120)
+		f.cycle(t, "a", "2026-06-16T08:35:00Z", "500", 1)
+		// Chain 1's last block (09:58) is within tolerance of this cycle, so only a chain-scoped lookup refuses it.
+		f.cycle(t, "b", "2026-06-16T10:05:00Z", "42", 1)
+		msg := f.mustRefuse(t, mapleTolerance, "chain 8453")
+		if strings.Contains(msg, "chain 1:") {
+			t.Errorf("chain 1 places fine but is named: %s", msg)
+		}
+	})
+
+	t.Run("a chain with no blocks at all is refused as unloaded, not as late history", func(t *testing.T) {
+		f.reset(t)
+		f.cycle(t, "a", "2026-06-16T09:00:00Z", "500", 1)
+		f.mustRefuse(t, mapleTolerance, "chain 1: block_meta holds no blocks for this chain")
+		appended(t)
+	})
+
+	t.Run("a cycle preceded only by an orphaned version is refused by name", func(t *testing.T) {
+		f.reset(t)
+		f.block(t, 1, 100, 0, "2026-06-16T10:00:00Z")
+		f.block(t, 1, 100, 1, "2026-06-16T12:00:00Z")
+		f.cycle(t, "a", "2026-06-16T11:00:00Z", "500", 1)
+		f.mustRefuse(t, "1 day", "chain 1: 1 cycle(s) that no surviving block precedes")
+		appended(t)
+	})
+
+	t.Run("a cycle at the earliest block's exact instant is placeable", func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 2000, "2026-06-16T10:00:00Z", 5, 120)
+		f.cycle(t, "a", "2026-06-16T10:00:00Z", "500", 1)
+		if _, err := f.run(t); err != nil {
+			t.Fatalf("a cycle exactly at the earliest block's instant must be placeable: %v", err)
+		}
+	})
+
+	t.Run("a cycle further than the tolerance from its block is refused, quantifying the gap", func(t *testing.T) {
+		f.reset(t)
+		f.block(t, 1, 100, 0, "2026-01-01T00:00:00Z")
+		f.cycle(t, "a", "2026-06-16T08:00:00Z", "500", 1)
+		msg := f.mustRefuse(t, mapleTolerance, "stale by up to")
+		gap := f.text(t, `'2026-06-16T08:00:00Z'::timestamptz - '2026-01-01T00:00:00Z'::timestamptz`)
+		if !strings.Contains(msg, "stale by up to "+gap+",") {
+			t.Errorf("refusal %q; want the gap %s", msg, gap)
+		}
+		appended(t)
+	})
+
+	t.Run("the tolerance is inclusive to the microsecond", func(t *testing.T) {
+		f.reset(t)
+		f.block(t, 1, 100, 0, "2026-06-16T08:00:00Z")
+		f.cycle(t, "a", "2026-06-16T08:10:00Z", "500", 1)
+		if _, err := f.runWith(t, "10 minutes"); err != nil {
+			t.Errorf("a gap equal to the tolerance must be accepted: %v", err)
+		}
+		f.reset(t)
+		f.block(t, 1, 100, 0, "2026-06-16T08:00:00Z")
+		f.cycle(t, "a", "2026-06-16T08:10:00Z", "500", 1)
+		f.mustRefuse(t, "9 minutes 59.999999 seconds", "stale by up to")
+	})
+
+	t.Run("a widened tolerance accepts the gap", func(t *testing.T) {
+		f.reset(t)
+		f.block(t, 1, 100, 0, "2026-01-01T00:00:00Z")
+		f.cycle(t, "a", "2026-06-16T08:00:00Z", "500", 1)
+		if n, err := f.runWith(t, "200 days"); err != nil || n != 1 {
+			t.Errorf("an explicitly widened tolerance appended %d rows, err %v; want 1", n, err)
+		}
+	})
+
+	t.Run("a pool cycle too far from its block is refused, since it can place a close", func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 10, 120)
+		f.cycle(t, "a", "2026-06-16T08:05:00Z", "500", 1)
+		f.poolCycle(t, "p1", "2026-06-16T08:05:00Z", 500, 1)
+		f.poolCycle(t, "p1", "2026-06-16T12:00:00Z", 0, 1)
+		f.mustRefuse(t, mapleTolerance, "chain 1: 1 cycle(s) stale by up to")
+		appended(t)
+	})
+
+	t.Run("a pool cycle before any of its loans was seen places no close and is not checked", func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 10, 120)
+		f.poolCycle(t, "p1", "2026-06-01T00:00:00Z", 0, 1)
+		f.cycle(t, "a", "2026-06-16T08:05:00Z", "500", 1)
+		f.poolCycle(t, "p1", "2026-06-16T08:05:00Z", 500, 1)
+		if _, err := f.run(t); err != nil {
+			t.Errorf("a pool row older than block_meta, before the pool's first loan cycle, refused the run: %v", err)
+		}
+	})
+
+	t.Run("a bounded run ignores offenders older than its window, and an unbounded run does not", func(t *testing.T) {
+		f.reset(t)
+		f.block(t, 1, 1, 0, "2020-01-01T00:00:00Z")
+		f.cycle(t, "a", "2020-06-01T00:00:00Z", "500", 1)
+		f.cycleState(t, "a", "2020-06-01T00:10:00Z", "Repaid", "1")
+		if _, err := pool.Exec(ctx, `SELECT materialize_maple_loan(0, NULL, INTERVAL '1 hour')`); err != nil {
+			t.Errorf("a one-hour window refused on a six-year-old row: %v", err)
+		}
+		f.mustRefuse(t, mapleTolerance, "stale by up to")
+	})
+
+	t.Run("a non-Active state inside the window is refused, listing states in order", func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
+		for i, s := range []string{"S7", "S2", "S9", "S1", "S5", "S3", "S8"} {
+			f.cycleState(t, "a", fmt.Sprintf("2026-06-16T08:%02d:00Z", 10+i), s, "1")
+		}
+		msg := f.mustRefuse(t, mapleTolerance, "cannot classify as an open BORROW")
+		var got []string
+		for _, m := range regexp.MustCompile(`S\d x`).FindAllString(msg, -1) {
+			got = append(got, strings.TrimSuffix(m, " x"))
+		}
+		if strings.Join(got, ",") != "S1,S2,S3,S5,S7" {
+			t.Errorf("reported states %v; want the first five in order, S1,S2,S3,S5,S7", got)
+		}
+	})
+
+	t.Run("block_meta header times that invert against height are refused naming the block", func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 3000, "2026-06-16T08:00:00Z", 10, 120)
+		f.block(t, 1, 2500, 0, "2026-06-16T08:19:00Z")
+		f.cycle(t, "a", "2026-06-16T08:18:30Z", "500", 1)
+		f.mustRefuse(t, mapleTolerance, "precedes block 2500 at")
+	})
+
+	t.Run("an orphaned reorg version does not count as an inversion", func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 3000, "2026-06-16T08:00:00Z", 10, 120)
+		f.block(t, 1, 2500, 0, "2026-06-16T08:19:00Z")
+		f.block(t, 1, 2500, 1, "2026-06-16T07:50:00Z")
+		f.cycle(t, "a", "2026-06-16T08:18:30Z", "500", 1)
+		if _, err := f.run(t); err != nil {
+			t.Fatalf("a superseded version must not be read as an inversion: %v", err)
+		}
+	})
+
+	t.Run("an inversion on a chain maple does not lend on is ignored, and on its own chain is not", func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 30, 120)
+		f.exec(t, `INSERT INTO chain (chain_id, name) VALUES (99, 'other') ON CONFLICT (chain_id) DO NOTHING`)
+		f.block(t, 99, 10, 0, "2026-06-16T10:00:00Z")
+		f.block(t, 99, 11, 0, "2026-06-16T09:00:00Z")
+		if _, err := f.run(t); err != nil {
+			t.Fatalf("an inversion on a chain with no maple loans must not abort: %v", err)
+		}
+		f.block(t, 1, 100000, 0, "2026-01-01T00:00:00Z")
+		f.mustRefuse(t, mapleTolerance, "invert against height")
+	})
+
+	t.Run("the inversion check stays linear in the number of blocks", func(t *testing.T) {
+		f.reset(t)
+		f.exec(t, `INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
+		           SELECT 1, 1000000 + g, 0, '2026-07-01T00:00:00Z'::timestamptz + (g * interval '12 seconds')
+		           FROM generate_series(1, 40000) g`)
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Release()
+		if _, err := conn.Exec(ctx, `SET statement_timeout = '30s'`); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := conn.Exec(ctx, `RESET statement_timeout`); err != nil {
+				t.Error(err)
+			}
+		}()
+		if _, err := conn.Exec(ctx, `SELECT materialize_maple_loan(p_build_id => 0)`); err != nil {
+			t.Fatalf("the pre-checks must finish well inside 30s on 40,000 blocks: %v", err)
+		}
+	})
+
 	for _, c := range []struct {
-		name      string
-		following int
-		wantClose bool
+		name, column string
+		address      string
+		want         string
 	}{
-		{"one following cycle does not close", 1, false},
-		{"two following cycles close", 2, true},
+		{"a short loan address", "loan", `\x0badc0de`, "4-byte loan address"},
+		{"an oversize loan address", "loan", `\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaff`, "21-byte loan address"},
+		{"a short borrower address", "borrower", `\x0badc0de`, "4-byte borrower address"},
+		{"an oversize borrower address", "borrower", `\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaff`, "21-byte borrower address"},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			ctx := context.Background()
-			pool, cleanup := setupMigratedPostgres(ctx, t)
-			defer cleanup()
-			f := seedMaple(ctx, t, pool, map[string]int{"gone": 1, "peer1": 1})
-			f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
-			inst := []string{"2026-06-16T08:05:00Z", "2026-06-16T08:15:00Z", "2026-06-16T08:25:00Z"}
-			f.cycle(t, "gone", inst[0], "500", 1)
-			for i := 0; i <= c.following; i++ {
-				f.cycle(t, "peer1", inst[i], "100", 1)
+		t.Run(c.name+" is refused by name, with or without a cycle", func(t *testing.T) {
+			f.reset(t)
+			loanAddr, borrower := `decode(md5('loan-bad') || 'a1b2c3d4', 'hex')`, `decode(md5('borrower-bad') || 'a1b2c3d4', 'hex')`
+			if c.column == "loan" {
+				loanAddr = fmt.Sprintf(`'%s'::bytea`, c.address)
+			} else {
+				borrower = fmt.Sprintf(`'%s'::bytea`, c.address)
 			}
-			f.mustRun(t)
-			var closes int
-			for _, r := range f.rows(t, "gone") {
-				if r.qty == "0" {
-					closes++
-				}
+			f.exec(t, `INSERT INTO "user" (chain_id, address) VALUES (1, `+borrower+`)`)
+			var badID int64
+			if err := pool.QueryRow(ctx, `
+				INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
+				SELECT 1, p.id, `+loanAddr+`, $1, u.id
+				FROM protocol p JOIN "user" u ON u.chain_id = 1 AND u.address = `+borrower+`
+				WHERE p.chain_id = 1 AND p.name = 'Maple' RETURNING id`, f.pools["p1"]).Scan(&badID); err != nil {
+				t.Fatal(err)
 			}
-			if c.wantClose && closes != 1 {
-				t.Errorf("%d closing rows after %d following cycles; want exactly 1", closes, c.following)
-			}
-			if !c.wantClose && closes != 0 {
-				t.Errorf("%d closing rows after %d following cycle; want none — the cycle may still be arriving", closes, c.following)
-			}
+			t.Cleanup(func() {
+				f.exec(t, `DELETE FROM maple_loan_state WHERE maple_loan_id = $1`, badID)
+				f.exec(t, `DELETE FROM maple_loan WHERE id = $1`, badID)
+				f.exec(t, `DELETE FROM "user" WHERE chain_id = 1 AND address = `+borrower)
+			})
+			f.mustRefuse(t, mapleTolerance, c.want)
+			f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 10, 120)
+			f.exec(t, `INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed)
+			           VALUES ($1, '2026-06-16T08:05:00Z', 'Active', 5)`, badID)
+			f.mustRefuse(t, mapleTolerance, c.want)
+			appended(t)
 		})
 	}
 }
 
-// A peer that vanishes alongside the loan means the fetch truncated, not that the loan repaid. Absence
-// is only attributable when every peer it had is still reported at the cycle it is missing from.
-func TestMapleLoanATruncatedPeerSetDoesNotClose(t *testing.T) {
+func TestMapleLoanWrapper(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-	f := seedMaple(ctx, t, pool, map[string]int{"gone": 1, "peer1": 1, "peer2": 1})
-	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
-	inst := []string{"2026-06-16T08:05:00Z", "2026-06-16T08:15:00Z", "2026-06-16T08:25:00Z"}
-	// All three reported at the first cycle; `gone` AND `peer2` vanish together afterwards.
-	f.cycle(t, "gone", inst[0], "500", 1)
-	f.cycle(t, "peer2", inst[0], "200", 1)
-	for _, ts := range inst {
-		f.cycle(t, "peer1", ts, "100", 1)
-	}
-	f.mustRun(t)
-	for _, r := range f.rows(t, "gone") {
-		if r.qty == "0" {
-			t.Errorf("a close was emitted at block %d even though peer2 vanished in the same cycle; that is a truncated fetch, not a repayment", r.bn)
+	f := seedMaple(ctx, t, pool, map[string]mapleLoanSpec{"a": {1, "p1"}})
+
+	t.Run("the writer run and build are forwarded, under the parameter names the runner uses", func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 100, "2026-04-01T00:00:00Z", 40, 3600)
+		f.cycle(t, "a", "2026-04-01T05:00:00Z", "1000", 0)
+		var n int64
+		if err := pool.QueryRow(ctx, `SELECT materialize_maple_loan(p_build_id => 7, p_max_skew => $1::interval, p_run_id => 9182)`, mapleTolerance).Scan(&n); err != nil {
+			t.Fatalf("materialize_maple_loan with a run: %v", err)
 		}
-	}
-}
+		if n != 1 {
+			t.Fatalf("appended %d rows, want 1", n)
+		}
+		stamped := f.count(t, `SELECT count(*) FROM position_state WHERE run_id = 9182 AND build_id = 7`)
+		unstamped := f.count(t, `SELECT count(*) FROM position_state WHERE run_id IS DISTINCT FROM 9182`)
+		if stamped != 1 || unstamped != 0 {
+			t.Errorf("appended rows: %d carry run 9182 at build 7, %d do not, want 1 and 0", stamped, unstamped)
+		}
+		if runs := f.count(t, `SELECT count(*) FROM position_projection_run
+			 WHERE projection = 'public.position_maple_loan' AND run_id = 9182`); runs != 1 {
+			t.Errorf("%d run records carry run 9182, want 1", runs)
+		}
+	})
 
-// The wrapper is the only path the runner calls, so a window it cannot forward is a window this
-// projection can never run with. Passed by name: p_max_skew sits between build_id and the run.
-func TestMapleLoanForwardsTheWindow(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	f := seedMaple(ctx, t, pool, map[string]int{"a": 1})
-	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
-	f.cycle(t, "a", "2026-06-16T08:05:00Z", "500", 1)
+	t.Run("the window is forwarded to the materializer", func(t *testing.T) {
+		f.reset(t)
+		f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
+		f.cycle(t, "a", "2026-06-16T08:05:00Z", "500", 1)
+		if _, err := pool.Exec(ctx, `SELECT materialize_maple_loan(p_build_id => 0, p_window => interval '36 hours')`); err != nil {
+			t.Fatalf("calling with a window: %v", err)
+		}
+		var window *string
+		if err := pool.QueryRow(ctx, `
+			SELECT window_interval::text FROM position_projection_run
+			 WHERE projection = 'public.position_maple_loan'
+			 ORDER BY created_at DESC LIMIT 1`).Scan(&window); err != nil {
+			t.Fatalf("reading the run record: %v", err)
+		}
+		if window == nil || *window != f.text(t, `interval '36 hours'`) {
+			t.Errorf("the run recorded window %v; want the 36 hours the wrapper was called with", window)
+		}
+	})
 
-	if _, err := pool.Exec(ctx,
-		`SELECT materialize_maple_loan(p_build_id => 0, p_window => interval '36 hours')`); err != nil {
-		t.Fatalf("calling with a window: %v", err)
-	}
-
-	var window *string
-	if err := pool.QueryRow(ctx, `
-		SELECT window_interval::text FROM position_projection_run
-		 WHERE projection = 'public.position_maple_loan'
-		 ORDER BY created_at DESC LIMIT 1`).Scan(&window); err != nil {
-		t.Fatalf("reading the run record: %v", err)
-	}
-	if window == nil {
-		t.Fatal("the run recorded no window, so the wrapper dropped it")
-	}
-	if *window != "36:00:00" {
-		t.Errorf("the run recorded window %q; want the 36 hours the wrapper was called with", *window)
-	}
-}
-
-// The close test pairs each cycle with the next one on its chain; a self-join on chain alone compares
-// every pair. cycle is materialized and feeds instant, last_seen and placed once each, so exactly three
-// scans: zero means the plan was not read, a fourth means the per-cycle rows are derived twice.
-func TestMapleLoanPairsCyclesInOnePass(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-
-	plan := explainLines(ctx, t, pool, `SELECT * FROM position_maple_loan`)
-	scans := map[string]int{}
-	for _, line := range plan {
-		for _, cte := range []string{"cycle", "instant"} {
-			if strings.Contains(line, "CTE Scan on "+cte+" ") || strings.HasSuffix(line, "CTE Scan on "+cte) {
-				scans[cte]++
+	t.Run("the search_path is empty, so a role-named schema cannot shadow a table it checks", func(t *testing.T) {
+		f.reset(t)
+		var cfg []string
+		if err := pool.QueryRow(ctx, `
+			SELECT coalesce(proconfig, ARRAY[]::text[]) FROM pg_proc
+			 WHERE oid = 'public.materialize_maple_loan(integer, bigint, interval, interval)'::regprocedure`).Scan(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		empty := false
+		for _, c := range cfg {
+			if c == `search_path=""` || c == "search_path=" {
+				empty = true
 			}
 		}
-	}
-	if scans["instant"] != 0 || scans["cycle"] != 3 {
-		t.Errorf("the plan scans instant %d and cycle %d times; want 0 and exactly 3, so each cycle is paired with its successor by lead() in one pass, not a self-join:\n%s",
-			scans["instant"], scans["cycle"], strings.Join(plan, "\n"))
-	}
+		if !empty {
+			t.Errorf("proconfig %v; want an empty search_path", cfg)
+		}
+		f.exec(t, `INSERT INTO "user" (chain_id, address) VALUES (1, '\x0badc0de')`)
+		var badID int64
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
+			SELECT 1, p.id, decode(md5('loan-shadowed') || 'a1b2c3d4', 'hex'), $1, u.id
+			FROM protocol p JOIN "user" u ON u.chain_id = 1 AND u.address = '\x0badc0de'
+			WHERE p.chain_id = 1 AND p.name = 'Maple' RETURNING id`, f.pools["p1"]).Scan(&badID); err != nil {
+			t.Fatal(err)
+		}
+		var role string
+		if err := pool.QueryRow(ctx, `SELECT current_user`).Scan(&role); err != nil {
+			t.Fatal(err)
+		}
+		shadow := pgx.Identifier{role}.Sanitize()
+		f.exec(t, `CREATE SCHEMA `+shadow)
+		f.exec(t, `CREATE TABLE `+shadow+`."user" AS SELECT id, decode(repeat('ab', 20), 'hex') AS address FROM public."user"`)
+		t.Cleanup(func() {
+			f.exec(t, `DROP SCHEMA `+shadow+` CASCADE`)
+			f.exec(t, `DELETE FROM maple_loan WHERE id = $1`, badID)
+			f.exec(t, `DELETE FROM "user" WHERE chain_id = 1 AND address = '\x0badc0de'`)
+		})
+		f.mustRefuse(t, mapleTolerance, "4-byte borrower address")
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Release()
+		if _, err := conn.Exec(ctx, `SET search_path = pg_catalog`); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := conn.Exec(ctx, `RESET search_path`); err != nil {
+				t.Error(err)
+			}
+		}()
+		if _, err := conn.Exec(ctx, `SELECT public.materialize_maple_loan()`); err == nil || !strings.Contains(err.Error(), "4-byte borrower address") {
+			t.Errorf("under a caller search_path without public, want the address refusal, got %v", err)
+		}
+	})
+
+	t.Run("re-applying the migration over the branch's first signature leaves one callable function", func(t *testing.T) {
+		f.reset(t)
+		f.exec(t, `CREATE FUNCTION public.materialize_maple_loan(p_build_id integer DEFAULT 0) RETURNS bigint
+		           LANGUAGE sql AS 'SELECT 0::bigint'`)
+		f.exec(t, `DELETE FROM migrations WHERE filename = '20260909_140000_materialize_maple_loan.sql'`)
+		if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
+			t.Fatalf("re-applying: %v", err)
+		}
+		if n := f.count(t, `SELECT count(*) FROM pg_proc WHERE proname = 'materialize_maple_loan'`); n != 1 {
+			t.Errorf("%d signatures of materialize_maple_loan exist; want 1", n)
+		}
+		f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
+		if _, err := pool.Exec(ctx, `SELECT materialize_maple_loan()`); err != nil {
+			t.Errorf("a call with no arguments is ambiguous or fails: %v", err)
+		}
+	})
+}
+
+// seedPlacementVolume gives the planner enough rows to choose the shapes it chooses at staging volume:
+// a dense block series with reorged heights, loan cycles across it, and a pool cycle beside each.
+func seedPlacementVolume(t *testing.T, f *mapleFixture) {
+	t.Helper()
+	f.blocks(t, 1, 1000, "2026-06-16T00:00:00Z", 15000, 12)
+	f.exec(t, `INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
+	           SELECT chain_id, block_number, 1, block_timestamp + interval '1 second'
+	           FROM block_meta WHERE chain_id = 1 AND block_number % 97 = 0`)
+	f.exec(t, `INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, build_id)
+	           SELECT l.id, '2026-06-16T00:05:00Z'::timestamptz + k * interval '10 minutes', 'Active', 100, 0
+	           FROM maple_loan l CROSS JOIN generate_series(0, 280) k
+	           WHERE l.chain_id = 1 AND (k < 200 OR l.id % 2 = 0)`)
+	f.exec(t, `INSERT INTO maple_pool_state (maple_pool_id, synced_at, liquid_assets, principal_out, utilization)
+	           SELECT s.maple_pool_id, s.synced_at, 0, sum(s.principal_owed), 0
+	           FROM (SELECT l.maple_pool_id, st.synced_at, st.principal_owed
+	                 FROM maple_loan_state st JOIN maple_loan l ON l.id = st.maple_loan_id) s
+	           GROUP BY 1, 2`)
+	f.exec(t, `ANALYZE block_meta`)
+	f.exec(t, `ANALYZE maple_loan_state`)
+	f.exec(t, `ANALYZE maple_pool_state`)
 }
 
 // explainLines returns the plan of query, one line per element.
@@ -1243,29 +1221,13 @@ func explainLines(ctx context.Context, t *testing.T, pool *pgxpool.Pool, query s
 	return plan
 }
 
-// seedPlacementVolume gives the planner enough rows to choose the shapes it chooses at staging volume:
-// a dense block series with reorged heights, and cycles spread across it.
-func seedPlacementVolume(t *testing.T, f *mapleFixture) {
-	t.Helper()
-	f.blocks(t, 1, 1000, "2026-06-16T00:00:00Z", 15000, 12)
-	f.exec(t, `INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
-	           SELECT chain_id, block_number, 1, block_timestamp + interval '1 second'
-	           FROM block_meta WHERE chain_id = 1 AND block_number % 97 = 0`)
-	f.exec(t, `INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, build_id)
-	           SELECT l.id, '2026-06-16T00:05:00Z'::timestamptz + k * interval '10 minutes', 'Active', 100, 0
-	           FROM maple_loan l CROSS JOIN generate_series(0, 280) k`)
-	f.exec(t, `ANALYZE block_meta`)
-	f.exec(t, `ANALYZE maple_loan_state`)
-}
-
-// A cycle is placed at the surviving block at or before its synced_at. Selecting the survivors in a
-// DISTINCT ON first leaves the time bound above it, so every cycle sorted the whole chain; the bound
-// must be an index condition on block_meta_chain_time_idx.
+// The placement's time bound must be an index condition on block_meta_chain_time_idx, or each cycle
+// sorts the chain's blocks.
 func TestMapleLoanPlacementReadsTheTimeIndex(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-	f := seedMaple(ctx, t, pool, map[string]int{"a": 1, "b": 1, "c": 1})
+	f := seedMaple(ctx, t, pool, map[string]mapleLoanSpec{"a": {1, "p1"}, "b": {1, "p1"}, "c": {1, "p2"}})
 	seedPlacementVolume(t, f)
 
 	plan := explainLines(ctx, t, pool, `SELECT * FROM position_maple_loan`)
@@ -1284,21 +1246,20 @@ func TestMapleLoanPlacementReadsTheTimeIndex(t *testing.T) {
 		}
 	}
 	if !bounded {
-		t.Errorf("placement does not bound block_meta_chain_time_idx by block_timestamp, so each cycle scans the chain's blocks:\n%s", strings.Join(plan, "\n"))
+		t.Errorf("placement does not bound block_meta_chain_time_idx by block_timestamp:\n%s", strings.Join(plan, "\n"))
 	}
 }
 
-// pairwiseFilter is a join or scan filter bounding block_timestamp by synced_at, in either operand order.
-var pairwiseFilter = regexp.MustCompile(`Filter: .*(block_timestamp <= \S*synced_at|synced_at >= \S*block_timestamp)`)
+// pairwiseFilter is a join or scan filter comparing a block or pool instant with a cycle instant, which
+// is evaluated for every pair instead of as an index condition.
+var pairwiseFilter = regexp.MustCompile(`Filter: .*(block_timestamp (<=|>) \S*synced_at|synced_at (>=|<) \S*block_timestamp|synced_at >= \S*nb\.block_timestamp)`)
 
-// No statement a run executes may compare cycles with blocks outside an index condition: as a join or
-// scan filter, block_timestamp against synced_at is evaluated for every pair. Every plan the run
-// executes is captured, since the guards live inside the function where EXPLAIN cannot reach.
+// Every plan a run executes is captured, since the checks live inside the function where EXPLAIN cannot reach.
 func TestMapleLoanRunComparesNoCycleWithEveryBlock(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-	f := seedMaple(ctx, t, pool, map[string]int{"a": 1, "b": 1, "c": 1})
+	f := seedMaple(ctx, t, pool, map[string]mapleLoanSpec{"a": {1, "p1"}, "b": {1, "p1"}, "c": {1, "p2"}})
 	seedPlacementVolume(t, f)
 
 	cfg := pool.Config().ConnConfig.Copy()
@@ -1324,17 +1285,20 @@ func TestMapleLoanRunComparesNoCycleWithEveryBlock(t *testing.T) {
 			t.Fatalf("%s: %v", stmt, err)
 		}
 	}
-	if _, err := conn.Exec(ctx, `SELECT materialize_maple_loan(p_build_id => 0)`); err != nil {
+	var appended int64
+	if err := conn.QueryRow(ctx, `SELECT materialize_maple_loan(p_build_id => 0)`).Scan(&appended); err != nil {
 		t.Fatalf("materialize_maple_loan: %v", err)
 	}
-
+	if closes := f.count(t, `SELECT count(*) FROM position_state WHERE quantity = 0`); closes == 0 {
+		t.Fatal("the volume fixture closed nothing, so the close path's plan was not exercised")
+	}
 	if len(plans) == 0 {
 		t.Fatal("auto_explain captured no plans, so nothing was checked")
 	}
 	for _, plan := range plans {
 		for _, line := range strings.Split(plan, "\n") {
 			if pairwiseFilter.MatchString(line) {
-				t.Errorf("a statement compares block_timestamp with synced_at outside an index condition, so cycles meet blocks pairwise:\n%s", plan)
+				t.Errorf("a statement compares instants outside an index condition:\n%s", plan)
 			}
 		}
 	}
