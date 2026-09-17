@@ -751,7 +751,7 @@ groups:
           component: position-materializer
           namespace: vector
         annotations:
-          summary: "position-materializer has appended no observations in 6h"
+          summary: "{{ $labels.service_name }} has appended no observations in 6h"
           description: >-
             Runs are succeeding on {{ $labels.cluster }} but
             position_materializer_rows_changed_total has not moved in 6 hours, so
