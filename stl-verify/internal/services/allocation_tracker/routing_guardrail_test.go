@@ -42,9 +42,8 @@ func TestEmittedProtocolsAreKnown(t *testing.T) {
 // not-yet-implemented StubSource (i.e. are knowingly untracked). Anything else that
 // routes to a stub is a silently-dropped position and fails the guardrail below.
 var stubRoutedAllowlist = map[string]bool{
-	"psm3":              true,
-	"centrifuge_feeder": true,
-	"galaxy_clo":        true,
+	"psm3":       true,
+	"galaxy_clo": true,
 }
 
 // TestEveryContractEntryRoutes is the guardrail for this PR's headline risk: a
@@ -73,7 +72,7 @@ func TestEveryContractEntryRoutes(t *testing.T) {
 			continue
 		}
 		if _, isStub := source.(placeholderSource); isStub && !stubRoutedAllowlist[e.TokenType] {
-			t.Errorf("contract entry routes to a not-yet-implemented stub but token_type %q is not in the allowlist {psm3, centrifuge_feeder, galaxy_clo}: chain=%s protocol=%q contract=%s — implement a real source or add the token_type to stubRoutedAllowlist",
+			t.Errorf("contract entry routes to a not-yet-implemented stub but token_type %q is not in the allowlist {psm3, galaxy_clo}: chain=%s protocol=%q contract=%s — implement a real source or add the token_type to stubRoutedAllowlist",
 				e.TokenType, e.Chain, e.Protocol, e.ContractAddress.Hex())
 		}
 	}
@@ -101,6 +100,30 @@ func TestCentrifugeRoutesToERC7540(t *testing.T) {
 	}
 	if got := source.Name(); got != "erc7540" {
 		t.Errorf("centrifuge routed to %q, want %q", got, "erc7540")
+	}
+}
+
+// TestCentrifugeFeederRoutesToBalanceOf pins the feeder entries — Centrifuge share
+// tokens, plain ERC-20s — on BalanceOfSource, so a source registered ahead of it
+// cannot quietly claim them without failing here.
+func TestCentrifugeFeederRoutesToBalanceOf(t *testing.T) {
+	registry, err := BuildSourceRegistry(nil, quietLogger())
+	if err != nil {
+		t.Fatalf("build source registry: %v", err)
+	}
+
+	source := registry.Route(&TokenEntry{
+		ContractAddress: common.HexToAddress("0x9477724bb54ad5417de8baff29e59df3fb4da74f"),
+		Chain:           "plume",
+		Star:            "grove",
+		Protocol:        "centrifuge",
+		TokenType:       "centrifuge_feeder",
+	})
+	if source == nil {
+		t.Fatal("centrifuge_feeder entry routes to no source")
+	}
+	if got := source.Name(); got != "balanceof" {
+		t.Errorf("centrifuge_feeder routed to %q, want %q", got, "balanceof")
 	}
 }
 

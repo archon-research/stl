@@ -54,7 +54,7 @@ func TestBalanceOfSource_Supports(t *testing.T) {
 		{"curve", "", false},
 		{"uni_v3_pool", "", false},
 		{"anchorage", "", false},
-		{"centrifuge_feeder", "centrifuge", false},
+		{"centrifuge_feeder", "centrifuge", true},
 	}
 
 	for _, tt := range tests {
