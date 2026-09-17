@@ -18,7 +18,7 @@ $fn$;
 
 COMMENT ON FUNCTION position_daily_as_of_bound(timestamptz) IS '[Operational] Returns its argument, raising on NULL (VEC-636). Guards the position_daily reads, whose created_at filter would otherwise turn a NULL bound into a silent empty result. IMMUTABLE so a constant bound folds at plan time and the guarded read still inlines.';
 
--- The same guard for the date, IMMUTABLE so a constant date folds and the window excludes chunks at plan time.
+-- The same guard for the date, IMMUTABLE so a constant date folds at plan time.
 CREATE OR REPLACE FUNCTION position_daily_date_required(d date) RETURNS date
     LANGUAGE plpgsql IMMUTABLE
     SET search_path = pg_catalog, public

@@ -260,6 +260,12 @@ func TestPositionDailyOnReadsOneChunk(t *testing.T) {
 			name, mode, sql string
 			wantChunks      int
 		}{
+			// Without ANALYZE the plan names every chunk it was built with, so a chunk dropped only at startup
+			// still appears. One chunk here is exclusion at plan time.
+			{name: "literal date, excluded at plan time", mode: "auto", wantChunks: 1,
+				sql: `EXPLAIN (FORMAT JSON) SELECT * FROM position_daily_on('2026-03-05')`},
+			{name: "literal range, excluded at plan time", mode: "auto", wantChunks: 3,
+				sql: `EXPLAIN (FORMAT JSON) SELECT * FROM position_daily_between('2026-03-04', '2026-03-06')`},
 			{name: "literal date", mode: "auto", wantChunks: 1,
 				sql: `EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM position_daily_on('2026-03-05')`},
 			{name: "literal date and bound", mode: "auto", wantChunks: 1,
@@ -891,6 +897,25 @@ func TestPositionDailySchema(t *testing.T) {
 		}
 		if !slices.Equal(functions, want) {
 			t.Errorf("position_daily functions are %v, want exactly %v", functions, want)
+		}
+	})
+
+	// The guards are IMMUTABLE so a constant argument folds at plan time. They pin search_path because they
+	// are plpgsql and never inlined.
+	t.Run("guards are immutable plpgsql with a pinned search_path", func(t *testing.T) {
+		for _, fn := range []string{"position_daily_date_required(date)", "position_daily_as_of_bound(timestamptz)"} {
+			var lang, volatility string
+			var config []string
+			if err := f.pool.QueryRow(f.ctx, `
+				SELECT l.lanname, p.provolatile::text, COALESCE(p.proconfig, '{}')
+				  FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang
+				 WHERE p.oid = $1::regprocedure`, fn).Scan(&lang, &volatility, &config); err != nil {
+				t.Fatalf("%s: %v", fn, err)
+			}
+			if lang != "plpgsql" || volatility != "i" || !slices.Equal(config, []string{"search_path=pg_catalog, public"}) {
+				t.Errorf("%s is %s, volatility %s, config %v; want plpgsql, IMMUTABLE, search_path=pg_catalog, public",
+					fn, lang, volatility, config)
+			}
 		}
 	})
 
