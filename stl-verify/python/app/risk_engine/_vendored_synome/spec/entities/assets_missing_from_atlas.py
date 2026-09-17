@@ -68,6 +68,29 @@ SPARK_MAINNET_ARKIS_VAULT: Final[Asset] = Asset(
 aToken — the mislabel removed in e031fbe6), not this vault."""
 
 
+SPARK_MAINNET_SXS_RLUSD: Final[Asset] = Asset(
+    token=Token.SXS_RLUSD,
+    network=Network.ETHEREUM_MAINNET,
+    address=EvmAddress("0xFC8C624B6080a0a780583799f2A862DE936F6E22"),
+    protocol=Protocol.SENTORA_SPARK_RLUSD_MORPHO_VAULT,
+    allocation_type=AllocationType.ALLOCATION,
+    token_type=TokenType.ERC4626,
+    underlying_asset_address=EvmAddress("0x8292Bb45bf1Ee4d140127049757C2E0fF06317eD"),
+    underlying_assets=(Token.RLUSD,),
+    categories={AssetCategory.LENDING_MARKET},
+)
+"""Sentora x Spark RLUSD Morpho VaultV2 (sxsRLUSD, VEC-832). Absent from the
+Atlas: no Spark Instance Configuration Document names this vault. Verified
+on-chain (2026-09-18): the ALM Proxy (0x1601843c5E9bC251A3272907010AFa41Fa18347E)
+holds ~249,998,828 sxsRLUSD shares, and the vault itself confirmed asset()
+0x8292Bb45bf1Ee4d140127049757C2E0fF06317eD (RLUSD, 18 decimals) via the
+morpho-vault-backfill worker's on-chain probe (morpho_vault.id=30622, name
+"Sentora x Spark RLUSD", version=3 i.e. real Morpho VaultV2). Two other
+contracts share the same on-chain name/symbol but hold zero balance (stale or
+retracted deployments); this is the one Sky's own prime_reference_position
+values at ~$250.0M."""
+
+
 SPARK_MAINNET_CURVE_PYUSD_USDS: Final[Asset] = Asset(
     token=Token.PYUSD_USDS,
     network=Network.ETHEREUM_MAINNET,
@@ -632,6 +655,7 @@ GROVE_MONAD_ASSET_AUSD: Final[Asset] = Asset(
 MISSING_FROM_ATLAS_BY_PRIME: Final[dict[PrimeName, list[Asset]]] = {
     PrimeName.SPARK: [
         SPARK_MAINNET_ARKIS_VAULT,
+        SPARK_MAINNET_SXS_RLUSD,
         SPARK_MAINNET_CURVE_PYUSD_USDS,
         SPARK_MAINNET_SUPERSTATE_USCC,
         SPARK_MAINNET_ANCHORAGE,

@@ -24,6 +24,7 @@ var legacyProtocolAliases = map[string]string{
 	"grove-x-steakhouse-usdc-high-yield-vault-v2": "steakhouse",
 	"grove-x-steakhouse-usdg-morpho-vault":        "steakhouse",
 	"morpho-blue-erc4626-vault":                   "morpho",
+	"sentora-x-spark-rlusd-morpho-vault":          "morpho",
 	"sparklend-protocol":                          "sparklend",
 	"steakhouse-pyusd-morpho-vault":               "steakhouse",
 }

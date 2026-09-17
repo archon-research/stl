@@ -52,6 +52,7 @@ class Protocol(Enum):
     GROVE_STEAKHOUSE_USDC_HIGH_YIELD_VAULT_V2 = "Grove x Steakhouse USDC High Yield Vault V2"
     GROVE_STEAKHOUSE_USDG_MORPHO_VAULT = "Grove x Steakhouse USDG Morpho Vault"
     STEAKHOUSE_PYUSD_MORPHO_VAULT = "Steakhouse pyUSD Morpho Vault"
+    SENTORA_SPARK_RLUSD_MORPHO_VAULT = "Sentora x Spark RLUSD Morpho Vault"
 
 
 # PSM (Peg Stability Module)
@@ -115,6 +116,7 @@ ERC4626_PROTOCOLS = {
     Protocol.GROVE_STEAKHOUSE_USDC_HIGH_YIELD_VAULT_V2,
     Protocol.GROVE_STEAKHOUSE_USDG_MORPHO_VAULT,
     Protocol.ARKIS,
+    Protocol.SENTORA_SPARK_RLUSD_MORPHO_VAULT,
 }
 
 UNISWAP_STYLE_PROTOCOLS = {Protocol.UNISWAP, Protocol.UNISWAP_V3, Protocol.GUNI}
