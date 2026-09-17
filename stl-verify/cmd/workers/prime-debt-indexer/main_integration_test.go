@@ -726,19 +726,19 @@ func TestRunIntegration_InvalidVatFlag(t *testing.T) {
 	}
 }
 
-// VEC-744's interim guard: the Sky migration seeds the protocol row for one Vat address and backfills
-// every legacy snapshot to it. If this default drifts from that literal, those rows are stamped with a
-// Vat this indexer never read, and the projection hashes the wrong protocol into every legacy position.
-func TestDefaultVatAddressMatchesTheSeededProtocolRow(t *testing.T) {
+// position_sky_prime_debt keys every snapshot on one Vat address, because prime_debt does not record
+// which Vat it was read from. If this default drifts from that literal, every position is keyed on a Vat
+// this indexer never read.
+func TestDefaultVatAddressMatchesTheProjectionKey(t *testing.T) {
 	sql, err := os.ReadFile(filepath.Join("..", "..", "..", "db", "migrations", "20260819_140000_materialize_sky_prime_debt.sql"))
 	if err != nil {
 		t.Fatalf("read the Sky migration: %v", err)
 	}
-	want := "'\\x" + strings.TrimPrefix(defaultVatAddress, "0x") + "'"
+	want := "'" + strings.TrimPrefix(defaultVatAddress, "0x") + ":'"
 	if !strings.Contains(string(sql), want) {
-		t.Fatalf("the Sky migration seeds no protocol row for %s; the migration and the indexer default have drifted apart", defaultVatAddress)
+		t.Fatalf("the Sky projection does not key on %s; the migration and the indexer default have drifted apart", want)
 	}
 	if strings.ToLower(defaultVatAddress) != defaultVatAddress {
-		t.Fatalf("defaultVatAddress %s is not lowercase; the migration's bytea literal is lowercase hex", defaultVatAddress)
+		t.Fatalf("defaultVatAddress %s is not lowercase; the projection key is lowercase hex", defaultVatAddress)
 	}
 }

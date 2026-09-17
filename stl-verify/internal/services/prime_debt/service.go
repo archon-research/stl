@@ -43,10 +43,6 @@ type Config struct {
 	// ChainID is the expected chain ID for incoming block events.
 	ChainID int64
 
-	// ProtocolID is the protocol row of the Vat this indexer reads, resolved once at startup. It is
-	// stamped on every snapshot because position_id hashes it (VEC-406).
-	ProtocolID int64
-
 	// MaxMessages is the max number of SQS messages per poll.
 	MaxMessages int
 
@@ -101,9 +97,6 @@ func NewVaultDebtService(
 	}
 	if blockQuerier == nil {
 		return nil, fmt.Errorf("block querier is required")
-	}
-	if config.ProtocolID <= 0 {
-		return nil, fmt.Errorf("protocol id must name the Vat's protocol row, got %d", config.ProtocolID)
 	}
 
 	defaults := configDefaults()
@@ -340,7 +333,6 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, block
 
 		snapshots = append(snapshots, &entity.PrimeDebt{
 			PrimeID:      prime.ID,
-			ProtocolID:   s.config.ProtocolID,
 			IlkName:      ilkToString(prime.ilk),
 			DebtWad:      debtWad,
 			BlockNumber:  blockNumber,
