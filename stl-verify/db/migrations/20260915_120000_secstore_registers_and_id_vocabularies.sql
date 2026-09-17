@@ -199,7 +199,7 @@ CREATE VIEW instrument_register_latest AS
 SELECT DISTINCT ON (instrument_key, chain_scope, valid_from) *
 FROM instrument_register
 ORDER BY instrument_key, chain_scope, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC;
-COMMENT ON VIEW instrument_register_latest IS 'Latest append per (instrument_key, chain_scope, valid_from) — step one of the two-step read (ADR-0006 §5), with no valid-time filter applied. Not a consumer surface: reading it alone returns closed and tombstoned windows. instrument_register_current and instrument_register_as_of(date) apply the window to it; instrument_register_as_of(date, pg_snapshot) must not use it, because the snapshot filter has to precede this resolution.';
+COMMENT ON VIEW instrument_register_latest IS 'Latest append per (instrument_key, chain_scope, valid_from) — step one of the two-step read (ADR-0006 §5), with no valid-time filter applied. Its ORDER BY must stay byte-identical to instrument_register_resolve_idx, column for column and direction for direction: drift there costs every resolution a scan plus a sort, and nothing fails — it only gets slower. Not a consumer surface: reading it alone returns closed and tombstoned windows. instrument_register_current and instrument_register_as_of(date) apply the window to it; instrument_register_as_of(date, pg_snapshot) must not use it, because the snapshot filter has to precede this resolution.';
 
 CREATE VIEW instrument_register_current AS
 SELECT DISTINCT ON (instrument_key, chain_scope) *
@@ -243,7 +243,7 @@ CREATE VIEW alias_register_latest AS
 SELECT DISTINCT ON (id_scheme, id_value, valid_from) *
 FROM alias_register
 ORDER BY id_scheme, id_value, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC;
-COMMENT ON VIEW alias_register_latest IS 'Latest append per (id_scheme, id_value, valid_from) — step one of the two-step read; see instrument_register_latest for why the knowledge-time overload does not use it.';
+COMMENT ON VIEW alias_register_latest IS 'Latest append per (id_scheme, id_value, valid_from) — step one of the two-step read; its ORDER BY must stay byte-identical to alias_register_resolve_idx. Not a consumer surface. See instrument_register_latest for both reasons and for why the knowledge-time overload does not use it.';
 
 CREATE VIEW alias_register_current AS
 SELECT DISTINCT ON (id_scheme, id_value) *
