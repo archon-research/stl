@@ -47,6 +47,7 @@ const props = (coverage: Coverage): PrimeMetricsBandProps => ({
   },
   isChartsLoading: false,
   chartsErrorMessage: null,
+  onCustomRangeSelect: () => {},
 });
 
 const render = (coverage: Coverage) =>

@@ -1,12 +1,16 @@
-import { SyncedChartGroup } from '@archon-research/charting/xychart';
+import {
+  SyncedChartGroup,
+  useSelectedTimeRange,
+} from '@archon-research/charting/xychart';
 import {
   Badge,
   type BadgeColorPalette,
   SkeletonStack,
   SurfaceMessageBody,
   SurfaceMessageRoot,
+  type TimeRange,
 } from '@archon-research/design-system';
-import type { ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 
 import { css, cx } from '#styled-system/css';
 
@@ -18,6 +22,7 @@ import {
   formatWadValue,
 } from '../../shared/lib/dashboard';
 import type { PrimeRiskCapital } from '../../shared/types/allocation';
+import { chartRangeToTimeRange } from './chartRangeSelection';
 import { ExposureCard, PrimeCollateralCard } from './HiddenMetricCards';
 import { MetricCardLegend, MetricCardTrend } from './metricCardChart';
 import {
@@ -83,6 +88,7 @@ export type PrimeMetricsBandProps = {
   charts: BandCharts;
   isChartsLoading: boolean;
   chartsErrorMessage: string | null;
+  onCustomRangeSelect: (range: TimeRange) => void;
 };
 
 // The card takes the flexible row and the note the fixed one, so a stale cell's
@@ -444,6 +450,35 @@ function PrimeDebtCard({
 }
 
 /**
+ * Forwards a drag-selected range from the charting kit's own group-local
+ * store to the URL, converting its `{ start, end }` epoch-ms shape to the
+ * app's ISO `TimeRange` — the store cannot be the source of truth, or the
+ * selection stops being shareable and bookmarkable.
+ *
+ * A leaf, not band-body logic: subscribing to the store in the band itself
+ * would re-render all six chart children on every drag commit instead of
+ * just this node.
+ */
+function ChartRangeBridge({
+  onCustomRangeSelect,
+}: {
+  onCustomRangeSelect: (range: TimeRange) => void;
+}) {
+  const [selectedRange, setSelectedRange] = useSelectedTimeRange();
+
+  useEffect(() => {
+    if (selectedRange === null) return;
+
+    onCustomRangeSelect(chartRangeToTimeRange(selectedRange));
+    // One-shot channel: clearing back to null lets an identical repeat drag
+    // commit again; the guard above stops this clear from re-triggering itself.
+    setSelectedRange(null);
+  }, [selectedRange, onCustomRangeSelect, setSelectedRange]);
+
+  return null;
+}
+
+/**
  * The metrics rail above the allocations table.
  *
  * Which cards appear is data-dependent, so the column count is passed in rather
@@ -468,6 +503,7 @@ export function PrimeMetricsBand({
   charts,
   isChartsLoading,
   chartsErrorMessage,
+  onCustomRangeSelect,
 }: PrimeMetricsBandProps) {
   if (isSkeleton) {
     return <MetricsBandSkeleton />;
@@ -561,6 +597,7 @@ export function PrimeMetricsBand({
     // window, so a reader comparing them is asking what every card said at one
     // instant. Hovering each in turn to find it is the question asked badly.
     <SyncedChartGroup>
+      <ChartRangeBridge onCustomRangeSelect={onCustomRangeSelect} />
       <div
         className={metricsGridClassName}
         style={metricsGridStyle(VISIBLE_TOP_METRIC_CARDS.length)}
