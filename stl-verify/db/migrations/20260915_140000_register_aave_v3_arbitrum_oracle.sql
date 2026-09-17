@@ -14,7 +14,7 @@
 
 INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
 VALUES (42161, '\x794a61358D6845594F94dc1DB02A252b5b4814aD'::bytea,
-        'Aave V3 Arbitrum', 'lending', 7742429, NOW(), '{}'::jsonb)
+        'Aave V3', 'lending', 7742429, NOW(), '{}'::jsonb)
 ON CONFLICT (chain_id, address) DO NOTHING;
 
 INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, price_decimals, enabled)

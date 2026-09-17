@@ -2,9 +2,11 @@
 -- are priced via the protocol's own oracle. The existing chainlink_base binding
 -- (from 20260909_130000) stays as an extra row; the receipt lateral joins any
 -- bound oracle and takes newest by block then oracle_id DESC, so aave_v3_base
--- is preferred while it writes newer rows, and chainlink_base takes over if
--- the Aave unit skips a block (it reverts wholesale when any asset is unpriceable).
--- Both are ~$1, so harmless.
+-- wins at equal block heights. Both price USDC at ~$1.
+-- An asset this AaveOracle cannot price fails the whole block in the live worker
+-- (getAssetsPrices runs with AllowFailure false and the error reaches SQS, which
+-- redelivers); the backfiller's per-asset path skips that asset alone and
+-- chainlink_base carries the block.
 --
 -- AaveOracle 0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156, verified on-chain at block
 -- 51419879: PoolAddressesProvider(0xe20fcbdbffc4dd138ce8b2e6fbb6cb49777ad64d).getPriceOracle()

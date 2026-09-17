@@ -22,7 +22,7 @@ VALUES
 ON CONFLICT (chain_id, address) DO NOTHING;
 
 INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, price_decimals, enabled)
-VALUES ('chainlink_robinhood', 'Chainlink (Robinhood)', 4663, NULL, 'chainlink_feed', 0, 8, true)
+VALUES ('chainlink_robinhood', 'Chainlink (Robinhood)', 4663, NULL, 'chainlink_feed', 33322, 8, true)
 ON CONFLICT (name) DO NOTHING;
 
 INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, processing_version, change_reason)
