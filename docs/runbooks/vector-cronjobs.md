@@ -1775,7 +1775,11 @@ passes unobserved is a permanent hole.
 `VectorCronjobRunFailing` stays quiet. A successful cycle always writes both
 tables — the service fails the cycle outright when the overview has no markets
 or no vaults — so zero rows on a successful cycle means the write path or the
-counter broke, not the feed.
+counter broke, not the feed. The counter is fed what the database inserted
+(the repositories sum `RowsAffected`), not the batch size, so it also catches a
+cycle whose rows all conflicted away: a host clock stepping back onto a
+`synced_at` already written under the same build. That case logs `some rows of
+this cycle were already written under this build and conflicted away`.
 
 This alert also fires if `core_model_reference_sync_markets_written_total` stops
 being emitted at all (a collector drop or a metric rename); the counter is
@@ -1843,6 +1847,69 @@ says anything is wrong.
 **Resolution.** Flag it to the model's owners; there is nothing to fix here. Do
 not stop the indexer — the rows it records are true statements ("upstream
 still says X for date D") and the series stays contiguous.
+
+---
+
+## VectorCoreModelReferenceIndexerRowsRejected
+
+**Severity:** warning · **For:** 5m (over a 1h window)
+
+**What it means.** The feed client dropped at least one upstream row this hour:
+a field was missing, a figure was out of range (`prob_no_bad_debt` outside 0
+to 1, a negative CRR or supply), or an `override` vault carried a standard
+error or expected shortfall it must not have. The rest of the cycle landed. The
+dropped row's day is gone for good — the dashboard publishes no history route —
+which is why any rejection is worth a look, even a single one.
+
+**Why rows are dropped rather than the cycle failed.** One bad row out of ~42
+used to cost all of them, every cycle, until upstream changed. The sibling
+`reference-capital-indexer` lost a whole staging cycle set that way (#824). The
+duplicate-identity guard still fails the cycle, because writing a duplicate
+would corrupt identity; a row upstream reported incompletely threatens nothing
+already written, so it is quarantined and counted instead.
+
+**Triage.**
+
+1. Read the reasons: `kubectl -n vector logs deploy/core-model-reference-indexer --tail=300 | grep "upstream row rejected"`.
+   Each line names the row (`network/protocol/uid`, or its index when the
+   identity itself is missing) and the field or range that failed.
+2. Compare with the feed: `curl -s "$CORE_MODEL_REFERENCE_URL/overview/" | jq '.data.markets[] | select(.market_uid == "<uid>")'`.
+   A `null` where the client requires a value is a shape drift; a value outside
+   the documented range is an upstream data problem.
+3. Decide: if upstream now legitimately omits the field for some rows (the way
+   it omits `crr_el_se` on an override vault), make the client accept it
+   structurally and relax the column; if the value is wrong, flag it upstream
+   and leave the row rejected.
+
+**Resolution.** A code change to `internal/adapters/outbound/coremodelfeed`
+(and the matching column comment or CHECK) for a shape drift; nothing for a
+bad upstream value. The alert clears an hour after the last rejected cycle.
+
+---
+
+## VectorCoreModelReferenceIndexerUnmappedNetwork
+
+**Severity:** warning · **For:** 5m (over a 1h window)
+
+**What it means.** Upstream published rows for a network the feed client's
+`networkToChainID` map does not know. The rows landed with `chain_id = NULL`,
+which is correct as a record of what upstream said, but a read-time join on
+`chain_id` against STL's registries drops them silently. Every other signal
+stays green: the cycle succeeds, the written counters advance.
+
+**Triage.**
+
+1. The alert label names the network. Confirm it in the feed:
+   `curl -s "$CORE_MODEL_REFERENCE_URL/overview/" | jq '[.data.markets[].network, .data.vaults[].network] | unique'`.
+2. Look up the chain id from an authoritative source (the chain's own
+   documentation or explorer), never guessed.
+
+**Resolution.** Add the entry to `networkToChainID` in
+`internal/adapters/outbound/coremodelfeed/core_client.go` (and to
+`chainutil` if STL does not know the chain yet), with a client test. Rows
+already stored keep their NULL: they are an honest record of the mapping at
+write time, and a later processing_version would be the way to restate them if
+that ever matters. The alert clears an hour after the map is deployed.
 
 ---
 

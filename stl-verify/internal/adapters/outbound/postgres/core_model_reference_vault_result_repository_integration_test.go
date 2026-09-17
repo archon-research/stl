@@ -39,13 +39,26 @@ func coreVaultResult(address string, syncedAt time.Time, buildID int) entity.Cor
 	}
 }
 
-func saveCoreVaults(t *testing.T, ctx context.Context, txm *TxManager, repo *CoreModelReferenceVaultResultRepository, rows ...entity.CoreModelReferenceVaultResult) {
+func saveCoreVaults(t *testing.T, ctx context.Context, txm *TxManager, repo *CoreModelReferenceVaultResultRepository, rows ...entity.CoreModelReferenceVaultResult) int {
 	t.Helper()
-	if err := txm.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return repo.SaveVaultResults(ctx, tx, rows)
+	var inserted int
+	if err := txm.WithTransaction(ctx, func(tx pgx.Tx) (err error) {
+		inserted, err = repo.SaveVaultResults(ctx, tx, rows)
+		return err
 	}); err != nil {
 		t.Fatalf("SaveVaultResults() = %v", err)
 	}
+	return inserted
+}
+
+// saveCoreVaultsExpectingError runs the save and returns the error the
+// database raised, for the CHECK constraints.
+func saveCoreVaultsExpectingError(t *testing.T, ctx context.Context, txm *TxManager, repo *CoreModelReferenceVaultResultRepository, row entity.CoreModelReferenceVaultResult) error {
+	t.Helper()
+	return txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := repo.SaveVaultResults(ctx, tx, []entity.CoreModelReferenceVaultResult{row})
+		return err
+	})
 }
 
 func TestCoreModelReferenceVaultResultRepositoryPreservesEighteenDecimalPrecision(t *testing.T) {
@@ -150,11 +163,30 @@ func TestCoreModelReferenceVaultResultRepositoryRejectsAModelVaultWithoutSimulat
 	row := coreVaultResult("0xbeef", time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC), 1)
 	row.CRRES = nil
 
-	err = txm.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return repo.SaveVaultResults(ctx, tx, []entity.CoreModelReferenceVaultResult{row})
-	})
-	if err == nil {
+	if err := saveCoreVaultsExpectingError(t, ctx, txm, repo, row); err == nil {
 		t.Fatal("SaveVaultResults() = nil, want the CHECK to reject a model vault with a NULL crr_es")
+	}
+}
+
+// The CHECK holds the override rule in both directions: an override vault
+// carrying a simulation figure is refused, so "crr_el_se IS NULL" and
+// "method = 'override'" stay the same statement.
+func TestCoreModelReferenceVaultResultRepositoryRejectsAnOverrideVaultWithASimulationFigure(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+
+	txm, err := NewTxManager(pool, nil)
+	if err != nil {
+		t.Fatalf("tx manager: %v", err)
+	}
+	repo := NewCoreModelReferenceVaultResultRepository(nil, 0)
+	row := coreVaultResult("0xbeef", time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC), 1)
+	row.Method = "override"
+	row.CRRES = nil
+
+	if err := saveCoreVaultsExpectingError(t, ctx, txm, repo, row); err == nil {
+		t.Fatal("SaveVaultResults() = nil, want the CHECK to reject an override vault carrying crr_el_se")
 	}
 }
 

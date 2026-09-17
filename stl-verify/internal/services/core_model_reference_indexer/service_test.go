@@ -31,30 +31,40 @@ func (m *mockProvider) FetchOverview(_ context.Context) (outbound.CoreModelRefer
 	return m.overview, m.err
 }
 
+// inserted, when set, is what the mock reports the database inserted; nil
+// means every submitted row, the healthy case.
 type mockMarketRepo struct {
-	saved []entity.CoreModelReferenceMarketResult
-	err   error
+	saved    []entity.CoreModelReferenceMarketResult
+	err      error
+	inserted *int
 }
 
-func (m *mockMarketRepo) SaveMarketResults(_ context.Context, _ pgx.Tx, results []entity.CoreModelReferenceMarketResult) error {
+func (m *mockMarketRepo) SaveMarketResults(_ context.Context, _ pgx.Tx, results []entity.CoreModelReferenceMarketResult) (int, error) {
 	if m.err != nil {
-		return m.err
+		return 0, m.err
 	}
 	m.saved = append(m.saved, results...)
-	return nil
+	if m.inserted != nil {
+		return *m.inserted, nil
+	}
+	return len(results), nil
 }
 
 type mockVaultRepo struct {
-	saved []entity.CoreModelReferenceVaultResult
-	err   error
+	saved    []entity.CoreModelReferenceVaultResult
+	err      error
+	inserted *int
 }
 
-func (m *mockVaultRepo) SaveVaultResults(_ context.Context, _ pgx.Tx, results []entity.CoreModelReferenceVaultResult) error {
+func (m *mockVaultRepo) SaveVaultResults(_ context.Context, _ pgx.Tx, results []entity.CoreModelReferenceVaultResult) (int, error) {
 	if m.err != nil {
-		return m.err
+		return 0, m.err
 	}
 	m.saved = append(m.saved, results...)
-	return nil
+	if m.inserted != nil {
+		return *m.inserted, nil
+	}
+	return len(results), nil
 }
 
 // fakeTxManager calls fn with a nil pgx.Tx; sufficient since the mock repos
@@ -420,6 +430,115 @@ func TestRunCountsAStaleCycleOnlyWhenNoRowIsFresh(t *testing.T) {
 	}
 }
 
+// The written counters are what VectorCoreModelReferenceIndexerWritesZero reads,
+// so they must count what the database inserted, not what was submitted: a
+// cycle whose rows all conflicted away is exactly the case that alert exists for.
+func TestRunRecordsInsertedRowsNotSubmittedRows(t *testing.T) {
+	reader := metric.NewManualReader()
+	tel, err := NewTelemetryWithProvider(context.Background(), metric.NewMeterProvider(metric.WithReader(reader)))
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProvider() = %v", err)
+	}
+	h := newHarness(healthyOverview())
+	h.markets.inserted = new(0)
+	h.vaults.inserted = new(0)
+
+	if err := h.run(t, tel); err != nil {
+		t.Fatalf("Run() = %v; a conflicted-away cycle is not a failure", err)
+	}
+	got := counterValues(t, reader)
+	if got["core_model_reference.sync.markets.written.total"] != 0 || got["core_model_reference.sync.vaults.written.total"] != 0 {
+		t.Errorf("written counters = %v, want both 0 when the database inserted nothing", got)
+	}
+}
+
+func TestRunCountsRejectedRowsAndStillPersistsTheRest(t *testing.T) {
+	reader := metric.NewManualReader()
+	tel, err := NewTelemetryWithProvider(context.Background(), metric.NewMeterProvider(metric.WithReader(reader)))
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProvider() = %v", err)
+	}
+	ov := healthyOverview()
+	ov.Rejected = []outbound.RowRejection{
+		{Kind: "market", Identity: "ethereum/morpho/0xbad", Reason: `missing field "crr_es_se"`},
+		{Kind: "vault", Identity: "row 3", Reason: `missing field "network"`},
+	}
+	h := newHarness(ov)
+
+	if err := h.run(t, tel); err != nil {
+		t.Fatalf("Run() = %v; rejected rows must not fail the cycle", err)
+	}
+	if len(h.markets.saved) != 2 || len(h.vaults.saved) != 1 {
+		t.Errorf("saved %d markets and %d vaults, want the 2 and 1 that passed validation", len(h.markets.saved), len(h.vaults.saved))
+	}
+	if got := counterValues(t, reader)["core_model_reference.sync.rows.rejected.total"]; got != 2 {
+		t.Errorf("rows.rejected.total = %d, want 2", got)
+	}
+}
+
+func TestRunFailsWhenEveryMarketWasRejected(t *testing.T) {
+	h := newHarness(overview(nil, []outbound.CoreModelReferenceVaultRow{vaultRow("0xbeef", "2026-09-17")}))
+	h.provider.overview.Rejected = []outbound.RowRejection{{Kind: "market", Identity: "row 0", Reason: "missing field"}}
+
+	err := h.run(t, nil)
+	if err == nil || !strings.Contains(err.Error(), "no markets") || !strings.Contains(err.Error(), "1 rows rejected") {
+		t.Fatalf("Run() = %v, want a no-markets error naming the rejected count", err)
+	}
+}
+
+func TestRunCountsRowsOfANetworkTheMapDoesNotKnow(t *testing.T) {
+	reader := metric.NewManualReader()
+	tel, err := NewTelemetryWithProvider(context.Background(), metric.NewMeterProvider(metric.WithReader(reader)))
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProvider() = %v", err)
+	}
+	unmappedA := marketRow("0xaaa", "2026-09-17")
+	unmappedA.Network, unmappedA.ChainID = "plasma", nil
+	unmappedB := marketRow("0xbbb", "2026-09-17")
+	unmappedB.Network, unmappedB.ChainID = "plasma", nil
+	h := newHarness(overview(
+		[]outbound.CoreModelReferenceMarketRow{unmappedA, unmappedB, marketRow("0xccc", "2026-09-17")},
+		[]outbound.CoreModelReferenceVaultRow{vaultRow("0xbeef", "2026-09-17")}))
+
+	if err := h.run(t, tel); err != nil {
+		t.Fatalf("Run() = %v; an unmapped network must not fail the cycle", err)
+	}
+	if len(h.markets.saved) != 3 {
+		t.Errorf("saved %d markets, want all 3: the rows land with a NULL chain id", len(h.markets.saved))
+	}
+	network, count := unmappedNetworkMetric(t, reader)
+	if network != "plasma" || count != 2 {
+		t.Errorf("unmapped_network_rows = %s/%d, want plasma/2", network, count)
+	}
+}
+
+// unmappedNetworkMetric extracts the single labelled data point of the
+// unmapped-network counter; the seeded unlabelled zero is ignored.
+func unmappedNetworkMetric(t *testing.T, reader *metric.ManualReader) (network string, count int64) {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect() = %v", err)
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "core_model_reference.sync.unmapped_network_rows.total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("unmapped_network_rows = %#v, want an int64 sum", m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				if v, ok := dp.Attributes.Value("network"); ok {
+					return v.AsString(), dp.Value
+				}
+			}
+		}
+	}
+	return "", 0
+}
+
 func TestRunRecordsNothingWrittenWhenTheCycleFails(t *testing.T) {
 	reader := metric.NewManualReader()
 	tel, err := NewTelemetryWithProvider(context.Background(), metric.NewMeterProvider(metric.WithReader(reader)))
@@ -438,7 +557,8 @@ func TestRunRecordsNothingWrittenWhenTheCycleFails(t *testing.T) {
 	}
 }
 
-// counterValues collects every int64 counter's single data point by name.
+// counterValues collects every int64 counter's data points by name, summed
+// across label sets so a labelled counter reads as its total.
 func counterValues(t *testing.T, reader *metric.ManualReader) map[string]int64 {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
@@ -449,10 +569,12 @@ func counterValues(t *testing.T, reader *metric.ManualReader) map[string]int64 {
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
 			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok || len(sum.DataPoints) != 1 {
-				t.Fatalf("%s = %#v, want exactly one int64 data point", m.Name, m.Data)
+			if !ok || len(sum.DataPoints) == 0 {
+				t.Fatalf("%s = %#v, want at least one int64 data point", m.Name, m.Data)
 			}
-			values[m.Name] = sum.DataPoints[0].Value
+			for _, dp := range sum.DataPoints {
+				values[m.Name] += dp.Value
+			}
 		}
 	}
 	return values

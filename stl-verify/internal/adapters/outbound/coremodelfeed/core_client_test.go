@@ -115,6 +115,32 @@ func fetch(t *testing.T, routes map[string]any) (markets int, vaults int, err er
 	return len(overview.Markets), len(overview.Vaults), err
 }
 
+// fetchRejections serves one market and one vault and returns the rows the
+// client dropped; the fetch itself must succeed.
+func fetchRejections(t *testing.T, market, vault map[string]any) []outbound.RowRejection {
+	t.Helper()
+	client, _ := newTestClient(t, map[string]any{
+		"/overview/": overviewPayload([]map[string]any{market}, []map[string]any{vault}),
+	})
+	overview, err := client.FetchOverview(context.Background())
+	if err != nil {
+		t.Fatalf("FetchOverview() = %v; a bad row must be rejected, not fail the fetch", err)
+	}
+	return overview.Rejected
+}
+
+// requireOneRejection asserts exactly one row of `kind` was dropped for a
+// reason naming `field`, and that the other row of the pair still came through.
+func requireOneRejection(t *testing.T, rejected []outbound.RowRejection, kind, field string) {
+	t.Helper()
+	if len(rejected) != 1 {
+		t.Fatalf("rejected = %+v, want exactly one %s rejection naming %q", rejected, kind, field)
+	}
+	if rejected[0].Kind != kind || !strings.Contains(rejected[0].Reason, `"`+field+`"`) {
+		t.Fatalf("rejection = %+v, want kind %s naming %q", rejected[0], kind, field)
+	}
+}
+
 // fetchOne serves one market and one vault and returns the parsed pair.
 func fetchOne(t *testing.T, market, vault map[string]any) (outbound.CoreModelReferenceMarketRow, outbound.CoreModelReferenceVaultRow) {
 	t.Helper()
@@ -212,14 +238,21 @@ func TestFetchOverviewKeepsAnOverrideVaultsAbsentFiguresNil(t *testing.T) {
 func TestFetchOverviewRejectsAModelVaultWithoutASimulationFigure(t *testing.T) {
 	for _, field := range []string{"crr_el_se", "crr_es"} {
 		t.Run(field, func(t *testing.T) {
-			_, _, err := fetch(t, map[string]any{
-				"/overview/": overviewPayload(
-					[]map[string]any{marketRow(nil)},
-					[]map[string]any{vaultRow(map[string]any{field: nil})}),
-			})
-			if err == nil || !strings.Contains(err.Error(), `"`+field+`"`) {
-				t.Fatalf("FetchOverview() = %v, want an error naming %q on a method=model vault", err, field)
-			}
+			rejected := fetchRejections(t, marketRow(nil), vaultRow(map[string]any{field: nil}))
+			requireOneRejection(t, rejected, "vault", field)
+		})
+	}
+}
+
+// The override rule holds both ways: a governance constant carrying a standard
+// error would read as a simulation result to anyone trusting the column.
+func TestFetchOverviewRejectsAnOverrideVaultCarryingASimulationFigure(t *testing.T) {
+	for _, field := range []string{"crr_el_se", "crr_es"} {
+		t.Run(field, func(t *testing.T) {
+			overrides := map[string]any{"method": "override", "crr_el_se": nil, "crr_es": nil}
+			overrides[field] = "0.0001"
+			rejected := fetchRejections(t, marketRow(nil), vaultRow(overrides))
+			requireOneRejection(t, rejected, "vault", field)
 		})
 	}
 }
@@ -272,51 +305,97 @@ func TestFetchOverviewMapsChainIDCaseInsensitively(t *testing.T) {
 	}
 }
 
-func TestFetchOverviewRejectsAnyAbsentMarketField(t *testing.T) {
+// A row missing a field is dropped on its own; failing the whole fetch would
+// lose the other rows' day, which the feed never re-publishes.
+func TestFetchOverviewRejectsAMarketRowMissingAnyField(t *testing.T) {
 	for _, field := range []string{
 		"network", "protocol", "market_uid", "market_symbol", "loan_token_symbol", "loan_token_address",
 		"date", "n_scenarios", "horizon_days", "effective_horizon_days", "tot_supply_usd", "prob_no_bad_debt",
 		"crr_el", "crr_var", "crr_es", "crr_el_se", "crr_var_se", "crr_es_se", "crr_floor", "external_flow_enabled",
 	} {
 		t.Run(field, func(t *testing.T) {
-			_, _, err := fetch(t, map[string]any{
-				"/overview/": overviewPayload(
-					[]map[string]any{marketRow(map[string]any{field: nil})},
-					[]map[string]any{vaultRow(nil)}),
-			})
-			if err == nil || !strings.Contains(err.Error(), `"`+field+`"`) {
-				t.Fatalf("FetchOverview() = %v, want an error naming %q", err, field)
-			}
+			rejected := fetchRejections(t, marketRow(map[string]any{field: nil}), vaultRow(nil))
+			requireOneRejection(t, rejected, "market", field)
 		})
 	}
 }
 
-func TestFetchOverviewRejectsAnyAbsentVaultField(t *testing.T) {
+func TestFetchOverviewRejectsAVaultRowMissingAnyField(t *testing.T) {
 	for _, field := range []string{
 		"network", "protocol", "vault_address", "vault_symbol", "vault_name", "version", "loan_token_symbol",
 		"loan_token_address", "method", "date", "n_markets", "total_assets_usd", "idle_usd", "crr_el",
 	} {
 		t.Run(field, func(t *testing.T) {
-			_, _, err := fetch(t, map[string]any{
-				"/overview/": overviewPayload(
-					[]map[string]any{marketRow(nil)},
-					[]map[string]any{vaultRow(map[string]any{field: nil})}),
-			})
-			if err == nil || !strings.Contains(err.Error(), `"`+field+`"`) {
-				t.Fatalf("FetchOverview() = %v, want an error naming %q", err, field)
+			rejected := fetchRejections(t, marketRow(nil), vaultRow(map[string]any{field: nil}))
+			requireOneRejection(t, rejected, "vault", field)
+		})
+	}
+}
+
+func TestFetchOverviewKeepsTheValidRowsWhenOneIsRejected(t *testing.T) {
+	client, _ := newTestClient(t, map[string]any{
+		"/overview/": overviewPayload(
+			[]map[string]any{
+				marketRow(nil),
+				marketRow(map[string]any{"market_uid": "0xbad", "crr_es_se": nil}),
+				marketRow(map[string]any{"market_uid": "0xother"}),
+			},
+			[]map[string]any{vaultRow(nil)}),
+	})
+
+	overview, err := client.FetchOverview(context.Background())
+	if err != nil {
+		t.Fatalf("FetchOverview() = %v", err)
+	}
+	if len(overview.Markets) != 2 || len(overview.Vaults) != 1 || len(overview.Rejected) != 1 {
+		t.Fatalf("markets/vaults/rejected = %d/%d/%d, want 2/1/1", len(overview.Markets), len(overview.Vaults), len(overview.Rejected))
+	}
+	if overview.Rejected[0].Identity != "ethereum/sparklend/0xbad" {
+		t.Errorf("rejection identity = %q, want the row's own identity", overview.Rejected[0].Identity)
+	}
+}
+
+func TestFetchOverviewNamesARejectedRowByIndexWhenItsIdentityIsMissing(t *testing.T) {
+	rejected := fetchRejections(t, marketRow(map[string]any{"market_uid": nil}), vaultRow(nil))
+	if len(rejected) != 1 || rejected[0].Identity != "row 0" {
+		t.Fatalf("rejected = %+v, want one rejection identified as row 0", rejected)
+	}
+}
+
+func TestFetchOverviewBlamesTheFirstAbsentFieldInOrder(t *testing.T) {
+	rejected := fetchRejections(t, marketRow(map[string]any{"crr_es": nil, "market_symbol": nil}), vaultRow(nil))
+	requireOneRejection(t, rejected, "market", "market_symbol")
+}
+
+// The table's CHECKs would abort the whole transaction on one bad figure; the
+// client rejects the row first so the rest of the cycle still lands.
+func TestFetchOverviewRejectsAnOutOfRangeMarketFigure(t *testing.T) {
+	for name, override := range map[string]map[string]any{
+		"prob_no_bad_debt above 1":  {"prob_no_bad_debt": "1.000000000000000001"},
+		"prob_no_bad_debt negative": {"prob_no_bad_debt": "-0.1"},
+		"crr_el negative":           {"crr_el": "-0.001"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rejected := fetchRejections(t, marketRow(override), vaultRow(nil))
+			if len(rejected) != 1 || rejected[0].Kind != "market" {
+				t.Fatalf("rejected = %+v, want one market rejection", rejected)
 			}
 		})
 	}
 }
 
-func TestFetchOverviewBlamesTheFirstAbsentFieldInOrder(t *testing.T) {
-	_, _, err := fetch(t, map[string]any{
+func TestFetchOverviewAcceptsBoundaryFigures(t *testing.T) {
+	client, _ := newTestClient(t, map[string]any{
 		"/overview/": overviewPayload(
-			[]map[string]any{marketRow(map[string]any{"crr_es": nil, "market_symbol": nil})},
-			[]map[string]any{vaultRow(nil)}),
+			[]map[string]any{marketRow(map[string]any{"prob_no_bad_debt": "1", "crr_el": "0", "crr_floor": "0"})},
+			[]map[string]any{vaultRow(map[string]any{"crr_el_se": "4.27099736914E-7"})}),
 	})
-	if err == nil || !strings.Contains(err.Error(), `"market_symbol"`) {
-		t.Fatalf("FetchOverview() = %v, want the earlier field market_symbol blamed", err)
+	overview, err := client.FetchOverview(context.Background())
+	if err != nil {
+		t.Fatalf("FetchOverview() = %v", err)
+	}
+	if len(overview.Rejected) != 0 {
+		t.Errorf("rejected = %+v, want none: 0, 1 and exponent notation are all in range", overview.Rejected)
 	}
 }
 

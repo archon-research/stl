@@ -117,57 +117,118 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 
-	if err := s.persistCycle(ctx, markets, vaults); err != nil {
+	inserted, err := s.persistCycle(ctx, markets, vaults)
+	if err != nil {
 		return err
 	}
+	s.reportRejections(ctx, overview.Rejected)
+	s.reportUnmappedNetworks(ctx, markets, vaults)
 	s.reportStaleness(ctx, markets, vaults, syncedAt)
 
-	s.logger.Info("core reference sync complete", "markets", len(markets), "vaults", len(vaults))
+	s.logger.Info("core reference sync complete",
+		"markets", len(markets), "vaults", len(vaults),
+		"markets_inserted", inserted.markets, "vaults_inserted", inserted.vaults,
+		"rejected", len(overview.Rejected))
 	return nil
 }
 
 // observeUpstream reads the overview and rejects an empty half. The model
-// covers dozens of markets and several vaults today, so covering none means
-// the feed broke or its shape drifted. That must not read as "nothing to do",
-// which would leave a silent hole in the series.
+// covers dozens of markets and several vaults today, so covering none — with
+// or without rejected rows — means the feed broke or its shape drifted. That
+// must not read as "nothing to do", which would leave a silent hole in the
+// series.
 func (s *Service) observeUpstream(ctx context.Context) (outbound.CoreModelReferenceOverview, error) {
 	overview, err := s.deps.Provider.FetchOverview(ctx)
 	if err != nil {
 		return outbound.CoreModelReferenceOverview{}, fmt.Errorf("fetching core overview: %w", err)
 	}
 	if len(overview.Markets) == 0 {
-		return outbound.CoreModelReferenceOverview{}, fmt.Errorf("core overview reported no markets")
+		return outbound.CoreModelReferenceOverview{}, fmt.Errorf("core overview reported no markets (%d rows rejected)", len(overview.Rejected))
 	}
 	if len(overview.Vaults) == 0 {
-		return outbound.CoreModelReferenceOverview{}, fmt.Errorf("core overview reported no vaults")
+		return outbound.CoreModelReferenceOverview{}, fmt.Errorf("core overview reported no vaults (%d rows rejected)", len(overview.Rejected))
 	}
 	return overview, nil
 }
 
+// insertedCounts is what the database actually inserted in one cycle.
+type insertedCounts struct{ markets, vaults int }
+
 // persistCycle saves markets and vaults in one transaction: they promise to
 // join exactly on synced_at, every table is append-only and a retry stamps a
 // fresh synced_at, so a partial commit would strand a permanent half-cycle no
-// retry repairs.
+// retry repairs. The written counters take the inserted counts, not the batch
+// sizes: a cycle whose rows all conflicted away (a clock stepping back onto an
+// already-written synced_at) must read as zero, or WritesZero cannot see it.
 func (s *Service) persistCycle(
 	ctx context.Context,
 	markets []entity.CoreModelReferenceMarketResult,
 	vaults []entity.CoreModelReferenceVaultResult,
-) error {
+) (insertedCounts, error) {
+	var inserted insertedCounts
 	err := s.deps.TxManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		if err := s.deps.MarketRepo.SaveMarketResults(ctx, tx, markets); err != nil {
+		n, err := s.deps.MarketRepo.SaveMarketResults(ctx, tx, markets)
+		if err != nil {
 			return fmt.Errorf("saving core market results: %w", err)
 		}
-		if err := s.deps.VaultRepo.SaveVaultResults(ctx, tx, vaults); err != nil {
+		inserted.markets = n
+		n, err = s.deps.VaultRepo.SaveVaultResults(ctx, tx, vaults)
+		if err != nil {
 			return fmt.Errorf("saving core vault results: %w", err)
 		}
+		inserted.vaults = n
 		return nil
 	})
 	if err != nil {
-		return err
+		return insertedCounts{}, err
 	}
-	s.telemetry.RecordMarketsWritten(ctx, len(markets))
-	s.telemetry.RecordVaultsWritten(ctx, len(vaults))
-	return nil
+	s.telemetry.RecordMarketsWritten(ctx, inserted.markets)
+	s.telemetry.RecordVaultsWritten(ctx, inserted.vaults)
+	if inserted.markets < len(markets) || inserted.vaults < len(vaults) {
+		s.logger.Warn("some rows of this cycle were already written under this build and conflicted away",
+			"markets_submitted", len(markets), "markets_inserted", inserted.markets,
+			"vaults_submitted", len(vaults), "vaults_inserted", inserted.vaults)
+	}
+	return inserted, nil
+}
+
+// reportRejections surfaces the rows the provider dropped. Each is a day of
+// that market or vault the series will never get back, so every one is logged
+// with its reason and counted for the alert; the cycle itself is not failed,
+// because failing it would lose the other rows too.
+func (s *Service) reportRejections(ctx context.Context, rejected []outbound.RowRejection) {
+	for _, r := range rejected {
+		s.logger.Warn("upstream row rejected; its result for this cycle is lost",
+			"kind", r.Kind, "identity", r.Identity, "reason", r.Reason)
+	}
+	s.telemetry.RecordRowsRejected(ctx, len(rejected))
+}
+
+// reportUnmappedNetworks surfaces rows stored with a NULL chain id. The row is
+// correct as recorded — the network is upstream's claim — but a read-time
+// registry join drops it, so the map must be extended and nothing else
+// notices: the write succeeds and every counter advances.
+func (s *Service) reportUnmappedNetworks(
+	ctx context.Context,
+	markets []entity.CoreModelReferenceMarketResult,
+	vaults []entity.CoreModelReferenceVaultResult,
+) {
+	unmapped := map[string]int{}
+	for _, m := range markets {
+		if m.ChainID == nil {
+			unmapped[m.Network]++
+		}
+	}
+	for _, v := range vaults {
+		if v.ChainID == nil {
+			unmapped[v.Network]++
+		}
+	}
+	for network, count := range unmapped {
+		s.logger.Warn("network has no chain id in the feed client's map; rows stored with chain_id NULL",
+			"network", network, "rows", count)
+		s.telemetry.RecordUnmappedNetworkRows(ctx, network, count)
+	}
 }
 
 // reportStaleness measures how far upstream's run day has fallen behind the

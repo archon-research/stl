@@ -43,13 +43,16 @@ func coreMarketResult(uid string, syncedAt time.Time, buildID int) entity.CoreMo
 	}
 }
 
-func saveCoreMarkets(t *testing.T, ctx context.Context, txm *TxManager, repo *CoreModelReferenceMarketResultRepository, rows ...entity.CoreModelReferenceMarketResult) {
+func saveCoreMarkets(t *testing.T, ctx context.Context, txm *TxManager, repo *CoreModelReferenceMarketResultRepository, rows ...entity.CoreModelReferenceMarketResult) int {
 	t.Helper()
-	if err := txm.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return repo.SaveMarketResults(ctx, tx, rows)
+	var inserted int
+	if err := txm.WithTransaction(ctx, func(tx pgx.Tx) (err error) {
+		inserted, err = repo.SaveMarketResults(ctx, tx, rows)
+		return err
 	}); err != nil {
 		t.Fatalf("SaveMarketResults() = %v", err)
 	}
+	return inserted
 }
 
 func TestCoreModelReferenceMarketResultRepositoryPreservesEighteenDecimalPrecision(t *testing.T) {
@@ -103,9 +106,8 @@ func TestCoreModelReferenceMarketResultRepositoryIsIdempotentWithinABuild(t *tes
 	syncedAt := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	row := coreMarketResult("0xaaa", syncedAt, 1)
 
-	for range 2 {
-		saveCoreMarkets(t, ctx, txm, repo, row)
-	}
+	first := saveCoreMarkets(t, ctx, txm, repo, row)
+	second := saveCoreMarkets(t, ctx, txm, repo, row)
 
 	var rows int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM core_model_reference_market_result WHERE market_uid = '0xaaa'`).Scan(&rows); err != nil {
@@ -113,6 +115,9 @@ func TestCoreModelReferenceMarketResultRepositoryIsIdempotentWithinABuild(t *tes
 	}
 	if rows != 1 {
 		t.Errorf("wrote %d rows for one cycle re-run under one build, want 1", rows)
+	}
+	if first != 1 || second != 0 {
+		t.Errorf("inserted = %d then %d, want 1 then 0: the counter must report what landed, not what was submitted", first, second)
 	}
 }
 

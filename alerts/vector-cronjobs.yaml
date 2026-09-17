@@ -723,8 +723,10 @@ groups:
         # Cycling but persisting nothing. The service fails a cycle whose
         # overview has no markets or no vaults and writes both tables in one
         # transaction, so a successful cycle always writes both and the market
-        # counter alone covers the vault table; zero rows means the write path
-        # or the counter broke.
+        # counter alone covers the vault table. The counter is fed the rows the
+        # database INSERTED (the repositories sum RowsAffected), not the batch
+        # size, so a cycle whose rows all conflicted away — a clock stepping
+        # back onto an already-written synced_at — reads as zero here.
         # Gated on "cycling AND zero" so it does not duplicate the worker-down
         # rules. The counters are seeded at 0 from process start, and `unless`
         # (not `== 0`) also fires when the series is entirely absent.
@@ -785,6 +787,61 @@ groups:
             correctly labelled. Nothing to fix in the service — confirm against
             the dashboard and flag it upstream.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcoremodelreferenceindexerstaleupstream
+
+      - alert: VectorCoreModelReferenceIndexerRowsRejected
+        # A row upstream published failed validation (missing field, figure out
+        # of range, simulation figure on an override vault) and was dropped so
+        # the rest of the cycle could land. The feed publishes no history, so
+        # that market's or vault's day is gone for good; the cycle still reports
+        # success and the written counters still advance. A drift repeats every
+        # 30m cycle until the parser or the map is fixed, and even a one-off is
+        # a lost row worth a look, so any increase fires; `for: 5m` only rides
+        # out scrape jitter.
+        expr: |
+          sum by (cluster) (
+            increase(core_model_reference_sync_rows_rejected_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 5m
+        labels:
+          team: vector
+          severity: warning
+          component: core-model-reference-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector core-model-reference-indexer dropped upstream rows"
+          description: |
+            `{{ $value | printf "%.0f" }}` upstream row(s) failed validation in
+            the last hour and were left out of their cycle. Each is a market or
+            vault day the reference series will never get back. The pod log
+            names the row and the reason (`upstream row rejected`); fix the
+            parser if the feed's shape drifted, or flag the row upstream.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcoremodelreferenceindexerrowsrejected
+
+      - alert: VectorCoreModelReferenceIndexerUnmappedNetwork
+        # Upstream covers a network the feed client's network→chain_id map does
+        # not know. The rows land correctly with chain_id NULL, every counter
+        # advances and the cycle succeeds — but a read-time registry join drops
+        # them, so the map must be extended. Fires per network on any increase;
+        # it repeats every cycle until the map is updated.
+        expr: |
+          sum by (cluster, network) (
+            increase(core_model_reference_sync_unmapped_network_rows_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 5m
+        labels:
+          team: vector
+          severity: warning
+          component: core-model-reference-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector core-model-reference-indexer: network `{{ $labels.network }}` has no chain id"
+          description: |
+            Rows for upstream network `{{ $labels.network }}` are being stored
+            with `chain_id = NULL` because the feed client's network map has no
+            entry for it. The rows are correct as recorded; add the chain id to
+            `networkToChainID` in `internal/adapters/outbound/coremodelfeed` so
+            read-time registry joins stop dropping them.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcoremodelreferenceindexerunmappednetwork
 
       # =====================================================================
       # VEC-828 — design-decision watchdog on the two plain reference tables.

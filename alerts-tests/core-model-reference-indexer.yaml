@@ -1,7 +1,8 @@
 # Unit tests for the core-model-reference-indexer rules (VEC-828): the `unless`
 # absence shape on WritesZero, the one-stale-cycle-must-not-page window on
 # StaleUpstream, the plain-table growth tripwire, and the Deployment-name regex
-# that VectorCronjobWorkerDown keys on.
+# that VectorCronjobWorkerDown keys on, plus the rejected-row and
+# unmapped-network data-quality signals that fire on a successful cycle.
 #
 # The job ticks every 30m. Series step at 1m, so a "cycle" is 30 samples.
 rule_files:
@@ -194,3 +195,77 @@ tests:
                 data goes stale.
               runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcronjobworkerdown"
               summary: "Vector cronjob `core-model-reference-indexer` has no available replica"
+
+  # One rejected row is a lost day for that market or vault; any increase fires.
+  - name: "rows-rejected: a single rejected row fires"
+    interval: 1m
+    input_series:
+      - series: 'core_model_reference_sync_rows_rejected_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0x29 1x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: VectorCoreModelReferenceIndexerRowsRejected
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "core-model-reference-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations:
+              description: |
+                `1` upstream row(s) failed validation in
+                the last hour and were left out of their cycle. Each is a market or
+                vault day the reference series will never get back. The pod log
+                names the row and the reason (`upstream row rejected`); fix the
+                parser if the feed's shape drifted, or flag the row upstream.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcoremodelreferenceindexerrowsrejected"
+              summary: "Vector core-model-reference-indexer dropped upstream rows"
+
+  - name: "rows-rejected: a seeded zero counter stays quiet"
+    interval: 1m
+    input_series:
+      - series: 'core_model_reference_sync_rows_rejected_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: VectorCoreModelReferenceIndexerRowsRejected
+        exp_alerts: []
+
+  - name: "unmapped-network: rows of an unknown network fire per network"
+    interval: 1m
+    input_series:
+      - series: 'core_model_reference_sync_unmapped_network_rows_total{k8s_namespace_name="vector", cluster="c1", network="plasma"}'
+        values: '0x29 2x30 4x30'
+      - series: 'core_model_reference_sync_unmapped_network_rows_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0x89'
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: VectorCoreModelReferenceIndexerUnmappedNetwork
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "core-model-reference-indexer"
+              namespace: "vector"
+              network: "plasma"
+              severity: "warning"
+              team: "vector"
+            exp_annotations:
+              description: |
+                Rows for upstream network `plasma` are being stored
+                with `chain_id = NULL` because the feed client's network map has no
+                entry for it. The rows are correct as recorded; add the chain id to
+                `networkToChainID` in `internal/adapters/outbound/coremodelfeed` so
+                read-time registry joins stop dropping them.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcoremodelreferenceindexerunmappednetwork"
+              summary: "Vector core-model-reference-indexer: network `plasma` has no chain id"
+
+  - name: "unmapped-network: only the seeded unlabelled zero stays quiet"
+    interval: 1m
+    input_series:
+      - series: 'core_model_reference_sync_unmapped_network_rows_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: VectorCoreModelReferenceIndexerUnmappedNetwork
+        exp_alerts: []

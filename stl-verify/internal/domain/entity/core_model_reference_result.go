@@ -66,7 +66,8 @@ type CoreModelReferenceMarketResult struct {
 // Same encoding rules as CoreModelReferenceMarketResult. Method says how upstream
 // produced the figure ("model" or "override"); an override row's CRR is a
 // governance-set constant, not a model output, so it carries no standard error
-// and no expected shortfall — CRRELSE and CRRES are nil exactly then.
+// and no expected shortfall — CRRELSE and CRRES are nil exactly then, and the
+// provider and the table CHECK both enforce the two directions.
 type CoreModelReferenceVaultResult struct {
 	Network      string
 	ChainID      *int64

@@ -43,15 +43,15 @@ func NewCoreModelReferenceMarketResultRepository(
 // Insert-only: a row is immutable once written. The BEFORE INSERT trigger
 // assigns processing_version, so the same (identity, synced_at) written again
 // under the same build_id conflicts away, and under a new build_id appends a
-// correction. A Temporal retry never hits either path: a failed cycle rolled
-// back everything, and the retry stamps a fresh synced_at.
+// correction. The returned count is what the database inserted, so a cycle
+// whose rows all conflicted away reports zero rather than its batch size.
 func (r *CoreModelReferenceMarketResultRepository) SaveMarketResults(
 	ctx context.Context,
 	tx pgx.Tx,
 	results []entity.CoreModelReferenceMarketResult,
-) error {
+) (int, error) {
 	if len(results) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	const q = `
@@ -92,19 +92,22 @@ func (r *CoreModelReferenceMarketResultRepository) SaveMarketResults(
 	}
 
 	batchResults := tx.SendBatch(ctx, batch)
+	inserted := 0
 	for i, m := range results {
-		if _, err := batchResults.Exec(); err != nil {
+		tag, err := batchResults.Exec()
+		if err != nil {
 			_ = batchResults.Close()
-			return fmt.Errorf("insert core model reference market result %d (%s/%s/%s): %w",
+			return 0, fmt.Errorf("insert core model reference market result %d (%s/%s/%s): %w",
 				i, m.Network, m.ProtocolName, m.MarketUID, err)
 		}
+		inserted += int(tag.RowsAffected())
 	}
 	if err := batchResults.Close(); err != nil {
-		return fmt.Errorf("close batch: %w", err)
+		return 0, fmt.Errorf("close batch: %w", err)
 	}
 
-	r.logger.Info("saved core model reference market results", "count", len(results))
-	return nil
+	r.logger.Info("saved core model reference market results", "submitted", len(results), "inserted", inserted)
+	return inserted, nil
 }
 
 // marketInsertArgs orders one row's values to match the INSERT column list.

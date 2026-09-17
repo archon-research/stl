@@ -47,8 +47,9 @@ type CoreModelReferenceMarketRow struct {
 
 // CoreModelReferenceVaultRow is one vault's row of the upstream CORE overview, as
 // decimal strings exactly as reported. Same encoding rules as the market row.
-// CRRELSE and CRRES are nil for a Method of "override", which has no
-// simulation behind it; the provider rejects their absence on any other method.
+// CRRELSE and CRRES are nil exactly when Method is "override", which has no
+// simulation behind it; the provider rejects a row that breaks that in either
+// direction.
 type CoreModelReferenceVaultRow struct {
 	Network      string
 	ChainID      *int64
@@ -72,12 +73,26 @@ type CoreModelReferenceVaultRow struct {
 	CRRES       *string
 }
 
+// RowRejection is one upstream row the provider refused to carry: a field
+// missing, a figure out of range, or a figure the row's method forbids. The row
+// is dropped from the cycle and reported here so the rest of the cycle still
+// lands and the loss is counted rather than silent.
+type RowRejection struct {
+	// Kind is "market" or "vault".
+	Kind string
+	// Identity is the row as upstream spelled it (network/protocol/uid), or
+	// its index when the identity fields are what is missing.
+	Identity string
+	Reason   string
+}
+
 // CoreModelReferenceOverview is everything one read of the upstream overview
 // reported, gathered so a cycle persists markets and vaults from the same
-// observation.
+// observation. Rejected lists the rows that were dropped on the way.
 type CoreModelReferenceOverview struct {
-	Markets []CoreModelReferenceMarketRow
-	Vaults  []CoreModelReferenceVaultRow
+	Markets  []CoreModelReferenceMarketRow
+	Vaults   []CoreModelReferenceVaultRow
+	Rejected []RowRejection
 }
 
 // CoreModelReferenceProvider fetches the current CORE model results the upstream
@@ -86,20 +101,25 @@ type CoreModelReferenceProvider interface {
 	// FetchOverview returns every market and vault the dashboard reports today.
 	// The feed publishes one result per calendar day and answers a date
 	// parameter by ignoring it, so this is always "now"; history is the
-	// caller's to accumulate.
+	// caller's to accumulate. A row that fails validation is returned under
+	// Rejected instead of failing the fetch; only a transport fault, a failed
+	// envelope or a duplicate identity fails it.
 	FetchOverview(ctx context.Context) (CoreModelReferenceOverview, error)
 }
 
 // CoreModelReferenceMarketResultRepository persists market rows of a cycle.
 type CoreModelReferenceMarketResultRepository interface {
 	// SaveMarketResults writes within the caller's transaction, so the caller
-	// controls what else commits or rolls back with it.
-	SaveMarketResults(ctx context.Context, tx pgx.Tx, results []entity.CoreModelReferenceMarketResult) error
+	// controls what else commits or rolls back with it. It returns how many rows
+	// the database actually inserted; a row whose identity and synced_at were
+	// already written under the same build conflicts away and is not counted.
+	SaveMarketResults(ctx context.Context, tx pgx.Tx, results []entity.CoreModelReferenceMarketResult) (inserted int, err error)
 }
 
 // CoreModelReferenceVaultResultRepository persists vault rows of a cycle.
 type CoreModelReferenceVaultResultRepository interface {
 	// SaveVaultResults writes within the caller's transaction, like
-	// SaveMarketResults, so a cycle's markets and vaults land together.
-	SaveVaultResults(ctx context.Context, tx pgx.Tx, results []entity.CoreModelReferenceVaultResult) error
+	// SaveMarketResults, so a cycle's markets and vaults land together, and
+	// returns the inserted count under the same rule.
+	SaveVaultResults(ctx context.Context, tx pgx.Tx, results []entity.CoreModelReferenceVaultResult) (inserted int, err error)
 }

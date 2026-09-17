@@ -23,12 +23,16 @@ func TestTelemetryEmitsTheMetricNamesTheAlertsQuery(t *testing.T) {
 	tel.RecordVaultsWritten(ctx, 10)
 	tel.RecordStaleRows(ctx, 1)
 	tel.RecordStaleCycle(ctx)
+	tel.RecordRowsRejected(ctx, 3)
+	tel.RecordUnmappedNetworkRows(ctx, "plasma", 2)
 
 	for name, want := range map[string]int64{
-		"core_model_reference.sync.markets.written.total": 32,
-		"core_model_reference.sync.vaults.written.total":  10,
-		"core_model_reference.sync.stale_rows.total":      1,
-		"core_model_reference.sync.stale_cycles.total":    1,
+		"core_model_reference.sync.markets.written.total":       32,
+		"core_model_reference.sync.vaults.written.total":        10,
+		"core_model_reference.sync.stale_rows.total":            1,
+		"core_model_reference.sync.stale_cycles.total":          1,
+		"core_model_reference.sync.rows.rejected.total":         3,
+		"core_model_reference.sync.unmapped_network_rows.total": 2,
 	} {
 		if got := counterValues(t, reader)[name]; got != want {
 			t.Errorf("%s = %d, want %d", name, got, want)
@@ -59,6 +63,8 @@ func TestTelemetrySeedsEveryCounterAtZeroOnConstruction(t *testing.T) {
 		"core_model_reference.sync.vaults.written.total",
 		"core_model_reference.sync.stale_rows.total",
 		"core_model_reference.sync.stale_cycles.total",
+		"core_model_reference.sync.rows.rejected.total",
+		"core_model_reference.sync.unmapped_network_rows.total",
 	} {
 		if !seeded[want] {
 			t.Errorf("%s not emitted before any record call; got %v", want, seeded)
@@ -74,4 +80,6 @@ func TestTelemetryRecordersAreNilSafe(t *testing.T) {
 	tel.RecordVaultsWritten(context.Background(), 1)
 	tel.RecordStaleRows(context.Background(), 1)
 	tel.RecordStaleCycle(context.Background())
+	tel.RecordRowsRejected(context.Background(), 1)
+	tel.RecordUnmappedNetworkRows(context.Background(), "plasma", 1)
 }

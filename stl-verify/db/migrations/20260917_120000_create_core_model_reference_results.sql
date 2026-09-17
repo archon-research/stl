@@ -112,7 +112,7 @@ EXECUTE FUNCTION assign_processing_version_core_model_reference_market_result();
 COMMENT ON TABLE core_model_reference_market_result IS
   '[Timeseries] Per-cycle snapshot of one market''s result from the upstream CORE risk model dashboard (/core/overview/). Reference data: what the upstream model reported, never STL''s own model output (that is core_model_results, keyed by market_key and scaled to percent). One row per (network, protocol_name, market_uid) per sync cycle; the feed publishes one result per calendar day (model_date) and ignores ?date=, so rows can only be accumulated forward. Identity fields are upstream''s claims verbatim, not registry FKs -- the feed covers networks and markets STL does not index. Deliberately a plain table (db/migrations/AGENTS.md create-plain rule): ~1.5k rows/day at the 30-minute cadence. Conversion path -- hypertable on synced_at, segment by (network, protocol_name), order by synced_at DESC, compress after 14 days -- is in docs/runbooks/vector-cronjobs.md under VectorCoreModelReferenceResultGrowthHigh, the alert that would prompt it. Append-only via the processing_version trigger; UPDATE/DELETE revoked from stl_readwrite.';
 COMMENT ON COLUMN core_model_reference_market_result.network IS 'PK. Upstream''s network label verbatim (''ethereum'', ''base'', ''robinhood''), where STL says ''mainnet'' for the first.';
-COMMENT ON COLUMN core_model_reference_market_result.chain_id IS 'EVM chain id mapped from network at write time. NULL for a network STL has no id for, which is a fact about the mapping, not missing data.';
+COMMENT ON COLUMN core_model_reference_market_result.chain_id IS 'EVM chain id mapped from network at write time. NULL for a network STL has no id for, which is a fact about the mapping, not missing data; the indexer counts such rows (unmapped_network_rows) and VectorCoreModelReferenceIndexerUnmappedNetwork asks for the map to be extended.';
 COMMENT ON COLUMN core_model_reference_market_result.protocol_name IS 'PK. Upstream protocol label verbatim (''sparklend'', ''morpho'', ''maple'', ''anchorage'', ''galaxy''), not an FK into protocol. Part of the identity because anchorage and galaxy share a placeholder market_uid on ethereum.';
 COMMENT ON COLUMN core_model_reference_market_result.market_uid IS 'PK. Upstream''s opaque market handle verbatim: the spToken address for SparkLend, the 32-byte Blue market id for Morpho, the pool address for Maple, a synthetic label (''0x…anchorageusdc'') for the off-chain markets. TEXT on purpose: three shapes, one column, no decoding. Stored as upstream spells it (lowercase hex today) and compared case-sensitively, so a spelling change upstream would open a second identity; the writer rejects two spellings within one fetch.';
 COMMENT ON COLUMN core_model_reference_market_result.market_symbol IS 'Display symbol as upstream reports it (''spUSDS'', ''cbBTC/USDC 86%'').';
@@ -166,9 +166,12 @@ CREATE TABLE IF NOT EXISTS core_model_reference_vault_result
     run_id             BIGINT,
     -- An override vault carries a flat governance value with no Monte Carlo
     -- behind it, so it has no standard error and no expected shortfall (verified
-    -- live: groveUSDG). A modelled vault always has both; a NULL there is a
-    -- broken payload, not a fact.
-    CHECK (method = 'override' OR (crr_el_se IS NOT NULL AND crr_es IS NOT NULL)),
+    -- live: groveUSDG); a modelled vault always has both. Enforced in both
+    -- directions, so "crr_el_se IS NULL" and "method = 'override'" stay the same
+    -- statement and a reader may trust either one.
+    CHECK (CASE WHEN method = 'override'
+                THEN crr_el_se IS NULL AND crr_es IS NULL
+                ELSE crr_el_se IS NOT NULL AND crr_es IS NOT NULL END),
     PRIMARY KEY (network, protocol_name, vault_address, synced_at, processing_version)
 );
 
@@ -231,8 +234,8 @@ COMMENT ON COLUMN core_model_reference_vault_result.n_markets IS 'Number of mark
 COMMENT ON COLUMN core_model_reference_vault_result.total_assets_usd IS 'Normalized USD decimal. Upstream total_assets_usd: the vault''s total assets the CRRs are a fraction of.';
 COMMENT ON COLUMN core_model_reference_vault_result.idle_assets_usd IS 'Normalized USD decimal. Upstream idle_usd: assets not allocated to any market; dilutes the supply-weighted CRR.';
 COMMENT ON COLUMN core_model_reference_vault_result.crr_el IS 'Plain 0-1 fraction of total_assets_usd (NOT percent). Expected-loss CRR; the vault rows carry no crr_floor.';
-COMMENT ON COLUMN core_model_reference_vault_result.crr_el_se IS 'Plain 0-1 fraction. Monte Carlo standard error of crr_el. NULL only under method=override, which has no simulation behind it; the CHECK forbids it elsewhere.';
-COMMENT ON COLUMN core_model_reference_vault_result.crr_es IS 'Plain 0-1 fraction of total_assets_usd. Expected-shortfall CRR. NULL only under method=override (a flat value has no tail); the CHECK forbids it elsewhere.';
+COMMENT ON COLUMN core_model_reference_vault_result.crr_el_se IS 'Plain 0-1 fraction. Monte Carlo standard error of crr_el. NULL if and only if method=override, which has no simulation behind it; the CHECK enforces both directions.';
+COMMENT ON COLUMN core_model_reference_vault_result.crr_es IS 'Plain 0-1 fraction of total_assets_usd. Expected-shortfall CRR. NULL if and only if method=override (a flat value has no tail); the CHECK enforces both directions.';
 COMMENT ON COLUMN core_model_reference_vault_result.source IS 'Provenance slug of the upstream route that produced the row.';
 COMMENT ON COLUMN core_model_reference_vault_result.processing_version IS 'PK, Audit. Correction version: 0=original, N=Nth reprocess under a later build (ADR-0002).';
 COMMENT ON COLUMN core_model_reference_vault_result.build_id IS 'Audit. Deployment build that wrote the row; never use to pick the latest row.';

@@ -6,6 +6,14 @@
 // calendar day and accepts a ?date= parameter that it silently ignores
 // (verified by byte-identical responses across values), so nothing is sent
 // and the response is always read as "the current day".
+//
+// Validation is per row. A row missing a field, carrying a figure out of its
+// range, or carrying a figure its method forbids is dropped and reported as a
+// rejection; the other rows of the cycle still land. Only a transport fault, a
+// failed envelope, a payload that does not decode (a non-numeric literal in a
+// numeric field is caught by json.Number for the whole document) or a duplicate
+// identity fails the whole fetch: those mean there is no trustworthy payload at
+// all, and writing a duplicate would corrupt identity rather than lose one row.
 package coremodelfeed
 
 import (
@@ -13,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/url"
 	"strings"
 	"time"
@@ -24,7 +33,8 @@ import (
 // The feed spells networks its own way — "ethereum" where the allocation
 // trackers say "mainnet". Translated here so no consumer has to know the
 // vendor's vocabulary; it is this vendor's, so a change to it must not move
-// any other client's map.
+// any other client's map. A network absent here lands with a nil chain id and
+// is counted by the service, which is what asks for the map to be extended.
 var networkToChainID = map[string]int64{
 	"ethereum":  1,
 	"optimism":  10,
@@ -34,6 +44,12 @@ var networkToChainID = map[string]int64{
 	"arbitrum":  42161,
 	"avalanche": 43114,
 }
+
+// The vault method whose figure is a governance-set constant rather than a
+// simulation result; it is the only one that legitimately lacks a standard
+// error and an expected shortfall (verified live: groveUSDG), and the only one
+// that must not carry them.
+const overrideMethod = "override"
 
 // Compile-time check that Client implements the provider port.
 var _ outbound.CoreModelReferenceProvider = (*Client)(nil)
@@ -116,7 +132,8 @@ func validateBaseURL(raw string) (string, error) {
 	return trimmed, nil
 }
 
-// FetchOverview returns every market and vault the dashboard reports today.
+// FetchOverview returns every market and vault the dashboard reports today,
+// with the rows that failed validation listed under Rejected.
 func (c *Client) FetchOverview(ctx context.Context) (outbound.CoreModelReferenceOverview, error) {
 	var payload overviewResponse
 	requestURL := c.baseURL + "/overview/"
@@ -127,48 +144,133 @@ func (c *Client) FetchOverview(ctx context.Context) (outbound.CoreModelReference
 		return outbound.CoreModelReferenceOverview{}, fmt.Errorf("core overview reported success=false (status %d): %s", payload.Status, requestURL)
 	}
 
-	markets, err := toMarketRows(payload.Data.Markets)
+	markets, rejectedMarkets, err := toMarketRows(payload.Data.Markets)
 	if err != nil {
 		return outbound.CoreModelReferenceOverview{}, err
 	}
-	vaults, err := toVaultRows(payload.Data.Vaults)
+	vaults, rejectedVaults, err := toVaultRows(payload.Data.Vaults)
 	if err != nil {
 		return outbound.CoreModelReferenceOverview{}, err
 	}
-	return outbound.CoreModelReferenceOverview{Markets: markets, Vaults: vaults}, nil
+	return outbound.CoreModelReferenceOverview{
+		Markets:  markets,
+		Vaults:   vaults,
+		Rejected: append(rejectedMarkets, rejectedVaults...),
+	}, nil
 }
 
-// toMarketRows converts and validates the payload's markets. Row identity is
-// (network, protocol, market_uid) — the table's key — case-folded because the
-// three are otherwise stored verbatim: a casing change would silently mint a
-// second identity for one market. A duplicate in one fetch would conflict away
-// at insert, so it fails here instead.
-func toMarketRows(rows []marketPayloadRow) ([]outbound.CoreModelReferenceMarketRow, error) {
+// toMarketRows converts the payload's markets, dropping the rows that fail
+// validation. Row identity is (network, protocol, market_uid) — the table's
+// key — case-folded because the three are otherwise stored verbatim: a casing
+// change would silently mint a second identity for one market. A duplicate in
+// one fetch would conflict away at insert, so it fails the fetch instead.
+func toMarketRows(rows []marketPayloadRow) ([]outbound.CoreModelReferenceMarketRow, []outbound.RowRejection, error) {
 	seen := make(map[string]bool, len(rows))
 	out := make([]outbound.CoreModelReferenceMarketRow, 0, len(rows))
+	var rejected []outbound.RowRejection
 	for i, row := range rows {
-		parsed, err := toMarketRow(row, i)
+		parsed, err := toMarketRow(row)
 		if err != nil {
-			return nil, err
+			rejected = append(rejected, outbound.RowRejection{
+				Kind:     "market",
+				Identity: rowIdentity(i, row.Network, row.Protocol, row.MarketUID),
+				Reason:   err.Error(),
+			})
+			continue
 		}
 		key := strings.ToLower(parsed.Network + "|" + parsed.Protocol + "|" + parsed.MarketUID)
 		if seen[key] {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"core overview repeats market identity %s/%s/%s; the row identity assumption no longer holds",
 				parsed.Network, parsed.Protocol, parsed.MarketUID)
 		}
 		seen[key] = true
 		out = append(out, parsed)
 	}
-	return out, nil
+	return out, rejected, nil
 }
 
-// toMarketRow rejects a row missing any field the feed is expected to report;
-// persisting a blank or a zero in their place would read as a real answer.
-func toMarketRow(row marketPayloadRow, index int) (outbound.CoreModelReferenceMarketRow, error) {
-	// Ordered, not a map: which field a broken payload is blamed on must be
-	// reproducible across runs, or the same fault reads as a different bug.
-	required := []struct{ field, value string }{
+// toVaultRows converts the payload's vaults under the same rules as
+// toMarketRows, with the identity guard on (network, protocol, vault_address).
+func toVaultRows(rows []vaultPayloadRow) ([]outbound.CoreModelReferenceVaultRow, []outbound.RowRejection, error) {
+	seen := make(map[string]bool, len(rows))
+	out := make([]outbound.CoreModelReferenceVaultRow, 0, len(rows))
+	var rejected []outbound.RowRejection
+	for i, row := range rows {
+		parsed, err := toVaultRow(row)
+		if err != nil {
+			rejected = append(rejected, outbound.RowRejection{
+				Kind:     "vault",
+				Identity: rowIdentity(i, row.Network, row.Protocol, row.VaultAddress),
+				Reason:   err.Error(),
+			})
+			continue
+		}
+		key := strings.ToLower(parsed.Network + "|" + parsed.Protocol + "|" + parsed.VaultAddress)
+		if seen[key] {
+			return nil, nil, fmt.Errorf(
+				"core overview repeats vault identity %s/%s/%s; the row identity assumption no longer holds",
+				parsed.Network, parsed.Protocol, parsed.VaultAddress)
+		}
+		seen[key] = true
+		out = append(out, parsed)
+	}
+	return out, rejected, nil
+}
+
+// rowIdentity names a rejected row by its identity fields, falling back to the
+// row's position when those are what is missing.
+func rowIdentity(index int, network, protocol, uid string) string {
+	if strings.TrimSpace(network) == "" || strings.TrimSpace(protocol) == "" || strings.TrimSpace(uid) == "" {
+		return fmt.Sprintf("row %d", index)
+	}
+	return strings.TrimSpace(network) + "/" + strings.TrimSpace(protocol) + "/" + strings.TrimSpace(uid)
+}
+
+// requiredField is one field a row must carry, in the order a broken payload
+// is blamed: ordered, not a map, so the same fault reads as the same bug.
+type requiredField struct{ field, value string }
+
+// requireFields rejects a row missing any field the feed is expected to
+// report; persisting a blank or a zero in their place would read as a real answer.
+func requireFields(fields []requiredField) error {
+	for _, r := range fields {
+		if strings.TrimSpace(r.value) == "" {
+			return fmt.Errorf("missing field %q", r.field)
+		}
+	}
+	return nil
+}
+
+var one = big.NewRat(1, 1)
+
+// requireNonNegative rejects a figure that does not parse or is below zero;
+// requireFraction additionally rejects one above 1. Checked here so a single
+// bad figure costs one row, not the whole cycle at the table's CHECK.
+func requireNonNegative(field, raw string) error {
+	return requireInRange(field, raw, nil)
+}
+
+func requireFraction(field, raw string) error {
+	return requireInRange(field, raw, one)
+}
+
+func requireInRange(field, raw string, maximum *big.Rat) error {
+	value, ok := new(big.Rat).SetString(strings.TrimSpace(raw))
+	if !ok {
+		return fmt.Errorf("field %q is not a number: %q", field, raw)
+	}
+	if value.Sign() < 0 {
+		return fmt.Errorf("field %q is negative: %s", field, raw)
+	}
+	if maximum != nil && value.Cmp(maximum) > 0 {
+		return fmt.Errorf("field %q is above 1: %s", field, raw)
+	}
+	return nil
+}
+
+func toMarketRow(row marketPayloadRow) (outbound.CoreModelReferenceMarketRow, error) {
+	if err := requireFields([]requiredField{
 		{"network", row.Network},
 		{"protocol", row.Protocol},
 		{"market_uid", row.MarketUID},
@@ -185,15 +287,10 @@ func toMarketRow(row marketPayloadRow, index int) (outbound.CoreModelReferenceMa
 		{"crr_var_se", row.CRRVaRSE.String()},
 		{"crr_es_se", row.CRRESSE.String()},
 		{"crr_floor", row.CRRFloor.String()},
+	}); err != nil {
+		return outbound.CoreModelReferenceMarketRow{}, err
 	}
-	for _, r := range required {
-		if strings.TrimSpace(r.value) == "" {
-			return outbound.CoreModelReferenceMarketRow{}, fmt.Errorf(
-				"core overview market row %d is missing field %q", index, r.field)
-		}
-	}
-	// Ordered for the same reason as above.
-	requiredScalars := []struct {
+	for _, scalar := range []struct {
 		field string
 		set   bool
 	}{
@@ -201,12 +298,13 @@ func toMarketRow(row marketPayloadRow, index int) (outbound.CoreModelReferenceMa
 		{"horizon_days", row.HorizonDays != nil},
 		{"effective_horizon_days", row.EffectiveHorizonDays != nil},
 		{"external_flow_enabled", row.ExternalFlowEnabled != nil},
-	}
-	for _, r := range requiredScalars {
-		if !r.set {
-			return outbound.CoreModelReferenceMarketRow{}, fmt.Errorf(
-				"core overview market row %d is missing field %q", index, r.field)
+	} {
+		if !scalar.set {
+			return outbound.CoreModelReferenceMarketRow{}, fmt.Errorf("missing field %q", scalar.field)
 		}
+	}
+	if err := requireMarketRanges(row); err != nil {
+		return outbound.CoreModelReferenceMarketRow{}, err
 	}
 
 	network := strings.TrimSpace(row.Network)
@@ -235,39 +333,46 @@ func toMarketRow(row marketPayloadRow, index int) (outbound.CoreModelReferenceMa
 	}, nil
 }
 
-// toVaultRows converts and validates the payload's vaults, with the same
-// duplicate-identity guard as toMarketRows on (network, protocol, vault_address).
-func toVaultRows(rows []vaultPayloadRow) ([]outbound.CoreModelReferenceVaultRow, error) {
-	seen := make(map[string]bool, len(rows))
-	out := make([]outbound.CoreModelReferenceVaultRow, 0, len(rows))
-	for i, row := range rows {
-		parsed, err := toVaultRow(row, i)
-		if err != nil {
-			return nil, err
-		}
-		key := strings.ToLower(parsed.Network + "|" + parsed.Protocol + "|" + parsed.VaultAddress)
-		if seen[key] {
-			return nil, fmt.Errorf(
-				"core overview repeats vault identity %s/%s/%s; the row identity assumption no longer holds",
-				parsed.Network, parsed.Protocol, parsed.VaultAddress)
-		}
-		seen[key] = true
-		out = append(out, parsed)
+// requireMarketRanges mirrors the table's CHECK constraints one row at a time.
+func requireMarketRanges(row marketPayloadRow) error {
+	if err := requireFraction("prob_no_bad_debt", row.ProbNoBadDebt.String()); err != nil {
+		return err
 	}
-	return out, nil
+	for _, f := range []requiredField{
+		{"tot_supply_usd", row.TotalSupply.String()},
+		{"crr_el", row.CRREL.String()},
+		{"crr_var", row.CRRVaR.String()},
+		{"crr_es", row.CRRES.String()},
+		{"crr_el_se", row.CRRELSE.String()},
+		{"crr_var_se", row.CRRVaRSE.String()},
+		{"crr_es_se", row.CRRESSE.String()},
+		{"crr_floor", row.CRRFloor.String()},
+	} {
+		if err := requireNonNegative(f.field, f.value); err != nil {
+			return err
+		}
+	}
+	for _, s := range []struct {
+		field string
+		value int
+	}{
+		{"n_scenarios", *row.NScenarios},
+		{"horizon_days", *row.HorizonDays},
+		{"effective_horizon_days", *row.EffectiveHorizonDays},
+	} {
+		if s.value < 0 {
+			return fmt.Errorf("field %q is negative: %d", s.field, s.value)
+		}
+	}
+	return nil
 }
 
-// The vault method whose figure is a governance-set constant rather than a
-// simulation result; it is the only one that legitimately lacks a standard
-// error and an expected shortfall (verified live: groveUSDG).
-const overrideMethod = "override"
-
-// toVaultRow rejects a row missing any field the feed is expected to report.
-// crr_el_se and crr_es are structurally absent on an override vault and
-// required on every other method, so their absence is gated on method rather
-// than folded to NULL across the board.
-func toVaultRow(row vaultPayloadRow, index int) (outbound.CoreModelReferenceVaultRow, error) {
-	required := []struct{ field, value string }{
+// toVaultRow validates one vault. crr_el_se and crr_es are structurally absent
+// on an override vault and required on every other method, and the rule holds
+// both ways: an override row that carries them is a shape drift that would
+// let a governance constant read as a simulation result.
+func toVaultRow(row vaultPayloadRow) (outbound.CoreModelReferenceVaultRow, error) {
+	if err := requireFields([]requiredField{
 		{"network", row.Network},
 		{"protocol", row.Protocol},
 		{"vault_address", row.VaultAddress},
@@ -281,22 +386,17 @@ func toVaultRow(row vaultPayloadRow, index int) (outbound.CoreModelReferenceVaul
 		{"total_assets_usd", row.TotalAssets.String()},
 		{"idle_usd", row.IdleAssets.String()},
 		{"crr_el", row.CRREL.String()},
-	}
-	if strings.TrimSpace(row.Method) != overrideMethod {
-		required = append(required,
-			struct{ field, value string }{"crr_el_se", row.CRRELSE.String()},
-			struct{ field, value string }{"crr_es", row.CRRES.String()},
-		)
-	}
-	for _, r := range required {
-		if strings.TrimSpace(r.value) == "" {
-			return outbound.CoreModelReferenceVaultRow{}, fmt.Errorf(
-				"core overview vault row %d is missing field %q", index, r.field)
-		}
+	}); err != nil {
+		return outbound.CoreModelReferenceVaultRow{}, err
 	}
 	if row.NMarkets == nil {
-		return outbound.CoreModelReferenceVaultRow{}, fmt.Errorf(
-			"core overview vault row %d is missing field %q", index, "n_markets")
+		return outbound.CoreModelReferenceVaultRow{}, fmt.Errorf("missing field %q", "n_markets")
+	}
+	if err := requireVaultSimulationFigures(row); err != nil {
+		return outbound.CoreModelReferenceVaultRow{}, err
+	}
+	if err := requireVaultRanges(row); err != nil {
+		return outbound.CoreModelReferenceVaultRow{}, err
 	}
 
 	network := strings.TrimSpace(row.Network)
@@ -321,14 +421,53 @@ func toVaultRow(row vaultPayloadRow, index int) (outbound.CoreModelReferenceVaul
 	}, nil
 }
 
-// optionalNumber folds an omitted or null numeric field to nil, keeping the
-// figure as upstream's literal string otherwise.
-func optionalNumber(value json.Number) *string {
-	raw := strings.TrimSpace(value.String())
-	if raw == "" {
+// requireVaultSimulationFigures enforces the override rule in both directions.
+func requireVaultSimulationFigures(row vaultPayloadRow) error {
+	se, es := optionalNumber(row.CRRELSE), optionalNumber(row.CRRES)
+	if strings.TrimSpace(row.Method) == overrideMethod {
+		if se != nil {
+			return fmt.Errorf("override vault carries %q", "crr_el_se")
+		}
+		if es != nil {
+			return fmt.Errorf("override vault carries %q", "crr_es")
+		}
 		return nil
 	}
-	return &raw
+	return requireFields([]requiredField{
+		{"crr_el_se", row.CRRELSE.String()},
+		{"crr_es", row.CRRES.String()},
+	})
+}
+
+// requireVaultRanges mirrors the table's CHECK constraints one row at a time.
+func requireVaultRanges(row vaultPayloadRow) error {
+	for _, f := range []requiredField{
+		{"total_assets_usd", row.TotalAssets.String()},
+		{"idle_usd", row.IdleAssets.String()},
+		{"crr_el", row.CRREL.String()},
+	} {
+		if err := requireNonNegative(f.field, f.value); err != nil {
+			return err
+		}
+	}
+	for _, f := range []struct {
+		field string
+		value *string
+	}{
+		{"crr_el_se", optionalNumber(row.CRRELSE)},
+		{"crr_es", optionalNumber(row.CRRES)},
+	} {
+		if f.value == nil {
+			continue
+		}
+		if err := requireNonNegative(f.field, *f.value); err != nil {
+			return err
+		}
+	}
+	if *row.NMarkets < 0 {
+		return fmt.Errorf("field %q is negative: %d", "n_markets", *row.NMarkets)
+	}
+	return nil
 }
 
 // chainIDFor looks up by a case-folded network, since the vendor vocabulary
@@ -339,6 +478,16 @@ func chainIDFor(network string) *int64 {
 		return nil
 	}
 	return &id
+}
+
+// optionalNumber folds an omitted or null numeric field to nil, keeping the
+// figure as upstream's literal string otherwise.
+func optionalNumber(value json.Number) *string {
+	raw := strings.TrimSpace(value.String())
+	if raw == "" {
+		return nil
+	}
+	return &raw
 }
 
 type overviewResponse struct {

@@ -42,9 +42,9 @@ func (r *CoreModelReferenceVaultResultRepository) SaveVaultResults(
 	ctx context.Context,
 	tx pgx.Tx,
 	results []entity.CoreModelReferenceVaultResult,
-) error {
+) (int, error) {
 	if len(results) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	const q = `
@@ -81,19 +81,22 @@ func (r *CoreModelReferenceVaultResultRepository) SaveVaultResults(
 	}
 
 	batchResults := tx.SendBatch(ctx, batch)
+	inserted := 0
 	for i, v := range results {
-		if _, err := batchResults.Exec(); err != nil {
+		tag, err := batchResults.Exec()
+		if err != nil {
 			_ = batchResults.Close()
-			return fmt.Errorf("insert core model reference vault result %d (%s/%s/%s): %w",
+			return 0, fmt.Errorf("insert core model reference vault result %d (%s/%s/%s): %w",
 				i, v.Network, v.ProtocolName, v.VaultAddress, err)
 		}
+		inserted += int(tag.RowsAffected())
 	}
 	if err := batchResults.Close(); err != nil {
-		return fmt.Errorf("close batch: %w", err)
+		return 0, fmt.Errorf("close batch: %w", err)
 	}
 
-	r.logger.Info("saved core model reference vault results", "count", len(results))
-	return nil
+	r.logger.Info("saved core model reference vault results", "submitted", len(results), "inserted", inserted)
+	return inserted, nil
 }
 
 // vaultInsertArgs orders one row's values to match the INSERT column list.
