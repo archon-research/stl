@@ -1363,7 +1363,7 @@ func TestRun(t *testing.T) {
 					getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
 						return []*entity.Oracle{{
 							ID: 1, Name: "chainlink", Enabled: true,
-							OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8,
+							OracleType: entity.OracleTypeChainlinkFeed, PriceDecimals: 8, ChainID: 1,
 						}}, nil
 					},
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
