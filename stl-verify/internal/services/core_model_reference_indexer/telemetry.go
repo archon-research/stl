@@ -1,4 +1,4 @@
-package reference_core_indexer
+package core_model_reference_indexer
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 )
 
-const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/reference_core_indexer"
+const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/core_model_reference_indexer"
 
 // Telemetry records what a cycle wrote and how fresh it was, which the shared
 // cronjob outcome counter cannot express.
@@ -48,7 +48,7 @@ func NewTelemetryWithProvider(ctx context.Context, mp metric.MeterProvider) (*Te
 
 	var err error
 	t.marketsWritten, err = t.meter.Int64Counter(
-		"reference_core.sync.markets.written.total",
+		"core_model_reference.sync.markets.written.total",
 		metric.WithDescription("CORE market result rows persisted, per cycle"),
 	)
 	if err != nil {
@@ -56,7 +56,7 @@ func NewTelemetryWithProvider(ctx context.Context, mp metric.MeterProvider) (*Te
 	}
 
 	t.vaultsWritten, err = t.meter.Int64Counter(
-		"reference_core.sync.vaults.written.total",
+		"core_model_reference.sync.vaults.written.total",
 		metric.WithDescription("CORE vault result rows persisted, per cycle"),
 	)
 	if err != nil {
@@ -64,7 +64,7 @@ func NewTelemetryWithProvider(ctx context.Context, mp metric.MeterProvider) (*Te
 	}
 
 	t.staleRows, err = t.meter.Int64Counter(
-		"reference_core.sync.stale_rows.total",
+		"core_model_reference.sync.stale_rows.total",
 		metric.WithDescription("Persisted rows whose upstream model_date lagged the cycle by more than the freshness allowance"),
 	)
 	if err != nil {
@@ -72,7 +72,7 @@ func NewTelemetryWithProvider(ctx context.Context, mp metric.MeterProvider) (*Te
 	}
 
 	t.staleCycles, err = t.meter.Int64Counter(
-		"reference_core.sync.stale_cycles.total",
+		"core_model_reference.sync.stale_cycles.total",
 		metric.WithDescription("Cycles whose freshest row still lagged the cycle by more than the freshness allowance: upstream has not published a new day"),
 	)
 	if err != nil {

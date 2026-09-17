@@ -1,11 +1,11 @@
-// Package reference_core_indexer accumulates Block Analitica's CORE model
+// Package core_model_reference_indexer accumulates the upstream CORE model's
 // results as a reference time series.
 //
 // The upstream dashboard publishes one result per market per calendar day and
 // no way to ask for a past one, so a reference figure can never be
 // reconstructed for a day that was not observed. This service observes the
 // overview each cycle and appends what it saw.
-package reference_core_indexer
+package core_model_reference_indexer
 
 import (
 	"context"
@@ -40,9 +40,9 @@ type Service struct {
 // Deps holds the service's ports. Named fields keep the two repositories,
 // which take the same argument shapes, from being swapped at the call site.
 type Deps struct {
-	Provider   outbound.ReferenceCoreProvider
-	MarketRepo outbound.ReferenceCoreMarketResultRepository
-	VaultRepo  outbound.ReferenceCoreVaultResultRepository
+	Provider   outbound.CoreModelReferenceProvider
+	MarketRepo outbound.CoreModelReferenceMarketResultRepository
+	VaultRepo  outbound.CoreModelReferenceVaultResultRepository
 	// TxManager coordinates markets and vaults in one transaction: the two
 	// join exactly on synced_at, so they must land together or not at all.
 	TxManager outbound.TxManager
@@ -72,7 +72,7 @@ func NewService(
 		buildID:   buildID,
 		now:       now,
 		telemetry: telemetry,
-		logger:    logger.With("component", "reference-core-indexer"),
+		logger:    logger.With("component", "core-model-reference-indexer"),
 	}, nil
 }
 
@@ -92,7 +92,7 @@ func (d Deps) validate() error {
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("reference core indexer wired without: %s", strings.Join(missing, ", "))
+		return fmt.Errorf("core model reference indexer wired without: %s", strings.Join(missing, ", "))
 	}
 	return nil
 }
@@ -130,16 +130,16 @@ func (s *Service) Run(ctx context.Context) error {
 // covers dozens of markets and several vaults today, so covering none means
 // the feed broke or its shape drifted. That must not read as "nothing to do",
 // which would leave a silent hole in the series.
-func (s *Service) observeUpstream(ctx context.Context) (outbound.ReferenceCoreOverview, error) {
+func (s *Service) observeUpstream(ctx context.Context) (outbound.CoreModelReferenceOverview, error) {
 	overview, err := s.deps.Provider.FetchOverview(ctx)
 	if err != nil {
-		return outbound.ReferenceCoreOverview{}, fmt.Errorf("fetching core overview: %w", err)
+		return outbound.CoreModelReferenceOverview{}, fmt.Errorf("fetching core overview: %w", err)
 	}
 	if len(overview.Markets) == 0 {
-		return outbound.ReferenceCoreOverview{}, fmt.Errorf("core overview reported no markets")
+		return outbound.CoreModelReferenceOverview{}, fmt.Errorf("core overview reported no markets")
 	}
 	if len(overview.Vaults) == 0 {
-		return outbound.ReferenceCoreOverview{}, fmt.Errorf("core overview reported no vaults")
+		return outbound.CoreModelReferenceOverview{}, fmt.Errorf("core overview reported no vaults")
 	}
 	return overview, nil
 }
@@ -150,8 +150,8 @@ func (s *Service) observeUpstream(ctx context.Context) (outbound.ReferenceCoreOv
 // retry repairs.
 func (s *Service) persistCycle(
 	ctx context.Context,
-	markets []entity.ReferenceCoreMarketResult,
-	vaults []entity.ReferenceCoreVaultResult,
+	markets []entity.CoreModelReferenceMarketResult,
+	vaults []entity.CoreModelReferenceVaultResult,
 ) error {
 	err := s.deps.TxManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		if err := s.deps.MarketRepo.SaveMarketResults(ctx, tx, markets); err != nil {
@@ -178,8 +178,8 @@ func (s *Service) persistCycle(
 // succeeds and the written counters advance.
 func (s *Service) reportStaleness(
 	ctx context.Context,
-	markets []entity.ReferenceCoreMarketResult,
-	vaults []entity.ReferenceCoreVaultResult,
+	markets []entity.CoreModelReferenceMarketResult,
+	vaults []entity.CoreModelReferenceVaultResult,
 	syncedAt time.Time,
 ) {
 	cutoff := syncedAt.Truncate(24*time.Hour).AddDate(0, 0, -freshnessAllowanceDays)
@@ -222,16 +222,16 @@ func (s *Service) reportStaleness(
 }
 
 func (s *Service) toMarketResults(
-	rows []outbound.ReferenceCoreMarketRow,
+	rows []outbound.CoreModelReferenceMarketRow,
 	syncedAt time.Time,
-) ([]entity.ReferenceCoreMarketResult, error) {
-	results := make([]entity.ReferenceCoreMarketResult, 0, len(rows))
+) ([]entity.CoreModelReferenceMarketResult, error) {
+	results := make([]entity.CoreModelReferenceMarketResult, 0, len(rows))
 	for _, row := range rows {
 		modelDate, err := parseModelDate(row.Date, fmt.Sprintf("market %s/%s/%s", row.Network, row.Protocol, row.MarketUID))
 		if err != nil {
 			return nil, err
 		}
-		results = append(results, entity.ReferenceCoreMarketResult{
+		results = append(results, entity.CoreModelReferenceMarketResult{
 			Network:              row.Network,
 			ChainID:              row.ChainID,
 			ProtocolName:         row.Protocol,
@@ -254,7 +254,7 @@ func (s *Service) toMarketResults(
 			CRRESSE:              row.CRRESSE,
 			CRRFloor:             row.CRRFloor,
 			ExternalFlowEnabled:  row.ExternalFlowEnabled,
-			Source:               entity.ReferenceCoreDataSource,
+			Source:               entity.CoreModelReferenceDataSource,
 			BuildID:              s.buildID,
 		})
 	}
@@ -262,16 +262,16 @@ func (s *Service) toMarketResults(
 }
 
 func (s *Service) toVaultResults(
-	rows []outbound.ReferenceCoreVaultRow,
+	rows []outbound.CoreModelReferenceVaultRow,
 	syncedAt time.Time,
-) ([]entity.ReferenceCoreVaultResult, error) {
-	results := make([]entity.ReferenceCoreVaultResult, 0, len(rows))
+) ([]entity.CoreModelReferenceVaultResult, error) {
+	results := make([]entity.CoreModelReferenceVaultResult, 0, len(rows))
 	for _, row := range rows {
 		modelDate, err := parseModelDate(row.Date, fmt.Sprintf("vault %s/%s/%s", row.Network, row.Protocol, row.VaultAddress))
 		if err != nil {
 			return nil, err
 		}
-		results = append(results, entity.ReferenceCoreVaultResult{
+		results = append(results, entity.CoreModelReferenceVaultResult{
 			Network:          row.Network,
 			ChainID:          row.ChainID,
 			ProtocolName:     row.Protocol,
@@ -290,7 +290,7 @@ func (s *Service) toVaultResults(
 			CRREL:            row.CRREL,
 			CRRELSE:          row.CRRELSE,
 			CRRES:            row.CRRES,
-			Source:           entity.ReferenceCoreDataSource,
+			Source:           entity.CoreModelReferenceDataSource,
 			BuildID:          s.buildID,
 		})
 	}

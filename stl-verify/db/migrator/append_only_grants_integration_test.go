@@ -64,8 +64,8 @@ var convertedAppendOnlyTables = []string{
 	// VEC-491: block header dimension; a mis-parse is corrected at a higher processing_version.
 	"block_meta",
 	// VEC-828: CORE reference results, append-only from birth; the creating migration REVOKEs both.
-	"reference_core_market_result",
-	"reference_core_vault_result",
+	"core_model_reference_market_result",
+	"core_model_reference_vault_result",
 	"position_projection_refusal",
 	// VEC-598: provenance tables. The owner keeps UPDATE for the FK integrity probe
 	// (20260714_160000); a statement-level trigger raises on any real mutation.

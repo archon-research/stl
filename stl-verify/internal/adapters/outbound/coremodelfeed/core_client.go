@@ -1,12 +1,12 @@
-// Package blockanalitica reads the CORE risk model results Block Analitica
-// publishes behind core.blockanalitica.com.
+// Package coremodelfeed reads the results the upstream CORE risk model
+// publishes on its dashboard's data API.
 //
 // One route is used per cycle: /overview/ carries every market and vault the
 // model covers, with today's figures. The feed publishes one result per
 // calendar day and accepts a ?date= parameter that it silently ignores
 // (verified by byte-identical responses across values), so nothing is sent
 // and the response is always read as "the current day".
-package blockanalitica
+package coremodelfeed
 
 import (
 	"context"
@@ -20,8 +20,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/httpclient"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
-
-const defaultBaseURL = "https://core.data.blockanalitica.com/core"
 
 // The feed spells networks its own way — "ethereum" where the allocation
 // trackers say "mainnet". Translated here so no consumer has to know the
@@ -38,7 +36,7 @@ var networkToChainID = map[string]int64{
 }
 
 // Compile-time check that Client implements the provider port.
-var _ outbound.ReferenceCoreProvider = (*Client)(nil)
+var _ outbound.CoreModelReferenceProvider = (*Client)(nil)
 
 // ClientConfig holds configuration for the CORE feed client.
 type ClientConfig struct {
@@ -58,13 +56,15 @@ type Client struct {
 	logger     *slog.Logger
 }
 
-// NewClient creates a new CORE feed client.
+// NewClient creates a new CORE feed client. BaseURL is the feed root
+// (deployment configuration, CORE_MODEL_REFERENCE_URL); there is no built-in
+// default, so a missing value fails at wiring time rather than at first fetch.
 func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	if cfg.BaseURL == "" {
-		cfg.BaseURL = defaultBaseURL
+	if strings.TrimSpace(cfg.BaseURL) == "" {
+		return nil, fmt.Errorf("core feed base URL is required")
 	}
 	baseURL, err := validateBaseURL(cfg.BaseURL)
 	if err != nil {
@@ -88,7 +88,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		httpCfg.BackoffFactor = cfg.BackoffFactor
 	}
 
-	logger := cfg.Logger.With("component", "blockanalitica-core-client")
+	logger := cfg.Logger.With("component", "core-model-feed-client")
 	return &Client{
 		baseURL:    baseURL,
 		httpClient: httpclient.NewClient(httpCfg, logger, nil),
@@ -117,25 +117,25 @@ func validateBaseURL(raw string) (string, error) {
 }
 
 // FetchOverview returns every market and vault the dashboard reports today.
-func (c *Client) FetchOverview(ctx context.Context) (outbound.ReferenceCoreOverview, error) {
+func (c *Client) FetchOverview(ctx context.Context) (outbound.CoreModelReferenceOverview, error) {
 	var payload overviewResponse
 	requestURL := c.baseURL + "/overview/"
 	if err := c.httpClient.DoRequest(ctx, httpclient.RequestConfig{URL: requestURL}, &payload); err != nil {
-		return outbound.ReferenceCoreOverview{}, fmt.Errorf("fetching core overview: %w", err)
+		return outbound.CoreModelReferenceOverview{}, fmt.Errorf("fetching core overview: %w", err)
 	}
 	if !payload.Success {
-		return outbound.ReferenceCoreOverview{}, fmt.Errorf("core overview reported success=false (status %d): %s", payload.Status, requestURL)
+		return outbound.CoreModelReferenceOverview{}, fmt.Errorf("core overview reported success=false (status %d): %s", payload.Status, requestURL)
 	}
 
 	markets, err := toMarketRows(payload.Data.Markets)
 	if err != nil {
-		return outbound.ReferenceCoreOverview{}, err
+		return outbound.CoreModelReferenceOverview{}, err
 	}
 	vaults, err := toVaultRows(payload.Data.Vaults)
 	if err != nil {
-		return outbound.ReferenceCoreOverview{}, err
+		return outbound.CoreModelReferenceOverview{}, err
 	}
-	return outbound.ReferenceCoreOverview{Markets: markets, Vaults: vaults}, nil
+	return outbound.CoreModelReferenceOverview{Markets: markets, Vaults: vaults}, nil
 }
 
 // toMarketRows converts and validates the payload's markets. Row identity is
@@ -143,9 +143,9 @@ func (c *Client) FetchOverview(ctx context.Context) (outbound.ReferenceCoreOverv
 // three are otherwise stored verbatim: a casing change would silently mint a
 // second identity for one market. A duplicate in one fetch would conflict away
 // at insert, so it fails here instead.
-func toMarketRows(rows []marketPayloadRow) ([]outbound.ReferenceCoreMarketRow, error) {
+func toMarketRows(rows []marketPayloadRow) ([]outbound.CoreModelReferenceMarketRow, error) {
 	seen := make(map[string]bool, len(rows))
-	out := make([]outbound.ReferenceCoreMarketRow, 0, len(rows))
+	out := make([]outbound.CoreModelReferenceMarketRow, 0, len(rows))
 	for i, row := range rows {
 		parsed, err := toMarketRow(row, i)
 		if err != nil {
@@ -165,7 +165,7 @@ func toMarketRows(rows []marketPayloadRow) ([]outbound.ReferenceCoreMarketRow, e
 
 // toMarketRow rejects a row missing any field the feed is expected to report;
 // persisting a blank or a zero in their place would read as a real answer.
-func toMarketRow(row marketPayloadRow, index int) (outbound.ReferenceCoreMarketRow, error) {
+func toMarketRow(row marketPayloadRow, index int) (outbound.CoreModelReferenceMarketRow, error) {
 	// Ordered, not a map: which field a broken payload is blamed on must be
 	// reproducible across runs, or the same fault reads as a different bug.
 	required := []struct{ field, value string }{
@@ -188,7 +188,7 @@ func toMarketRow(row marketPayloadRow, index int) (outbound.ReferenceCoreMarketR
 	}
 	for _, r := range required {
 		if strings.TrimSpace(r.value) == "" {
-			return outbound.ReferenceCoreMarketRow{}, fmt.Errorf(
+			return outbound.CoreModelReferenceMarketRow{}, fmt.Errorf(
 				"core overview market row %d is missing field %q", index, r.field)
 		}
 	}
@@ -204,13 +204,13 @@ func toMarketRow(row marketPayloadRow, index int) (outbound.ReferenceCoreMarketR
 	}
 	for _, r := range requiredScalars {
 		if !r.set {
-			return outbound.ReferenceCoreMarketRow{}, fmt.Errorf(
+			return outbound.CoreModelReferenceMarketRow{}, fmt.Errorf(
 				"core overview market row %d is missing field %q", index, r.field)
 		}
 	}
 
 	network := strings.TrimSpace(row.Network)
-	return outbound.ReferenceCoreMarketRow{
+	return outbound.CoreModelReferenceMarketRow{
 		Network:              network,
 		ChainID:              chainIDFor(network),
 		Protocol:             strings.TrimSpace(row.Protocol),
@@ -237,9 +237,9 @@ func toMarketRow(row marketPayloadRow, index int) (outbound.ReferenceCoreMarketR
 
 // toVaultRows converts and validates the payload's vaults, with the same
 // duplicate-identity guard as toMarketRows on (network, protocol, vault_address).
-func toVaultRows(rows []vaultPayloadRow) ([]outbound.ReferenceCoreVaultRow, error) {
+func toVaultRows(rows []vaultPayloadRow) ([]outbound.CoreModelReferenceVaultRow, error) {
 	seen := make(map[string]bool, len(rows))
-	out := make([]outbound.ReferenceCoreVaultRow, 0, len(rows))
+	out := make([]outbound.CoreModelReferenceVaultRow, 0, len(rows))
 	for i, row := range rows {
 		parsed, err := toVaultRow(row, i)
 		if err != nil {
@@ -266,7 +266,7 @@ const overrideMethod = "override"
 // crr_el_se and crr_es are structurally absent on an override vault and
 // required on every other method, so their absence is gated on method rather
 // than folded to NULL across the board.
-func toVaultRow(row vaultPayloadRow, index int) (outbound.ReferenceCoreVaultRow, error) {
+func toVaultRow(row vaultPayloadRow, index int) (outbound.CoreModelReferenceVaultRow, error) {
 	required := []struct{ field, value string }{
 		{"network", row.Network},
 		{"protocol", row.Protocol},
@@ -290,17 +290,17 @@ func toVaultRow(row vaultPayloadRow, index int) (outbound.ReferenceCoreVaultRow,
 	}
 	for _, r := range required {
 		if strings.TrimSpace(r.value) == "" {
-			return outbound.ReferenceCoreVaultRow{}, fmt.Errorf(
+			return outbound.CoreModelReferenceVaultRow{}, fmt.Errorf(
 				"core overview vault row %d is missing field %q", index, r.field)
 		}
 	}
 	if row.NMarkets == nil {
-		return outbound.ReferenceCoreVaultRow{}, fmt.Errorf(
+		return outbound.CoreModelReferenceVaultRow{}, fmt.Errorf(
 			"core overview vault row %d is missing field %q", index, "n_markets")
 	}
 
 	network := strings.TrimSpace(row.Network)
-	return outbound.ReferenceCoreVaultRow{
+	return outbound.CoreModelReferenceVaultRow{
 		Network:          network,
 		ChainID:          chainIDFor(network),
 		Protocol:         strings.TrimSpace(row.Protocol),

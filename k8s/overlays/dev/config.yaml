@@ -34,7 +34,7 @@ data:
   SKY_DATA_URL: "https://sky.data.blockanalitica.com/internal"
   REFERENCE_CAPITAL_SYNC_INTERVAL: "15m"
   # CORE feed root, without the /overview route the client appends itself.
-  REFERENCE_CORE_URL: "https://core.data.blockanalitica.com/core"
-  REFERENCE_CORE_SYNC_INTERVAL: "30m"
+  CORE_MODEL_REFERENCE_URL: "https://core.data.blockanalitica.com/core"
+  CORE_MODEL_REFERENCE_SYNC_INTERVAL: "30m"
   ANCHORAGE_API_URL: "https://api.anchorage.com"
   ANCHORAGE_PRIME: "spark"

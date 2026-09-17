@@ -1969,12 +1969,12 @@
       "type": "infrastructure",
       "owner": "infra"
     },
-    "reference_core_market_result": {
+    "core_model_reference_market_result": {
       "type": "raw_pipeline",
       "owner": "risk",
       "transform_defer": "VEC-828: native PK (network, protocol_name, market_uid, synced_at); reference feed, transform deferred pending the reference-data rollout"
     },
-    "reference_core_vault_result": {
+    "core_model_reference_vault_result": {
       "type": "raw_pipeline",
       "owner": "risk",
       "transform_defer": "VEC-828: native PK (network, protocol_name, vault_address, synced_at); reference feed, transform deferred pending the reference-data rollout"
@@ -2200,13 +2200,13 @@
       "guard_max": 4100000000
     },
     {
-      "table": "reference_core_market_result",
+      "table": "core_model_reference_market_result",
       "column": "synced_at",
       "canonical": "snapshot_time",
       "action": "rename"
     },
     {
-      "table": "reference_core_vault_result",
+      "table": "core_model_reference_vault_result",
       "column": "synced_at",
       "canonical": "snapshot_time",
       "action": "rename"
@@ -2242,7 +2242,7 @@
       "reason": "VEC-617: as sec_node.valid_from — UTC calendar date per ADR-0007 §3."
     },
     {
-      "table": "reference_core_vault_result",
+      "table": "core_model_reference_vault_result",
       "column": "vault_address",
       "canonical": "vault_address",
       "accepted_type": "text",
@@ -2609,8 +2609,8 @@
         "psm3_alm_shares",
         "psm3_reserves",
         "token_total_supply",
-        "reference_core_market_result",
-        "reference_core_vault_result"
+        "core_model_reference_market_result",
+        "core_model_reference_vault_result"
       ]
     },
     {

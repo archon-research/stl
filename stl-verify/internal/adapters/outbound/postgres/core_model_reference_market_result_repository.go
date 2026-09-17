@@ -12,26 +12,26 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// Compile-time check that ReferenceCoreMarketResultRepository implements the port.
-var _ outbound.ReferenceCoreMarketResultRepository = (*ReferenceCoreMarketResultRepository)(nil)
+// Compile-time check that CoreModelReferenceMarketResultRepository implements the port.
+var _ outbound.CoreModelReferenceMarketResultRepository = (*CoreModelReferenceMarketResultRepository)(nil)
 
-// ReferenceCoreMarketResultRepository persists per-cycle CORE market results.
+// CoreModelReferenceMarketResultRepository persists per-cycle CORE market results.
 // It holds no pool: every write goes through the caller's transaction.
-type ReferenceCoreMarketResultRepository struct {
+type CoreModelReferenceMarketResultRepository struct {
 	logger *slog.Logger
 	runID  buildregistry.RunID
 }
 
-// NewReferenceCoreMarketResultRepository creates a new ReferenceCoreMarketResultRepository.
-func NewReferenceCoreMarketResultRepository(
+// NewCoreModelReferenceMarketResultRepository creates a new CoreModelReferenceMarketResultRepository.
+func NewCoreModelReferenceMarketResultRepository(
 	logger *slog.Logger,
 	runID buildregistry.RunID,
-) *ReferenceCoreMarketResultRepository {
+) *CoreModelReferenceMarketResultRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &ReferenceCoreMarketResultRepository{
-		logger: logger.With("component", "reference-core-market-result-repo"),
+	return &CoreModelReferenceMarketResultRepository{
+		logger: logger.With("component", "core-model-reference-market-result-repo"),
 		runID:  runID,
 	}
 }
@@ -45,17 +45,17 @@ func NewReferenceCoreMarketResultRepository(
 // under the same build_id conflicts away, and under a new build_id appends a
 // correction. A Temporal retry never hits either path: a failed cycle rolled
 // back everything, and the retry stamps a fresh synced_at.
-func (r *ReferenceCoreMarketResultRepository) SaveMarketResults(
+func (r *CoreModelReferenceMarketResultRepository) SaveMarketResults(
 	ctx context.Context,
 	tx pgx.Tx,
-	results []entity.ReferenceCoreMarketResult,
+	results []entity.CoreModelReferenceMarketResult,
 ) error {
 	if len(results) == 0 {
 		return nil
 	}
 
 	const q = `
-		INSERT INTO reference_core_market_result (
+		INSERT INTO core_model_reference_market_result (
 			network,
 			chain_id,
 			protocol_name,
@@ -95,7 +95,7 @@ func (r *ReferenceCoreMarketResultRepository) SaveMarketResults(
 	for i, m := range results {
 		if _, err := batchResults.Exec(); err != nil {
 			_ = batchResults.Close()
-			return fmt.Errorf("insert reference core market result %d (%s/%s/%s): %w",
+			return fmt.Errorf("insert core model reference market result %d (%s/%s/%s): %w",
 				i, m.Network, m.ProtocolName, m.MarketUID, err)
 		}
 	}
@@ -103,12 +103,12 @@ func (r *ReferenceCoreMarketResultRepository) SaveMarketResults(
 		return fmt.Errorf("close batch: %w", err)
 	}
 
-	r.logger.Info("saved reference core market results", "count", len(results))
+	r.logger.Info("saved core model reference market results", "count", len(results))
 	return nil
 }
 
 // marketInsertArgs orders one row's values to match the INSERT column list.
-func (r *ReferenceCoreMarketResultRepository) marketInsertArgs(m entity.ReferenceCoreMarketResult) []any {
+func (r *CoreModelReferenceMarketResultRepository) marketInsertArgs(m entity.CoreModelReferenceMarketResult) []any {
 	return []any{
 		m.Network,
 		m.ChainID,

@@ -65,7 +65,7 @@ Every join is verified 0-unresolved on the live schema.
 A `raw_pipeline` (on-chain observation) table must resolve each requirement, as a native column, via a transform, or via a fill. `any_of` allows the canonical time to be `block_timestamp` OR `snapshot_time` (API poll) OR `event_time` (CEX). `exempt` lists tables where the key does not apply or is a pending modeling decision:
 - off-chain CEX prices/orderbooks and Anchorage custody have no chain, so no `chain_id`.
 - not protocol-scoped (prices, token supply, custody) or pending a modeling decision (`prime_debt` = Sky constant, `allocation_position`, `maple_syrup_global_state`, `psm3_reserves`), so no `protocol_id`.
-- reference tables that record an upstream feed's own labels verbatim (`prime_capital_stack_allocation`, `prime_reference_position`, `reference_core_market_result`, `reference_core_vault_result`) carry `protocol_name` as upstream spelled it, deliberately not an FK — the feed covers protocols and networks STL does not index, and a reference row must stay traceable to what the feed said — so no `protocol_id`.
+- reference tables that record an upstream feed's own labels verbatim (`prime_capital_stack_allocation`, `prime_reference_position`, `core_model_reference_market_result`, `core_model_reference_vault_result`) carry `protocol_name` as upstream spelled it, deliberately not an FK — the feed covers protocols and networks STL does not index, and a reference row must stay traceable to what the feed said — so no `protocol_id`.
 - Anchorage operations carry only processing time (`created_at`), no event/observation time.
 
 ### `nullable_exempt`

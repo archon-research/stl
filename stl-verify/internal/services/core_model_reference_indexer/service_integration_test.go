@@ -1,6 +1,6 @@
 //go:build integration
 
-package reference_core_indexer
+package core_model_reference_indexer
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/blockanalitica"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/coremodelfeed"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -48,7 +48,7 @@ func serveRecordedOverview(t *testing.T) string {
 // URL and database, with the cycle clock injected.
 func newWiredService(t *testing.T, ctx context.Context, pool *pgxpool.Pool, feedURL string, now Clock) (*Service, buildregistry.RunID) {
 	t.Helper()
-	client, err := blockanalitica.NewClient(blockanalitica.ClientConfig{BaseURL: feedURL, MaxRetries: 1})
+	client, err := coremodelfeed.NewClient(coremodelfeed.ClientConfig{BaseURL: feedURL, MaxRetries: 1})
 	if err != nil {
 		t.Fatalf("NewClient() = %v", err)
 	}
@@ -59,8 +59,8 @@ func newWiredService(t *testing.T, ctx context.Context, pool *pgxpool.Pool, feed
 	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
 	service, err := NewService(Deps{
 		Provider:   client,
-		MarketRepo: postgres.NewReferenceCoreMarketResultRepository(nil, runID),
-		VaultRepo:  postgres.NewReferenceCoreVaultResultRepository(nil, runID),
+		MarketRepo: postgres.NewCoreModelReferenceMarketResultRepository(nil, runID),
+		VaultRepo:  postgres.NewCoreModelReferenceVaultResultRepository(nil, runID),
 		TxManager:  txm,
 	}, int(buildID), now, nil, nil)
 	if err != nil {
@@ -89,10 +89,10 @@ func TestRunPersistsTheRecordedOverviewEndToEnd(t *testing.T) {
 		t.Fatalf("Run() = %v", err)
 	}
 
-	if got := countRows(t, ctx, pool, "reference_core_market_result"); got != 32 {
+	if got := countRows(t, ctx, pool, "core_model_reference_market_result"); got != 32 {
 		t.Errorf("market rows = %d, want the 32 markets of the recorded overview", got)
 	}
-	if got := countRows(t, ctx, pool, "reference_core_vault_result"); got != 10 {
+	if got := countRows(t, ctx, pool, "core_model_reference_vault_result"); got != 10 {
 		t.Errorf("vault rows = %d, want the 10 vaults of the recorded overview", got)
 	}
 
@@ -100,7 +100,7 @@ func TestRunPersistsTheRecordedOverviewEndToEnd(t *testing.T) {
 	var chainID, gotRunID *int64
 	if err := pool.QueryRow(ctx, `
 		SELECT crr_el::text, crr_floor::text, model_date::text, source, chain_id, run_id
-		FROM reference_core_market_result
+		FROM core_model_reference_market_result
 		WHERE protocol_name = 'sparklend' AND market_symbol = 'spUSDS' AND synced_at = $1`, syncedAt,
 	).Scan(&crrEL, &crrFloor, &modelDate, &source, &chainID, &gotRunID); err != nil {
 		t.Fatalf("reading spUSDS: %v", err)
@@ -109,7 +109,7 @@ func TestRunPersistsTheRecordedOverviewEndToEnd(t *testing.T) {
 	if crrFloor != "0.020000000000000000" || crrEL == "" || crrEL >= crrFloor {
 		t.Errorf("spUSDS crr_el/crr_floor = %s/%s, want the raw EL under the 0.02 floor and the floor stored apart", crrEL, crrFloor)
 	}
-	if modelDate != "2026-09-17" || chainID == nil || *chainID != 1 || source != "blockanalitica:core" {
+	if modelDate != "2026-09-17" || chainID == nil || *chainID != 1 || source != "coremodel:dashboard" {
 		t.Errorf("spUSDS model_date/chain_id/source = %s/%v/%s", modelDate, chainID, source)
 	}
 }
@@ -129,7 +129,7 @@ func TestRunKeepsTheOverrideVaultsSimulationFiguresNullEndToEnd(t *testing.T) {
 	var chainID *int64
 	if err := pool.QueryRow(ctx, `
 		SELECT method, crr_el_se::text, crr_es::text, chain_id
-		FROM reference_core_vault_result WHERE vault_symbol = 'groveUSDG'`).Scan(&method, &se, &es, &chainID); err != nil {
+		FROM core_model_reference_vault_result WHERE vault_symbol = 'groveUSDG'`).Scan(&method, &se, &es, &chainID); err != nil {
 		t.Fatalf("reading groveUSDG: %v", err)
 	}
 	if method != "override" || se != nil || es != nil {
@@ -159,13 +159,13 @@ func TestRunAppendsANewCyclePerTickAndNeverRewritesOne(t *testing.T) {
 	}
 
 	var cycles int
-	if err := pool.QueryRow(ctx, `SELECT count(DISTINCT synced_at) FROM reference_core_market_result`).Scan(&cycles); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(DISTINCT synced_at) FROM core_model_reference_market_result`).Scan(&cycles); err != nil {
 		t.Fatalf("counting cycles: %v", err)
 	}
 	if cycles != 2 {
 		t.Errorf("distinct synced_at = %d, want 2: the repeated tick conflicted away, the later tick appended", cycles)
 	}
-	if got := countRows(t, ctx, pool, "reference_core_market_result"); got != 64 {
+	if got := countRows(t, ctx, pool, "core_model_reference_market_result"); got != 64 {
 		t.Errorf("market rows = %d, want 64 (32 per distinct cycle)", got)
 	}
 }

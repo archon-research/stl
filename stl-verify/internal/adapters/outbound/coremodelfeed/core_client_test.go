@@ -1,4 +1,4 @@
-package blockanalitica
+package coremodelfeed
 
 import (
 	"context"
@@ -116,7 +116,7 @@ func fetch(t *testing.T, routes map[string]any) (markets int, vaults int, err er
 }
 
 // fetchOne serves one market and one vault and returns the parsed pair.
-func fetchOne(t *testing.T, market, vault map[string]any) (outbound.ReferenceCoreMarketRow, outbound.ReferenceCoreVaultRow) {
+func fetchOne(t *testing.T, market, vault map[string]any) (outbound.CoreModelReferenceMarketRow, outbound.CoreModelReferenceVaultRow) {
 	t.Helper()
 	client, _ := newTestClient(t, map[string]any{
 		"/overview/": overviewPayload([]map[string]any{market}, []map[string]any{vault}),
@@ -388,23 +388,19 @@ func TestFetchOverviewPropagatesATransportFailure(t *testing.T) {
 }
 
 func TestNewClientRejectsABaseURLThatAlreadyNamesTheOverviewRoute(t *testing.T) {
-	if _, err := NewClient(ClientConfig{BaseURL: "https://core.data.blockanalitica.com/core/overview"}); err == nil {
+	if _, err := NewClient(ClientConfig{BaseURL: "https://feed.example/core/overview"}); err == nil {
 		t.Fatal("NewClient() = nil, want an error")
 	}
 }
 
 func TestNewClientRejectsARelativeBaseURL(t *testing.T) {
-	if _, err := NewClient(ClientConfig{BaseURL: "core.data.blockanalitica.com/core"}); err == nil {
+	if _, err := NewClient(ClientConfig{BaseURL: "feed.example/core"}); err == nil {
 		t.Fatal("NewClient() = nil, want an error")
 	}
 }
 
-func TestNewClientDefaultsToTheUpstreamFeed(t *testing.T) {
-	client, err := NewClient(ClientConfig{})
-	if err != nil {
-		t.Fatalf("NewClient() = %v", err)
-	}
-	if client.baseURL != defaultBaseURL {
-		t.Errorf("baseURL = %s, want %s", client.baseURL, defaultBaseURL)
+func TestNewClientRequiresABaseURL(t *testing.T) {
+	if _, err := NewClient(ClientConfig{}); err == nil {
+		t.Fatal("NewClient() = nil, want an error: the feed root is deployment configuration with no built-in default")
 	}
 }

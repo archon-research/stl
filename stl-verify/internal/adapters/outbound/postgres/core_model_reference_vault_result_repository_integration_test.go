@@ -13,9 +13,9 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-func coreVaultResult(address string, syncedAt time.Time, buildID int) entity.ReferenceCoreVaultResult {
+func coreVaultResult(address string, syncedAt time.Time, buildID int) entity.CoreModelReferenceVaultResult {
 	chainID := int64(8453)
-	return entity.ReferenceCoreVaultResult{
+	return entity.CoreModelReferenceVaultResult{
 		Network:          "base",
 		ChainID:          &chainID,
 		ProtocolName:     "morpho",
@@ -34,12 +34,12 @@ func coreVaultResult(address string, syncedAt time.Time, buildID int) entity.Ref
 		CRREL:            "0.000288698101040592",
 		CRRELSE:          new("0.000028834308921715"),
 		CRRES:            new("0.009880342305281255"),
-		Source:           entity.ReferenceCoreDataSource,
+		Source:           entity.CoreModelReferenceDataSource,
 		BuildID:          buildID,
 	}
 }
 
-func saveCoreVaults(t *testing.T, ctx context.Context, txm *TxManager, repo *ReferenceCoreVaultResultRepository, rows ...entity.ReferenceCoreVaultResult) {
+func saveCoreVaults(t *testing.T, ctx context.Context, txm *TxManager, repo *CoreModelReferenceVaultResultRepository, rows ...entity.CoreModelReferenceVaultResult) {
 	t.Helper()
 	if err := txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		return repo.SaveVaultResults(ctx, tx, rows)
@@ -48,7 +48,7 @@ func saveCoreVaults(t *testing.T, ctx context.Context, txm *TxManager, repo *Ref
 	}
 }
 
-func TestReferenceCoreVaultResultRepositoryPreservesEighteenDecimalPrecision(t *testing.T) {
+func TestCoreModelReferenceVaultResultRepositoryPreservesEighteenDecimalPrecision(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
@@ -58,7 +58,7 @@ func TestReferenceCoreVaultResultRepositoryPreservesEighteenDecimalPrecision(t *
 		t.Fatalf("tx manager: %v", err)
 	}
 	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
-	repo := NewReferenceCoreVaultResultRepository(nil, runID)
+	repo := NewCoreModelReferenceVaultResultRepository(nil, runID)
 	syncedAt := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 
 	saveCoreVaults(t, ctx, txm, repo, coreVaultResult("0xbeef", syncedAt, int(buildID)))
@@ -67,7 +67,7 @@ func TestReferenceCoreVaultResultRepositoryPreservesEighteenDecimalPrecision(t *
 	var gotRunID *int64
 	if err := pool.QueryRow(ctx, `
 		SELECT total_assets_usd::text, idle_assets_usd::text, crr_el::text, method, version_label, run_id
-		FROM reference_core_vault_result WHERE vault_address = '0xbeef'`).Scan(&assets, &idle, &crrEL, &method, &version, &gotRunID); err != nil {
+		FROM core_model_reference_vault_result WHERE vault_address = '0xbeef'`).Scan(&assets, &idle, &crrEL, &method, &version, &gotRunID); err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
 	testutil.RequireRunID(t, gotRunID, runID)
@@ -82,7 +82,7 @@ func TestReferenceCoreVaultResultRepositoryPreservesEighteenDecimalPrecision(t *
 // Upstream serialises a very small figure in exponent notation (sxsRLUSD's
 // crr_el_se arrived as 4.27099736914E-7, verified live 17 Sep 2026); NUMERIC
 // must take it as the same number, not reject the literal.
-func TestReferenceCoreVaultResultRepositoryAcceptsAnExponentNotationFigure(t *testing.T) {
+func TestCoreModelReferenceVaultResultRepositoryAcceptsAnExponentNotationFigure(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
@@ -91,7 +91,7 @@ func TestReferenceCoreVaultResultRepositoryAcceptsAnExponentNotationFigure(t *te
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	repo := NewReferenceCoreVaultResultRepository(nil, 0)
+	repo := NewCoreModelReferenceVaultResultRepository(nil, 0)
 	row := coreVaultResult("0xbeef", time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC), 1)
 	row.CRRELSE = new("4.27099736914E-7")
 
@@ -99,7 +99,7 @@ func TestReferenceCoreVaultResultRepositoryAcceptsAnExponentNotationFigure(t *te
 
 	var se string
 	if err := pool.QueryRow(ctx, `
-		SELECT crr_el_se::text FROM reference_core_vault_result WHERE vault_address = '0xbeef'`).Scan(&se); err != nil {
+		SELECT crr_el_se::text FROM core_model_reference_vault_result WHERE vault_address = '0xbeef'`).Scan(&se); err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
 	if se != "0.000000427099736914" {
@@ -109,7 +109,7 @@ func TestReferenceCoreVaultResultRepositoryAcceptsAnExponentNotationFigure(t *te
 
 // An override vault has no simulation behind it, so its standard error and
 // expected shortfall are structurally absent and land as NULL.
-func TestReferenceCoreVaultResultRepositoryStoresAnOverrideVaultWithoutSimulationFigures(t *testing.T) {
+func TestCoreModelReferenceVaultResultRepositoryStoresAnOverrideVaultWithoutSimulationFigures(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
@@ -118,7 +118,7 @@ func TestReferenceCoreVaultResultRepositoryStoresAnOverrideVaultWithoutSimulatio
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	repo := NewReferenceCoreVaultResultRepository(nil, 0)
+	repo := NewCoreModelReferenceVaultResultRepository(nil, 0)
 	row := coreVaultResult("0xbeef", time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC), 1)
 	row.Method = "override"
 	row.CRRELSE, row.CRRES = nil, nil
@@ -127,7 +127,7 @@ func TestReferenceCoreVaultResultRepositoryStoresAnOverrideVaultWithoutSimulatio
 
 	var se, es *string
 	if err := pool.QueryRow(ctx, `
-		SELECT crr_el_se::text, crr_es::text FROM reference_core_vault_result WHERE vault_address = '0xbeef'`).Scan(&se, &es); err != nil {
+		SELECT crr_el_se::text, crr_es::text FROM core_model_reference_vault_result WHERE vault_address = '0xbeef'`).Scan(&se, &es); err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
 	if se != nil || es != nil {
@@ -137,7 +137,7 @@ func TestReferenceCoreVaultResultRepositoryStoresAnOverrideVaultWithoutSimulatio
 
 // The table refuses the same NULLs on a modelled vault: there they mean a
 // broken payload, and the client should have failed the cycle first.
-func TestReferenceCoreVaultResultRepositoryRejectsAModelVaultWithoutSimulationFigures(t *testing.T) {
+func TestCoreModelReferenceVaultResultRepositoryRejectsAModelVaultWithoutSimulationFigures(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
@@ -146,19 +146,19 @@ func TestReferenceCoreVaultResultRepositoryRejectsAModelVaultWithoutSimulationFi
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	repo := NewReferenceCoreVaultResultRepository(nil, 0)
+	repo := NewCoreModelReferenceVaultResultRepository(nil, 0)
 	row := coreVaultResult("0xbeef", time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC), 1)
 	row.CRRES = nil
 
 	err = txm.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return repo.SaveVaultResults(ctx, tx, []entity.ReferenceCoreVaultResult{row})
+		return repo.SaveVaultResults(ctx, tx, []entity.CoreModelReferenceVaultResult{row})
 	})
 	if err == nil {
 		t.Fatal("SaveVaultResults() = nil, want the CHECK to reject a model vault with a NULL crr_es")
 	}
 }
 
-func TestReferenceCoreVaultResultRepositoryIsIdempotentWithinABuild(t *testing.T) {
+func TestCoreModelReferenceVaultResultRepositoryIsIdempotentWithinABuild(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
@@ -167,7 +167,7 @@ func TestReferenceCoreVaultResultRepositoryIsIdempotentWithinABuild(t *testing.T
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	repo := NewReferenceCoreVaultResultRepository(nil, 0)
+	repo := NewCoreModelReferenceVaultResultRepository(nil, 0)
 	syncedAt := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	row := coreVaultResult("0xbeef", syncedAt, 1)
 
@@ -176,7 +176,7 @@ func TestReferenceCoreVaultResultRepositoryIsIdempotentWithinABuild(t *testing.T
 	}
 
 	var rows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM reference_core_vault_result WHERE vault_address = '0xbeef'`).Scan(&rows); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM core_model_reference_vault_result WHERE vault_address = '0xbeef'`).Scan(&rows); err != nil {
 		t.Fatalf("counting: %v", err)
 	}
 	if rows != 1 {
@@ -184,7 +184,7 @@ func TestReferenceCoreVaultResultRepositoryIsIdempotentWithinABuild(t *testing.T
 	}
 }
 
-func TestReferenceCoreVaultResultRepositoryAppendsACorrectionForANewBuild(t *testing.T) {
+func TestCoreModelReferenceVaultResultRepositoryAppendsACorrectionForANewBuild(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
@@ -193,7 +193,7 @@ func TestReferenceCoreVaultResultRepositoryAppendsACorrectionForANewBuild(t *tes
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	repo := NewReferenceCoreVaultResultRepository(nil, 0)
+	repo := NewCoreModelReferenceVaultResultRepository(nil, 0)
 	syncedAt := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 
 	saveCoreVaults(t, ctx, txm, repo, coreVaultResult("0xbeef", syncedAt, 1))
@@ -201,7 +201,7 @@ func TestReferenceCoreVaultResultRepositoryAppendsACorrectionForANewBuild(t *tes
 
 	var maxVersion, rows int
 	if err := pool.QueryRow(ctx, `
-		SELECT max(processing_version), count(*) FROM reference_core_vault_result WHERE vault_address = '0xbeef'`).Scan(&maxVersion, &rows); err != nil {
+		SELECT max(processing_version), count(*) FROM core_model_reference_vault_result WHERE vault_address = '0xbeef'`).Scan(&maxVersion, &rows); err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
 	if rows != 2 || maxVersion != 1 {

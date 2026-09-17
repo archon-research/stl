@@ -1,6 +1,6 @@
 //go:build integration
 
-package reference_core_indexer
+package core_model_reference_indexer
 
 import (
 	"os"

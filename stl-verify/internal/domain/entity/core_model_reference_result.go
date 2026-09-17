@@ -2,15 +2,15 @@ package entity
 
 import "time"
 
-// ReferenceCoreDataSource is the provenance slug on every row STL records from
-// Block Analitica's CORE dashboard feed (core.blockanalitica.com).
+// CoreModelReferenceDataSource is the provenance slug on every row STL records from
+// the upstream CORE model dashboard feed.
 //
 // Distinct from ReferenceDataSource on purpose: Sky's Star monitor and this
 // feed are two different upstream models answering two different questions,
 // and the API serves them under two provenances.
-const ReferenceCoreDataSource = "blockanalitica:core"
+const CoreModelReferenceDataSource = "coremodel:dashboard"
 
-// ReferenceCoreMarketResult is one market's CORE model result as the upstream
+// CoreModelReferenceMarketResult is one market's CORE model result as the upstream
 // dashboard reported it at a single sync cycle.
 //
 // Figures are decimal strings, not float64: upstream carries them to 18
@@ -22,7 +22,7 @@ const ReferenceCoreDataSource = "blockanalitica:core"
 // Identity fields are upstream's claims verbatim, not registry references: the
 // feed covers networks and markets STL does not index, and a reference row
 // must stay traceable to what the feed said.
-type ReferenceCoreMarketResult struct {
+type CoreModelReferenceMarketResult struct {
 	Network string
 	// Nil for a network STL has no chain id for, which is a fact about the
 	// mapping rather than missing data.
@@ -59,15 +59,15 @@ type ReferenceCoreMarketResult struct {
 	BuildID int
 }
 
-// ReferenceCoreVaultResult is one vault's CORE model result as the upstream
+// CoreModelReferenceVaultResult is one vault's CORE model result as the upstream
 // dashboard reported it at a single sync cycle: the vault-level aggregate of
 // the market rows written by the same cycle.
 //
-// Same encoding rules as ReferenceCoreMarketResult. Method says how upstream
+// Same encoding rules as CoreModelReferenceMarketResult. Method says how upstream
 // produced the figure ("model" or "override"); an override row's CRR is a
 // governance-set constant, not a model output, so it carries no standard error
 // and no expected shortfall — CRRELSE and CRRES are nil exactly then.
-type ReferenceCoreVaultResult struct {
+type CoreModelReferenceVaultResult struct {
 	Network      string
 	ChainID      *int64
 	ProtocolName string

@@ -1,4 +1,4 @@
-package reference_core_indexer
+package core_model_reference_indexer
 
 import (
 	"context"
@@ -23,20 +23,20 @@ var (
 )
 
 type mockProvider struct {
-	overview outbound.ReferenceCoreOverview
+	overview outbound.CoreModelReferenceOverview
 	err      error
 }
 
-func (m *mockProvider) FetchOverview(_ context.Context) (outbound.ReferenceCoreOverview, error) {
+func (m *mockProvider) FetchOverview(_ context.Context) (outbound.CoreModelReferenceOverview, error) {
 	return m.overview, m.err
 }
 
 type mockMarketRepo struct {
-	saved []entity.ReferenceCoreMarketResult
+	saved []entity.CoreModelReferenceMarketResult
 	err   error
 }
 
-func (m *mockMarketRepo) SaveMarketResults(_ context.Context, _ pgx.Tx, results []entity.ReferenceCoreMarketResult) error {
+func (m *mockMarketRepo) SaveMarketResults(_ context.Context, _ pgx.Tx, results []entity.CoreModelReferenceMarketResult) error {
 	if m.err != nil {
 		return m.err
 	}
@@ -45,11 +45,11 @@ func (m *mockMarketRepo) SaveMarketResults(_ context.Context, _ pgx.Tx, results 
 }
 
 type mockVaultRepo struct {
-	saved []entity.ReferenceCoreVaultResult
+	saved []entity.CoreModelReferenceVaultResult
 	err   error
 }
 
-func (m *mockVaultRepo) SaveVaultResults(_ context.Context, _ pgx.Tx, results []entity.ReferenceCoreVaultResult) error {
+func (m *mockVaultRepo) SaveVaultResults(_ context.Context, _ pgx.Tx, results []entity.CoreModelReferenceVaultResult) error {
 	if m.err != nil {
 		return m.err
 	}
@@ -68,9 +68,9 @@ func (m *fakeTxManager) WithTransaction(_ context.Context, fn func(pgx.Tx) error
 	return err
 }
 
-func marketRow(uid, date string) outbound.ReferenceCoreMarketRow {
+func marketRow(uid, date string) outbound.CoreModelReferenceMarketRow {
 	chainID := int64(1)
-	return outbound.ReferenceCoreMarketRow{
+	return outbound.CoreModelReferenceMarketRow{
 		Network:              "ethereum",
 		ChainID:              &chainID,
 		Protocol:             "sparklend",
@@ -95,9 +95,9 @@ func marketRow(uid, date string) outbound.ReferenceCoreMarketRow {
 	}
 }
 
-func vaultRow(address, date string) outbound.ReferenceCoreVaultRow {
+func vaultRow(address, date string) outbound.CoreModelReferenceVaultRow {
 	chainID := int64(8453)
-	return outbound.ReferenceCoreVaultRow{
+	return outbound.CoreModelReferenceVaultRow{
 		Network:          "base",
 		ChainID:          &chainID,
 		Protocol:         "morpho",
@@ -118,14 +118,14 @@ func vaultRow(address, date string) outbound.ReferenceCoreVaultRow {
 	}
 }
 
-func overview(markets []outbound.ReferenceCoreMarketRow, vaults []outbound.ReferenceCoreVaultRow) outbound.ReferenceCoreOverview {
-	return outbound.ReferenceCoreOverview{Markets: markets, Vaults: vaults}
+func overview(markets []outbound.CoreModelReferenceMarketRow, vaults []outbound.CoreModelReferenceVaultRow) outbound.CoreModelReferenceOverview {
+	return outbound.CoreModelReferenceOverview{Markets: markets, Vaults: vaults}
 }
 
-func healthyOverview() outbound.ReferenceCoreOverview {
+func healthyOverview() outbound.CoreModelReferenceOverview {
 	return overview(
-		[]outbound.ReferenceCoreMarketRow{marketRow("0xaaa", "2026-09-17"), marketRow("0xbbb", "2026-09-17")},
-		[]outbound.ReferenceCoreVaultRow{vaultRow("0xbeef", "2026-09-17")},
+		[]outbound.CoreModelReferenceMarketRow{marketRow("0xaaa", "2026-09-17"), marketRow("0xbbb", "2026-09-17")},
+		[]outbound.CoreModelReferenceVaultRow{vaultRow("0xbeef", "2026-09-17")},
 	)
 }
 
@@ -136,7 +136,7 @@ type harness struct {
 	txm      *fakeTxManager
 }
 
-func newHarness(ov outbound.ReferenceCoreOverview) *harness {
+func newHarness(ov outbound.CoreModelReferenceOverview) *harness {
 	return &harness{
 		provider: &mockProvider{overview: ov},
 		markets:  &mockMarketRepo{},
@@ -176,26 +176,26 @@ func TestRunStampsEveryRowOfACycleIdentically(t *testing.T) {
 		t.Fatalf("Run() = %v", err)
 	}
 	for _, m := range h.markets.saved {
-		if !m.SyncedAt.Equal(syncedAt) || m.BuildID != 7 || m.Source != entity.ReferenceCoreDataSource {
-			t.Errorf("market %s stamped %v/%d/%s, want %v/7/%s", m.MarketUID, m.SyncedAt, m.BuildID, m.Source, syncedAt, entity.ReferenceCoreDataSource)
+		if !m.SyncedAt.Equal(syncedAt) || m.BuildID != 7 || m.Source != entity.CoreModelReferenceDataSource {
+			t.Errorf("market %s stamped %v/%d/%s, want %v/7/%s", m.MarketUID, m.SyncedAt, m.BuildID, m.Source, syncedAt, entity.CoreModelReferenceDataSource)
 		}
 	}
 	for _, v := range h.vaults.saved {
-		if !v.SyncedAt.Equal(syncedAt) || v.BuildID != 7 || v.Source != entity.ReferenceCoreDataSource {
-			t.Errorf("vault %s stamped %v/%d/%s, want %v/7/%s", v.VaultAddress, v.SyncedAt, v.BuildID, v.Source, syncedAt, entity.ReferenceCoreDataSource)
+		if !v.SyncedAt.Equal(syncedAt) || v.BuildID != 7 || v.Source != entity.CoreModelReferenceDataSource {
+			t.Errorf("vault %s stamped %v/%d/%s, want %v/7/%s", v.VaultAddress, v.SyncedAt, v.BuildID, v.Source, syncedAt, entity.CoreModelReferenceDataSource)
 		}
 	}
 }
 
 func TestRunCarriesEveryMarketFigureOntoTheResult(t *testing.T) {
 	row := marketRow("0xaaa", "2026-09-16")
-	h := newHarness(overview([]outbound.ReferenceCoreMarketRow{row}, []outbound.ReferenceCoreVaultRow{vaultRow("0xbeef", "2026-09-17")}))
+	h := newHarness(overview([]outbound.CoreModelReferenceMarketRow{row}, []outbound.CoreModelReferenceVaultRow{vaultRow("0xbeef", "2026-09-17")}))
 
 	if err := h.run(t, nil); err != nil {
 		t.Fatalf("Run() = %v", err)
 	}
 	got := h.markets.saved[0]
-	want := entity.ReferenceCoreMarketResult{
+	want := entity.CoreModelReferenceMarketResult{
 		Network: "ethereum", ChainID: row.ChainID, ProtocolName: "sparklend", MarketUID: "0xaaa", MarketSymbol: "spUSDS",
 		LoanTokenSymbol: "USDS", LoanTokenAddress: row.LoanTokenAddress,
 		ModelDate: time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC), SyncedAt: syncedAt,
@@ -203,7 +203,7 @@ func TestRunCarriesEveryMarketFigureOntoTheResult(t *testing.T) {
 		TotalSupplyUSD: row.TotalSupply, ProbNoBadDebt: row.ProbNoBadDebt,
 		CRREL: row.CRREL, CRRVaR: row.CRRVaR, CRRES: row.CRRES,
 		CRRELSE: row.CRRELSE, CRRVaRSE: row.CRRVaRSE, CRRESSE: row.CRRESSE, CRRFloor: row.CRRFloor,
-		ExternalFlowEnabled: true, Source: entity.ReferenceCoreDataSource, BuildID: 7,
+		ExternalFlowEnabled: true, Source: entity.CoreModelReferenceDataSource, BuildID: 7,
 	}
 	if got != want {
 		t.Errorf("market result =\n%+v\nwant\n%+v", got, want)
@@ -212,19 +212,19 @@ func TestRunCarriesEveryMarketFigureOntoTheResult(t *testing.T) {
 
 func TestRunCarriesEveryVaultFigureOntoTheResult(t *testing.T) {
 	row := vaultRow("0xbeef", "2026-09-17")
-	h := newHarness(overview([]outbound.ReferenceCoreMarketRow{marketRow("0xaaa", "2026-09-17")}, []outbound.ReferenceCoreVaultRow{row}))
+	h := newHarness(overview([]outbound.CoreModelReferenceMarketRow{marketRow("0xaaa", "2026-09-17")}, []outbound.CoreModelReferenceVaultRow{row}))
 
 	if err := h.run(t, nil); err != nil {
 		t.Fatalf("Run() = %v", err)
 	}
 	got := h.vaults.saved[0]
-	want := entity.ReferenceCoreVaultResult{
+	want := entity.CoreModelReferenceVaultResult{
 		Network: "base", ChainID: row.ChainID, ProtocolName: "morpho", VaultAddress: "0xbeef", VaultSymbol: "steakUSDC",
 		VaultName: "Steakhouse Prime USDC", VersionLabel: "v2", LoanTokenSymbol: "USDC", LoanTokenAddress: row.LoanTokenAddress,
 		Method: "model", ModelDate: time.Date(2026, 9, 17, 0, 0, 0, 0, time.UTC), SyncedAt: syncedAt,
 		NMarkets: 5, TotalAssetsUSD: row.TotalAssets, IdleAssetsUSD: row.IdleAssets,
 		CRREL: row.CRREL, CRRELSE: row.CRRELSE, CRRES: row.CRRES,
-		Source: entity.ReferenceCoreDataSource, BuildID: 7,
+		Source: entity.CoreModelReferenceDataSource, BuildID: 7,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("vault result =\n%+v\nwant\n%+v", got, want)
@@ -235,7 +235,7 @@ func TestRunKeepsAnOverrideVaultsAbsentFiguresNilRatherThanZero(t *testing.T) {
 	row := vaultRow("0xbeef", "2026-09-17")
 	row.Method = "override"
 	row.CRRELSE, row.CRRES = nil, nil
-	h := newHarness(overview([]outbound.ReferenceCoreMarketRow{marketRow("0xaaa", "2026-09-17")}, []outbound.ReferenceCoreVaultRow{row}))
+	h := newHarness(overview([]outbound.CoreModelReferenceMarketRow{marketRow("0xaaa", "2026-09-17")}, []outbound.CoreModelReferenceVaultRow{row}))
 
 	if err := h.run(t, nil); err != nil {
 		t.Fatalf("Run() = %v", err)
@@ -247,7 +247,7 @@ func TestRunKeepsAnOverrideVaultsAbsentFiguresNilRatherThanZero(t *testing.T) {
 }
 
 func TestRunFailsWhenTheOverviewHasNoMarkets(t *testing.T) {
-	h := newHarness(overview(nil, []outbound.ReferenceCoreVaultRow{vaultRow("0xbeef", "2026-09-17")}))
+	h := newHarness(overview(nil, []outbound.CoreModelReferenceVaultRow{vaultRow("0xbeef", "2026-09-17")}))
 
 	err := h.run(t, nil)
 	if err == nil || !strings.Contains(err.Error(), "no markets") {
@@ -259,7 +259,7 @@ func TestRunFailsWhenTheOverviewHasNoMarkets(t *testing.T) {
 }
 
 func TestRunFailsWhenTheOverviewHasNoVaults(t *testing.T) {
-	h := newHarness(overview([]outbound.ReferenceCoreMarketRow{marketRow("0xaaa", "2026-09-17")}, nil))
+	h := newHarness(overview([]outbound.CoreModelReferenceMarketRow{marketRow("0xaaa", "2026-09-17")}, nil))
 
 	err := h.run(t, nil)
 	if err == nil || !strings.Contains(err.Error(), "no vaults") {
@@ -272,8 +272,8 @@ func TestRunFailsWhenTheOverviewHasNoVaults(t *testing.T) {
 
 func TestRunFailsOnAnUnparseableMarketDateBeforePersistingAnything(t *testing.T) {
 	h := newHarness(overview(
-		[]outbound.ReferenceCoreMarketRow{marketRow("0xaaa", "17/09/2026")},
-		[]outbound.ReferenceCoreVaultRow{vaultRow("0xbeef", "2026-09-17")}))
+		[]outbound.CoreModelReferenceMarketRow{marketRow("0xaaa", "17/09/2026")},
+		[]outbound.CoreModelReferenceVaultRow{vaultRow("0xbeef", "2026-09-17")}))
 
 	err := h.run(t, nil)
 	if err == nil || !strings.Contains(err.Error(), "17/09/2026") {
@@ -286,8 +286,8 @@ func TestRunFailsOnAnUnparseableMarketDateBeforePersistingAnything(t *testing.T)
 
 func TestRunFailsOnAnUnparseableVaultDate(t *testing.T) {
 	h := newHarness(overview(
-		[]outbound.ReferenceCoreMarketRow{marketRow("0xaaa", "2026-09-17")},
-		[]outbound.ReferenceCoreVaultRow{vaultRow("0xbeef", "")}))
+		[]outbound.CoreModelReferenceMarketRow{marketRow("0xaaa", "2026-09-17")},
+		[]outbound.CoreModelReferenceVaultRow{vaultRow("0xbeef", "")}))
 
 	if err := h.run(t, nil); err == nil {
 		t.Fatal("Run() = nil, want a date parse error")
@@ -364,25 +364,25 @@ func TestRunRecordsWrittenAndStaleCountsThroughACycle(t *testing.T) {
 	}
 	// syncedAt is 17 Sep: yesterday's date is within the allowance, the 14th is not.
 	h := newHarness(overview(
-		[]outbound.ReferenceCoreMarketRow{marketRow("0xaaa", "2026-09-17"), marketRow("0xbbb", "2026-09-16"), marketRow("0xccc", "2026-09-14")},
-		[]outbound.ReferenceCoreVaultRow{vaultRow("0xbeef", "2026-09-01")}))
+		[]outbound.CoreModelReferenceMarketRow{marketRow("0xaaa", "2026-09-17"), marketRow("0xbbb", "2026-09-16"), marketRow("0xccc", "2026-09-14")},
+		[]outbound.CoreModelReferenceVaultRow{vaultRow("0xbeef", "2026-09-01")}))
 
 	if err := h.run(t, tel); err != nil {
 		t.Fatalf("Run() = %v", err)
 	}
 
 	got := counterValues(t, reader)
-	if got["reference_core.sync.markets.written.total"] != 3 {
-		t.Errorf("markets.written.total = %d, want 3", got["reference_core.sync.markets.written.total"])
+	if got["core_model_reference.sync.markets.written.total"] != 3 {
+		t.Errorf("markets.written.total = %d, want 3", got["core_model_reference.sync.markets.written.total"])
 	}
-	if got["reference_core.sync.vaults.written.total"] != 1 {
-		t.Errorf("vaults.written.total = %d, want 1", got["reference_core.sync.vaults.written.total"])
+	if got["core_model_reference.sync.vaults.written.total"] != 1 {
+		t.Errorf("vaults.written.total = %d, want 1", got["core_model_reference.sync.vaults.written.total"])
 	}
-	if got["reference_core.sync.stale_rows.total"] != 2 {
-		t.Errorf("stale_rows.total = %d, want 2 — the 14 Sep market and the 1 Sep vault", got["reference_core.sync.stale_rows.total"])
+	if got["core_model_reference.sync.stale_rows.total"] != 2 {
+		t.Errorf("stale_rows.total = %d, want 2 — the 14 Sep market and the 1 Sep vault", got["core_model_reference.sync.stale_rows.total"])
 	}
-	if got["reference_core.sync.stale_cycles.total"] != 0 {
-		t.Errorf("stale_cycles.total = %d, want 0 — one fresh row means upstream is still publishing", got["reference_core.sync.stale_cycles.total"])
+	if got["core_model_reference.sync.stale_cycles.total"] != 0 {
+		t.Errorf("stale_cycles.total = %d, want 0 — one fresh row means upstream is still publishing", got["core_model_reference.sync.stale_cycles.total"])
 	}
 }
 
@@ -404,16 +404,16 @@ func TestRunCountsAStaleCycleOnlyWhenNoRowIsFresh(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewTelemetryWithProvider() = %v", err)
 			}
-			markets := make([]outbound.ReferenceCoreMarketRow, 0, len(tc.marketDates))
+			markets := make([]outbound.CoreModelReferenceMarketRow, 0, len(tc.marketDates))
 			for i, d := range tc.marketDates {
 				markets = append(markets, marketRow("0x"+strings.Repeat("a", i+1), d))
 			}
-			h := newHarness(overview(markets, []outbound.ReferenceCoreVaultRow{vaultRow("0xbeef", tc.vaultDate)}))
+			h := newHarness(overview(markets, []outbound.CoreModelReferenceVaultRow{vaultRow("0xbeef", tc.vaultDate)}))
 
 			if err := h.run(t, tel); err != nil {
 				t.Fatalf("Run() = %v; staleness must never fail the cycle", err)
 			}
-			if got := counterValues(t, reader)["reference_core.sync.stale_cycles.total"]; got != tc.wantCycles {
+			if got := counterValues(t, reader)["core_model_reference.sync.stale_cycles.total"]; got != tc.wantCycles {
 				t.Errorf("stale_cycles.total = %d, want %d", got, tc.wantCycles)
 			}
 		})
@@ -433,7 +433,7 @@ func TestRunRecordsNothingWrittenWhenTheCycleFails(t *testing.T) {
 		t.Fatalf("Run() = %v, want %v", err, errRepo)
 	}
 	got := counterValues(t, reader)
-	if got["reference_core.sync.markets.written.total"] != 0 || got["reference_core.sync.vaults.written.total"] != 0 {
+	if got["core_model_reference.sync.markets.written.total"] != 0 || got["core_model_reference.sync.vaults.written.total"] != 0 {
 		t.Errorf("written counters = %v, want both 0 after a rolled-back cycle", got)
 	}
 }

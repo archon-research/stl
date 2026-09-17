@@ -8,14 +8,14 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
-// ReferenceCoreMarketRow is one market's row of the upstream CORE overview, as
+// CoreModelReferenceMarketRow is one market's row of the upstream CORE overview, as
 // decimal strings exactly as reported.
 //
 // Parsing and rescaling belong to the consumer, not the transport: every figure
 // is carried raw so a change in upstream's encoding surfaces as a parse failure
 // rather than as a silently wrong number. CRRs and ProbNoBadDebt are upstream's
 // 0-1 fractions. Date is upstream's calendar day as an ISO string.
-type ReferenceCoreMarketRow struct {
+type CoreModelReferenceMarketRow struct {
 	Network string
 	// Nil for a network the vendor vocabulary has no chain id for.
 	ChainID      *int64
@@ -45,11 +45,11 @@ type ReferenceCoreMarketRow struct {
 	ExternalFlowEnabled bool
 }
 
-// ReferenceCoreVaultRow is one vault's row of the upstream CORE overview, as
+// CoreModelReferenceVaultRow is one vault's row of the upstream CORE overview, as
 // decimal strings exactly as reported. Same encoding rules as the market row.
 // CRRELSE and CRRES are nil for a Method of "override", which has no
 // simulation behind it; the provider rejects their absence on any other method.
-type ReferenceCoreVaultRow struct {
+type CoreModelReferenceVaultRow struct {
 	Network      string
 	ChainID      *int64
 	Protocol     string
@@ -72,34 +72,34 @@ type ReferenceCoreVaultRow struct {
 	CRRES       *string
 }
 
-// ReferenceCoreOverview is everything one read of the upstream overview
+// CoreModelReferenceOverview is everything one read of the upstream overview
 // reported, gathered so a cycle persists markets and vaults from the same
 // observation.
-type ReferenceCoreOverview struct {
-	Markets []ReferenceCoreMarketRow
-	Vaults  []ReferenceCoreVaultRow
+type CoreModelReferenceOverview struct {
+	Markets []CoreModelReferenceMarketRow
+	Vaults  []CoreModelReferenceVaultRow
 }
 
-// ReferenceCoreProvider fetches the current CORE model results the upstream
+// CoreModelReferenceProvider fetches the current CORE model results the upstream
 // dashboard publishes.
-type ReferenceCoreProvider interface {
+type CoreModelReferenceProvider interface {
 	// FetchOverview returns every market and vault the dashboard reports today.
 	// The feed publishes one result per calendar day and answers a date
 	// parameter by ignoring it, so this is always "now"; history is the
 	// caller's to accumulate.
-	FetchOverview(ctx context.Context) (ReferenceCoreOverview, error)
+	FetchOverview(ctx context.Context) (CoreModelReferenceOverview, error)
 }
 
-// ReferenceCoreMarketResultRepository persists market rows of a cycle.
-type ReferenceCoreMarketResultRepository interface {
+// CoreModelReferenceMarketResultRepository persists market rows of a cycle.
+type CoreModelReferenceMarketResultRepository interface {
 	// SaveMarketResults writes within the caller's transaction, so the caller
 	// controls what else commits or rolls back with it.
-	SaveMarketResults(ctx context.Context, tx pgx.Tx, results []entity.ReferenceCoreMarketResult) error
+	SaveMarketResults(ctx context.Context, tx pgx.Tx, results []entity.CoreModelReferenceMarketResult) error
 }
 
-// ReferenceCoreVaultResultRepository persists vault rows of a cycle.
-type ReferenceCoreVaultResultRepository interface {
+// CoreModelReferenceVaultResultRepository persists vault rows of a cycle.
+type CoreModelReferenceVaultResultRepository interface {
 	// SaveVaultResults writes within the caller's transaction, like
 	// SaveMarketResults, so a cycle's markets and vaults land together.
-	SaveVaultResults(ctx context.Context, tx pgx.Tx, results []entity.ReferenceCoreVaultResult) error
+	SaveVaultResults(ctx context.Context, tx pgx.Tx, results []entity.CoreModelReferenceVaultResult) error
 }

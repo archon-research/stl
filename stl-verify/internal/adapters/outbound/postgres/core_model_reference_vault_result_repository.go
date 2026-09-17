@@ -12,43 +12,43 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// Compile-time check that ReferenceCoreVaultResultRepository implements the port.
-var _ outbound.ReferenceCoreVaultResultRepository = (*ReferenceCoreVaultResultRepository)(nil)
+// Compile-time check that CoreModelReferenceVaultResultRepository implements the port.
+var _ outbound.CoreModelReferenceVaultResultRepository = (*CoreModelReferenceVaultResultRepository)(nil)
 
-// ReferenceCoreVaultResultRepository persists per-cycle CORE vault results.
+// CoreModelReferenceVaultResultRepository persists per-cycle CORE vault results.
 // It holds no pool: every write goes through the caller's transaction.
-type ReferenceCoreVaultResultRepository struct {
+type CoreModelReferenceVaultResultRepository struct {
 	logger *slog.Logger
 	runID  buildregistry.RunID
 }
 
-// NewReferenceCoreVaultResultRepository creates a new ReferenceCoreVaultResultRepository.
-func NewReferenceCoreVaultResultRepository(
+// NewCoreModelReferenceVaultResultRepository creates a new CoreModelReferenceVaultResultRepository.
+func NewCoreModelReferenceVaultResultRepository(
 	logger *slog.Logger,
 	runID buildregistry.RunID,
-) *ReferenceCoreVaultResultRepository {
+) *CoreModelReferenceVaultResultRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &ReferenceCoreVaultResultRepository{
-		logger: logger.With("component", "reference-core-vault-result-repo"),
+	return &CoreModelReferenceVaultResultRepository{
+		logger: logger.With("component", "core-model-reference-vault-result-repo"),
 		runID:  runID,
 	}
 }
 
 // SaveVaultResults inserts a cycle's vault rows within the caller's
 // transaction; insert-only under the same rules as SaveMarketResults.
-func (r *ReferenceCoreVaultResultRepository) SaveVaultResults(
+func (r *CoreModelReferenceVaultResultRepository) SaveVaultResults(
 	ctx context.Context,
 	tx pgx.Tx,
-	results []entity.ReferenceCoreVaultResult,
+	results []entity.CoreModelReferenceVaultResult,
 ) error {
 	if len(results) == 0 {
 		return nil
 	}
 
 	const q = `
-		INSERT INTO reference_core_vault_result (
+		INSERT INTO core_model_reference_vault_result (
 			network,
 			chain_id,
 			protocol_name,
@@ -84,7 +84,7 @@ func (r *ReferenceCoreVaultResultRepository) SaveVaultResults(
 	for i, v := range results {
 		if _, err := batchResults.Exec(); err != nil {
 			_ = batchResults.Close()
-			return fmt.Errorf("insert reference core vault result %d (%s/%s/%s): %w",
+			return fmt.Errorf("insert core model reference vault result %d (%s/%s/%s): %w",
 				i, v.Network, v.ProtocolName, v.VaultAddress, err)
 		}
 	}
@@ -92,12 +92,12 @@ func (r *ReferenceCoreVaultResultRepository) SaveVaultResults(
 		return fmt.Errorf("close batch: %w", err)
 	}
 
-	r.logger.Info("saved reference core vault results", "count", len(results))
+	r.logger.Info("saved core model reference vault results", "count", len(results))
 	return nil
 }
 
 // vaultInsertArgs orders one row's values to match the INSERT column list.
-func (r *ReferenceCoreVaultResultRepository) vaultInsertArgs(v entity.ReferenceCoreVaultResult) []any {
+func (r *CoreModelReferenceVaultResultRepository) vaultInsertArgs(v entity.CoreModelReferenceVaultResult) []any {
 	return []any{
 		v.Network,
 		v.ChainID,

@@ -1,4 +1,4 @@
-package reference_core_indexer
+package core_model_reference_indexer
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 )
 
 // The alert rules key on these exact names; renaming one silently stops
-// VectorReferenceCoreIndexerWritesZero / StaleUpstream / ResultGrowthHigh from
+// VectorCoreModelReferenceIndexerWritesZero / StaleUpstream / ResultGrowthHigh from
 // ever firing.
 func TestTelemetryEmitsTheMetricNamesTheAlertsQuery(t *testing.T) {
 	reader := metric.NewManualReader()
@@ -25,10 +25,10 @@ func TestTelemetryEmitsTheMetricNamesTheAlertsQuery(t *testing.T) {
 	tel.RecordStaleCycle(ctx)
 
 	for name, want := range map[string]int64{
-		"reference_core.sync.markets.written.total": 32,
-		"reference_core.sync.vaults.written.total":  10,
-		"reference_core.sync.stale_rows.total":      1,
-		"reference_core.sync.stale_cycles.total":    1,
+		"core_model_reference.sync.markets.written.total": 32,
+		"core_model_reference.sync.vaults.written.total":  10,
+		"core_model_reference.sync.stale_rows.total":      1,
+		"core_model_reference.sync.stale_cycles.total":    1,
 	} {
 		if got := counterValues(t, reader)[name]; got != want {
 			t.Errorf("%s = %d, want %d", name, got, want)
@@ -55,10 +55,10 @@ func TestTelemetrySeedsEveryCounterAtZeroOnConstruction(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"reference_core.sync.markets.written.total",
-		"reference_core.sync.vaults.written.total",
-		"reference_core.sync.stale_rows.total",
-		"reference_core.sync.stale_cycles.total",
+		"core_model_reference.sync.markets.written.total",
+		"core_model_reference.sync.vaults.written.total",
+		"core_model_reference.sync.stale_rows.total",
+		"core_model_reference.sync.stale_cycles.total",
 	} {
 		if !seeded[want] {
 			t.Errorf("%s not emitted before any record call; got %v", want, seeded)

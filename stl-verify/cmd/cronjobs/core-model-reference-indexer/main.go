@@ -1,6 +1,5 @@
-// Package main implements a Temporal cronjob worker that records Block
-// Analitica's CORE model results (core.blockanalitica.com) as reference data
-// on a schedule.
+// Package main implements a Temporal cronjob worker that records the upstream
+// CORE model's published results as reference data on a schedule.
 package main
 
 import (
@@ -12,13 +11,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/blockanalitica"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/coremodelfeed"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
-	"github.com/archon-research/stl/stl-verify/internal/services/reference_core_indexer"
+	"github.com/archon-research/stl/stl-verify/internal/services/core_model_reference_indexer"
 )
 
 var (
@@ -37,8 +36,8 @@ func main() {
 	err := temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.CronjobConfig{
-		Name:        "reference-core-indexer",
-		IntervalEnv: "REFERENCE_CORE_SYNC_INTERVAL",
+		Name:        "core-model-reference-indexer",
+		IntervalEnv: "CORE_MODEL_REFERENCE_SYNC_INTERVAL",
 		// The feed advances once a day, so any sub-day cadence sees every
 		// result; 30m keeps a single failed tick inside
 		// VectorCronjobAllRunsFailing's 1h window, where an hourly tick would
@@ -65,26 +64,24 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, fmt.Errorf("creating tx manager: %w", err)
 	}
 
-	// Empty falls through to the client's own default, so the URL is not
-	// duplicated here where the two could drift apart.
-	coreClient, err := blockanalitica.NewClient(blockanalitica.ClientConfig{
-		BaseURL: env.Get("REFERENCE_CORE_URL", ""),
+	coreClient, err := coremodelfeed.NewClient(coremodelfeed.ClientConfig{
+		BaseURL: env.Get("CORE_MODEL_REFERENCE_URL", ""),
 		Logger:  deps.Logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating core feed client: %w", err)
 	}
 
-	syncTelemetry, err := reference_core_indexer.NewTelemetry(ctx)
+	syncTelemetry, err := core_model_reference_indexer.NewTelemetry(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("creating telemetry: %w", err)
 	}
 
-	service, err := reference_core_indexer.NewService(
-		reference_core_indexer.Deps{
+	service, err := core_model_reference_indexer.NewService(
+		core_model_reference_indexer.Deps{
 			Provider:   coreClient,
-			MarketRepo: postgres.NewReferenceCoreMarketResultRepository(deps.Logger, runID),
-			VaultRepo:  postgres.NewReferenceCoreVaultResultRepository(deps.Logger, runID),
+			MarketRepo: postgres.NewCoreModelReferenceMarketResultRepository(deps.Logger, runID),
+			VaultRepo:  postgres.NewCoreModelReferenceVaultResultRepository(deps.Logger, runID),
 			TxManager:  txm,
 		},
 		int(buildReg.BuildID()),

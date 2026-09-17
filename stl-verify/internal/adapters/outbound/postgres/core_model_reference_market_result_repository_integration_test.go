@@ -13,9 +13,9 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-func coreMarketResult(uid string, syncedAt time.Time, buildID int) entity.ReferenceCoreMarketResult {
+func coreMarketResult(uid string, syncedAt time.Time, buildID int) entity.CoreModelReferenceMarketResult {
 	chainID := int64(1)
-	return entity.ReferenceCoreMarketResult{
+	return entity.CoreModelReferenceMarketResult{
 		Network:              "ethereum",
 		ChainID:              &chainID,
 		ProtocolName:         "sparklend",
@@ -38,12 +38,12 @@ func coreMarketResult(uid string, syncedAt time.Time, buildID int) entity.Refere
 		CRRESSE:              "0.001220932121971280",
 		CRRFloor:             "0.020000000000000000",
 		ExternalFlowEnabled:  true,
-		Source:               entity.ReferenceCoreDataSource,
+		Source:               entity.CoreModelReferenceDataSource,
 		BuildID:              buildID,
 	}
 }
 
-func saveCoreMarkets(t *testing.T, ctx context.Context, txm *TxManager, repo *ReferenceCoreMarketResultRepository, rows ...entity.ReferenceCoreMarketResult) {
+func saveCoreMarkets(t *testing.T, ctx context.Context, txm *TxManager, repo *CoreModelReferenceMarketResultRepository, rows ...entity.CoreModelReferenceMarketResult) {
 	t.Helper()
 	if err := txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		return repo.SaveMarketResults(ctx, tx, rows)
@@ -52,7 +52,7 @@ func saveCoreMarkets(t *testing.T, ctx context.Context, txm *TxManager, repo *Re
 	}
 }
 
-func TestReferenceCoreMarketResultRepositoryPreservesEighteenDecimalPrecision(t *testing.T) {
+func TestCoreModelReferenceMarketResultRepositoryPreservesEighteenDecimalPrecision(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
@@ -62,7 +62,7 @@ func TestReferenceCoreMarketResultRepositoryPreservesEighteenDecimalPrecision(t 
 		t.Fatalf("tx manager: %v", err)
 	}
 	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
-	repo := NewReferenceCoreMarketResultRepository(nil, runID)
+	repo := NewCoreModelReferenceMarketResultRepository(nil, runID)
 	syncedAt := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 
 	saveCoreMarkets(t, ctx, txm, repo, coreMarketResult("0xaaa", syncedAt, int(buildID)))
@@ -73,7 +73,7 @@ func TestReferenceCoreMarketResultRepositoryPreservesEighteenDecimalPrecision(t 
 	var externalFlow bool
 	if err := pool.QueryRow(ctx, `
 		SELECT total_supply_usd::text, crr_el::text, crr_floor::text, model_date::text, chain_id, run_id, external_flow_enabled
-		FROM reference_core_market_result WHERE market_uid = '0xaaa'`).Scan(&supply, &crrEL, &crrFloor, &modelDate, &chainID, &gotRunID, &externalFlow); err != nil {
+		FROM core_model_reference_market_result WHERE market_uid = '0xaaa'`).Scan(&supply, &crrEL, &crrFloor, &modelDate, &chainID, &gotRunID, &externalFlow); err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
 	testutil.RequireRunID(t, gotRunID, runID)
@@ -90,7 +90,7 @@ func TestReferenceCoreMarketResultRepositoryPreservesEighteenDecimalPrecision(t 
 
 // The same cycle written twice under one build_id must reuse its
 // processing_version and conflict away rather than duplicate.
-func TestReferenceCoreMarketResultRepositoryIsIdempotentWithinABuild(t *testing.T) {
+func TestCoreModelReferenceMarketResultRepositoryIsIdempotentWithinABuild(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
@@ -99,7 +99,7 @@ func TestReferenceCoreMarketResultRepositoryIsIdempotentWithinABuild(t *testing.
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	repo := NewReferenceCoreMarketResultRepository(nil, 0)
+	repo := NewCoreModelReferenceMarketResultRepository(nil, 0)
 	syncedAt := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	row := coreMarketResult("0xaaa", syncedAt, 1)
 
@@ -108,7 +108,7 @@ func TestReferenceCoreMarketResultRepositoryIsIdempotentWithinABuild(t *testing.
 	}
 
 	var rows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM reference_core_market_result WHERE market_uid = '0xaaa'`).Scan(&rows); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM core_model_reference_market_result WHERE market_uid = '0xaaa'`).Scan(&rows); err != nil {
 		t.Fatalf("counting: %v", err)
 	}
 	if rows != 1 {
@@ -118,7 +118,7 @@ func TestReferenceCoreMarketResultRepositoryIsIdempotentWithinABuild(t *testing.
 
 // A new build reprocessing the same cycle appends a correction rather than
 // overwriting, so history stays auditable (ADR-0002).
-func TestReferenceCoreMarketResultRepositoryAppendsACorrectionForANewBuild(t *testing.T) {
+func TestCoreModelReferenceMarketResultRepositoryAppendsACorrectionForANewBuild(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
@@ -127,7 +127,7 @@ func TestReferenceCoreMarketResultRepositoryAppendsACorrectionForANewBuild(t *te
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	repo := NewReferenceCoreMarketResultRepository(nil, 0)
+	repo := NewCoreModelReferenceMarketResultRepository(nil, 0)
 	syncedAt := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 
 	saveCoreMarkets(t, ctx, txm, repo, coreMarketResult("0xaaa", syncedAt, 1))
@@ -136,7 +136,7 @@ func TestReferenceCoreMarketResultRepositoryAppendsACorrectionForANewBuild(t *te
 	saveCoreMarkets(t, ctx, txm, repo, corrected)
 
 	rows, err := pool.Query(ctx, `
-		SELECT processing_version, crr_el::text FROM reference_core_market_result
+		SELECT processing_version, crr_el::text FROM core_model_reference_market_result
 		WHERE market_uid = '0xaaa' ORDER BY processing_version`)
 	if err != nil {
 		t.Fatalf("reading back: %v", err)
@@ -163,7 +163,7 @@ func TestReferenceCoreMarketResultRepositoryAppendsACorrectionForANewBuild(t *te
 
 // Two protocols share a placeholder market_uid on ethereum (anchorage and
 // galaxy); the identity must keep them apart.
-func TestReferenceCoreMarketResultRepositoryKeepsOneUIDUnderTwoProtocolsApart(t *testing.T) {
+func TestCoreModelReferenceMarketResultRepositoryKeepsOneUIDUnderTwoProtocolsApart(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
@@ -172,7 +172,7 @@ func TestReferenceCoreMarketResultRepositoryKeepsOneUIDUnderTwoProtocolsApart(t 
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	repo := NewReferenceCoreMarketResultRepository(nil, 0)
+	repo := NewCoreModelReferenceMarketResultRepository(nil, 0)
 	syncedAt := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	anchorage := coreMarketResult("0x0000000000000000000000000000000000000000", syncedAt, 1)
 	anchorage.ProtocolName = "anchorage"
@@ -182,7 +182,7 @@ func TestReferenceCoreMarketResultRepositoryKeepsOneUIDUnderTwoProtocolsApart(t 
 	saveCoreMarkets(t, ctx, txm, repo, anchorage, galaxy)
 
 	var rows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM reference_core_market_result`).Scan(&rows); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM core_model_reference_market_result`).Scan(&rows); err != nil {
 		t.Fatalf("counting: %v", err)
 	}
 	if rows != 2 {
