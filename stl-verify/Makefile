@@ -52,7 +52,7 @@ include lint.mk
 		kind-create kind-delete kind-infra kind-config kind-secrets kind-bootstrap-db kind-migrate \
 		kind-load-migrate kind-load-watcher kind-load-workers kind-load-python-api kind-load-cronjobs \
 		kind-deploy-apps kind-deploy-workers kind-deploy-data-validator check-dev-overlay-sync \
-		check-reloader-opt-in check-overlay-images build-reproducibility-check \
+		check-reloader-opt-in check-overlay-images check-cronjob-release-dedupe build-reproducibility-check \
 		kind-redeploy-watcher kind-redeploy-worker \
 		docker-build-migrate \
 		kind-infra-ci kind-ci-up kind-ci-down \
@@ -429,7 +429,7 @@ tools:
 # CI target for lint/format/static/security checks. go vet, staticcheck, and
 # go fix -diff are covered by golangci-lint v2 (govet, staticcheck, modernize
 # linters — see .golangci.yml); running them separately tripled analysis time.
-ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check buildinfo-populate-check check-overlay-images golangci-lint golangci-lint-new vulncheck
+ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check buildinfo-populate-check check-overlay-images check-cronjob-release-dedupe golangci-lint golangci-lint-new vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks
@@ -2395,6 +2395,12 @@ docker-release-cronjob-%: ecr-login _docker-release-cronjob-%-internal
 
 _docker-release-cronjob-%-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Cronjob $*" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/cronjobs/$* GO_BIN=cronjob GO_CACHE_KEY="cronjob-$*" GO_TAG="$*-$(IMAGE_TAG)" GO_LATEST_TAG="$*-latest"
+
+# docker-release-all must release each cmd/cronjobs image exactly once, through
+# the pattern rules above; a duplicate now fails the deploy outright against
+# immutable ECR tags. The script carries the reasoning and the grep.
+check-cronjob-release-dedupe:
+	@ci/check-cronjob-release-dedupe.sh
 
 # transform-bootstrap (VEC-490): the one-off VEC-484 history backfill. It is not a
 # cronjob (no Temporal schedule) so it is not auto-discovered, but it ships in the
