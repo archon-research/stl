@@ -3,6 +3,7 @@ package outbound
 import (
 	"context"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -42,6 +43,8 @@ type UniswapV4PositionValuationReader interface {
 	PositionForTokenAtBlock(ctx context.Context, chainID int64, positionManager common.Address, tokenID *big.Int, blockNumber int64) (*UniswapV4PositionSnapshot, error)
 	// PoolStateAtBlock returns the latest sqrtPriceX96 for poolID at or before
 	// blockNumber, or nil when the pool has no state snapshot at or below
-	// blockNumber.
-	PoolStateAtBlock(ctx context.Context, poolID int64, blockNumber int64) (*big.Int, error)
+	// blockNumber. blockTimestamp is the caller's block's own timestamp, used
+	// only to bound the hypertable scan (see poolStateAtBlockSQL); it is not
+	// poolID's timestamp.
+	PoolStateAtBlock(ctx context.Context, poolID int64, blockNumber int64, blockTimestamp time.Time) (*big.Int, error)
 }

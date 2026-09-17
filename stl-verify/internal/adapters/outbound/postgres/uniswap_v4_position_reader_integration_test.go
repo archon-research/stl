@@ -22,12 +22,14 @@ import (
 // uniswap_v4_repository_integration_test.go.
 
 const (
-	uniswapV4RepoValuationHeldChainID    = 490026
-	uniswapV4RepoValuationPosChainID     = 490027
-	uniswapV4RepoValuationStateChainID   = 490028
-	uniswapV4RepoValuationIsolationChID  = 490029
-	uniswapV4RepoValuationIsolationChID2 = 490030
-	uniswapV4RepoValuationOrphanChID     = 490031
+	uniswapV4RepoValuationHeldChainID      = 490026
+	uniswapV4RepoValuationPosChainID       = 490027
+	uniswapV4RepoValuationStateChainID     = 490028
+	uniswapV4RepoValuationIsolationChID    = 490029
+	uniswapV4RepoValuationIsolationChID2   = 490030
+	uniswapV4RepoValuationOrphanChID       = 490031
+	uniswapV4RepoValuationSameBlockChID    = 490032
+	uniswapV4RepoValuationStateForwardChID = 490033
 )
 
 func uniswapV4TokenIDSetEqual(got []*big.Int, want ...*big.Int) bool {
@@ -194,6 +196,50 @@ func TestUniswapV4Repository_HeldTokenIDsAtBlock_ChainIsolation(t *testing.T) {
 	}
 }
 
+// TestUniswapV4Repository_HeldTokenIDsAtBlock_SameBlockTransferInAndOut targets
+// this PR's own candidates CTE (not the older holderOfUniswapV4Token helper
+// tested elsewhere): a mint and a same-block move must resolve by
+// (block_number, block_version, log_index, processing_version) DESC, not by
+// block_number alone, or the mint's later-in-scan row would win.
+func TestUniswapV4Repository_HeldTokenIDsAtBlock_SameBlockTransferInAndOut(t *testing.T) {
+	ctx := context.Background()
+	chainID := uniswapV4RepoValuationSameBlockChID
+	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(chainID))
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, chainID)
+
+	walletA := common.HexToAddress("0x00000000000000000000000000000000FFFFF1")
+	walletB := common.HexToAddress("0x00000000000000000000000000000000FFFFF2")
+	tokenID := int64(9001)
+	const blockNumber = int64(400)
+
+	repo := newUniswapV4Repo(t)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		transfers := []*entity.UniswapV4PositionNFTTransfer{
+			newUniswapV4RepoNFTTransfer(managerID, blockNumber, 0, 1, tokenID, common.Address{}, walletA),
+			newUniswapV4RepoNFTTransfer(managerID, blockNumber, 0, 2, tokenID, walletA, walletB),
+		}
+		if _, err := repo.SaveNFTTransfers(ctx, tx, transfers); err != nil {
+			t.Fatalf("SaveNFTTransfers: %v", err)
+		}
+	})
+
+	gotB, err := repo.HeldTokenIDsAtBlock(ctx, int64(chainID), walletB, blockNumber)
+	if err != nil {
+		t.Fatalf("HeldTokenIDsAtBlock walletB: %v", err)
+	}
+	if !uniswapV4TokenIDSetEqual(gotB, big.NewInt(tokenID)) {
+		t.Errorf("walletB held at block %d = %v, want [%d]: the later log_index must win within the same block", blockNumber, gotB, tokenID)
+	}
+
+	gotA, err := repo.HeldTokenIDsAtBlock(ctx, int64(chainID), walletA, blockNumber)
+	if err != nil {
+		t.Fatalf("HeldTokenIDsAtBlock walletA: %v", err)
+	}
+	if len(gotA) != 0 {
+		t.Errorf("walletA held at block %d = %v, want none: the mint must not outrank the same-block move", blockNumber, gotA)
+	}
+}
+
 // TestUniswapV4Repository_PositionForTokenAtBlock_ResolvesAcrossPoolsAndAtBlock
 // is the other half of the posm identity: a token id names no pool, so the
 // read must search every pool on the chain, and it must answer "as of block
@@ -313,6 +359,56 @@ func TestUniswapV4Repository_PositionForTokenAtBlock_ChainIsolation(t *testing.T
 	}
 }
 
+// TestUniswapV4Repository_PositionForTokenAtBlock_ResolvesSupersededPoolForward
+// is the VEC-829 registry-correction scenario: a position row written while
+// the pool was at processing_version=0 must still resolve, and must resolve
+// to the CURRENT surrogate id (the one LoadPools' poolsByID map holds after a
+// processing_version=1 correction), not the retired one it was written
+// against. Without currentUniswapV4PoolCTE this position would be reported
+// as belonging to a pool "absent from the chain's current pool registry"
+// forever (source_univ4.go's positionValue).
+func TestUniswapV4Repository_PositionForTokenAtBlock_ResolvesSupersededPoolForward(t *testing.T) {
+	ctx := context.Background()
+	chainID := uniswapV4RepoSupersededChainID
+	mgr := newUniswapV4RepoManagerFixture(chainID)
+	seedUniswapV4RepoPoolManager(t, ctx, mgr)
+
+	fixture := newUniswapV4RepoPoolFixture(t, ctx, chainID, 0x4c)
+	supersededID := seedUniswapV4RepoPool(t, ctx, fixture)
+
+	tokenID := big.NewInt(4747)
+	key := entity.UniswapV4PositionKey{Owner: mgr.positionManager, TickLower: -60, TickUpper: 60, Salt: common.BigToHash(tokenID)}
+
+	repo := newUniswapV4Repo(t)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := repo.SavePositions(ctx, tx, []*entity.UniswapV4Position{
+			newUniswapV4TestPosition(supersededID, key, 100, 0, defaultUniswapV4PositionValues()),
+		}); err != nil {
+			t.Fatalf("SavePositions: %v", err)
+		}
+	})
+
+	// The registry correction: same (chain_id, pool_id), a new build_id, hence
+	// a new processing_version and a new surrogate id.
+	fixture.buildID = 1
+	fixture.deployBlock = 2
+	currentID := seedUniswapV4RepoPool(t, ctx, fixture)
+	if currentID == supersededID {
+		t.Fatalf("the corrected pool reused id %d; the fixture did not append a new version", currentID)
+	}
+
+	got, err := repo.PositionForTokenAtBlock(ctx, int64(chainID), mgr.positionManager, tokenID, 200)
+	if err != nil {
+		t.Fatalf("PositionForTokenAtBlock: %v", err)
+	}
+	if got == nil {
+		t.Fatal("got nil, want the position to still resolve after the registry correction")
+	}
+	if got.PoolID != currentID {
+		t.Errorf("PoolID = %d, want the CURRENT surrogate %d (the superseded %d must resolve forward)", got.PoolID, currentID, supersededID)
+	}
+}
+
 // TestUniswapV4Repository_PoolStateAtBlock_ReturnsLatestAtOrBefore locks the
 // same "value as of a point" convention readLatestPositionsV4 uses.
 func TestUniswapV4Repository_PoolStateAtBlock_ReturnsLatestAtOrBefore(t *testing.T) {
@@ -358,7 +454,8 @@ func TestUniswapV4Repository_PoolStateAtBlock_ReturnsLatestAtOrBefore(t *testing
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := repo.PoolStateAtBlock(ctx, poolID, tc.blockNumber)
+			ts := time.Unix(1740000000+tc.blockNumber, 0).UTC()
+			got, err := repo.PoolStateAtBlock(ctx, poolID, tc.blockNumber, ts)
 			if err != nil {
 				t.Fatalf("PoolStateAtBlock: %v", err)
 			}
@@ -368,12 +465,93 @@ func TestUniswapV4Repository_PoolStateAtBlock_ReturnsLatestAtOrBefore(t *testing
 		})
 	}
 
-	got, err := repo.PoolStateAtBlock(ctx, poolID, 50)
+	got, err := repo.PoolStateAtBlock(ctx, poolID, 50, time.Unix(1740000050, 0).UTC())
 	if err != nil {
 		t.Fatalf("PoolStateAtBlock(50): %v", err)
 	}
 	if got != nil {
 		t.Errorf("PoolStateAtBlock(50) = %s, want nil (before the pool's first snapshot)", got)
+	}
+}
+
+// TestUniswapV4Repository_PoolStateAtBlock_TimestampBandExcludesFarBlocks
+// locks the ±1 day block_timestamp band (VEC-541 chunk pruning): a
+// blockTimestamp far from the actual snapshot's own timestamp must not
+// answer with it, even though block_number <= blockNumber alone would match.
+func TestUniswapV4Repository_PoolStateAtBlock_TimestampBandExcludesFarBlocks(t *testing.T) {
+	ctx := context.Background()
+	chainID := uniswapV4RepoValuationStateChainID
+	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(chainID))
+	poolID := seedUniswapV4RepoPool(t, ctx, newUniswapV4RepoPoolFixture(t, ctx, chainID, 0xC9))
+
+	price := new(big.Int).Lsh(big.NewInt(1), 96)
+	repo := newUniswapV4Repo(t)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		writes := outbound.UniswapV4BlockWrites{States: []*entity.UniswapV4PoolState{{
+			PoolID: poolID, BlockNumber: 100, BlockTimestamp: time.Unix(1740000000, 0).UTC(),
+			SqrtPriceX96: price, Tick: 0, LpFee: 3000, Liquidity: big.NewInt(1000),
+			FeeGrowthGlobal0X128: big.NewInt(0), FeeGrowthGlobal1X128: big.NewInt(0),
+		}}}
+		if _, err := repo.SaveBlock(ctx, tx, writes); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+
+	// The caller's blockTimestamp is 30 days after the snapshot's own
+	// timestamp; block_number <= 200 still matches, so only the band excludes it.
+	got, err := repo.PoolStateAtBlock(ctx, poolID, 200, time.Unix(1740000000+30*86400, 0).UTC())
+	if err != nil {
+		t.Fatalf("PoolStateAtBlock: %v", err)
+	}
+	if got != nil {
+		t.Errorf("PoolStateAtBlock = %s, want nil: a blockTimestamp 30 days out must miss the snapshot's chunk", got)
+	}
+}
+
+// TestUniswapV4Repository_PoolStateAtBlock_ResolvesSupersededPoolForward is
+// PoolStateAtBlock's half of the VEC-829 registry-correction scenario:
+// PositionForTokenAtBlock now returns the pool's CURRENT surrogate id (see
+// TestUniswapV4Repository_PositionForTokenAtBlock_ResolvesSupersededPoolForward),
+// so PoolStateAtBlock must forward-map too, or a just-corrected pool with no
+// state of its own yet would report "no state snapshot" even though the
+// superseded id's state answers the same question.
+func TestUniswapV4Repository_PoolStateAtBlock_ResolvesSupersededPoolForward(t *testing.T) {
+	ctx := context.Background()
+	chainID := uniswapV4RepoValuationStateForwardChID
+	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(chainID))
+
+	fixture := newUniswapV4RepoPoolFixture(t, ctx, chainID, 0xE1)
+	supersededID := seedUniswapV4RepoPool(t, ctx, fixture)
+
+	price := new(big.Int).Lsh(big.NewInt(5), 96)
+	repo := newUniswapV4Repo(t)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		writes := outbound.UniswapV4BlockWrites{States: []*entity.UniswapV4PoolState{{
+			PoolID: supersededID, BlockNumber: 100, BlockTimestamp: time.Unix(1740000100, 0).UTC(),
+			SqrtPriceX96: price, Tick: 0, LpFee: 3000, Liquidity: big.NewInt(1000),
+			FeeGrowthGlobal0X128: big.NewInt(0), FeeGrowthGlobal1X128: big.NewInt(0),
+		}}}
+		if _, err := repo.SaveBlock(ctx, tx, writes); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+
+	// The registry correction, same shape as the position-side test: same
+	// (chain_id, pool_id), a new build_id, hence a new surrogate id with no
+	// uniswap_v4_pool_state rows of its own.
+	fixture.buildID = 1
+	fixture.deployBlock = 2
+	currentID := seedUniswapV4RepoPool(t, ctx, fixture)
+	if currentID == supersededID {
+		t.Fatalf("the corrected pool reused id %d; the fixture did not append a new version", currentID)
+	}
+
+	got, err := repo.PoolStateAtBlock(ctx, currentID, 200, time.Unix(1740000100, 0).UTC())
+	if err != nil {
+		t.Fatalf("PoolStateAtBlock: %v", err)
+	}
+	if got == nil || got.Cmp(price) != 0 {
+		t.Errorf("PoolStateAtBlock(currentID=%d) = %v, want %s: state written under the superseded id %d must resolve forward", currentID, got, price, supersededID)
 	}
 }
 
@@ -402,7 +580,7 @@ func TestUniswapV4Repository_PoolStateAtBlock_ChainIsolation(t *testing.T) {
 		}
 	})
 
-	gotB, err := repo.PoolStateAtBlock(ctx, poolB, 200)
+	gotB, err := repo.PoolStateAtBlock(ctx, poolB, 200, time.Unix(1740000200, 0).UTC())
 	if err != nil {
 		t.Fatalf("PoolStateAtBlock poolB: %v", err)
 	}

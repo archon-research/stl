@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -76,7 +77,7 @@ func (s *UniV4Source) FetchBalances(
 		return nil, err
 	}
 
-	blockNumber, err := s.resolveBlockNumber(ctx, blockHash)
+	blockNumber, blockTimestamp, err := s.resolveBlockCoordinates(ctx, blockHash)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +88,7 @@ func (s *UniV4Source) FetchBalances(
 	}
 
 	for chain, chainEntries := range byChain {
-		if err := s.fetchChainBalances(ctx, chain, chainEntries, blockNumber, result.Balances); err != nil {
+		if err := s.fetchChainBalances(ctx, chain, chainEntries, blockNumber, blockTimestamp, result.Balances); err != nil {
 			return nil, fmt.Errorf("fetch V4 balances for chain %s: %w", chain, err)
 		}
 	}
@@ -109,23 +110,25 @@ func validateUniV4Entries(entries []*TokenEntry) error {
 	return nil
 }
 
-// resolveBlockNumber looks blockHash up in block_states. The allocation
+// resolveBlockCoordinates looks blockHash up in block_states. The allocation
 // tracker only ever calls a source with the block it is currently processing
 // (a just-consumed live event or a sweep of the chain's current head), never
 // an arbitrarily old replay, so the hash is always well within the 30-day
-// window block_states retains (see docs/runbooks/vector-indexers.md).
-func (s *UniV4Source) resolveBlockNumber(ctx context.Context, blockHash common.Hash) (int64, error) {
+// window block_states retains (see docs/runbooks/vector-indexers.md). The
+// timestamp is returned alongside the number because PoolStateAtBlock needs
+// it to prune uniswap_v4_pool_state's hypertable chunks (VEC-541).
+func (s *UniV4Source) resolveBlockCoordinates(ctx context.Context, blockHash common.Hash) (int64, time.Time, error) {
 	state, err := s.blockState.GetBlockByHash(ctx, blockHash.Hex())
 	if err != nil {
-		return 0, fmt.Errorf("resolve block number for hash %s: %w", blockHash.Hex(), err)
+		return 0, time.Time{}, fmt.Errorf("resolve block number for hash %s: %w", blockHash.Hex(), err)
 	}
 	if state == nil {
-		return 0, fmt.Errorf(
+		return 0, time.Time{}, fmt.Errorf(
 			"block hash %s not found in block_states; cannot resolve a block number for the uni-v4 read",
 			blockHash.Hex(),
 		)
 	}
-	return state.Number, nil
+	return state.Number, time.Unix(state.BlockTimestamp, 0).UTC(), nil
 }
 
 // fetchChainBalances handles every entry for a single chain: it resolves the
@@ -138,6 +141,7 @@ func (s *UniV4Source) fetchChainBalances(
 	chain string,
 	entries []*TokenEntry,
 	blockNumber int64,
+	blockTimestamp time.Time,
 	result map[EntryKey]*PositionBalance,
 ) error {
 	chainID, ok := chainIDForName(chain)
@@ -164,7 +168,7 @@ func (s *UniV4Source) fetchChainBalances(
 	for _, entry := range entries {
 		value := new(big.Int)
 		if len(pools) > 0 {
-			value, err = s.entryValue(ctx, chainID, positionManager, entry, blockNumber, poolsByID)
+			value, err = s.entryValue(ctx, chainID, positionManager, entry, blockNumber, blockTimestamp, poolsByID)
 			if err != nil {
 				return err
 			}
@@ -188,6 +192,7 @@ func (s *UniV4Source) entryValue(
 	positionManager common.Address,
 	entry *TokenEntry,
 	blockNumber int64,
+	blockTimestamp time.Time,
 	poolsByID map[int64]outbound.UniswapV4PoolRow,
 ) (*big.Int, error) {
 	tokenIDs, err := s.reader.HeldTokenIDsAtBlock(ctx, chainID, entry.WalletAddress, blockNumber)
@@ -197,7 +202,7 @@ func (s *UniV4Source) entryValue(
 
 	total := new(big.Int)
 	for _, tokenID := range tokenIDs {
-		value, err := s.positionValue(ctx, chainID, positionManager, entry, tokenID, blockNumber, poolsByID)
+		value, err := s.positionValue(ctx, chainID, positionManager, entry, tokenID, blockNumber, blockTimestamp, poolsByID)
 		if err != nil {
 			return nil, err
 		}
@@ -218,6 +223,7 @@ func (s *UniV4Source) positionValue(
 	entry *TokenEntry,
 	tokenID *big.Int,
 	blockNumber int64,
+	blockTimestamp time.Time,
 	poolsByID map[int64]outbound.UniswapV4PoolRow,
 ) (*big.Int, error) {
 	position, err := s.reader.PositionForTokenAtBlock(ctx, chainID, positionManager, tokenID, blockNumber)
@@ -227,6 +233,16 @@ func (s *UniV4Source) positionValue(
 	if position == nil {
 		return nil, fmt.Errorf(
 			"posm token %s held by %s has no indexed position at or before block %d",
+			tokenID, entry.WalletAddress.Hex(), blockNumber,
+		)
+	}
+	// The sole adapter never returns a Liquidity-less snapshot (its NOT-NULL
+	// guard rejects one at scan time), but UniswapV4PositionSnapshot's
+	// zero-value is legal Go and .Sign() below nil-panics on it, so a second
+	// adapter or a test double with a gap here fails loud instead.
+	if position.Liquidity == nil {
+		return nil, fmt.Errorf(
+			"posm position for token %s held by %s decoded with nil Liquidity at or before block %d",
 			tokenID, entry.WalletAddress.Hex(), blockNumber,
 		)
 	}
@@ -242,7 +258,7 @@ func (s *UniV4Source) positionValue(
 		)
 	}
 
-	sqrtPriceX96, err := s.reader.PoolStateAtBlock(ctx, position.PoolID, blockNumber)
+	sqrtPriceX96, err := s.reader.PoolStateAtBlock(ctx, position.PoolID, blockNumber, blockTimestamp)
 	if err != nil {
 		return nil, fmt.Errorf("pool state for pool %d: %w", position.PoolID, err)
 	}

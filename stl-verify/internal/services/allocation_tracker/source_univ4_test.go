@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -108,7 +109,7 @@ func (f *fakeV4Reader) PositionForTokenAtBlock(
 	return &p, nil
 }
 
-func (f *fakeV4Reader) PoolStateAtBlock(ctx context.Context, poolID int64, blockNumber int64) (*big.Int, error) {
+func (f *fakeV4Reader) PoolStateAtBlock(ctx context.Context, poolID int64, blockNumber int64, blockTimestamp time.Time) (*big.Int, error) {
 	if f.poolStateErr != nil {
 		return nil, f.poolStateErr
 	}
@@ -429,6 +430,23 @@ func TestUniV4Source_FetchBalances_MissingIndexedPosition_Error(t *testing.T) {
 	_, err := src.FetchBalances(context.Background(), []*TokenEntry{v4Entry("uni_v4_lp", &v4HintAsset)}, v4BlockHash)
 	if err == nil {
 		t.Fatal("expected error for a held token with no indexed position")
+	}
+}
+
+// TestUniV4Source_FetchBalances_NilLiquidityPosition_Error guards the
+// UniswapV4PositionSnapshot zero-value risk: a reader returning a position
+// with a nil Liquidity (the sole adapter never does; a future one or a test
+// double might) must fail loud rather than nil-panic on .Sign().
+func TestUniV4Source_FetchBalances_NilLiquidityPosition_Error(t *testing.T) {
+	reader := newFakeV4ReaderWithPool(t, v4DefaultPool())
+	reader.setHeld(v4ChainID, v4Wallet, v4TokenIDOne)
+	reader.setPosition(v4ChainID, v4PositionManagerAddr, v4TokenIDOne, outbound.UniswapV4PositionSnapshot{
+		PoolID: 10, TickLower: v4FullRangeL, TickUpper: v4FullRangeU, Liquidity: nil,
+	})
+	src := NewUniV4Source(reader, newV4BlockState(t, v4BlockHash, v4BlockNum), quietLogger())
+	_, err := src.FetchBalances(context.Background(), []*TokenEntry{v4Entry("uni_v4_lp", &v4HintAsset)}, v4BlockHash)
+	if err == nil {
+		t.Fatal("expected error for a position snapshot with nil Liquidity")
 	}
 }
 

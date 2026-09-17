@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
@@ -86,11 +87,17 @@ func (r *UniswapV4Repository) HeldTokenIDsAtBlock(ctx context.Context, chainID i
 // positionForTokenAtBlockSQL searches every pool on chainID because a posm
 // token id does not name its pool; salt = bytes32(tokenID) is the caller's
 // discriminator and, combined with owner = the PositionManager, identifies
-// the position uniquely regardless of which pool it belongs to.
-const positionForTokenAtBlockSQL = `
-	SELECT pos.pool_id, pos.tick_lower, pos.tick_upper, pos.liquidity
+// the position uniquely regardless of which pool it belongs to. It returns
+// cur.id, the pool's CURRENT registry surrogate, rather than pos.pool_id: an
+// old position row keeps pointing at whatever surrogate was current when it
+// was written, and a later registry correction (currentUniswapV4PoolCTE)
+// would otherwise leave that position resolving to a retired id absent from
+// LoadPools' poolsByID map.
+const positionForTokenAtBlockSQL = currentUniswapV4PoolCTE + `
+	SELECT cur.id, pos.tick_lower, pos.tick_upper, pos.liquidity
 	FROM uniswap_v4_position pos
 	JOIN uniswap_v4_pool p ON p.id = pos.pool_id
+	JOIN cur ON cur.chain_id = p.chain_id AND cur.pool_id = p.pool_id
 	WHERE p.chain_id = $1
 	  AND pos.owner = $2
 	  AND pos.salt = $3
@@ -140,19 +147,34 @@ func (r *UniswapV4Repository) PositionForTokenAtBlock(
 }
 
 // poolStateAtBlockSQL takes the latest row at or below blockNumber, the same
-// "value as of a point" convention as readLatestPositionsV4.
-const poolStateAtBlockSQL = `
-	SELECT sqrt_price_x96
-	FROM uniswap_v4_pool_state
-	WHERE pool_id = $1 AND block_number <= $2
-	ORDER BY block_number DESC, block_version DESC, processing_version DESC
+// "value as of a point" convention as readLatestPositionsV4. The ±1 day
+// block_timestamp band is what prunes chunks on this hypertable; this runs
+// once per held token per processed block (the hot path, not a boot-time
+// read), so filtering on block_number alone would scan every chunk on each
+// call (VEC-541), mirroring poolIDsWithStateAtBlockSQL. It also forward-maps
+// through currentUniswapV4PoolCTE like the sibling reads: poolID here is
+// PositionForTokenAtBlock's CURRENT surrogate, but the state rows for the
+// position's held-since block may still sit under a superseded surrogate
+// written before the registry correction, so a direct pool_id = $1 match
+// would find nothing for a just-corrected pool that has no state of its own
+// yet.
+const poolStateAtBlockSQL = currentUniswapV4PoolCTE + `
+	SELECT s.sqrt_price_x96
+	FROM uniswap_v4_pool_state s
+	JOIN uniswap_v4_pool p ON p.id = s.pool_id
+	JOIN cur ON cur.chain_id = p.chain_id AND cur.pool_id = p.pool_id
+	WHERE cur.id = $1
+	  AND s.block_number <= $2
+	  AND s.block_timestamp BETWEEN $3::timestamptz - INTERVAL '1 day'
+	                            AND $3::timestamptz + INTERVAL '1 day'
+	ORDER BY s.block_number DESC, s.block_version DESC, s.processing_version DESC
 	LIMIT 1`
 
 // PoolStateAtBlock returns nil, nil when poolID has no state snapshot at or
 // below blockNumber.
-func (r *UniswapV4Repository) PoolStateAtBlock(ctx context.Context, poolID int64, blockNumber int64) (*big.Int, error) {
+func (r *UniswapV4Repository) PoolStateAtBlock(ctx context.Context, poolID int64, blockNumber int64, blockTimestamp time.Time) (*big.Int, error) {
 	var raw pgtype.Numeric
-	err := r.pool.QueryRow(ctx, poolStateAtBlockSQL, poolID, blockNumber).Scan(&raw)
+	err := r.pool.QueryRow(ctx, poolStateAtBlockSQL, poolID, blockNumber, blockTimestamp).Scan(&raw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
