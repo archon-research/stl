@@ -81,7 +81,7 @@ type OracleAsset struct {
 	Enabled       bool
 	FeedAddress   common.Address // zero for aave_oracle; the feed contract address for feed oracles
 	FeedDecimals  int            // 0 for aave_oracle; falls back to oracle.PriceDecimals
-	QuoteCurrency QuoteCurrency  // "USD" (default), "ETH", or "BTC"
+	QuoteCurrency QuoteCurrency  // "USD" by default
 	CreatedAt     time.Time
 }
 

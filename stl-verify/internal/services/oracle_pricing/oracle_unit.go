@@ -17,13 +17,17 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// quoteCurrencyTokenAddr maps quote currencies to their well-known token
-// addresses per chain, used for reference feed identification.
-var quoteCurrencyTokenAddr = map[int64]map[string]common.Address{
+// quoteCurrencyTokenAddr maps each chain's quote currencies to the token address whose
+// USD feed serves as that currency's reference price.
+var quoteCurrencyTokenAddr = map[int64]map[entity.QuoteCurrency]common.Address{
 	1: {
-		"ETH":  common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH
-		"BTC":  common.HexToAddress("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"), // WBTC
-		"USDS": common.HexToAddress("0xdC035D45d973e3ec169d2276ddab16F1e407384F"), // USDS
+		entity.QuoteCurrencyETH:  common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH
+		entity.QuoteCurrencyBTC:  common.HexToAddress("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"), // WBTC
+		entity.QuoteCurrencyUSDS: common.HexToAddress("0xdC035D45d973e3ec169d2276ddab16F1e407384F"), // USDS
+	},
+	8453: {
+		entity.QuoteCurrencyETH:  common.HexToAddress("0x4200000000000000000000000000000000000006"), // WETH
+		entity.QuoteCurrencyUSDS: common.HexToAddress("0x820c137fa70c8691f0e44dc420a5e53c168921dc"), // USDS
 	},
 }
 
@@ -404,9 +408,8 @@ func validateRefFeeds(nonUSDFeeds map[int]string, refFeedIdx map[string]int, ora
 	return fmt.Errorf("oracle %s: missing USD reference feeds for currencies: %v", oracleName, missing)
 }
 
-// buildRefFeedIdx identifies which feeds serve as USD-denominated reference prices
-// for non-USD quote currencies. It matches token addresses against well-known
-// WETH/WBTC addresses to find feeds that provide ETH/USD and BTC/USD.
+// buildRefFeedIdx pairs each quote currency with the USD feed that prices it, matching
+// feed token addresses against quoteCurrencyTokenAddr[chainID], and lists the non-USD feeds.
 func buildRefFeedIdx(feeds []blockchain.FeedConfig, tokenAddrs map[int64]common.Address, chainID int64) (map[string]int, map[int]string) {
 	refFeedIdx := make(map[string]int)
 	nonUSDFeeds := make(map[int]string)
@@ -424,7 +427,7 @@ func buildRefFeedIdx(feeds []blockchain.FeedConfig, tokenAddrs map[int64]common.
 		}
 		for currency, refAddr := range chainRefs {
 			if addr == refAddr {
-				refFeedIdx[currency] = i
+				refFeedIdx[string(currency)] = i
 			}
 		}
 	}

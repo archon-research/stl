@@ -857,7 +857,9 @@ func Test_buildRefFeedIdx(t *testing.T) {
 	wbtcAddr := common.HexToAddress("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599")
 	daiAddr := common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F")
 	usdsAddr := common.HexToAddress("0xdC035D45d973e3ec169d2276ddab16F1e407384F")
+	susdsAddr := common.HexToAddress("0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD")
 	baseWethAddr := common.HexToAddress("0x4200000000000000000000000000000000000006")
+	baseUsdsAddr := common.HexToAddress("0x820c137fa70c8691f0e44dc420a5e53c168921dc")
 
 	tests := []struct {
 		name           string
@@ -942,19 +944,34 @@ func Test_buildRefFeedIdx(t *testing.T) {
 			},
 			tokenAddrs: map[int64]common.Address{
 				1: usdsAddr,
-				2: daiAddr,
+				2: susdsAddr,
 			},
 			wantRefFeedIdx: map[string]int{"USDS": 0},
 			wantNonUSD:     map[int]string{1: "USDS"},
 		},
 		{
-			name:    "Base WETH reference resolves per-chain address",
+			name:    "Base references resolve per-chain addresses",
 			chainID: 8453,
 			feeds: []blockchain.FeedConfig{
-				{TokenID: 1, QuoteCurrency: "USD"}, // WETH/USD (Base WETH)
+				{TokenID: 1, QuoteCurrency: "USD"},  // Base WETH/USD -> ref for ETH
+				{TokenID: 2, QuoteCurrency: "USD"},  // Base USDS/USD -> ref for USDS
+				{TokenID: 3, QuoteCurrency: "USDS"}, // Base sUSDS/USDS -> non-USD
 			},
 			tokenAddrs: map[int64]common.Address{
 				1: baseWethAddr,
+				2: baseUsdsAddr,
+			},
+			wantRefFeedIdx: map[string]int{"ETH": 0, "USDS": 1},
+			wantNonUSD:     map[int]string{2: "USDS"},
+		},
+		{
+			name:    "mainnet WETH is not a reference on Base",
+			chainID: 8453,
+			feeds: []blockchain.FeedConfig{
+				{TokenID: 1, QuoteCurrency: "USD"},
+			},
+			tokenAddrs: map[int64]common.Address{
+				1: wethAddr,
 			},
 			wantRefFeedIdx: map[string]int{},
 			wantNonUSD:     map[int]string{},
