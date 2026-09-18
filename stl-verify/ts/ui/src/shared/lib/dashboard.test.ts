@@ -63,7 +63,6 @@ function makeAllocation(overrides: Partial<Allocation> = {}): Allocation {
     balance: '1',
     category: 'allocation',
     chain_id: 1,
-    scope: 'proxy',
     source: 'indexed',
     symbol: 'WETH',
     underlying_symbol: 'WETH',
@@ -658,16 +657,12 @@ describe('groupPrimesByVault', () => {
     expect(group?.proxyAddresses).toEqual(['0xaaaa']);
   });
 
-  it('prefers the mainnet proxy as the primary even when it arrives last', () => {
+  it('addresses every prime-scoped read to the prime, not one of its proxies', () => {
+    // Picking a proxy was how a prime-wide figure was asked for before the API
+    // answered whole-prime from any of its identifiers.
     const [group] = groupPrimesByVault([avalancheRow, baseRow, mainnetRow]);
 
-    expect(group?.primaryProxyAddress).toBe('0xffff');
-  });
-
-  it('falls back to the lowest proxy address when the prime is not on mainnet', () => {
-    const [group] = groupPrimesByVault([baseRow, avalancheRow]);
-
-    expect(group?.primaryProxyAddress).toBe('0xbbbb');
+    expect(group?.primeId).toBe(group?.name);
   });
 
   it('keeps a prime with no vault address as its own group keyed on its name', () => {

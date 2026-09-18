@@ -15,10 +15,13 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 from app.domain.entities.allocation import EthAddress
+from app.domain.prime_registry import ProxyKind
 from app.services.allocation_service import AllocationService
+from tests.factories import make_prime_scope, make_proxy_wallet
 
 V1 = EthAddress("0x" + "a" * 40)
 P1 = EthAddress("0x" + "b" * 40)
+SPARK = make_prime_scope(wallets=(make_proxy_wallet(address=P1, kind=ProxyKind.ALM),)).alm_proxies
 
 
 def _service() -> tuple[AllocationService, AsyncMock]:
@@ -28,12 +31,11 @@ def _service() -> tuple[AllocationService, AsyncMock]:
 
 async def test_allowed_vaults_reach_the_repository_query():
     svc, repo = _service()
-    repo.list_prime_proxy_addresses.return_value = [P1]
     repo.list_allocation_activity.return_value = []
-    await svc.list_allocation_activity(prime_id=P1, limit=50, allowed_vaults=[V1])
+    await svc.list_allocation_activity(proxy_addresses=SPARK, limit=50, allowed_vaults=[V1])
     kwargs = repo.list_allocation_activity.await_args.kwargs
     assert kwargs["allowed_vaults"] == [V1]  # into the SQL WHERE, pre-LIMIT
-    assert kwargs["proxy_addresses"] == [P1]  # the prime filter stays independent
+    assert kwargs["proxy_addresses"] == (P1,)  # the prime filter stays independent
     assert kwargs["limit"] == 50
 
 
@@ -66,9 +68,9 @@ FROM = datetime(2026, 1, 1, tzinfo=UTC)
 TO = datetime(2026, 1, 2, tzinfo=UTC)
 
 
-async def _buckets(svc: AllocationService, allowed: list[EthAddress] | None, prime: EthAddress | None = None) -> None:
+async def _buckets(svc: AllocationService, allowed: list[EthAddress] | None, prime=None) -> None:
     await svc.list_activity_buckets(
-        prime_id=prime,
+        proxy_addresses=prime,
         allowed_vaults=allowed,
         from_timestamp=FROM,
         to_timestamp=TO,
@@ -78,12 +80,11 @@ async def _buckets(svc: AllocationService, allowed: list[EthAddress] | None, pri
 
 async def test_bucket_allowed_vaults_reach_the_repository_query():
     svc, repo = _service()
-    repo.list_prime_proxy_addresses.return_value = [P1]
     repo.list_activity_buckets.return_value = []
-    await _buckets(svc, [V1], prime=P1)
+    await _buckets(svc, [V1], prime=SPARK)
     kwargs = repo.list_activity_buckets.await_args.kwargs
     assert kwargs["allowed_vaults"] == [V1]  # bounds the rows the SUM covers
-    assert kwargs["proxy_addresses"] == [P1]
+    assert kwargs["proxy_addresses"] == (P1,)
 
 
 async def test_bucket_empty_allowed_set_is_passed_through_not_dropped():

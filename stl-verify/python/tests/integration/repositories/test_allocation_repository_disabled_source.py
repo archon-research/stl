@@ -76,7 +76,7 @@ async def repo_while_live(async_db_url: str):
 @pytest.mark.asyncio
 async def test_receipt_positions_exclude_disabled_higher_block_source(repo) -> None:
     """list_receipt_token_positions values the position at the enabled source's lower-block price."""
-    positions = await repo.list_receipt_token_positions(_RECEIPT_PRIME)
+    positions = await repo.list_receipt_token_positions([_RECEIPT_PRIME])
     position = {p.symbol: p for p in positions}.get("disReceipt")
     assert position is not None
     assert position.amount_usd == _EXPECTED_RECEIPT_USD
@@ -85,7 +85,7 @@ async def test_receipt_positions_exclude_disabled_higher_block_source(repo) -> N
 @pytest.mark.asyncio
 async def test_direct_holdings_exclude_disabled_higher_block_source(repo) -> None:
     """list_direct_asset_holdings values the bare holding at the enabled source's lower-block price."""
-    holding = {h.symbol: h for h in await repo.list_direct_asset_holdings(_DIRECT_PRIME)}.get("disDirect")
+    holding = {h.symbol: h for h in await repo.list_direct_asset_holdings([_DIRECT_PRIME])}.get("disDirect")
     assert holding is not None
     assert holding.amount_usd == _EXPECTED_DIRECT_USD
 
@@ -128,7 +128,7 @@ async def test_receipt_positions_include_the_source_that_was_live_at_the_effecti
     ORACLE_ASSET_WHILE_LIVE is still queryable — the reference view a calculation from that
     date used is recoverable, which an in-place toggle destroyed.
     """
-    positions = await repo_while_live.list_receipt_token_positions(_RECEIPT_PRIME)
+    positions = await repo_while_live.list_receipt_token_positions([_RECEIPT_PRIME])
     position = {p.symbol: p for p in positions}.get("disReceipt")
     assert position is not None
     assert position.amount_usd == _EXPECTED_RECEIPT_USD_WHILE_LIVE
@@ -139,7 +139,7 @@ async def test_direct_holdings_include_the_source_that_was_live_at_the_effective
     repo_while_live,
 ) -> None:
     """list_direct_asset_holdings values the holding at the then-live source's price."""
-    holdings = await repo_while_live.list_direct_asset_holdings(_DIRECT_PRIME)
+    holdings = await repo_while_live.list_direct_asset_holdings([_DIRECT_PRIME])
     holding = {h.symbol: h for h in holdings}.get("disDirect")
     assert holding is not None
     assert holding.amount_usd == _EXPECTED_DIRECT_USD_WHILE_LIVE

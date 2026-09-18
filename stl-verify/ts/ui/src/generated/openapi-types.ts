@@ -93,7 +93,7 @@ export interface paths {
     };
     /**
      * List a prime's current allocations
-     * @description Return every current allocation held by the given prime — receipt-token positions (enriched with USD value when a price is available), direct asset holdings (tokens held in the proxy with no registered receipt-token wrapper, surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` set to `null`, and `amount_usd` valued from the token's oracle price when one exists), and off-chain Anchorage BTC custody (chain_id 0, `protocol_name` `anchorage`, `amount_usd` the loan drawn against the collateral). Each row includes the latest activity timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset` / `custody`). Rows are proxy-scoped except the Anchorage custody leg, which is prime-scoped and returned only under the one proxy of the prime that carries its prime-scoped rows (its mainnet proxy when indexed, else its lowest-addressed one) — see the `scope` field.
+     * @description Return every current allocation held by the given prime — receipt-token positions (enriched with USD value when a price is available), direct asset holdings (tokens held in the proxy with no registered receipt-token wrapper, surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` set to `null`, and `amount_usd` valued from the token's oracle price when one exists), and off-chain Anchorage BTC custody (chain_id 0, `protocol_name` `anchorage`, `amount_usd` the loan drawn against the collateral). Each row includes the latest activity timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset` / `custody`). The rows are the whole prime's whichever of its identifiers you pass: on-chain positions are the union across its ALM proxies, and the Anchorage custody leg is counted once.
      *
      *     Under `source=reference` (and the reference half of `source=both`) the rows are Sky's published balance sheet instead: every position the prime holds, prime-scoped, with `amount_usd` carrying upstream's `assets`. That is the same measurement as the indexed rows' `amount_usd`, so the two halves of `both` are comparable — deliberately not the Star monitor's risk-capital breakdown, whose `exposure` covers only the priced subset and runs about a third smaller. These rows carry no `balance` and no activity fields, which upstream does not publish, and a `reference_synced_at` naming the sync cycle they were observed at rather than implying they are current. `underlying_*` are populated when the position resolves to STL's receipt-token registry (the feed itself names no underlying) and `null`/empty otherwise.
      */
@@ -768,12 +768,6 @@ export interface components {
        */
       log_index: number;
       /**
-       * Prime Address
-       * @description 0x-prefixed ALM proxy address the event occurred on.
-       * @example 0x1234567890abcdef1234567890abcdef12345678
-       */
-      prime_address: string;
-      /**
        * Prime Name
        * @description Human-readable prime name.
        * @example Acme Prime
@@ -853,7 +847,6 @@ export interface components {
      *       "protocol_name": "aave-v3",
      *       "receipt_token_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
      *       "receipt_token_id": 42,
-     *       "scope": "proxy",
      *       "symbol": "aUSDC",
      *       "underlying_symbol": "USDC",
      *       "underlying_token_address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
@@ -951,14 +944,6 @@ export interface components {
        */
       reference_synced_at?: string | null;
       /**
-       * Scope
-       * @description Whether the row belongs to the queried proxy (`proxy`) or to the prime as a whole (`prime`). A `prime`-scoped row is served under the prime's primary proxy only, so unioning a prime's proxies never double-counts it.
-       * @default proxy
-       * @example proxy
-       * @enum {string}
-       */
-      scope: 'proxy' | 'prime';
-      /**
        * @description Which provenance reported this position. `both` means the two agreed it exists and the figures shown are STL's; `reference` means only Sky reports it, which is either a position STL does not index or one on a chain it does not serve.
        * @default indexed
        */
@@ -989,7 +974,7 @@ export interface components {
       underlying_token_id?: number | null;
       /**
        * Wallet Address
-       * @description The ALM proxy holding this position, as upstream reports it. Populated on reference rows only, and `null` there where several of a prime's proxies hold the position: upstream reports those per wallet and they are served as one summed row. Also `null` on an indexed row, which is already scoped to a single queried proxy.
+       * @description The ALM proxy holding this position, as upstream reports it. Populated on reference rows only, and `null` there where several of a prime's proxies hold the position: upstream reports those per wallet and they are served as one summed row. Also `null` on an indexed row: indexed results cover the whole prime and do not name a proxy.
        * @example 0x1234567890abcdef1234567890abcdef12345678
        */
       wallet_address?: string | null;
@@ -1618,7 +1603,7 @@ export interface components {
       name: string;
       /**
        * Prime Vault Address
-       * @description The owning prime's on-chain vault address — identical across every proxy of a prime, so consumers group rows by it. Prime-scoped: dedupe, never sum.
+       * @description The owning prime's on-chain vault address — identical across every proxy of a prime, so consumers group rows by it. This endpoint is the one place a prime's proxies are enumerated; every prime-scoped route answers whole-prime from any one of them.
        * @example 0x691a6c29e9e96dd897718305427ad5d534db16ba
        */
       prime_vault_address?: string | null;
@@ -2618,7 +2603,7 @@ export interface operations {
   list_allocation_activity_v1_allocations_activity_get: {
     parameters: {
       query?: {
-        /** @description Filter by prime address (0x-prefixed Ethereum address). */
+        /** @description Filter by prime, named by any of four forms: its **name** (preferred, e.g. `spark`), its vault address, or any of its ALM proxy or SubProxy addresses. The feed is the whole prime's: every one of its proxies' events, not the named wallet's alone. */
         prime_id?: string | null;
         /** @description Filter by EVM chain id. */
         chain_id?: number | null;
@@ -2769,7 +2754,7 @@ export interface operations {
       };
       header?: never;
       path: {
-        /** @description A prime's 0x-prefixed ALM **proxy** address on one chain — not a prime identifier. A prime allocates through one proxy per chain; list them via `GET /v1/primes` and group by `prime_vault_address`. */
+        /** @description A prime, named by any of four forms: its **name** (preferred, e.g. `spark`), its vault address, or any of its ALM proxy or SubProxy addresses. Addresses must carry the `0x` prefix. All four resolve to the same prime, silently and with no redirect. **Results are always whole-prime**: passing a proxy address returns the entire prime, including the chains that proxy has nothing to do with. */
         prime_id: string;
       };
       cookie?: never;

@@ -7,9 +7,9 @@
  * view switcher it begins before the click.
  *
  * What a loader cannot do here is shorten the chain. Every per-prime read is
- * addressed to an ALM proxy that only `/v1/primes` names, so the prime list is
- * ahead of them either way; moving them here removes the render-and-navigate
- * round trip stacked on top of that request, not the request.
+ * addressed to a prime that only `/v1/primes` names, so the prime list is ahead
+ * of them either way; moving them here removes the render-and-navigate round
+ * trip stacked on top of that request, not the request.
  *
  * Nothing below is awaited, which is the whole judgement: the one read worth
  * awaiting is the prime list, and awaiting it trades the shell's skeletons for
@@ -60,25 +60,15 @@ async function loadPrimeGroups(): Promise<PrimeGroup[] | null> {
 
 /** The reads that belong to a prime rather than to a view. */
 function warmPrime(group: PrimeGroup): void {
-  // The same fan-out `useAllocationRows` performs: a view carrying Sky's
-  // figures is answered prime-wide off the primary proxy, and asking each proxy
-  // as well would show every position once per chain.
-  const proxies = showsReference
-    ? group.proxyAddresses.slice(0, 1)
-    : group.proxyAddresses;
-
-  for (const proxy of proxies) {
-    warm(queryClient.ensureQueryData(allocationsQuery(proxy)));
-  }
-
-  warm(
-    queryClient.ensureQueryData(riskCapitalQuery(group.primaryProxyAddress)),
-  );
+  // Keyed on what `useAllocationRows` asks for. A proxy address is a cache key
+  // of its own, so warming one would leave the read the screen makes cold.
+  warm(queryClient.ensureQueryData(allocationsQuery(group.primeId)));
+  warm(queryClient.ensureQueryData(riskCapitalQuery(group.primeId)));
   warm(
     queryClient.ensureQueryData(
       showsReference
-        ? latestReferenceDebtQuery(group.primaryProxyAddress)
-        : latestDebtSnapshotQuery(group.primaryProxyAddress),
+        ? latestReferenceDebtQuery(group.primeId)
+        : latestDebtSnapshotQuery(group.primeId),
     ),
   );
 }

@@ -33,21 +33,8 @@ class AllocationRepositoryPort(Protocol):
         """Return all distinct primes."""
         ...
 
-    async def prime_exists(self, prime_address: EthAddress) -> bool:
-        """Return whether ``prime_address`` is a known allocation proxy.
-
-        Identity matches ``/v1/primes`` (and the rest of this repository's
-        position queries): a prime "exists" iff it has at least one row in
-        ``allocation_position.proxy_address``. ``prime.vault_address`` is
-        intentionally not accepted here — downstream position queries are
-        keyed on ``proxy_address`` only, so allowing vault-address inputs
-        would produce false-positive existence checks followed by empty
-        results.
-        """
-        ...
-
-    async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:
-        """Return current receipt-token holdings for the given prime.
+    async def list_receipt_token_positions(self, proxy_addresses: Sequence[EthAddress]) -> list[ReceiptTokenPosition]:
+        """Return current receipt-token holdings across the prime's ALM proxies.
 
         A position whose latest balance is zero (a closed or swept position)
         is excluded, even when older non-zero balance records exist in its
@@ -55,16 +42,19 @@ class AllocationRepositoryPort(Protocol):
         """
         ...
 
-    async def list_direct_asset_holdings(self, prime_id: EthAddress) -> list[DirectAssetHolding]:
-        """Return tokens held directly by the prime that are not registered as receipt-token wrappers.
+    async def list_direct_asset_holdings(self, proxy_addresses: Sequence[EthAddress]) -> list[DirectAssetHolding]:
+        """Return tokens the prime's proxies hold directly, with no receipt-token wrapper.
 
         A holding whose latest balance is zero (closed or swept) is excluded,
         even when older non-zero balance records exist in its history.
         """
         ...
 
-    async def list_anchorage_custody_holdings(self, prime_id: EthAddress) -> list[AnchorageCustodyHolding]:
+    async def list_anchorage_custody_holdings(self, prime_id: int) -> list[AnchorageCustodyHolding]:
         """Return off-chain Anchorage custody collateral for the prime.
+
+        Keyed on the resolved ``prime.id``: custody is SHARED (see
+        ``PrimeScope``), one figure per prime with no proxy to attribute it to.
 
         One row per ``(asset_type, custody_type)``, collapsed across every
         package in the prime's *latest snapshot cohort* — the packages sharing
@@ -179,17 +169,6 @@ class AllocationRepositoryPort(Protocol):
         Scoped to the prime's SubProxy wallets like
         ``list_total_capital_buckets``; an empty set answers ``None``.
         """
-        ...
-
-    async def list_prime_proxy_addresses(self, prime_address: EthAddress) -> list[EthAddress]:
-        """Return every allocation proxy of the prime that owns ``prime_address``.
-
-        Never empty: an address with no rows resolves to itself.
-        """
-        ...
-
-    async def primary_proxy_address(self, prime_address: EthAddress) -> str | None:
-        """Return the one proxy of this prime that carries its prime-scoped rows."""
         ...
 
     async def list_exposure_buckets(

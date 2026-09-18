@@ -71,7 +71,7 @@ def tie_receipt_token_id(async_db_url: str, db_url: str) -> int:
 @pytest.mark.asyncio
 async def test_receipt_positions_price_tie_resolves_to_highest_oracle_id(repo) -> None:
     """list_receipt_token_positions values the position at the higher-oracle_id price."""
-    positions = await repo.list_receipt_token_positions(_PRIME)
+    positions = await repo.list_receipt_token_positions([_PRIME])
     position = {p.symbol: p for p in positions}.get("tieReceipt")
     assert position is not None
     assert position.amount_usd == _EXPECTED_AMOUNT_USD

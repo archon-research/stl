@@ -10,7 +10,6 @@ class AllocationActivityEvent:
     """Single allocation activity event enriched for API consumption."""
 
     chain_id: int
-    prime_address: str
     prime_name: str
     protocol_name: str | None
     token_id: int

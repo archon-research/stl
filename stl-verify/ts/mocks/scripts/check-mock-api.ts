@@ -365,7 +365,6 @@ async function checkCustodyLegIsPrimeScoped() {
 
   const custody = allocations.find((row) => row.category === 'custody');
   assert.ok(custody, 'the off-chain custody leg is missing');
-  assert.equal(custody.scope, 'prime');
   assert.equal(custody.chain_id, 0);
 }
 
@@ -380,8 +379,7 @@ async function checkPrimeFilterDoesNotLeak() {
   assert.ok(feed.data.length > 0, 'prime-filtered activity is empty');
   assert.ok(
     armWith(feed.data, 'action_type', 'prime-filtered activity').every(
-      (row) =>
-        row.prime_address.toLowerCase() === SPARK_MAINNET_PROXY.toLowerCase(),
+      (row) => row.prime_name === 'spark',
     ),
     'prime_id filter leaked another prime into the feed',
   );
@@ -592,6 +590,111 @@ async function checkBalanceSeriesReportsCoverage() {
       !('entity_count' in bucket) && !('priced_entity_count' in bucket),
       `flow bucket ${bucket.bucket_start} should carry neither coverage count`,
     );
+  }
+}
+
+/**
+ * Every identifier form answers the same prime, as the API guarantees (VEC-722).
+ *
+ * The app addresses prime-scoped reads by NAME — `PrimeGroup.primeId` is
+ * `prime.name` — while the fixtures are keyed by proxy address. A handler that
+ * resolves only an address 404s the whole screen against mocks while
+ * type-checking and unit-testing clean, because `prime_id` is a `string` either
+ * way and no unit test round-trips a handler.
+ *
+ * The clock is frozen and the window pinned, because both are otherwise
+ * now-relative: a defaulted window differs in `window` alone between two
+ * requests a millisecond apart, and rows re-based on the clock each request
+ * reads differ in `latest_activity_at` alone.
+ *
+ * `SPARK_BASE_PROXY` holds nothing itself, so it also carries what the narrower
+ * allocations-only check this replaces was for: a proxy with no rows of its own
+ * must still answer with its prime's.
+ */
+async function checkEveryIdentifierFormAnswersTheSamePrime() {
+  const identifiers = [
+    'spark',
+    SPARK_VAULT,
+    SPARK_MAINNET_PROXY,
+    SPARK_BASE_PROXY,
+  ];
+  const window = {
+    from_timestamp: '2026-09-01T00:00:00Z',
+    to_timestamp: '2026-09-02T00:00:00Z',
+    frequency: 'PT1H',
+  } as const;
+
+  const reads: [string, (primeId: string) => Promise<unknown>][] = [
+    [
+      'risk-capital',
+      (prime_id) =>
+        request(
+          '/v1/primes/{prime_id}/risk-capital',
+          { params: { path: { prime_id } } },
+          `risk-capital by ${prime_id}`,
+        ),
+    ],
+    [
+      'allocations',
+      (prime_id) =>
+        request(
+          '/v1/primes/{prime_id}/allocations',
+          { params: { path: { prime_id } } },
+          `allocations by ${prime_id}`,
+        ),
+    ],
+    [
+      'total-capital',
+      (prime_id) =>
+        request(
+          '/v1/primes/{prime_id}/total-capital',
+          { params: { path: { prime_id }, query: window } },
+          `total-capital by ${prime_id}`,
+        ),
+    ],
+    [
+      'exposure',
+      (prime_id) =>
+        request(
+          '/v1/primes/{prime_id}/exposure',
+          { params: { path: { prime_id }, query: window } },
+          `exposure by ${prime_id}`,
+        ),
+    ],
+    [
+      'debt',
+      (prime_id) =>
+        request(
+          '/v1/primes/{prime_id}/debt',
+          {
+            params: {
+              path: { prime_id },
+              query: { ...window, aggregation_method: 'end-period' },
+            },
+          },
+          `debt by ${prime_id}`,
+        ),
+    ],
+  ];
+
+  const realNow = Date.now;
+  const frozenMs = realNow();
+  Date.now = () => frozenMs;
+  try {
+    for (const [route, read] of reads) {
+      const bodies = new Set(
+        await Promise.all(
+          identifiers.map(async (id) => JSON.stringify(await read(id))),
+        ),
+      );
+      assert.equal(
+        bodies.size,
+        1,
+        `${route} answered differently across a prime's identifier forms`,
+      );
+    }
+  } finally {
+    Date.now = realNow;
   }
 }
 
@@ -1294,20 +1397,6 @@ async function checkReferenceTranchesSplitTotalCapital() {
   }
 }
 
-async function checkEmptyProxyIsNotAnError() {
-  const allocations = await request(
-    '/v1/primes/{prime_id}/allocations',
-    primeAt(SPARK_BASE_PROXY),
-    'allocations for a proxy that holds nothing',
-  );
-
-  assert.deepEqual(
-    allocations,
-    [],
-    'a real proxy holding nothing answers an empty list, not a 404',
-  );
-}
-
 async function checkUnknownPrimeIsNotFound() {
   for (const path of [
     '/v1/primes/{prime_id}/allocations',
@@ -1644,13 +1733,16 @@ const checks: [string, () => Promise<void>][] = [
     'the reference tranches split total capital',
     checkReferenceTranchesSplitTotalCapital,
   ],
-  ['an empty proxy is not an error', checkEmptyProxyIsNotAnError],
   ['an unknown prime is a 404', checkUnknownPrimeIsNotFound],
   ['an unknown asset is a 404', checkUnknownAssetIsNotFound],
   ['an inherited key is not a fixture', checkInheritedKeysAreNotFound],
   [
     'reference debt requires an aggregation method',
     checkReferenceDebtRequiresAMethod,
+  ],
+  [
+    'every identifier form answers the same prime',
+    checkEveryIdentifierFormAnswersTheSamePrime,
   ],
   ['malformed params are rejected', checkMalformedParamsAreRejected],
   ['boolean flags follow pydantic', checkBooleanFlagsFollowPydantic],

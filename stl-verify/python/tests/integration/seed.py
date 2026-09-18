@@ -650,7 +650,6 @@ _GHOST_USDS_HEX = "2222222222222222222222222222222222222222"
 GHOST_RECEIPT_SYRUP_HEX = "3333333333333333333333333333333333333333"  # receipt token wrapping syrupUSDT
 
 # Vault address for the ghost_balance prime (20 bytes, unique in the prime table).
-_GHOST_VAULT_HEX = "99" * 20
 
 # Transaction hashes (32 bytes).
 _GHOST_TXA = "aa" * 32
@@ -661,16 +660,24 @@ _GHOST_TXE = "ee" * 32
 _GHOST_TXF = "ff" * 32
 
 
-async def _ghost_seed_reference_rows(conn: asyncpg.Connection) -> tuple[int, int, int]:
-    """Create the ghost_balance prime, tokens, receipt-token registration, and a syrupUSDT price of 2 USD.
+async def _ghost_prime(conn: asyncpg.Connection, name: str, vault_hex: str) -> int:
+    """One prime per ghost scenario.
 
-    Returns (prime_id, asyrup_token_id, usds_token_id).
+    The allocation reads answer whole-prime, so two scenarios sharing a prime
+    would see each other's tokens and no test could assert on one in isolation.
     """
-    prime_id = await conn.fetchval(
-        "INSERT INTO prime (external_id, name, vault_address) "
-        "VALUES (gen_random_uuid(), 'ghost_balance', $1) RETURNING id",
-        bytes.fromhex(_GHOST_VAULT_HEX),
+    return await conn.fetchval(
+        "INSERT INTO prime (external_id, name, vault_address) VALUES (gen_random_uuid(), $1, $2) RETURNING id",
+        name,
+        bytes.fromhex(vault_hex),
     )
+
+
+async def _ghost_seed_reference_rows(conn: asyncpg.Connection) -> tuple[int, int]:
+    """Create the shared tokens, receipt-token registration, and a syrupUSDT price of 2 USD.
+
+    Returns (asyrup_token_id, usds_token_id).
+    """
     # protocol.name is not unique across chains; chain_id pins mainnet.
     protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE name = 'Aave V3' AND chain_id = 1")
     oracle_id = await conn.fetchval("SELECT id FROM oracle WHERE name = 'aave_v3'")
@@ -695,7 +702,7 @@ async def _ghost_seed_reference_rows(conn: asyncpg.Connection) -> tuple[int, int
         Decimal(2),
     )
     await insert_oracle_asset(conn, oracle_id, syrup_id)
-    return prime_id, asyrup_id, usds_id
+    return asyrup_id, usds_id
 
 
 async def _ghost_seed_closed_proxy(conn: asyncpg.Connection, prime_id: int, asyrup_id: int, usds_id: int) -> None:
@@ -1397,12 +1404,22 @@ async def seed_ghost_balance(db_url: str) -> None:
     conn = await asyncpg.connect(db_url)
     try:
         async with conn.transaction():
-            prime_id, asyrup_id, usds_id = await _ghost_seed_reference_rows(conn)
-            await _ghost_seed_closed_proxy(conn, prime_id, asyrup_id, usds_id)
-            await _ghost_seed_sweep_proxy(conn, prime_id, asyrup_id)
-            await _ghost_seed_open_proxy(conn, prime_id, asyrup_id)
-            await _ghost_seed_mixed_proxy(conn, prime_id, asyrup_id, usds_id)
-            await _ghost_seed_tiebreak_proxy(conn, prime_id, asyrup_id, usds_id)
+            asyrup_id, usds_id = await _ghost_seed_reference_rows(conn)
+            prime = {
+                name: await _ghost_prime(conn, f"ghost_{name}", vault_hex)
+                for name, vault_hex in (
+                    ("closed", "99" * 20),
+                    ("sweep", "98" * 20),
+                    ("open", "97" * 20),
+                    ("mixed", "96" * 20),
+                    ("tiebreak", "95" * 20),
+                )
+            }
+            await _ghost_seed_closed_proxy(conn, prime["closed"], asyrup_id, usds_id)
+            await _ghost_seed_sweep_proxy(conn, prime["sweep"], asyrup_id)
+            await _ghost_seed_open_proxy(conn, prime["open"], asyrup_id)
+            await _ghost_seed_mixed_proxy(conn, prime["mixed"], asyrup_id, usds_id)
+            await _ghost_seed_tiebreak_proxy(conn, prime["tiebreak"], asyrup_id, usds_id)
     finally:
         await conn.close()
 

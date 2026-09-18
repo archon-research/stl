@@ -36,6 +36,16 @@ async def _seed(async_url: str) -> None:
                 await conn.execute(text("SELECT id FROM protocol WHERE name = 'SparkLend' ORDER BY id LIMIT 1"))
             ).scalar_one()
 
+            # prime_proxy is where a prime's wallet set is resolved from, so a
+            # proxy that only has positions is not reachable by the feed's filter.
+            await conn.execute(
+                text(
+                    "INSERT INTO prime_proxy (chain_id, proxy_address, prime_id) "
+                    "VALUES (1, decode(:proxy, 'hex'), :pid) ON CONFLICT DO NOTHING"
+                ),
+                {"proxy": _SPARK_PROXY_ADDR, "pid": spark_prime_id},
+            )
+
             # Allocation activity rows: one inside default 24h, one outside.
             await conn.execute(
                 text(

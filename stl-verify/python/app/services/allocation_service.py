@@ -35,44 +35,33 @@ class AllocationService:
     async def list_primes(self, allowed_vaults: Sequence[EthAddress] | None = None) -> list[Prime]:
         return await self._repository.list_primes(allowed_vaults=allowed_vaults)
 
-    async def prime_exists(self, prime_address: EthAddress) -> bool:
-        return await self._repository.prime_exists(prime_address)
+    async def list_receipt_token_positions(self, scope: PrimeScope) -> list[ReceiptTokenPosition]:
+        """The prime's receipt-token positions, union across its ALM proxies.
 
-    async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:
-        return await self._repository.list_receipt_token_positions(prime_id)
+        Allocation rows are ADDITIVE (see ``PrimeScope``): each proxy holds
+        its own, so the prime's set is their union.
+        """
+        return await self._repository.list_receipt_token_positions(scope.alm_proxies)
 
-    async def list_direct_asset_holdings(self, prime_id: EthAddress) -> list[DirectAssetHolding]:
-        return await self._repository.list_direct_asset_holdings(prime_id)
+    async def list_direct_asset_holdings(self, scope: PrimeScope) -> list[DirectAssetHolding]:
+        return await self._repository.list_direct_asset_holdings(scope.alm_proxies)
 
-    async def list_anchorage_custody_holdings(self, prime_id: EthAddress) -> list[AnchorageCustodyHolding]:
-        return await self._repository.list_anchorage_custody_holdings(prime_id)
+    async def list_anchorage_custody_holdings(self, scope: PrimeScope) -> list[AnchorageCustodyHolding]:
+        """The prime's off-chain custody, read once.
 
-    async def primary_proxy_address(self, prime_id: EthAddress) -> str | None:
-        return await self._repository.primary_proxy_address(prime_id)
+        Custody is SHARED: one figure per prime. Fanning it out over the proxies
+        would triple-count $250M of BTC, which is what the retired `scope` field
+        and the primary-proxy pick existed to prevent.
+        """
+        return await self._repository.list_anchorage_custody_holdings(scope.identity.id)
 
     async def get_total_usd_exposure(self, prime_id: EthAddress) -> Decimal:
         return await self._repository.get_total_usd_exposure(prime_id)
 
-    async def prime_proxy_addresses(self, prime_id: EthAddress) -> list[EthAddress]:
-        """Every allocation proxy of the prime that owns ``prime_id``."""
-        return await self._repository.list_prime_proxy_addresses(prime_id)
-
-    async def _prime_proxies(self, prime_id: EthAddress | None) -> list[EthAddress] | None:
-        """Widen one proxy address to every allocation proxy of its prime.
-
-        A prime allocates through one proxy per chain, so activity addressed by
-        any one of them belongs to the whole prime; scoping to the address as
-        given reports a fraction of the prime's flows against a prime-wide
-        headline.
-        """
-        if prime_id is None:
-            return None
-        return await self._repository.list_prime_proxy_addresses(prime_id)
-
     async def list_allocation_activity(
         self,
         *,
-        prime_id: EthAddress | None = None,
+        proxy_addresses: Sequence[EthAddress] | None = None,
         chain_id: int | None = None,
         protocol_name: str | None = None,
         action_type: str | None = None,
@@ -83,11 +72,18 @@ class AllocationService:
         limit: int = 100,
         allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityEvent]:
-        # Authorization is part of the query semantics: allowed_vaults travels
-        # to the repository and lands in the SQL WHERE, before ORDER BY/LIMIT.
-        # None = auth off (no filter); [] = caller may view nothing (no rows).
+        """The events of the given wallets, or every prime's when unscoped.
+
+        Activity events are ADDITIVE, so the caller resolves a prime to its whole
+        ALM proxy set: the feed is their union, never one proxy's fraction under
+        a prime-wide headline. ``proxy_addresses`` follows the repository's
+        contract — ``None`` is unscoped, ``()`` matches nothing.
+
+        Authorization is part of the query semantics: allowed_vaults travels to
+        the repository and lands in the SQL WHERE, before ORDER BY/LIMIT.
+        """
         return await self._repository.list_allocation_activity(
-            proxy_addresses=await self._prime_proxies(prime_id),
+            proxy_addresses=proxy_addresses,
             allowed_vaults=allowed_vaults,
             chain_id=chain_id,
             protocol_name=protocol_name,
@@ -102,7 +98,7 @@ class AllocationService:
     async def list_activity_buckets(
         self,
         *,
-        prime_id: EthAddress | None = None,
+        proxy_addresses: Sequence[EthAddress] | None = None,
         chain_id: int | None = None,
         protocol_name: str | None = None,
         action_type: str | None = None,
@@ -120,7 +116,7 @@ class AllocationService:
         # for series="balance" too -- the allow-list is inside its window_rows.
         return await self._repository.list_activity_buckets(
             series=series,
-            proxy_addresses=await self._prime_proxies(prime_id),
+            proxy_addresses=proxy_addresses,
             allowed_vaults=allowed_vaults,
             chain_id=chain_id,
             protocol_name=protocol_name,

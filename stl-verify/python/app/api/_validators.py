@@ -97,6 +97,13 @@ def _validate_tx_hash(value: str) -> str:
     return value
 
 
+def _validate_optional_prime_identifier(value: str | None) -> str | None:
+    """Validate an optional prime identifier; ``None`` passes through unchanged."""
+    if value is None:
+        return None
+    return _validate_prime_identifier(value)
+
+
 def _validate_optional_tx_hash(value: str | None) -> str | None:
     """Validate an optional transaction hash; ``None`` passes through unchanged."""
     if value is None:
@@ -106,44 +113,6 @@ def _validate_optional_tx_hash(value: str | None) -> str | None:
 
 EthAddressParam = Annotated[str, AfterValidator(_validate_eth_address)]
 """Use as the type for any path/query/body field that holds an EVM address."""
-
-ProxyAddressPathParam = Annotated[
-    str,
-    AfterValidator(_validate_eth_address),
-    Path(
-        description=(
-            "A prime's 0x-prefixed ALM **proxy** address on one chain — not a prime "
-            "identifier. A prime allocates through one proxy per chain; list them via "
-            "`GET /v1/primes` and group by `prime_vault_address`."
-        )
-    ),
-]
-"""Path-param type for a ``{prime_id}`` segment that accepts a proxy address only.
-
-The segment name is load-bearing: ``require_prime_view`` reads ``prime_id`` out of
-``request.path_params`` by literal name, so renaming it turns the per-resource authz
-check into a silent no-op. The description carries the correction instead.
-"""
-
-PrimeOrProxyAddressPathParam = Annotated[
-    str,
-    AfterValidator(_validate_eth_address),
-    Path(
-        description=(
-            "Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses — "
-            "this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; "
-            "the vault address is their shared `prime_vault_address`. Results are whole-prime: "
-            "passing a proxy address returns the entire prime, including the chains that proxy "
-            "has nothing to do with."
-        )
-    ),
-]
-"""Path-param type for a ``{prime_id}`` segment that resolves either address.
-
-Validation is identical to ``ProxyAddressPathParam``; only the published description
-differs, so an endpoint matching on the prime does not advertise the narrower contract.
-"""
-
 
 PrimeIdentifierPathParam = Annotated[
     str,
@@ -168,6 +137,14 @@ and read the prime off it rather than parsing the segment as an address.
 
 OptionalEthAddressParam = Annotated[str | None, AfterValidator(_validate_optional_eth_address)]
 """Use as the type for optional query filters that hold an EVM address."""
+
+OptionalPrimeIdentifierParam = Annotated[str | None, AfterValidator(_validate_optional_prime_identifier)]
+"""Use as the type for an optional query filter naming a prime in any accepted form.
+
+A filter, not a path resource: one that names no prime is an empty result rather
+than a 404 (see the ID-error contract above), so the caller resolves it through
+``deps.prime_scope_filter`` instead of ``deps.prime_scope``.
+"""
 
 TxHashParam = Annotated[str, AfterValidator(_validate_tx_hash)]
 """Use as the type for any path/query/body field that holds a transaction hash."""

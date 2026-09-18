@@ -60,7 +60,7 @@ async def repo(async_db_url: str):
 
 async def _holding(repo: AllocationRepository, proxy_hex: str, symbol: str):
     """Return the named direct holding for a proxy, or None if absent."""
-    holdings = await repo.list_direct_asset_holdings(EthAddress(f"0x{proxy_hex}"))
+    holdings = await repo.list_direct_asset_holdings([EthAddress(f"0x{proxy_hex}")])
     return {h.symbol: h for h in holdings}.get(symbol)
 
 
@@ -169,7 +169,7 @@ async def test_allowlisted_vault_unpriced_underlying_is_surfaced(repo) -> None:
     target.addHandler(handler)
     target.setLevel(logging.WARNING)
     try:
-        await repo.list_direct_asset_holdings(EthAddress(f"0x{UV_PROXY_UNDERLYING_UNPRICED}"))
+        await repo.list_direct_asset_holdings([EthAddress(f"0x{UV_PROXY_UNDERLYING_UNPRICED}")])
     finally:
         target.removeHandler(handler)
         target.setLevel(previous_level)

@@ -43,7 +43,7 @@ SPARK_IDENTIFIERS = [
 ]
 
 #: Routes already carrying whole-prime semantics. VEC-722 adds one per slice.
-WHOLE_PRIME_ROUTES = ["total-capital", "exposure", "debt", "risk-capital"]
+WHOLE_PRIME_ROUTES = ["total-capital", "exposure", "debt", "risk-capital", "allocations"]
 
 #: Pinned around the seeded observation: a defaulted window is now-relative, so
 #: two requests a millisecond apart would differ in `window` alone.
@@ -105,7 +105,7 @@ def test_the_treasury_is_counted_once_rather_than_per_proxy(client: TestClient) 
     assert all(float(value) == float(FAN_OUT_TREASURY) for value in observed)
 
 
-@pytest.mark.parametrize("route", [r for r in WHOLE_PRIME_ROUTES if r != "risk-capital"])
+@pytest.mark.parametrize("route", ["total-capital", "exposure", "debt"])
 def test_a_prime_with_no_proxies_answers_a_series_not_a_404(client: TestClient, route: str) -> None:
     """obex is a vault with no declared proxies. Whole-prime aggregation over an
     empty wallet set is an answer, not an error."""
@@ -183,3 +183,30 @@ def test_a_prime_with_no_proxies_reports_zero_risk_capital_rather_than_404(clien
 
     assert body["exposure_usd"] == "0"
     assert body["prime_per_chain"] == []
+
+
+def test_a_prime_with_no_proxies_lists_no_allocations_rather_than_404(client: TestClient) -> None:
+    response = client.get("/v1/primes/obex/allocations")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_the_activity_feed_covers_the_whole_prime(client: TestClient) -> None:
+    """`prime_id` is a filter, so an unknown one is an empty feed and a known one
+    is every wallet's events — not the named wallet's alone."""
+    by_name = client.get("/v1/allocations/activity", params={"prime_id": "spark"}).json()["data"]
+    by_proxy = client.get("/v1/allocations/activity", params={"prime_id": f"0x{SPARK_AVALANCHE_ALM_HEX}"}).json()[
+        "data"
+    ]
+
+    assert by_name == by_proxy
+    assert {row["chain_id"] for row in by_name} == {1, 43114}
+
+
+def test_an_unknown_activity_filter_is_an_empty_feed_not_every_primes_events(client: TestClient) -> None:
+    """`None` would mean "no prime filter" and serve the lot."""
+    response = client.get("/v1/allocations/activity", params={"prime_id": "not-a-prime"})
+
+    assert response.status_code == 200
+    assert response.json()["data"] == []

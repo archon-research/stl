@@ -17,7 +17,6 @@ const allocation = (overrides: Partial<Allocation> = {}): Allocation => ({
   balance: '100',
   category: 'allocation',
   chain_id: 1,
-  scope: 'proxy',
   source: 'indexed',
   symbol: 'spUSDS',
   underlying_symbol: 'USDS',

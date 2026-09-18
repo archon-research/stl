@@ -231,7 +231,7 @@ class PrimeRiskCapitalService:
         """Run the per-allocation model pipeline over one ALM proxy's positions."""
         proxy_address = wallet.address
         chain = _chain_of(wallet)
-        positions = await self._repository.list_receipt_token_positions(proxy_address)
+        positions = await self._repository.list_receipt_token_positions([proxy_address])
 
         # A zero-balance position contributes no required risk capital, so skip
         # its model compute entirely (each compute is several DB round trips).

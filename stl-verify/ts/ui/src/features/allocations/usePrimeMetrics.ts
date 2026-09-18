@@ -73,12 +73,12 @@ function useRetryEmptyOn(
 }
 
 export function usePrimeMetrics(
-  primaryProxyAddress: string | null,
+  primeId: string | null,
   rangeSignal?: string,
 ): PrimeMetrics {
   const { provenance: shownProvenance } = useProvenanceView();
-  const isPrimeSelected = Boolean(primaryProxyAddress);
-  const forPrime = primaryProxyAddress ?? '';
+  const isPrimeSelected = Boolean(primeId);
+  const forPrime = primeId ?? '';
 
   const riskCapitalResult = useQuery({
     ...riskCapitalQuery(forPrime),

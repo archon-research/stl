@@ -44,7 +44,6 @@ def series(request):
     }[request.param]
 
     service = AsyncMock(spec=AllocationService)
-    service.prime_exists.return_value = True
     repository = AsyncMock()
     repository.list_reference_capital_buckets.return_value = _buckets()
 

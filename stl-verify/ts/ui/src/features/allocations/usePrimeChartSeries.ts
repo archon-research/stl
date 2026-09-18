@@ -113,7 +113,7 @@ function getFrequencyForRange(
  * figure it has no indexed equivalent for.
  */
 export function usePrimeChartSeries(
-  primaryProxyAddress: string | null,
+  primeId: string | null,
   rangePreset: RangePreset,
   timeRange: TimeRange,
   primeTotalAllocationUsd: number,
@@ -133,17 +133,11 @@ export function usePrimeChartSeries(
     isLoading,
     errorMessage,
     activityErrorMessage,
-  } = usePrimeChartData(
-    // Any one of the prime's proxies: the activity and exposure endpoints
-    // resolve it prime-wide server-side. Total-capital and debt read
-    // prime-scoped rows, so one address answers for the whole prime there too.
-    primaryProxyAddress,
-    {
-      fromTimestamp: timeRange.from_timestamp,
-      toTimestamp: timeRange.to_timestamp,
-      frequency: chartFrequency,
-    },
-  );
+  } = usePrimeChartData(primeId, {
+    fromTimestamp: timeRange.from_timestamp,
+    toTimestamp: timeRange.to_timestamp,
+    frequency: chartFrequency,
+  });
 
   // Each bucket's own recorded position value, read server-side
   // (`series=balance`). Clamped at 0 since a negative balance is meaningless.

@@ -356,7 +356,13 @@ LIMIT 1
 """)
 
 
-_PROXY_PARAMS = {"proxy_hex": RTL_PROXY_HEX, "reference_effective_at": utc_now()}
+# Two spellings of one wallet: the whole-prime reads take a BYTEA[] wallet set,
+# the per-proxy ones still take a single hex address.
+_PROXY_PARAMS = {
+    "proxy_addrs": [bytes.fromhex(RTL_PROXY_HEX)],
+    "proxy_hex": RTL_PROXY_HEX,
+    "reference_effective_at": utc_now(),
+}
 
 # (cache-backed query, history reference, bind parameters).
 _CACHE_QUERIES = (
@@ -460,7 +466,7 @@ async def test_wallet_lookup_matches_the_history_read(conn, receipt_hex: str) ->
 @pytest.mark.asyncio
 async def test_receipt_positions_hold_one_row_per_receipt_token(repo) -> None:
     """Two cache rows can reach one receipt_token; only a chain-qualified token join stops that."""
-    positions = await repo.list_receipt_token_positions(_PROXY)
+    positions = await repo.list_receipt_token_positions([_PROXY])
     ids = [p.receipt_token_id for p in positions]
     assert sorted(ids) == sorted(set(ids))
 
@@ -471,7 +477,7 @@ async def test_receipt_position_reports_the_latest_versioned_balance(
     repo, symbol: str, expected_balance: Decimal
 ) -> None:
     """Each receipt token appears once, carrying the balance of its winning row."""
-    positions = [p for p in await repo.list_receipt_token_positions(_PROXY) if p.symbol == symbol]
+    positions = [p for p in await repo.list_receipt_token_positions([_PROXY]) if p.symbol == symbol]
     assert len(positions) == 1
     assert positions[0].balance == expected_balance
 
@@ -480,14 +486,14 @@ async def test_receipt_position_reports_the_latest_versioned_balance(
 @pytest.mark.parametrize(("symbol", "expected_action"), sorted(RTL_LATEST_ACTIONS.items()))
 async def test_receipt_position_breaks_an_exact_tie_on_direction(repo, symbol: str, expected_action: str) -> None:
     """Rows tied through log_index resolve on direction, not on whatever the sort emitted."""
-    positions = {p.symbol: p for p in await repo.list_receipt_token_positions(_PROXY)}
+    positions = {p.symbol: p for p in await repo.list_receipt_token_positions([_PROXY])}
     assert positions[symbol].latest_activity_action == expected_action
 
 
 @pytest.mark.asyncio
 async def test_receipt_position_reports_the_blocks_time_not_the_cache_rows(repo) -> None:
     """latest_activity_at is the winning row's block time; the cache's own write times never surface."""
-    positions = {p.symbol: p for p in await repo.list_receipt_token_positions(_PROXY)}
+    positions = {p.symbol: p for p in await repo.list_receipt_token_positions([_PROXY])}
     assert positions["rtlVersions"].latest_activity_at == rtl_block_time(9_002)
 
 
@@ -497,7 +503,7 @@ async def test_direct_holding_reports_the_latest_versioned_balance(
     repo, symbol: str, expected_balance: Decimal
 ) -> None:
     """Each bare-held token appears once, carrying the balance of its winning row."""
-    holdings = [h for h in await repo.list_direct_asset_holdings(_PROXY) if h.symbol == symbol]
+    holdings = [h for h in await repo.list_direct_asset_holdings([_PROXY]) if h.symbol == symbol]
     assert len(holdings) == 1
     assert holdings[0].balance == expected_balance
 
@@ -519,7 +525,7 @@ async def test_latest_total_capital_breaks_an_exact_tie_on_direction(repo) -> No
 @pytest.mark.parametrize("symbol", RTL_EXCLUDED_SYMBOLS)
 async def test_receipt_positions_omit_tokens_outside_the_receipt_set(repo, symbol: str) -> None:
     """A swept, bare-held or foreign-protocol token is absent despite having positions."""
-    positions = await repo.list_receipt_token_positions(_PROXY)
+    positions = await repo.list_receipt_token_positions([_PROXY])
     assert symbol not in {p.symbol for p in positions}
 
 

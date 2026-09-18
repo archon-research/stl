@@ -5,6 +5,7 @@
  * rows to the ones the rest of the fixtures reference (see `TOKENS`).
  */
 import { FIXTURE_ANCHOR_ISO } from '../clock.ts';
+import { sameHex } from '../query.ts';
 import type { Chain, DataSource, Prime, Protocol, Token } from '../schema.ts';
 
 export const CHAINS: readonly Chain[] = [
@@ -112,6 +113,23 @@ export const PRIMES: readonly SeededPrime[] = PRIME_ROWS.map(
     prime_vault_address: PRIME_VAULTS[name],
   }),
 );
+
+/**
+ * The prime an identifier names, matching what the API's resolver accepts: a
+ * prime name, its vault address, or any of its ALM proxy addresses.
+ *
+ * The real resolver also takes a SubProxy treasury address. This registry is
+ * built from `/v1/primes`, which lists allocation venues only, so it carries no
+ * SubProxy row to match — a caller passing one gets a 404 here and a 200 there.
+ */
+export function findPrime(identifier: string): SeededPrime | undefined {
+  return PRIMES.find(
+    (prime) =>
+      prime.name === identifier ||
+      sameHex(prime.address, identifier) ||
+      sameHex(prime.prime_vault_address, identifier),
+  );
+}
 
 export const USDS = '0xdc035d45d973e3ec169d2276ddab16f1e407384f';
 const USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7';

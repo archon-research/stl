@@ -44,20 +44,20 @@ export function AllocationRoute() {
 
   const rows = useAllocationRows(selectedPrimeGroup);
 
-  // The proxy every prime-wide read is addressed to; why one is enough is on
-  // `riskCapitalQuery`, which is what depends on it.
-  const primaryProxyAddress = selectedPrimeGroup?.primaryProxyAddress ?? null;
+  // The prime every read below is addressed to. One identifier answers for the
+  // whole prime, so there is no proxy to pick.
+  const primeId = selectedPrimeGroup?.primeId ?? null;
   // The range is passed only as a retry signal; these figures do not vary with
   // it, which is why it is not part of their key.
   const metrics = usePrimeMetrics(
-    primaryProxyAddress,
+    primeId,
     `${rangePreset}:${timeRange.from_timestamp ?? ''}:${timeRange.to_timestamp ?? ''}`,
   );
 
   const primeTotalAllocationUsd = usePrimeTotalAllocationUsd(rows.allocations);
 
   const series = usePrimeChartSeries(
-    primaryProxyAddress,
+    primeId,
     rangePreset,
     timeRange,
     primeTotalAllocationUsd,
