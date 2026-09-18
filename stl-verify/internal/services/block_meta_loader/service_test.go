@@ -37,6 +37,26 @@ func (m *mockS3Reader) StreamFile(ctx context.Context, bucket, key string) (io.R
 	return m.streamFn(ctx, bucket, key)
 }
 
+// fakeArchive implements outbound.ArchiveReader. highestVersionFn is nil in every test that never
+// hits the archive-version fallback (the requested version always reads successfully), matching a
+// real ArchiveReader that a run pinging cleanly at startup never needs to call again mid-run.
+// BlockHashAt is unused by this service — resolving a timestamp needs no hash proof, unlike
+// internal/pkg/blockversion's replay use case — so it is a fixed stub, never exercised.
+type fakeArchive struct {
+	highestVersionFn func(ctx context.Context, blockNumber int64) (int, bool, error)
+}
+
+func (a *fakeArchive) HighestVersion(ctx context.Context, blockNumber int64) (int, bool, error) {
+	if a.highestVersionFn == nil {
+		return 0, false, nil
+	}
+	return a.highestVersionFn(ctx, blockNumber)
+}
+
+func (a *fakeArchive) BlockHashAt(context.Context, int64, int) (string, bool, error) {
+	return "", false, fmt.Errorf("BlockHashAt: unused by block_meta_loader, must not be called")
+}
+
 // streamTimestampByBlock returns a reader whose header timestamp encodes tsBase + blockNumber.
 func streamTimestampByBlock(_ context.Context, _ string, key string) (io.ReadCloser, error) {
 	parsed, ok := s3key.Parse(key)
@@ -116,9 +136,16 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// newTestService builds a Service with a fakeArchive that never resolves anything (found=false),
+// matching every test that never drives a block's requested read into a 404 in the first place.
 func newTestService(t *testing.T, repo outbound.BlockMetaRepository, reader outbound.S3Reader, batch int) *Service {
 	t.Helper()
-	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: batch}, repo, reader, testLogger())
+	return newTestServiceWithArchive(t, repo, reader, &fakeArchive{}, batch)
+}
+
+func newTestServiceWithArchive(t *testing.T, repo outbound.BlockMetaRepository, reader outbound.S3Reader, archive outbound.ArchiveReader, batch int) *Service {
+	t.Helper()
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: batch}, repo, reader, archive, testLogger())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -229,23 +256,26 @@ func TestRun_StopsOnCancelledContext(t *testing.T) {
 func TestNew_Validation(t *testing.T) {
 	repo := &mockBlockMetaRepo{}
 	reader := &mockS3Reader{streamFn: streamTimestampByBlock}
+	archive := &fakeArchive{}
 	tests := []struct {
 		name    string
 		cfg     Config
 		repo    outbound.BlockMetaRepository
 		reader  outbound.S3Reader
+		archive outbound.ArchiveReader
 		wantErr string
 	}{
-		{"valid", Config{ChainID: 1, Bucket: "b"}, repo, reader, ""},
-		{"zero chain", Config{ChainID: 0, Bucket: "b"}, repo, reader, "chain id"},
-		{"negative chain", Config{ChainID: -1, Bucket: "b"}, repo, reader, "chain id"},
-		{"empty bucket", Config{ChainID: 1, Bucket: ""}, repo, reader, "bucket"},
-		{"nil repo", Config{ChainID: 1, Bucket: "b"}, nil, reader, "repository"},
-		{"nil reader", Config{ChainID: 1, Bucket: "b"}, repo, nil, "s3 reader"},
+		{"valid", Config{ChainID: 1, Bucket: "b"}, repo, reader, archive, ""},
+		{"zero chain", Config{ChainID: 0, Bucket: "b"}, repo, reader, archive, "chain id"},
+		{"negative chain", Config{ChainID: -1, Bucket: "b"}, repo, reader, archive, "chain id"},
+		{"empty bucket", Config{ChainID: 1, Bucket: ""}, repo, reader, archive, "bucket"},
+		{"nil repo", Config{ChainID: 1, Bucket: "b"}, nil, reader, archive, "repository"},
+		{"nil reader", Config{ChainID: 1, Bucket: "b"}, repo, nil, archive, "s3 reader"},
+		{"nil archive", Config{ChainID: 1, Bucket: "b"}, repo, reader, nil, "archive reader"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := New(tt.cfg, tt.repo, tt.reader, testLogger())
+			_, err := New(tt.cfg, tt.repo, tt.reader, tt.archive, testLogger())
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
@@ -260,7 +290,7 @@ func TestNew_Validation(t *testing.T) {
 }
 
 func TestNew_DefaultsBatchSize(t *testing.T) {
-	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 0}, &mockBlockMetaRepo{}, &mockS3Reader{streamFn: streamTimestampByBlock}, testLogger())
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 0}, &mockBlockMetaRepo{}, &mockS3Reader{streamFn: streamTimestampByBlock}, &fakeArchive{}, testLogger())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -404,7 +434,7 @@ func TestRun_ReadsWithinABatchOverlap(t *testing.T) {
 		return streamTimestampByBlock(ctx, bucket, key)
 	}}
 
-	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: batch, Concurrency: batch}, repo, reader, testLogger())
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: batch, Concurrency: batch}, repo, reader, &fakeArchive{}, testLogger())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -471,6 +501,142 @@ func TestRun_RecordsTheWorkListRowsItPages(t *testing.T) {
 	// Three blocks over two batches: the counter is the pending set, not the number of batches.
 	if got, ok := collectPagedRows(t, reader); !ok || got != 3 {
 		t.Errorf("block_meta.worklist.rows.paged = %d (present=%t), want 3", got, ok)
+	}
+}
+
+// A December raw-block backfill hardcoded key version 1 for a swath of deep history regardless of
+// what a referencing table's own block_version column says, so a read pinned to the requested
+// version 404s even though the archive holds the block under a different version. This must fail on
+// the code before it: without the fallback, a 404 at the requested version was reported as an
+// absent object with no second attempt.
+func TestRun_RecoversAVersionMismatchFromTheArchive(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 100, Version: 0}}}
+	reader := &mockS3Reader{
+		streamFn: func(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+			parsed, ok := s3key.Parse(key)
+			if !ok {
+				return nil, fmt.Errorf("unparseable key %q", key)
+			}
+			// Only version 1 is actually archived; the work list (mirroring the source
+			// table's own bookkeeping) still asks for version 0.
+			if parsed.Version != 1 {
+				return nil, outbound.ErrObjectNotFound
+			}
+			return streamTimestampByBlock(ctx, bucket, key)
+		},
+	}
+	archive := &fakeArchive{highestVersionFn: func(_ context.Context, blockNumber int64) (int, bool, error) {
+		if blockNumber != 100 {
+			t.Fatalf("resolved block %d, want 100", blockNumber)
+		}
+		return 1, true, nil
+	}}
+	svc := newTestServiceWithArchive(t, repo, reader, archive, 500)
+
+	total, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v (want the version mismatch recovered via the archive)", err)
+	}
+	if total != 1 {
+		t.Fatalf("total = %d, want 1", total)
+	}
+	if len(repo.upserted) != 1 {
+		t.Fatalf("upserted %d rows, want 1", len(repo.upserted))
+	}
+	got := repo.upserted[0]
+	if got.BlockVersion != 1 {
+		t.Errorf("BlockVersion = %d, want 1 (the archive's real version, not the requested 0)", got.BlockVersion)
+	}
+	if want := tsBase + 100; got.BlockTimestamp.Unix() != want {
+		t.Errorf("BlockTimestamp = %d, want %d", got.BlockTimestamp.Unix(), want)
+	}
+}
+
+// A height the archive holds nothing for at all is still a genuine hole, not a version mismatch —
+// the fallback must not invent occupancy the archive does not report.
+func TestRun_GenuineArchiveHoleStillReportsAsAMiss(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 200, Version: 0}}}
+	reader := &mockS3Reader{streamFn: func(context.Context, string, string) (io.ReadCloser, error) {
+		return nil, outbound.ErrObjectNotFound
+	}}
+	archive := &fakeArchive{} // highestVersionFn nil -> found=false, matching "nothing archived"
+	svc := newTestServiceWithArchive(t, repo, reader, archive, 500)
+
+	total, err := svc.Run(context.Background())
+	if err == nil {
+		t.Fatal("want a failure naming the absent block, got none")
+	}
+	if !strings.Contains(err.Error(), "200/0") {
+		t.Errorf("error %q does not name the absent block", err)
+	}
+	if total != 0 {
+		t.Errorf("total = %d, want 0", total)
+	}
+}
+
+// The archive resolving to the SAME version that already 404ed is also a genuine hole: there is
+// nothing else to try, and readAt must not be called a second time at an identical coordinate.
+func TestRun_ArchiveAgreeingWithTheFailedReadIsAMissNotARetry(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 250, Version: 0}}}
+	var reads int
+	reader := &mockS3Reader{streamFn: func(context.Context, string, string) (io.ReadCloser, error) {
+		reads++
+		return nil, outbound.ErrObjectNotFound
+	}}
+	archive := &fakeArchive{highestVersionFn: func(context.Context, int64) (int, bool, error) {
+		return 0, true, nil // agrees with the version already requested and already absent
+	}}
+	svc := newTestServiceWithArchive(t, repo, reader, archive, 500)
+
+	total, err := svc.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "250/0") {
+		t.Fatalf("want a failure naming block 250/0, got %v", err)
+	}
+	if total != 0 {
+		t.Errorf("total = %d, want 0", total)
+	}
+	if reads != 1 {
+		t.Errorf("StreamFile called %d times, want exactly 1 (no retry at an identical version)", reads)
+	}
+}
+
+// A failure resolving the archive's version says nothing about whether the block exists, so it must
+// surface as a hard error rather than be swallowed as a miss.
+func TestRun_ArchiveResolutionFailureDuringFallbackSurfaces(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 300, Version: 0}}}
+	reader := &mockS3Reader{streamFn: func(context.Context, string, string) (io.ReadCloser, error) {
+		return nil, outbound.ErrObjectNotFound
+	}}
+	archive := &fakeArchive{highestVersionFn: func(context.Context, int64) (int, bool, error) {
+		return 0, false, fmt.Errorf("connection reset")
+	}}
+	svc := newTestServiceWithArchive(t, repo, reader, archive, 500)
+
+	if _, err := svc.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "resolving the archived version") {
+		t.Fatalf("want the resolution failure surfaced naming the resolution step, got %v", err)
+	}
+}
+
+// The version the archive resolves to can hold receipts/traces with no block object at all — a
+// raw-block-bulk-downloader partial upload, not a corrupted read. This must still be a miss, not a
+// hard failure: treating it as a failure would stall an entire chain's load on an ordinary partial-
+// archive state the codebase already anticipates elsewhere (internal/pkg/blockversion).
+func TestRun_ResolvedVersionWithNoBlockObjectIsAMissNotAFailure(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 400, Version: 0}}}
+	reader := &mockS3Reader{streamFn: func(context.Context, string, string) (io.ReadCloser, error) {
+		return nil, outbound.ErrObjectNotFound // every version: the resolved one holds no block object
+	}}
+	archive := &fakeArchive{highestVersionFn: func(context.Context, int64) (int, bool, error) {
+		return 1, true, nil // occupied by receipts/traces only
+	}}
+	svc := newTestServiceWithArchive(t, repo, reader, archive, 500)
+
+	total, err := svc.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "400/0") {
+		t.Fatalf("want a miss naming block 400/0, got %v", err)
+	}
+	if total != 0 {
+		t.Errorf("total = %d, want 0", total)
 	}
 }
 

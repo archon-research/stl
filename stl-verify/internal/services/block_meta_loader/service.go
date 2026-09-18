@@ -11,8 +11,8 @@
 //
 // Run PER CHAIN (like raw-data-backup): one invocation, one CHAIN_ID, one S3 bucket. Idempotent
 // (ON CONFLICT DO NOTHING) and resumable (the work-list is only blocks not yet in block_meta).
-// The block_meta reads/writes live behind the outbound.BlockMetaRepository port; this service owns
-// only the S3-header decode and the batch loop.
+// The block_meta reads/writes live behind the outbound.BlockMetaRepository port, and archive-version
+// resolution behind outbound.ArchiveReader; this service owns the S3-header decode and the batch loop.
 package block_meta_loader
 
 import (
@@ -61,12 +61,13 @@ type Service struct {
 	cfg     Config
 	repo    outbound.BlockMetaRepository
 	reader  outbound.S3Reader
+	archive outbound.ArchiveReader
 	logger  *slog.Logger
 	metrics *loaderMetrics
 }
 
 // New validates the configuration and dependencies for a single-chain run.
-func New(cfg Config, repo outbound.BlockMetaRepository, reader outbound.S3Reader, logger *slog.Logger) (*Service, error) {
+func New(cfg Config, repo outbound.BlockMetaRepository, reader outbound.S3Reader, archive outbound.ArchiveReader, logger *slog.Logger) (*Service, error) {
 	if cfg.ChainID <= 0 {
 		return nil, fmt.Errorf("chain id must be positive, got %d", cfg.ChainID)
 	}
@@ -81,6 +82,9 @@ func New(cfg Config, repo outbound.BlockMetaRepository, reader outbound.S3Reader
 	}
 	if reader == nil {
 		return nil, fmt.Errorf("s3 reader is required")
+	}
+	if archive == nil {
+		return nil, fmt.Errorf("archive reader is required")
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -100,7 +104,7 @@ func New(cfg Config, repo outbound.BlockMetaRepository, reader outbound.S3Reader
 	if err != nil {
 		logger.Warn("block_meta loader metrics unavailable", "error", err)
 	}
-	return &Service{cfg: cfg, repo: repo, reader: reader, logger: logger, metrics: metrics}, nil
+	return &Service{cfg: cfg, repo: repo, reader: reader, archive: archive, logger: logger, metrics: metrics}, nil
 }
 
 // Run fills block_meta for cfg.ChainID until no referenced block is missing. Returns rows upserted.
@@ -187,20 +191,15 @@ func (s *Service) readBatch(ctx context.Context, refs []outbound.BlockRef) ([]ou
 			if gctx.Err() != nil {
 				return nil
 			}
-			ts, err := blockheader.ReadTimestampFromS3(gctx, s.reader, s.cfg.Bucket, r.Number, r.Version)
+			row, miss, err := s.readOne(gctx, r)
 			if err != nil {
-				if errors.Is(err, outbound.ErrObjectNotFound) {
-					misses[i] = fmt.Sprintf("%d/%d", r.Number, r.Version)
-					return nil
-				}
-				return fmt.Errorf("chain %d block %d/%d: %w", s.cfg.ChainID, r.Number, r.Version, err)
+				return err
 			}
-			rows[i] = outbound.BlockMetaRow{
-				ChainID:        s.cfg.ChainID,
-				BlockNumber:    r.Number,
-				BlockVersion:   r.Version,
-				BlockTimestamp: ts,
+			if miss != "" {
+				misses[i] = miss
+				return nil
 			}
+			rows[i] = row
 			found[i] = true
 			return nil
 		})
@@ -220,4 +219,59 @@ func (s *Service) readBatch(ctx context.Context, refs []outbound.BlockRef) ([]ou
 		}
 	}
 	return out, absent, nil
+}
+
+// readOne reads one block's header at its requested version, falling back to the archive's
+// own highest version at that height when the requested one is absent.
+//
+// block_meta.block_version matches the archive's own version, not a referencing table's — the
+// two usually agree, but the raw-block-bulk-downloader's December backfill wrote a swath of
+// deep history under key version 1 regardless of the referencing table's own bookkeeping, so a
+// read pinned to the requested version 404s even though the archive holds the block elsewhere.
+// Resolving the real version is the correct read, not a workaround: it is the same rule
+// listHighestVersionReceipts and internal/pkg/blockversion already apply to raw-bucket reads.
+func (s *Service) readOne(ctx context.Context, r outbound.BlockRef) (outbound.BlockMetaRow, string, error) {
+	row, err := s.readAt(ctx, r.Number, r.Version)
+	if err == nil {
+		return row, "", nil
+	}
+	if !errors.Is(err, outbound.ErrObjectNotFound) {
+		return outbound.BlockMetaRow{}, "", fmt.Errorf("chain %d block %d/%d: %w", s.cfg.ChainID, r.Number, r.Version, err)
+	}
+
+	highest, found, err := s.archive.HighestVersion(ctx, r.Number)
+	if err != nil {
+		return outbound.BlockMetaRow{}, "", fmt.Errorf(
+			"chain %d block %d/%d: resolving the archived version: %w", s.cfg.ChainID, r.Number, r.Version, err)
+	}
+	if !found || highest == r.Version {
+		// Nothing archived at this height at all, or the listing agrees with what already
+		// 404ed: a genuine hole, not a version mismatch.
+		return outbound.BlockMetaRow{}, fmt.Sprintf("%d/%d", r.Number, r.Version), nil
+	}
+
+	row, err = s.readAt(ctx, r.Number, highest)
+	if err != nil {
+		if errors.Is(err, outbound.ErrObjectNotFound) {
+			// The occupied version can hold receipts/traces with no block object (a
+			// raw-block-bulk-downloader partial upload) — still a miss, nothing else to try.
+			return outbound.BlockMetaRow{}, fmt.Sprintf("%d/%d", r.Number, r.Version), nil
+		}
+		return outbound.BlockMetaRow{}, "", fmt.Errorf(
+			"chain %d block %d/%d at resolved version %d: %w", s.cfg.ChainID, r.Number, r.Version, highest, err)
+	}
+	return row, "", nil
+}
+
+func (s *Service) readAt(ctx context.Context, blockNumber int64, version int) (outbound.BlockMetaRow, error) {
+	ts, err := blockheader.ReadTimestampFromS3(ctx, s.reader, s.cfg.Bucket, blockNumber, version)
+	if err != nil {
+		return outbound.BlockMetaRow{}, err
+	}
+	return outbound.BlockMetaRow{
+		ChainID:        s.cfg.ChainID,
+		BlockNumber:    blockNumber,
+		BlockVersion:   version,
+		BlockTimestamp: ts,
+	}, nil
 }
