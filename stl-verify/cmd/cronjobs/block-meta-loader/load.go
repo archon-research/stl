@@ -76,10 +76,11 @@ func loadWorkflow(ctx workflow.Context, params LoadParams) (LoadProgress, error)
 // loadActivities holds what the activity needs for the life of the worker, so a
 // run does not pay for opening the pool or the archive reader.
 type loadActivities struct {
-	cfg    config
-	pool   *pgxpool.Pool
-	reader outbound.S3Reader
-	logger *slog.Logger
+	cfg     config
+	pool    *pgxpool.Pool
+	reader  outbound.S3Reader
+	archive outbound.ArchiveReader
+	logger  *slog.Logger
 }
 
 // LoadBlockMeta fills block_meta for this deployment's chain and returns what it
@@ -115,7 +116,7 @@ func (a *loadActivities) LoadBlockMeta(ctx context.Context, params LoadParams) (
 		OnProgress: func(total int64) {
 			_ = heartbeat.SaveProgress(ctx, LoadProgress{Loaded: total})
 		},
-	}, repo, a.reader, a.logger)
+	}, repo, a.reader, a.archive, a.logger)
 	if err != nil {
 		return out, err
 	}

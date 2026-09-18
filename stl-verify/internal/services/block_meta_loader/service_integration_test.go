@@ -196,7 +196,8 @@ func newLoaderFixture(t *testing.T, ctx context.Context) loaderFixture {
 	}
 	// BatchSize 2 forces several batches over the pending set, so the keyset cursor advances
 	// across boundaries rather than filling everything at once.
-	svc, err := New(Config{ChainID: fixtureChn, Bucket: bucket, BatchSize: 2}, repo, newLocalStackReader(t, ctx, logger), logger)
+	reader := newLocalStackReader(t, ctx, logger)
+	svc, err := New(Config{ChainID: fixtureChn, Bucket: bucket, BatchSize: 2}, repo, reader, s3adapter.NewArchiveReader(reader, bucket), logger)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

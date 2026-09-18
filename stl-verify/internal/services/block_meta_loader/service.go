@@ -11,8 +11,8 @@
 //
 // Run PER CHAIN (like raw-data-backup): one invocation, one CHAIN_ID, one S3 bucket. Idempotent
 // (ON CONFLICT DO NOTHING) and resumable (the work-list is only blocks not yet in block_meta).
-// The block_meta reads/writes live behind the outbound.BlockMetaRepository port; this service owns
-// only the S3-header decode and the batch loop.
+// The block_meta reads/writes live behind the outbound.BlockMetaRepository port, and archive-version
+// resolution behind outbound.ArchiveReader; this service owns the S3-header decode and the batch loop.
 package block_meta_loader
 
 import (
@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockheader"
 	"golang.org/x/sync/errgroup"
@@ -61,12 +62,13 @@ type Service struct {
 	cfg     Config
 	repo    outbound.BlockMetaRepository
 	reader  outbound.S3Reader
+	archive outbound.ArchiveReader
 	logger  *slog.Logger
 	metrics *loaderMetrics
 }
 
 // New validates the configuration and dependencies for a single-chain run.
-func New(cfg Config, repo outbound.BlockMetaRepository, reader outbound.S3Reader, logger *slog.Logger) (*Service, error) {
+func New(cfg Config, repo outbound.BlockMetaRepository, reader outbound.S3Reader, archive outbound.ArchiveReader, logger *slog.Logger) (*Service, error) {
 	if cfg.ChainID <= 0 {
 		return nil, fmt.Errorf("chain id must be positive, got %d", cfg.ChainID)
 	}
@@ -81,6 +83,9 @@ func New(cfg Config, repo outbound.BlockMetaRepository, reader outbound.S3Reader
 	}
 	if reader == nil {
 		return nil, fmt.Errorf("s3 reader is required")
+	}
+	if archive == nil {
+		return nil, fmt.Errorf("archive reader is required")
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -100,7 +105,7 @@ func New(cfg Config, repo outbound.BlockMetaRepository, reader outbound.S3Reader
 	if err != nil {
 		logger.Warn("block_meta loader metrics unavailable", "error", err)
 	}
-	return &Service{cfg: cfg, repo: repo, reader: reader, logger: logger, metrics: metrics}, nil
+	return &Service{cfg: cfg, repo: repo, reader: reader, archive: archive, logger: logger, metrics: metrics}, nil
 }
 
 // Run fills block_meta for cfg.ChainID until no referenced block is missing. Returns rows upserted.
@@ -184,23 +189,21 @@ func (s *Service) readBatch(ctx context.Context, refs []outbound.BlockRef) ([]ou
 			break
 		}
 		g.Go(func() error {
-			if gctx.Err() != nil {
+			// Returning nil here would hand Run a batch that is neither loaded nor missed: the
+			// skipped refs land in no list, and errgroup does not treat a cancelled derived context
+			// as an error, so Wait would report success for a short batch.
+			if err := gctx.Err(); err != nil {
+				return err
+			}
+			row, miss, err := s.readOne(gctx, r)
+			if err != nil {
+				return err
+			}
+			if miss != "" {
+				misses[i] = miss
 				return nil
 			}
-			ts, err := blockheader.ReadTimestampFromS3(gctx, s.reader, s.cfg.Bucket, r.Number, r.Version)
-			if err != nil {
-				if errors.Is(err, outbound.ErrObjectNotFound) {
-					misses[i] = fmt.Sprintf("%d/%d", r.Number, r.Version)
-					return nil
-				}
-				return fmt.Errorf("chain %d block %d/%d: %w", s.cfg.ChainID, r.Number, r.Version, err)
-			}
-			rows[i] = outbound.BlockMetaRow{
-				ChainID:        s.cfg.ChainID,
-				BlockNumber:    r.Number,
-				BlockVersion:   r.Version,
-				BlockTimestamp: ts,
-			}
+			rows[i] = row
 			found[i] = true
 			return nil
 		})
@@ -220,4 +223,65 @@ func (s *Service) readBatch(ctx context.Context, refs []outbound.BlockRef) ([]ou
 		}
 	}
 	return out, absent, nil
+}
+
+// readOne reads one block's header, falling back to the versions the archive actually holds when
+// the requested one is absent. A December backfill wrote deep history under key version 1 whatever
+// the referencing table records, so a read pinned to the requested version 404s (VEC-835).
+func (s *Service) readOne(ctx context.Context, r outbound.BlockRef) (outbound.BlockMetaRow, string, error) {
+	ts, err := s.readAt(ctx, r.Number, r.Version)
+	if err == nil {
+		return s.row(r, ts), "", nil
+	}
+	if !errors.Is(err, outbound.ErrObjectNotFound) {
+		return outbound.BlockMetaRow{}, "", fmt.Errorf("chain %d block %d/%d: %w", s.cfg.ChainID, r.Number, r.Version, err)
+	}
+
+	highest, found, err := s.archive.HighestVersion(ctx, r.Number)
+	if err != nil {
+		return outbound.BlockMetaRow{}, "", fmt.Errorf(
+			"chain %d block %d/%d: resolving the archived version: %w", s.cfg.ChainID, r.Number, r.Version, err)
+	}
+	if !found {
+		// Nothing archived at this height at all: a genuine hole, not a version mismatch.
+		return outbound.BlockMetaRow{}, fmt.Sprintf("%d/%d", r.Number, r.Version), nil
+	}
+
+	// A slot counts as occupied whatever data type fills it, so the top one can hold receipts from a
+	// partial upload while a lower version holds the block. Stopping at the first 404 would report a
+	// block the archive holds as absent; descending takes the newest block, never an orphan below it.
+	for v := highest; v >= 0; v-- {
+		if v == r.Version {
+			continue // already read above, already 404ed
+		}
+		ts, err := s.readAt(ctx, r.Number, v)
+		if err == nil {
+			s.metrics.recordResolved(ctx, s.cfg.ChainID)
+			s.logger.Warn("block_meta header read from a different archived version",
+				"chain", s.cfg.ChainID, "block", r.Number, "requested", r.Version, "read", v)
+			return s.row(r, ts), "", nil
+		}
+		if !errors.Is(err, outbound.ErrObjectNotFound) {
+			return outbound.BlockMetaRow{}, "", fmt.Errorf(
+				"chain %d block %d/%d at archived version %d: %w", s.cfg.ChainID, r.Number, r.Version, v, err)
+		}
+	}
+	// Every occupied version at this height holds something other than a block object.
+	return outbound.BlockMetaRow{}, fmt.Sprintf("%d/%d", r.Number, r.Version), nil
+}
+
+// row records the block under the version that REFERENCED it, never the one read from: the anti-join
+// clears only on the exact (chain_id, block_number, block_version), and observation tables join on
+// their own column. An absent version inherits the surviving one's time — a slot apart for a reorg.
+func (s *Service) row(r outbound.BlockRef, ts time.Time) outbound.BlockMetaRow {
+	return outbound.BlockMetaRow{
+		ChainID:        s.cfg.ChainID,
+		BlockNumber:    r.Number,
+		BlockVersion:   r.Version,
+		BlockTimestamp: ts,
+	}
+}
+
+func (s *Service) readAt(ctx context.Context, blockNumber int64, version int) (time.Time, error) {
+	return blockheader.ReadTimestampFromS3(ctx, s.reader, s.cfg.Bucket, blockNumber, version)
 }

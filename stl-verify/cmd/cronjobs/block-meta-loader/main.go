@@ -111,11 +111,12 @@ func register(ctx context.Context, cfg config, deps temporal.Dependencies, r wor
 	// s3:ListBucket and s3:GetObject come from an EKS Pod Identity association granted in the infra
 	// repo. Proven here, a missing grant is a pod that will not start rather than a run an operator
 	// started and has to come back to.
-	if err := s3adapter.NewArchiveReader(reader, cfg.bucket).Ping(ctx); err != nil {
+	archive := s3adapter.NewArchiveReader(reader, cfg.bucket)
+	if err := archive.Ping(ctx); err != nil {
 		return fmt.Errorf("the raw archive %s is unusable: %w", cfg.bucket, err)
 	}
 
-	activities := &loadActivities{cfg: cfg, pool: deps.Pool, reader: reader, logger: deps.Logger}
+	activities := &loadActivities{cfg: cfg, pool: deps.Pool, reader: reader, archive: archive, logger: deps.Logger}
 
 	r.RegisterWorkflowWithOptions(loadWorkflow, workflow.RegisterOptions{Name: workflowTypeName})
 	activities.register(r)

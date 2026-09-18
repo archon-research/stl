@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -91,7 +92,8 @@ func TestVolume_RealDataEndToEnd(t *testing.T) {
 		t.Fatalf("repository: %v", err)
 	}
 	cfg := Config{ChainID: 1, Bucket: bucket, BatchSize: 50, Concurrency: 10}
-	svc, err := New(cfg, repo, newLocalStackReader(t, ctx, logger), logger)
+	reader := newLocalStackReader(t, ctx, logger)
+	svc, err := New(cfg, repo, reader, s3adapter.NewArchiveReader(reader, bucket), logger)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
