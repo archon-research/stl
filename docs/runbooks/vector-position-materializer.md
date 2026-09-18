@@ -214,7 +214,7 @@ SELECT r.projection, encode(r.position_id, 'hex') AS position_id, r.detail,
 ```
 
 That table is append-only, so its rows outlive the defect. What is withheld *now* is
-`SELECT projection, count(DISTINCT pair) FROM position_projection_withheld_pair GROUP BY 1;`, with
+`SELECT projection, count(DISTINCT pair) FROM projection_withheld_pair GROUP BY 1;`, with
 `morpho_market_withheld_pair` giving the Morpho reasons behind it. The fix is upstream in
 `morpho_market` or `"user"`, not here.
 
@@ -229,7 +229,7 @@ another chain.
 All three classes reach the alert, but by two different routes. The spine counts the first two into
 `position_projection_run.positions_refused` as it writes the run row. An unkeyable pair is recorded
 *after* that row is written and can never be in it, so the runner adds what
-`position_projection_withheld_pair` currently reports for that projection to the level it exports. A
+`projection_withheld_pair` currently reports for that projection to the level it exports. A
 projection that did not complete a run this tick stays absent either way.
 
 ## VectorPositionMaterializerViewFailing

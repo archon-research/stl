@@ -80,11 +80,11 @@ func (r *PositionMaterializerRepository) Materialize(ctx context.Context, materi
 //
 // Read live rather than from position_projection_refusal: that table is append-only, so a count taken
 // from it would outlive the defect and the alert would never clear.
-const withheldPairView = "public.position_projection_withheld_pair"
+const withheldPairView = "public.projection_withheld_pair"
 
 // DISTINCT because the view emits one row per pair per reason, and a pair failing two checks is still
 // one withheld position.
-const withheldPairQuery = `SELECT projection, count(DISTINCT pair) FROM public.position_projection_withheld_pair GROUP BY projection`
+const withheldPairQuery = `SELECT projection, count(DISTINCT pair) FROM public.projection_withheld_pair GROUP BY projection`
 
 // RefusedByProjection reads the level the withholding alert watches: positions_refused from the latest
 // run row of each projection runID wrote within the last `within`, plus the pairs that projection is

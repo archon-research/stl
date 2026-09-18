@@ -256,7 +256,7 @@ func TestPositionMaterializer_RefusedByProjection(t *testing.T) {
 // real view exposes exactly these two columns with these types, so a drift there fails that test rather
 // than silently diverging from this stand-in.
 const withheldPairViewDDL = `
-	CREATE VIEW position_projection_withheld_pair AS
+	CREATE VIEW projection_withheld_pair AS
 	SELECT * FROM (VALUES %s) AS v(projection, pair)`
 
 // A pair the wrapper cannot key is recorded after the run row is written, so it can never be in
@@ -338,7 +338,7 @@ func TestPositionMaterializer_RefusedByProjectionWithAnEmptyWithheldView(t *test
 	ctx := context.Background()
 
 	if _, err := pool.Exec(ctx, `
-		CREATE VIEW position_projection_withheld_pair AS
+		CREATE VIEW projection_withheld_pair AS
 		SELECT NULL::text AS projection, NULL::text AS pair WHERE false;
 		INSERT INTO position_projection_run
 		    (projection, created_at, build_id, run_id, block_timestamp, rows_emitted, rows_appended, positions_refused)
@@ -365,11 +365,11 @@ func TestPositionMaterializer_RefusedByProjectionWithoutTheWithheldView(t *testi
 	ctx := context.Background()
 
 	var present bool
-	if err := pool.QueryRow(ctx, `SELECT to_regclass('public.position_projection_withheld_pair') IS NOT NULL`).Scan(&present); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('public.projection_withheld_pair') IS NOT NULL`).Scan(&present); err != nil {
 		t.Fatal(err)
 	}
 	if present {
-		t.Fatal("position_projection_withheld_pair exists on this branch; this test no longer covers the missing-view path")
+		t.Fatal("projection_withheld_pair exists on this branch; this test no longer covers the missing-view path")
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO position_projection_run
