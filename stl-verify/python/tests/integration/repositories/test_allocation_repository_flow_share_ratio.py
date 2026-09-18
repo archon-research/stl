@@ -48,6 +48,12 @@ from tests.integration.seed import (
     FR_MIXED_OUT_TX_AMOUNT,
     FR_MIXED_OUT_UNDERLYING_VALUE,
     FR_NEVER_VALUED_TX_AMOUNT,
+    FR_PRICE_CHANGE_AFTER,
+    FR_PRICE_CHANGE_BEFORE,
+    FR_PRICE_CHANGE_TX_AMOUNT_AFTER,
+    FR_PRICE_CHANGE_TX_AMOUNT_BEFORE,
+    FR_PRICE_GAP_PRICE,
+    FR_PRICE_GAP_TX_AMOUNT_AFTER,
     FR_PROXY_ATOKEN,
     FR_PROXY_DISTANCE,
     FR_PROXY_DIVERGENT,
@@ -57,6 +63,8 @@ from tests.integration.seed import (
     FR_PROXY_LEGACY,
     FR_PROXY_MIXED,
     FR_PROXY_NEVER_VALUED,
+    FR_PROXY_PRICE_CHANGE,
+    FR_PROXY_PRICE_GAP,
     FR_PROXY_RATIO,
     FR_PROXY_SAME_BLOCK,
     FR_PROXY_TIE,
@@ -232,6 +240,67 @@ async def test_mixed_bucket_sums_ratio_and_nearest_row_flows(repo) -> None:
     bucket = await _single_bucket(repo, FR_PROXY_MIXED)
     assert bucket.event_count == 4
     assert bucket.net_flow_usd == _EXPECTED_MIXED_NET_FLOW
+
+
+@pytest.mark.asyncio
+async def test_flow_bucket_prices_at_its_own_historical_price_not_latest(repo) -> None:
+    """Each bucket's flow is priced at the price effective at that bucket, not today's spot (VEC-763).
+
+    Two flows, one per hourly bucket, both own-ratio (ratio fixed at 1) so only
+    the underlying's price -- which steps between the buckets -- can move
+    net_flow_usd. The pre-fix read priced every bucket at the latest price
+    (``FR_PRICE_CHANGE_AFTER``), including the first, which predates it.
+    """
+    buckets = await repo.list_activity_buckets(
+        proxy_addresses=[EthAddress(f"0x{FR_PROXY_PRICE_CHANGE}")],
+        from_timestamp=FR_BUCKET_TS - dt.timedelta(minutes=30),
+        to_timestamp=FR_BUCKET_TS + dt.timedelta(hours=1, minutes=30),
+        bucket_seconds=3600.0,
+        limit=10,
+    )
+    by_start = {b.bucket_start: b.net_flow_usd for b in buckets}
+
+    before_change_usd = FR_PRICE_CHANGE_TX_AMOUNT_BEFORE * FR_PRICE_CHANGE_BEFORE
+    after_change_usd = FR_PRICE_CHANGE_TX_AMOUNT_AFTER * FR_PRICE_CHANGE_AFTER
+    assert before_change_usd != after_change_usd, "the before/after prices must differ, or this test cannot fail"
+
+    bucket_0 = FR_BUCKET_TS.replace(minute=0, second=0, microsecond=0)
+    assert by_start[bucket_0] == before_change_usd
+    assert by_start[bucket_0 + dt.timedelta(hours=1)] == after_change_usd
+
+
+@pytest.mark.asyncio
+async def test_flow_bucket_before_the_underlyings_first_price_is_unpriced_not_zeroed(repo) -> None:
+    """A bucket predating the underlying's first-ever price is unpriced, not a silent zero (VEC-763).
+
+    Every other price-change fixture seeds a carry-in at
+    ``HISTORICAL_PRICE_SEED_AT``, so the seed probe (bounded to
+    ``otp.timestamp < :from_timestamp``) always finds one. Here the
+    underlying's ONLY observation lands inside the window, so the first bucket
+    must come back with ``priced_entity_count`` below ``entity_count`` --
+    otherwise a real held position is indistinguishable from one that was
+    never priced at all.
+    """
+    buckets = await repo.list_activity_buckets(
+        proxy_addresses=[EthAddress(f"0x{FR_PROXY_PRICE_GAP}")],
+        from_timestamp=FR_BUCKET_TS - dt.timedelta(minutes=30),
+        to_timestamp=FR_BUCKET_TS + dt.timedelta(hours=1, minutes=30),
+        bucket_seconds=3600.0,
+        limit=10,
+    )
+    by_start = {b.bucket_start: b for b in buckets}
+    bucket_0 = FR_BUCKET_TS.replace(minute=0, second=0, microsecond=0)
+    bucket_1 = bucket_0 + dt.timedelta(hours=1)
+
+    before = by_start[bucket_0]
+    assert before.net_flow_usd == Decimal(0)
+    assert before.entity_count == 1
+    assert before.priced_entity_count == 0, "unpriced, not silently zeroed as if fully accounted for"
+
+    after = by_start[bucket_1]
+    assert after.net_flow_usd == FR_PRICE_GAP_TX_AMOUNT_AFTER * FR_PRICE_GAP_PRICE
+    assert after.entity_count == 1
+    assert after.priced_entity_count == 1
 
 
 @pytest.mark.asyncio

@@ -6,9 +6,10 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from opentelemetry import trace
-from sqlalchemy import bindparam, text
+from sqlalchemy import TextClause, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.adapters.postgres._historical_price import historical_price_buckets_cte
 from app.adapters.postgres._time_window import (
     clamp_limit,
     required_time_window_clause,
@@ -54,7 +55,7 @@ _USDS_ADDRESS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
 #     members.
 # A deliberately curated set (VEC-450): the general widening to every vault,
 # and syrupUSDC, are owned separately. Add addresses here to widen. The
-# balance series (_ALLOCATION_BALANCE_BUCKETS_SQL) does not consult this set:
+# balance series (_allocation_balance_buckets_sql) does not consult this set:
 # its last valuation arm prices ANY direct holding this way once the token's
 # own price is missing, and VEC-782 holds the two reads to agree.
 _UNDERLYING_VALUE_TOKEN_HEXES = frozenset(
@@ -825,10 +826,14 @@ class AllocationRepository:
         ``series="flow"`` keeps the historical behaviour: event counts,
         tx-amount sums and the signed USD net flow. ``series="balance"`` runs
         the checkpoint read instead and returns ``balance_usd`` — a different
-        and much cheaper measure, see ``_ALLOCATION_BALANCE_BUCKETS_SQL``.
+        and much cheaper measure, see ``_allocation_balance_buckets_sql``.
 
         Exactly one query runs per call, so the fields belonging to the other
         series come back ``None`` rather than being computed alongside.
+        ``priced_entity_count``/``entity_count`` are populated for both series:
+        each prices its receipt-token entities at their own bucket, and a
+        bucket predating an entity's first in-window price is unpriced rather
+        than silently zeroed (VEC-763).
         """
         params = {
             "proxy_addrs": (None if proxy_addresses is None else [a.to_bytes() for a in proxy_addresses]),
@@ -850,7 +855,11 @@ class AllocationRepository:
             window = to_timestamp - from_timestamp
             params["seed_from"] = from_timestamp - max(window, _BALANCE_SEED_REACH)
 
-        statement = _ALLOCATION_BALANCE_BUCKETS_SQL if series == "balance" else _ALLOCATION_ACTIVITY_BUCKETS_SQL
+        statement = (
+            _allocation_balance_buckets_sql(from_timestamp, to_timestamp)
+            if series == "balance"
+            else _allocation_activity_buckets_sql(from_timestamp, to_timestamp)
+        )
         try:
             async with self._engine.connect() as conn:
                 result = await conn.execute(statement, self._reference.params(**params))
@@ -887,8 +896,8 @@ class AllocationRepository:
                     if series == "balance" and row.balance_usd is not None
                     else None
                 ),
-                priced_entity_count=(row.priced_entity_count if series == "balance" else None),
-                entity_count=(row.entity_count if series == "balance" else None),
+                priced_entity_count=row.priced_entity_count,
+                entity_count=row.entity_count,
             )
             for row in rows
         ]
@@ -1148,16 +1157,16 @@ class AllocationRepository:
         Per bucket and receipt-token position, the last observed redeemable
         value (``COALESCE(underlying_value, balance)``; rationale on
         ``_RECEIPT_TOKEN_POSITIONS_SQL``) is carried forward and valued at the
-        *latest* underlying oracle price (via the protocol-bound oracle), then
-        summed across positions. The position size is the historical driver;
-        the price is held at its latest value because the price history is
-        change-only, so a bucketed price-LOCF would drop stable assets whose
-        last price change predates the window. This is exact for the
-        dollar-pegged positions that dominate the book; for volatile
-        underlyings (e.g. WETH) historical buckets use the current price (a
-        bounded approximation). Leading buckets before the first observation
-        are ``None``. Direct holdings (no receipt token) are excluded, matching
-        the exposure basis of the risk-capital endpoint.
+        underlying oracle price AT THAT BUCKET (via the protocol-bound oracle),
+        then summed across positions (VEC-763): both the position size and the
+        price are historical, each carried forward (locf) from its own last
+        known observation, not today's spot. A bucket predating the token's
+        first known oracle price is unpriced -- excluded from the sum rather
+        than counted as zero, with ``priced_entity_count``/``entity_count``
+        telling a caller a partial total from a complete one, same as the
+        activity-buckets balance series. Leading buckets before the first
+        position observation are ``None``. Direct holdings (no receipt token)
+        are excluded, matching the exposure basis of the risk-capital endpoint.
 
         Windows spanning the ``underlying_value`` rollout boundary show a
         valuation-basis step: buckets fed by pre-rollout rows carry the share
@@ -1172,9 +1181,10 @@ class AllocationRepository:
             "limit": clamp_limit(limit, _ALLOCATION_ACTIVITY_LIMIT),
         }
 
+        statement = _exposure_buckets_sql(from_timestamp, to_timestamp)
         try:
             async with self._engine.connect() as conn:
-                result = await conn.execute(_EXPOSURE_BUCKETS_SQL, self._reference.params(**params))
+                result = await conn.execute(statement, self._reference.params(**params))
                 rows = result.fetchall()
         except asyncio.CancelledError:
             raise
@@ -1200,6 +1210,8 @@ class AllocationRepository:
                     if row.exposure_usd is not None
                     else None
                 ),
+                priced_entity_count=row.priced_entity_count,
+                entity_count=row.entity_count,
             )
             for row in rows
         ]
@@ -1240,7 +1252,7 @@ class AllocationRepository:
 # are unchanged (their underlying_value equals balance by construction).
 # Flow-level reads (``net_flow_usd``) convert each flow at its row's share
 # ratio, borrowing the nearest same-token row's when the row lacks one; see
-# ``_ALLOCATION_ACTIVITY_BUCKETS_SQL``.
+# ``_allocation_activity_buckets_sql``.
 #
 # The underlying is priced via the registry's ``receipt_token.underlying_token_id``,
 # not the position's own ``underlying_token_id`` (verified identical on every
@@ -1803,7 +1815,7 @@ LIMIT :limit
 # at the flow's block, not a per-leg execution price. Acceptable because a
 # yield vault's share ratio moves slowly, so the same-block position ratio is
 # indistinguishable from the execution price at this read's resolution.
-# Balance counterpart of _ALLOCATION_ACTIVITY_BUCKETS_SQL, for series=balance
+# Balance counterpart of _allocation_activity_buckets_sql, for series=balance
 # (VEC-760). Same filters, same buckets, but it READS each bucket's recorded
 # position state instead of summing the flows into it.
 #
@@ -1830,12 +1842,14 @@ LIMIT :limit
 # mark-to-market, so a share-price move shows on a day with no transaction.
 # That is the same basis debt/total-capital/exposure already report.
 #
-# The valuation basis matches the other receipt reads (see the block above
-# _RECEIPT_TOKEN_POSITIONS_SQL): COALESCE(underlying_value, balance) x the
-# registry underlying's price, refusing a row whose own underlying diverges.
-# Prices come from token_price_current, so every bucket is valued at the newest
-# price rather than its own block's -- documented on the flow read and tracked
-# in VEC-763; it applies identically here.
+# The valuation splits into three arms, mirroring VEC-782's
+# _TOTAL_USD_EXPOSURE_SQL: a registered receipt token prices
+# COALESCE(underlying_value, balance) through its protocol-bound oracle; an
+# unregistered token that itself carries an oracle price prices balance
+# directly; everything else falls back to the tracker's own recorded
+# underlying_value, priced through whatever oracle knows that underlying. A
+# row whose own underlying diverges from the registry's is refused. Every arm
+# is priced at ITS OWN bucket's historical price, not today's spot (VEC-763).
 # Minimum distance before the window to look for a carry-forward seed. A window
 # is also a floor on its own reach, so a long window looks back at least its own
 # length; a short one still reaches 30 days. Without the floor a 24h window sees
@@ -1845,7 +1859,9 @@ LIMIT :limit
 _BALANCE_SEED_REACH = timedelta(days=30)
 
 
-_ALLOCATION_BALANCE_BUCKETS_SQL = text(f"""
+def _allocation_balance_buckets_sql(from_timestamp: datetime, to_timestamp: datetime) -> TextClause:
+    """Build the balance-buckets query, with its price CTEs' window as a literal (VEC-672)."""
+    return text(f"""
 WITH window_rows AS MATERIALIZED (
     -- Deduped to the newest processing_version per identity for the same reason
     -- the flow read is (VEC-758): last() below picks a per-bucket winner by
@@ -1883,34 +1899,19 @@ WITH window_rows AS MATERIALIZED (
     ORDER BY {_VERSION_ORDER_AP}
 ),
 token_context AS MATERIALIZED (
-    -- One row per token: registry underlying, its protocol, and its latest
-    -- price. Identical in shape and rationale to the flow read's, including
-    -- MATERIALIZED being load-bearing. Direct holdings get a NULL underlying
-    -- and protocol, and are priced by their own token price instead; one
-    -- with no price of its own falls through to underlying_context below.
+    -- One row per token: registry underlying, its protocol, and whether the
+    -- token itself carries any currently enabled oracle price -- the static
+    -- per-token classification the valuation arms below switch on. The price
+    -- VALUE used to multiply is resolved separately, per bucket, not here
+    -- (VEC-763).
     SELECT
         wt.chain_id,
         wt.token_id,
         rt.underlying_token_id,
+        rt.protocol_id,
         protocol_match.protocol_name,
-        (
-            SELECT tpc.price_usd
-            FROM token_price_current tpc
-            JOIN protocol_oracle po ON po.oracle_id = tpc.oracle_id
-                AND po.protocol_id = rt.protocol_id
-            WHERE tpc.token_id = rt.underlying_token_id
-              AND EXISTS (
-                  SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
-                  WHERE oa.oracle_id = tpc.oracle_id
-                    AND oa.token_id = tpc.token_id
-                    AND oa.enabled
-              )
-            ORDER BY tpc.block_number DESC, tpc.block_version DESC,
-                     tpc.processing_version DESC, tpc.oracle_id DESC
-            LIMIT 1
-        ) AS receipt_price_usd,
-        (
-            SELECT tpc.price_usd
+        EXISTS (
+            SELECT 1
             FROM token_price_current tpc
             WHERE tpc.token_id = wt.token_id
               AND EXISTS (
@@ -1919,10 +1920,7 @@ token_context AS MATERIALIZED (
                     AND oa.token_id = tpc.token_id
                     AND oa.enabled
               )
-            ORDER BY tpc.block_number DESC, tpc.block_version DESC,
-                     tpc.processing_version DESC, tpc.oracle_id DESC
-            LIMIT 1
-        ) AS direct_price_usd
+        ) AS has_direct_price
     FROM (SELECT DISTINCT chain_id, token_id, token_address FROM window_rows) wt
     LEFT JOIN receipt_token rt
         ON rt.chain_id = wt.chain_id AND rt.receipt_token_address = wt.token_address
@@ -1944,56 +1942,27 @@ token_context AS MATERIALIZED (
         LIMIT 1
     ) AS protocol_match ON TRUE
 ),
-underlying_context AS MATERIALIZED (
-    -- The latest enabled price of each underlying the TRACKER recorded on a
-    -- row (ap.underlying_token_id), for the last arm of the valuation below:
-    -- a direct holding the registry does not know and no oracle prices, whose
-    -- value the tracker nonetheless computed in units of an asset that IS
-    -- priced -- an ERC-4626 vault share read through convertToAssets, or a
-    -- pool position whose address is the pool contract and can never carry a
-    -- price of its own. Any enabled oracle serves, as for the direct arm: with
-    -- no registry protocol there is no protocol_oracle binding to prefer.
-    -- One row per underlying, resolved once, for the same reason token_context
-    -- is MATERIALIZED.
-    SELECT
-        u.underlying_token_id,
-        (
-            SELECT tpc.price_usd
-            FROM token_price_current tpc
-            WHERE tpc.token_id = u.underlying_token_id
-              AND EXISTS (
-                  SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
-                  WHERE oa.oracle_id = tpc.oracle_id
-                    AND oa.token_id = tpc.token_id
-                    AND oa.enabled
-              )
-            ORDER BY tpc.block_number DESC, tpc.block_version DESC,
-                     tpc.processing_version DESC, tpc.oracle_id DESC
-            LIMIT 1
-        ) AS price_usd
-    FROM (
-        SELECT DISTINCT underlying_token_id
-        FROM window_rows
-        WHERE underlying_token_id IS NOT NULL
-    ) u
-),
 valued_rows AS MATERIALIZED (
     SELECT
         ap.proxy_address,
         ap.chain_id,
         ap.token_id,
+        tc.underlying_token_id,
+        tc.protocol_id,
+        tc.has_direct_price,
+        ap.underlying_token_id AS tracker_underlying_token_id,
         ap.block_number,
         ap.block_version,
         ap.log_index,
         ap.direction,
         ap.tx_hash,
         ap.created_at,
+        -- The multiply-by-price happens later, per bucket (VEC-763), but a
+        -- position of 0 units must be caught here: the arms below each read
+        -- only ONE of balance/underlying_value, so an empty position whose
+        -- arm-specific field happens to be NULL would otherwise read as
+        -- unpriceable rather than worth 0 (`0 * NULL price` is NULL in SQL).
         CASE
-            -- An empty position is worth nothing whatever it is denominated in
-            -- and whatever it would have been priced at, so it is valued
-            -- without consulting a price. Arithmetically this arm is what
-            -- `0 * price` would give, except that in SQL `0 * NULL` is NULL,
-            -- which would report the position as unpriceable.
             WHEN COALESCE(ap.underlying_value, ap.balance) = 0 THEN 0
             -- Same refusal as every other valuation read: a row whose own
             -- underlying disagrees with the registry's is denominated in a
@@ -2002,37 +1971,35 @@ valued_rows AS MATERIALIZED (
              AND tc.underlying_token_id IS NOT NULL
              AND ap.underlying_token_id <> tc.underlying_token_id THEN NULL
             WHEN tc.underlying_token_id IS NOT NULL
-                THEN COALESCE(ap.underlying_value, ap.balance) * tc.receipt_price_usd
-            WHEN tc.direct_price_usd IS NOT NULL
-                THEN ap.balance * tc.direct_price_usd
+                THEN COALESCE(ap.underlying_value, ap.balance)
+            WHEN tc.has_direct_price
+                THEN ap.balance
             -- Neither the registry nor an oracle knows the token, so the
             -- tracker's own valuation is the only one there is: its recorded
-            -- value in underlying units times that underlying's price. NULL
-            -- when the tracker recorded no value or the underlying is not
-            -- priced either (a plain holding names itself as its underlying,
-            -- and its price is what the arm above already failed to find),
-            -- so this can only turn an unpriceable row into a priced one,
-            -- never change a number the arms above produce. The grid read
-            -- (_DIRECT_ASSET_HOLDINGS_SQL) prices the same rows through its
-            -- curated _UNDERLYING_VALUE_TOKEN_HEXES; this arm is the general
-            -- form, and VEC-782 is where the two are held to agree.
-            ELSE ap.underlying_value * uc.price_usd
-        END AS value_usd
+            -- value in units of its own recorded underlying. NULL when the
+            -- tracker recorded no value, so this can only turn an unpriceable
+            -- row into a priced one, never change what the arms above
+            -- produce. The grid read (_DIRECT_ASSET_HOLDINGS_SQL) prices the
+            -- same rows through its curated _UNDERLYING_VALUE_TOKEN_HEXES;
+            -- this arm is the general form, and VEC-782 is where the two are
+            -- held to agree.
+            ELSE ap.underlying_value
+        END AS valuation_units
     FROM window_rows ap
     JOIN token_context tc ON tc.chain_id = ap.chain_id AND tc.token_id = ap.token_id
-    LEFT JOIN underlying_context uc ON uc.underlying_token_id = ap.underlying_token_id
     WHERE (CAST(:protocol_name AS TEXT) IS NULL OR LOWER(COALESCE(tc.protocol_name, ''))
            LIKE '%' || LOWER(CAST(:protocol_name AS TEXT)) || '%' ESCAPE '\\')
 ),
 seed AS (
     -- Each entity's most recently recorded state strictly before the window,
-    -- priced or not: the newest state decides whether the entity counts as
-    -- priced, so an unpriceable one has to reach the aggregate. Resolved as a single
-    -- DISTINCT ON scan rather than a per-entity correlated subquery -- the
-    -- prototype ran it as a lateral and paid 36 loops for spark's 58 tokens
-    -- (same shape of fix as #728 on the exposure read).
+    -- priceable or not: the newest state decides whether the entity counts as
+    -- priceable, so an unpriceable one has to reach the aggregate. Resolved as
+    -- a single DISTINCT ON scan rather than a per-entity correlated subquery
+    -- -- the prototype ran it as a lateral and paid 36 loops for spark's 58
+    -- tokens (same shape of fix as #728 on the exposure read).
     SELECT DISTINCT ON (proxy_address, chain_id, token_id)
-           proxy_address, chain_id, token_id, value_usd,
+           proxy_address, chain_id, token_id, underlying_token_id, protocol_id,
+           has_direct_price, tracker_underlying_token_id, valuation_units,
            block_number, block_version, log_index, direction, tx_hash
     FROM valued_rows
     WHERE created_at < CAST(:from_timestamp AS TIMESTAMPTZ)
@@ -2041,8 +2008,9 @@ seed AS (
              direction DESC, tx_hash DESC
 ),
 observations AS (
-    SELECT proxy_address, chain_id, token_id, block_number, block_version, log_index,
-           direction, tx_hash, created_at, value_usd
+    SELECT proxy_address, chain_id, token_id, underlying_token_id, protocol_id,
+           has_direct_price, tracker_underlying_token_id,
+           block_number, block_version, log_index, direction, tx_hash, created_at, valuation_units
     FROM valued_rows
     WHERE created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
     UNION ALL
@@ -2055,8 +2023,10 @@ observations AS (
     -- that has a row, and locf then carries this value across the buckets
     -- before the entity's first in-window observation. One scan, evaluated
     -- once, rather than per (bucket, entity) group.
-    SELECT proxy_address, chain_id, token_id, block_number, block_version, log_index,
-           direction, tx_hash, CAST(:from_timestamp AS TIMESTAMPTZ) AS created_at, value_usd
+    SELECT proxy_address, chain_id, token_id, underlying_token_id, protocol_id,
+           has_direct_price, tracker_underlying_token_id,
+           block_number, block_version, log_index, direction, tx_hash,
+           CAST(:from_timestamp AS TIMESTAMPTZ) AS created_at, valuation_units
     FROM seed
 ),
 deduped_observations AS (
@@ -2067,7 +2037,8 @@ deduped_observations AS (
     -- 20260825_120000): block/version/log_index, then direction/tx_hash for
     -- the log_index-0 pair a same-block flow row and sweep row both carry.
     SELECT DISTINCT ON (proxy_address, chain_id, token_id, created_at)
-           proxy_address, chain_id, token_id, created_at, value_usd
+           proxy_address, chain_id, token_id, underlying_token_id, protocol_id,
+           has_direct_price, tracker_underlying_token_id, created_at, valuation_units
     FROM observations
     ORDER BY proxy_address, chain_id, token_id, created_at,
              block_number DESC, block_version DESC, log_index DESC,
@@ -2084,33 +2055,113 @@ per_entity AS (
         o.proxy_address,
         o.chain_id,
         o.token_id,
+        o.underlying_token_id,
+        o.protocol_id,
+        o.has_direct_price,
         -- gapfill + locf, not the plain time_bucket the other bucketed reads
         -- use: a bucket with no observation of its own has to report the last
-        -- known value, not nothing. The FILTER carries the newest PRICED value;
-        -- priced_at and last_event_at below are what tell the aggregate whether
-        -- that value is still the entity's current state.
-        locf(last(o.value_usd, o.created_at) FILTER (WHERE o.value_usd IS NOT NULL)) AS priced_value,
-        -- The created_at of that same latest-priced observation, and of the
+        -- known quantity, not nothing. The FILTER carries the newest
+        -- PRICEABLE quantity; priced_at and last_event_at below are what tell
+        -- the aggregate whether that quantity is still the entity's current
+        -- state. The USD figure itself is resolved afterwards, per bucket,
+        -- against the price series below (VEC-763).
+        locf(last(o.valuation_units, o.created_at) FILTER (WHERE o.valuation_units IS NOT NULL)) AS priced_units,
+        -- Carried the same way as priced_units, and gated by the same FILTER,
+        -- so the two always describe one observation: this is the tracker's
+        -- own underlying as of that observation, not the entity's first- or
+        -- last-ever value. It must NOT be a GROUP BY key -- a backfill flips
+        -- a row's raw underlying_token_id from NULL to non-NULL without
+        -- changing what entity it is, and grouping on it split one entity
+        -- into two rows that could both independently pass the priced FILTER
+        -- below, double-counting it.
+        locf(last(o.tracker_underlying_token_id, o.created_at)
+             FILTER (WHERE o.valuation_units IS NOT NULL)) AS tracker_underlying_token_id,
+        -- The created_at of that same latest-priceable observation, and of the
         -- latest observation of ANY kind. Comparing the two separates "not
         -- observed yet" (both NULL) from "observed, but its current state is
-        -- unpriceable" (the any-kind one is newer). locf on value_usd alone
-        -- cannot: both read as NULL there.
-        locf(last(o.created_at, o.created_at) FILTER (WHERE o.value_usd IS NOT NULL)) AS priced_at,
+        -- unpriceable" (the any-kind one is newer). locf on valuation_units
+        -- alone cannot: both read as NULL there.
+        locf(last(o.created_at, o.created_at) FILTER (WHERE o.valuation_units IS NOT NULL)) AS priced_at,
         locf(last(o.created_at, o.created_at)) AS last_event_at
     FROM deduped_observations o
-    GROUP BY bucket_start, o.proxy_address, o.chain_id, o.token_id
-)
+    GROUP BY bucket_start, o.proxy_address, o.chain_id, o.token_id, o.underlying_token_id,
+             o.protocol_id, o.has_direct_price
+),
+-- Each entity's units are priced at ITS OWN bucket, not today's spot
+-- (VEC-763): the key set is resolved once per basis, like #728's latest-price
+-- fix, but the price itself is now a locf-gapfilled series over the query's
+-- bucket grid. Three bases, matching the three valuation arms above:
+-- receipt-token positions price through the protocol-bound oracle, tokens
+-- with their own oracle price through any oracle enabled for the token
+-- itself, and the tracker-recorded-underlying fallback through any oracle
+-- enabled for THAT underlying (rationale on _DIRECT_ASSET_HOLDINGS_SQL and
+-- VEC-782).
+receipt_price_keys AS (
+    SELECT DISTINCT underlying_token_id, protocol_id
+    FROM token_context
+    WHERE underlying_token_id IS NOT NULL
+),
+{
+        historical_price_buckets_cte(
+            prefix="receipt_price",
+            keys_cte="receipt_price_keys",
+            key_columns=("underlying_token_id", "protocol_id"),
+            token_id_column="underlying_token_id",
+            protocol_id_column="protocol_id",
+            oracle_asset_as_of=ORACLE_ASSET_AS_OF,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+        )
+    },
+direct_price_keys AS (
+    SELECT DISTINCT token_id
+    FROM token_context
+    WHERE underlying_token_id IS NULL
+      AND has_direct_price
+),
+{
+        historical_price_buckets_cte(
+            prefix="direct_price",
+            keys_cte="direct_price_keys",
+            key_columns=("token_id",),
+            token_id_column="token_id",
+            protocol_id_column=None,
+            oracle_asset_as_of=ORACLE_ASSET_AS_OF,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+        )
+    },
+underlying_price_keys AS (
+    SELECT DISTINCT tracker_underlying_token_id AS underlying_token_id
+    FROM valued_rows
+    WHERE tracker_underlying_token_id IS NOT NULL
+      AND underlying_token_id IS NULL
+      AND NOT has_direct_price
+),
+{
+        historical_price_buckets_cte(
+            prefix="underlying_price",
+            keys_cte="underlying_price_keys",
+            key_columns=("underlying_token_id",),
+            token_id_column="underlying_token_id",
+            protocol_id_column=None,
+            oracle_asset_as_of=ORACLE_ASSET_AS_OF,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+        )
+    }
 SELECT
-    bucket_start,
+    pe.bucket_start,
     CAST(NULL AS INTEGER) AS event_count,
     CAST(NULL AS NUMERIC) AS total_tx_amount,
     CAST(NULL AS NUMERIC) AS net_flow_usd,
     -- The total of the entities this bucket can currently price, and how many
     -- of the entities it knows about that is. An entity counts as priced only
-    -- when its NEWEST recorded state is the one that carries the price: an
-    -- older priced observation locf'd past a newer unpriceable one is a stale
-    -- number for a position whose current state is unknown, so it is excluded
-    -- from the total and counted as unpriced rather than quietly standing in.
+    -- when its NEWEST recorded state is unit-priceable AND a price is known
+    -- for its bucket: an older priceable observation locf'd past a newer
+    -- unpriceable one, or a bucket predating the relevant price series' first
+    -- observation, is excluded from the total and counted as unpriced rather
+    -- than quietly standing in.
     --
     -- Reporting the subtotal alongside the counts is what lets a caller tell a
     -- complete total from a partial one. SUM alone cannot: it skips NULL
@@ -2118,23 +2169,48 @@ SELECT
     -- (VEC-537's failure, one step removed). Callers that require completeness
     -- compare the two counts; the retirement of the partial state once every
     -- position is priceable is VEC-782.
-    SUM(priced_value) FILTER (
-        WHERE last_event_at IS NOT NULL AND priced_at IS NOT NULL AND priced_at >= last_event_at
+    SUM(
+        CASE
+            WHEN pe.priced_units = 0 THEN 0
+            ELSE pe.priced_units * COALESCE(rp.price_usd, dp.price_usd, up.price_usd)
+        END
+    ) FILTER (
+        WHERE pe.last_event_at IS NOT NULL AND pe.priced_at IS NOT NULL AND pe.priced_at >= pe.last_event_at
+          AND (pe.priced_units = 0 OR COALESCE(rp.price_usd, dp.price_usd, up.price_usd) IS NOT NULL)
     ) AS balance_usd,
     COUNT(*) FILTER (
-        WHERE last_event_at IS NOT NULL AND priced_at IS NOT NULL AND priced_at >= last_event_at
+        WHERE pe.last_event_at IS NOT NULL AND pe.priced_at IS NOT NULL AND pe.priced_at >= pe.last_event_at
+          AND (pe.priced_units = 0 OR COALESCE(rp.price_usd, dp.price_usd, up.price_usd) IS NOT NULL)
     ) AS priced_entity_count,
     -- Entities observed at or before this bucket. One never observed yet is
     -- not part of the prime here and is not counted as missing.
-    COUNT(*) FILTER (WHERE last_event_at IS NOT NULL) AS entity_count
-FROM per_entity
-GROUP BY bucket_start
-ORDER BY bucket_start DESC
+    COUNT(*) FILTER (WHERE pe.last_event_at IS NOT NULL) AS entity_count
+FROM per_entity pe
+LEFT JOIN receipt_price_buckets rp
+    ON pe.underlying_token_id IS NOT NULL
+   AND rp.underlying_token_id = pe.underlying_token_id
+   AND rp.protocol_id = pe.protocol_id
+   AND rp.bucket = pe.bucket_start
+LEFT JOIN direct_price_buckets dp
+    ON pe.underlying_token_id IS NULL
+   AND pe.has_direct_price
+   AND dp.token_id = pe.token_id
+   AND dp.bucket = pe.bucket_start
+LEFT JOIN underlying_price_buckets up
+    ON pe.underlying_token_id IS NULL
+   AND NOT pe.has_direct_price
+   AND pe.tracker_underlying_token_id IS NOT NULL
+   AND up.underlying_token_id = pe.tracker_underlying_token_id
+   AND up.bucket = pe.bucket_start
+GROUP BY pe.bucket_start
+ORDER BY pe.bucket_start DESC
 LIMIT :limit
 """)
 
 
-_ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
+def _allocation_activity_buckets_sql(from_timestamp: datetime, to_timestamp: datetime) -> TextClause:
+    """Build the flow-buckets query, with its price CTE's window as a literal (VEC-672)."""
+    return text(f"""
 WITH window_rows AS MATERIALIZED (
     -- The activity rows this read aggregates. Fenced so the hypertable is
     -- scanned once; token_context and the outer query both read this set.
@@ -2156,7 +2232,8 @@ WITH window_rows AS MATERIALIZED (
         ap.underlying_token_id,
         ap.block_number,
         ap.created_at,
-        t.address AS token_address
+        t.address AS token_address,
+        {time_bucket_expr("ap.created_at")} AS bucket_start
     FROM allocation_position ap
     JOIN token t ON t.id = ap.token_id
     WHERE (CAST(:proxy_addrs AS BYTEA[]) IS NULL OR ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[])))
@@ -2174,32 +2251,15 @@ WITH window_rows AS MATERIALIZED (
 ),
 token_context AS MATERIALIZED (
     -- Everything the aggregate needs per token (a handful of rows): protocol
-    -- name, registry underlying, and the latest underlying oracle price for
-    -- receipt tokens. Direct holdings get NULLs and so contribute 0 USD.
-    -- MATERIALIZED is load-bearing: inlined, the price subquery would run
-    -- once per flow row instead of once per token.
+    -- name and registry underlying for receipt tokens. Direct holdings get
+    -- NULLs and so contribute 0 USD. The underlying oracle price is resolved
+    -- separately below, per bucket rather than once per token (VEC-763).
     SELECT
         wt.chain_id,
         wt.token_id,
         rt.underlying_token_id,
-        protocol_match.protocol_name,
-        (
-            SELECT tpc.price_usd
-            FROM token_price_current tpc
-            JOIN protocol_oracle po ON po.oracle_id = tpc.oracle_id
-                AND po.protocol_id = rt.protocol_id
-            WHERE tpc.token_id = rt.underlying_token_id
-            -- enabled-mapping filter + oracle_id tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
-              AND EXISTS (
-                  SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
-                  WHERE oa.oracle_id = tpc.oracle_id
-                    AND oa.token_id = tpc.token_id
-                    AND oa.enabled
-              )
-            ORDER BY tpc.block_number DESC, tpc.block_version DESC,
-                     tpc.processing_version DESC, tpc.oracle_id DESC
-            LIMIT 1
-        ) AS price_usd
+        rt.protocol_id,
+        protocol_match.protocol_name
     FROM (SELECT DISTINCT chain_id, token_id, token_address FROM window_rows) wt
     LEFT JOIN receipt_token rt
         ON rt.chain_id = wt.chain_id AND rt.receipt_token_address = wt.token_address
@@ -2220,9 +2280,30 @@ token_context AS MATERIALIZED (
         ORDER BY match_priority
         LIMIT 1
     ) AS protocol_match ON TRUE
-)
+),
+-- Each flow event is priced at its OWN bucket, not today's spot (VEC-763):
+-- resolved once per (underlying, protocol) key -- same shape as #728's
+-- latest-price fix -- as a locf-gapfilled series over the query's bucket
+-- grid, instead of a lateral re-probe per bucket.
+price_keys AS (
+    SELECT DISTINCT underlying_token_id, protocol_id
+    FROM token_context
+    WHERE underlying_token_id IS NOT NULL
+),
+{
+        historical_price_buckets_cte(
+            prefix="price",
+            keys_cte="price_keys",
+            key_columns=("underlying_token_id", "protocol_id"),
+            token_id_column="underlying_token_id",
+            protocol_id_column="protocol_id",
+            oracle_asset_as_of=ORACLE_ASSET_AS_OF,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+        )
+    }
 SELECT
-    {time_bucket_expr("ap.created_at")} AS bucket_start,
+    ap.bucket_start,
     COUNT(*) AS event_count,
     GREATEST(COALESCE(SUM(ap.tx_amount), 0), 0) AS total_tx_amount,
     COALESCE(SUM(
@@ -2238,11 +2319,28 @@ SELECT
                 THEN ap.underlying_value / ap.balance
             ELSE COALESCE(nearest_ratio.ratio, 1)
         END
-        * COALESCE(tc.price_usd, 0)
-    ), 0) AS net_flow_usd
+        -- pb.price_usd, not COALESCE(..., 0): an unknown price already nets to
+        -- 0 via SUM's NULL-skip, same as priced_entity_count's own check on it.
+        * pb.price_usd
+    ), 0) AS net_flow_usd,
+    -- Excludes direct holdings (no price needed) and refused rows (own
+    -- underlying diverges, see the CASE above) -- neither is a coverage gap.
+    COUNT(*) FILTER (
+        WHERE tc.underlying_token_id IS NOT NULL
+          AND NOT (ap.underlying_token_id IS NOT NULL AND ap.underlying_token_id <> tc.underlying_token_id)
+          AND pb.price_usd IS NOT NULL
+    ) AS priced_entity_count,
+    COUNT(*) FILTER (
+        WHERE tc.underlying_token_id IS NOT NULL
+          AND NOT (ap.underlying_token_id IS NOT NULL AND ap.underlying_token_id <> tc.underlying_token_id)
+    ) AS entity_count
 FROM window_rows ap
 JOIN prime p ON p.id = ap.prime_id
 JOIN token_context tc ON tc.chain_id = ap.chain_id AND tc.token_id = ap.token_id
+LEFT JOIN price_buckets pb
+    ON pb.underlying_token_id = tc.underlying_token_id
+   AND pb.protocol_id = tc.protocol_id
+   AND pb.bucket = ap.bucket_start
 LEFT JOIN LATERAL (
     -- Tier-2 ratio: the nearest same-token row with a usable, unit-consistent
     -- ratio, looked up per flow row that needs one (the WHERE gates the probe
@@ -2297,15 +2395,17 @@ WHERE
     (CAST(:allowed_vaults AS BYTEA[]) IS NULL OR p.vault_address = ANY(CAST(:allowed_vaults AS BYTEA[])))
     AND (CAST(:protocol_name AS TEXT) IS NULL OR LOWER(COALESCE(tc.protocol_name, ''))
          LIKE '%' || LOWER(CAST(:protocol_name AS TEXT)) || '%' ESCAPE '\\')
-GROUP BY bucket_start
-ORDER BY bucket_start DESC
+GROUP BY ap.bucket_start
+ORDER BY ap.bucket_start DESC
 LIMIT :limit
 """)
 
 
 # Priced receipt-token exposure per time bucket; semantics on
 # ``AllocationRepository.list_exposure_buckets``.
-_EXPOSURE_BUCKETS_SQL = text(f"""
+def _exposure_buckets_sql(from_timestamp: datetime, to_timestamp: datetime) -> TextClause:
+    """Build the exposure-buckets query, with its price CTE's window as a literal (VEC-672)."""
+    return text(f"""
 WITH position_buckets AS (
     SELECT
         rt.id AS receipt_token_id,
@@ -2348,48 +2448,44 @@ WITH position_buckets AS (
         ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
     GROUP BY rt.id, rt.underlying_token_id, rt.protocol_id, bucket
 ),
--- The latest price does not vary by bucket, so it is resolved once per
--- (underlying, protocol) pair instead of inside the per-bucket join.
+-- Each bucket is priced at its OWN block, not today's spot (VEC-763): the
+-- key set is resolved once, like #728's latest-price fix, but the price
+-- itself is now a locf-gapfilled series over the same bucket grid, sourced
+-- from the onchain_token_price history rather than the latest-only cache.
 price_keys AS (
     SELECT DISTINCT underlying_token_id, protocol_id
     FROM position_buckets
 ),
-latest_price AS (
-    SELECT pk.underlying_token_id, pk.protocol_id, px.price_usd
-    FROM price_keys pk
-    LEFT JOIN LATERAL (
-        -- Reads the trigger-maintained cache, not the onchain_token_price
-        -- hypertable behind it: the cache keeps the per-(oracle, token) winner
-        -- under the same newer-wins tuple, so the ORDER BY below only picks
-        -- between oracles. Same rows the other latest-price reads in this file
-        -- resolve (VEC-712).
-        SELECT tpc.price_usd
-        FROM token_price_current tpc
-        JOIN protocol_oracle po
-            ON po.oracle_id = tpc.oracle_id AND po.protocol_id = pk.protocol_id
-        WHERE tpc.token_id = pk.underlying_token_id
-        -- enabled-mapping filter (rationale on _DIRECT_ASSET_HOLDINGS_SQL):
-        -- a retired source's tail must not serve any bucket after
-        -- retirement (nor, given the one-instant-per-query tradeoff
-        -- recorded there, before).
-          AND EXISTS (
-              SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
-              WHERE oa.oracle_id = tpc.oracle_id
-                AND oa.token_id = tpc.token_id
-                AND oa.enabled
-          )
-        ORDER BY tpc.block_number DESC, tpc.block_version DESC,
-                 tpc.processing_version DESC, tpc.oracle_id DESC
-        LIMIT 1
-    ) px ON TRUE
-)
+{
+        historical_price_buckets_cte(
+            prefix="price",
+            keys_cte="price_keys",
+            key_columns=("underlying_token_id", "protocol_id"),
+            token_id_column="underlying_token_id",
+            protocol_id_column="protocol_id",
+            oracle_asset_as_of=ORACLE_ASSET_AS_OF,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+        )
+    }
 SELECT
     b.bucket AS bucket_start,
-    SUM(b.valuation_units * COALESCE(lp.price_usd, 0)) AS exposure_usd
+    SUM(
+        CASE WHEN b.valuation_units = 0 THEN 0 ELSE b.valuation_units * pb.price_usd END
+    ) FILTER (
+        WHERE b.valuation_units IS NOT NULL AND (b.valuation_units = 0 OR pb.price_usd IS NOT NULL)
+    ) AS exposure_usd,
+    -- Unpriced before the underlying's own first in-window price, not
+    -- silently zeroed (VEC-763) -- same shape as the balance series.
+    COUNT(*) FILTER (
+        WHERE b.valuation_units IS NOT NULL AND (b.valuation_units = 0 OR pb.price_usd IS NOT NULL)
+    ) AS priced_entity_count,
+    COUNT(*) FILTER (WHERE b.valuation_units IS NOT NULL) AS entity_count
 FROM position_buckets b
-LEFT JOIN latest_price lp
-    ON lp.underlying_token_id = b.underlying_token_id
-   AND lp.protocol_id = b.protocol_id
+LEFT JOIN price_buckets pb
+    ON pb.underlying_token_id = b.underlying_token_id
+   AND pb.protocol_id = b.protocol_id
+   AND pb.bucket = b.bucket
 GROUP BY b.bucket
 ORDER BY b.bucket DESC
 LIMIT :limit

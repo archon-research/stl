@@ -19,20 +19,15 @@ Isolated database per module (``module_db`` from ``conftest.py``); seeded by
 import asyncio
 import datetime as dt
 import logging
-import re
 from decimal import Decimal
 
 import asyncpg
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.adapters.postgres.allocation_position_repository import (
-    _EXPOSURE_BUCKETS_SQL,
-    AllocationRepository,
-)
-from app.adapters.postgres.reference_as_of import ReferenceAsOf, utc_now
+from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.reference_as_of import utc_now
 from app.domain.entities.allocation import EthAddress
 from tests.integration.seed import (
     RUV_ATOKEN_BALANCE,
@@ -51,6 +46,13 @@ from tests.integration.seed import (
     RUV_MORPHO_SHARE_BALANCE,
     RUV_MORPHO_UNDERLYING_PRICE,
     RUV_MORPHO_UNDERLYING_VALUE,
+    RUV_PRICE_CHANGE_AFTER,
+    RUV_PRICE_CHANGE_BALANCE,
+    RUV_PRICE_CHANGE_BEFORE,
+    RUV_PRICE_CHANGE_PROXY_HEX,
+    RUV_PRICE_GAP_BALANCE,
+    RUV_PRICE_GAP_PRICE,
+    RUV_PRICE_GAP_PROXY_HEX,
     RUV_PROXY_HEX,
     RUV_SYRUP_LIKE_BALANCE,
     RUV_SYRUP_LIKE_UNDERLYING_VALUE,
@@ -97,17 +99,6 @@ async def repo(async_db_url: str):
     engine = create_async_engine(async_db_url)
     try:
         yield AllocationRepository(engine, utc_now)
-    finally:
-        await engine.dispose()
-
-
-@pytest_asyncio.fixture()
-async def conn(async_db_url: str):
-    """A connection for running the cache and history queries side by side."""
-    engine = create_async_engine(async_db_url)
-    try:
-        async with engine.connect() as connection:
-            yield connection
     finally:
         await engine.dispose()
 
@@ -311,55 +302,61 @@ async def test_balance_basis_receipt_position_is_surfaced(repo) -> None:
 
 
 # ---------------------------------------------------------------------------
-# VEC-712: the bucketed read resolves its latest prices from the
-# trigger-maintained ``token_price_current`` cache instead of LATERAL-ing into
-# the ``onchain_token_price`` hypertable behind it. The two must agree row for
-# row — the cache holds the newest row per (oracle, token) under the same
-# newer-wins comparison, so all that changed is which relation is scanned.
-# The columns are identically named, so the pre-swap query is the live one with
-# the relation substituted back; the guards below fail loudly if a later edit
-# makes that substitution a no-op, which would leave this test comparing a
-# query against itself.
+# VEC-763: each bucket is priced at its own historical block, not today's
+# spot. A position held constant across the whole window isolates the price
+# axis -- its bucket-to-bucket swing can only come from the underlying's price
+# history, never from the (unchanging) position size.
 # ---------------------------------------------------------------------------
 
-# Matched by pattern rather than by literal: alias-agnostic, so a second cache
-# read added later cannot survive the substitution under a different alias, and
-# anchored to the keyword that introduces a relation, so prose naming the table
-# is not mistaken for a read of it. JOIN is covered as well as FROM — a cache
-# read reached by a join, not a lateral, is the form a literal FROM match misses.
-_CACHE_RELATION = re.compile(r"\b(FROM|JOIN)\s+token_price_current\b")
 
-_PRE_SWAP_EXPOSURE_BUCKETS_SQL = text(_CACHE_RELATION.sub(r"\1 onchain_token_price", str(_EXPOSURE_BUCKETS_SQL)))
-
-
-@pytest.mark.parametrize("proxy_hex", [RUV_LOCF_PROXY_HEX, RUV_CONTEST_PROXY_HEX])
 @pytest.mark.asyncio
-async def test_exposure_buckets_match_the_pre_swap_history_read(repo, conn, proxy_hex: str) -> None:
-    """Reading token_price_current yields the same buckets as LATERAL-ing into the history."""
-    assert _CACHE_RELATION.search(str(_EXPOSURE_BUCKETS_SQL)), (
-        "the bucketed read no longer resolves prices from the cache (VEC-712)"
+async def test_exposure_bucket_prices_at_its_own_historical_price_not_latest(repo) -> None:
+    """A price change mid-window moves only the buckets at or after it, not the whole series.
+
+    The pre-fix read priced every bucket at the latest price
+    (``RUV_PRICE_CHANGE_AFTER``), including the first two, which predate that
+    price ever existing; this fails on that read and passes only once each
+    bucket resolves the price effective at its own point in time.
+    """
+    by_start = await _exposure_by_bucket(repo, RUV_PRICE_CHANGE_PROXY_HEX)
+
+    before_change_usd = RUV_PRICE_CHANGE_BALANCE * RUV_PRICE_CHANGE_BEFORE
+    after_change_usd = RUV_PRICE_CHANGE_BALANCE * RUV_PRICE_CHANGE_AFTER
+    assert before_change_usd != after_change_usd, "the before/after prices must differ, or this test cannot fail"
+
+    assert by_start[RUV_LOCF_BASE_TS] == before_change_usd
+    assert by_start[RUV_LOCF_BASE_TS + dt.timedelta(hours=1)] == before_change_usd
+    assert by_start[RUV_LOCF_BASE_TS + dt.timedelta(hours=2)] == after_change_usd
+
+
+@pytest.mark.asyncio
+async def test_exposure_bucket_before_the_underlyings_first_price_is_unpriced_not_zeroed(repo) -> None:
+    """A bucket predating the underlying's first-ever price is unpriced, not a silent zero (VEC-763).
+
+    Unlike ``RUV_PRICE_CHANGE`` above, this position's underlying has no price
+    at all before the window: the seed probe (bounded to
+    ``otp.timestamp < :from_timestamp``) finds nothing, so the leading buckets
+    must report ``priced_entity_count`` below ``entity_count`` -- otherwise a
+    real, held position is indistinguishable from one that was never priced.
+    """
+    buckets = await repo.list_exposure_buckets(
+        [EthAddress(f"0x{RUV_PRICE_GAP_PROXY_HEX}")],
+        from_timestamp=RUV_LOCF_BASE_TS,
+        to_timestamp=RUV_LOCF_BASE_TS + dt.timedelta(hours=3),
+        bucket_seconds=3600.0,
+        limit=10,
     )
-    assert not _CACHE_RELATION.search(str(_PRE_SWAP_EXPOSURE_BUCKETS_SQL)), (
-        "the pre-swap substitution missed a cache read; this test would compare the query against itself"
-    )
+    by_start = {b.bucket_start: b for b in buckets}
 
-    params = {
-        "proxy_addrs": [EthAddress(f"0x{proxy_hex}").to_bytes()],
-        "from_timestamp": RUV_LOCF_BASE_TS,
-        "to_timestamp": RUV_LOCF_BASE_TS + dt.timedelta(hours=3),
-        "bucket_seconds": 3600.0,
-        "limit": 10,
-    }
-    reference = ReferenceAsOf(utc_now)
+    unpriced = by_start[RUV_LOCF_BASE_TS]
+    assert unpriced.exposure_usd is None
+    assert unpriced.entity_count == 1
+    assert unpriced.priced_entity_count == 0, "unpriced, not silently zeroed as if fully accounted for"
 
-    before = (await conn.execute(_PRE_SWAP_EXPOSURE_BUCKETS_SQL, reference.params(**params))).fetchall()
-
-    after = await _exposure_by_bucket(repo, proxy_hex)
-
-    assert any(row.exposure_usd for row in before), (
-        "expected a priced bucket; two unpriced reads would both COALESCE to 0 and match vacuously"
-    )
-    assert {row.bucket_start: row.exposure_usd for row in before} == after
+    priced = by_start[RUV_LOCF_BASE_TS + dt.timedelta(hours=2)]
+    assert priced.exposure_usd == RUV_PRICE_GAP_BALANCE * RUV_PRICE_GAP_PRICE
+    assert priced.entity_count == 1
+    assert priced.priced_entity_count == 1
 
 
 @pytest.mark.asyncio

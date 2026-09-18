@@ -45,8 +45,10 @@ class ExposureBucketResponse(BaseModel):
         default=None,
         description=(
             "Sum across the prime's receipt-token positions of the carried-forward balance "
-            "valued at the latest underlying oracle price (USD), serialized as a JSON string. "
-            "`null` for leading buckets before the first observation."
+            "valued at the underlying oracle price AT THAT BUCKET (USD), serialized as a JSON "
+            "string. `null` for leading buckets before the first observation, and for a bucket "
+            "where nothing could be priced -- compare `priced_entity_count` with `entity_count` "
+            "before treating a non-null value as complete."
         ),
         examples=["1459014561.88"],
     )
@@ -58,6 +60,26 @@ class ExposureBucketResponse(BaseModel):
             "differ by around a percent, which a reader needs shown rather than reconciled."
         ),
         examples=["1461200000.00"],
+    )
+    priced_entity_count: int | None = Field(
+        default=None,
+        description=(
+            "How many of the bucket's receipt-token positions `exposure_usd` accounts for. A "
+            "position counts once its underlying has a known price at this bucket; one predating "
+            "the underlying's own first in-window price does not. `null` under `source=reference`, "
+            "which does not compute it."
+        ),
+        examples=[12],
+    )
+    entity_count: int | None = Field(
+        default=None,
+        description=(
+            "How many receipt-token positions the bucket has observed. Equal to "
+            "`priced_entity_count` when the total is complete, and greater when some position's "
+            "underlying could not yet be priced this bucket. `null` under `source=reference`, "
+            "which does not compute it."
+        ),
+        examples=[12],
     )
 
 
@@ -119,8 +141,8 @@ async def _reference_exposure_by_bucket(
     description=(
         "Return the prime's priced receipt-token exposure over time, gap-filled (LOCF) into "
         "buckets. Per bucket, each receipt-token position's carried-forward balance is valued at "
-        "the latest underlying oracle price and summed (the current `balance * price` exposure "
-        "extended over time). Direct (non-receipt-token) holdings are excluded, matching "
+        "the underlying oracle price AT THAT BUCKET and summed (the current `balance * price` "
+        "exposure extended over time). Direct (non-receipt-token) holdings are excluded, matching "
         "the risk-capital exposure basis. Returns `404` if the prime is unknown. Defaults to the "
         "last 24h; pass a window and `frequency` for longer ranges."
     ),
@@ -177,20 +199,20 @@ async def list_prime_exposure(
                 limit=limit,
             ),
         )
-        indexed_by_bucket = {bucket.bucket_start: bucket.exposure_usd for bucket in buckets}
-        return ExposureEnvelope(
-            mode="aggregated",
-            source=source,
-            window=window,
-            data=[
+        indexed_by_bucket = {bucket.bucket_start: bucket for bucket in buckets}
+        data = []
+        for bucket_start in _merged_bucket_starts(indexed_by_bucket, reference_by_bucket):
+            indexed = indexed_by_bucket.get(bucket_start)
+            data.append(
                 ExposureBucketResponse(
                     bucket_start=bucket_start,
-                    exposure_usd=indexed_by_bucket.get(bucket_start),
+                    exposure_usd=indexed.exposure_usd if indexed else None,
                     reference_exposure_usd=reference_by_bucket.get(bucket_start),
+                    priced_entity_count=indexed.priced_entity_count if indexed else None,
+                    entity_count=indexed.entity_count if indexed else None,
                 )
-                for bucket_start in _merged_bucket_starts(indexed_by_bucket, reference_by_bucket)
-            ],
-        )
+            )
+        return ExposureEnvelope(mode="aggregated", source=source, window=window, data=data)
 
     buckets = await service.list_exposure_buckets(
         prime_address,

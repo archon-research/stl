@@ -96,7 +96,7 @@ async def test_activity_buckets_net_flow_price_tie_resolves_to_highest_oracle_id
     """list_activity_buckets values the seeded inflow at the higher-oracle_id price.
 
     Flows are valued at the row's share ratio (``underlying_value / balance``;
-    see ``_ALLOCATION_ACTIVITY_BUCKETS_SQL``). The seeded inflow spends its full
+    see ``_allocation_activity_buckets_sql``). The seeded inflow spends its full
     balance (``tx_amount == balance``), so ``tx_amount x ratio == underlying_value``
     and the flow equals the position figure; the ratio is folded into the
     expectation so this pins ONLY the oracle tie (fresh 1.25 beats stale 1.00).

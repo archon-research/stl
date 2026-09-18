@@ -135,7 +135,7 @@ export interface paths {
     };
     /**
      * Prime exposure time series
-     * @description Return the prime's priced receipt-token exposure over time, gap-filled (LOCF) into buckets. Per bucket, each receipt-token position's carried-forward balance is valued at the latest underlying oracle price and summed (the current `balance * price` exposure extended over time). Direct (non-receipt-token) holdings are excluded, matching the risk-capital exposure basis. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `frequency` for longer ranges.
+     * @description Return the prime's priced receipt-token exposure over time, gap-filled (LOCF) into buckets. Per bucket, each receipt-token position's carried-forward balance is valued at the underlying oracle price AT THAT BUCKET and summed (the current `balance * price` exposure extended over time). Direct (non-receipt-token) holdings are excluded, matching the risk-capital exposure basis. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `frequency` for longer ranges.
      */
     get: operations['list_prime_exposure_v1_primes__prime_id__exposure_get'];
     put?: never;
@@ -672,7 +672,7 @@ export interface components {
     AllocationActivityBucketResponse: {
       /**
        * Balance Usd
-       * @description Position value in USD read from each bucket's own recorded state, present only when `series=balance`. Unlike `net_flow_usd` this needs no client-side reconstruction and no anchor, so it is valid for a window that does not end at now. It is also a different measure: true mark-to-market rather than cost basis, so a share-price move on a receipt token appears here even in a bucket with no transaction, and yield accrual is included. Valued as COALESCE(underlying_value, balance) x the registry underlying's latest oracle price, refusing any row whose own underlying diverges from the registry's. Null on `series=flow`. Totals only the positions this bucket can price -- compare `priced_entity_count` with `entity_count` before treating it as complete.
+       * @description Position value in USD read from each bucket's own recorded state, present only when `series=balance`. Unlike `net_flow_usd` this needs no client-side reconstruction and no anchor, so it is valid for a window that does not end at now. It is also a different measure: true mark-to-market rather than cost basis, so a share-price move on a receipt token appears here even in a bucket with no transaction, and yield accrual is included. Valued as COALESCE(underlying_value, balance) x the registry underlying's oracle price AT THAT BUCKET, refusing any row whose own underlying diverges from the registry's. Null on `series=flow`. Totals only the positions this bucket can price -- compare `priced_entity_count` with `entity_count` before treating it as complete.
        * @example 3280541138.58
        */
       balance_usd?: string | null;
@@ -684,7 +684,7 @@ export interface components {
       bucket_start: string;
       /**
        * Entity Count
-       * @description How many positions the bucket knows about, present only when `series=balance`. Equal to `priced_entity_count` when the total is complete, and greater when some position could not be priced -- pricing is all-or-nothing per token, so one token without an enabled oracle makes every position in it unpriceable. Counts only positions observed at or before this bucket, so a leading bucket reports 0 rather than treating a position that does not exist yet as missing. Null on `series=flow`.
+       * @description How many positions (`series=balance`) or receipt-token events (`series=flow`) the bucket knows about. Equal to `priced_entity_count` when the total is complete, and greater when some position or event could not be priced -- on `series=balance` pricing is all-or-nothing per token, so one token without an enabled oracle makes every position in it unpriceable. On `series=balance`, counts only positions observed at or before this bucket, so a leading bucket reports 0 rather than treating a position that does not exist yet as missing.
        * @example 58
        */
       entity_count?: number | null;
@@ -696,13 +696,13 @@ export interface components {
       event_count?: number | null;
       /**
        * Net Flow Usd
-       * @description Signed net flow valued in USD (inflows positive, outflows negative). Only receipt-token flows are valued: each is converted to underlying units at its row's share ratio (underlying_value / balance), borrowing the nearest same-token row's ratio when the row's own is unavailable and falling back to the raw tx_amount only when the token has no valued row at all, then priced at the receipt token's latest underlying oracle price. Rows whose recorded underlying diverges from the registry's are refused and contribute 0, as do direct holdings. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards. Null on `series=balance`, which does not compute it.
+       * @description Signed net flow valued in USD (inflows positive, outflows negative). Only receipt-token flows are valued: each is converted to underlying units at its row's share ratio (underlying_value / balance), borrowing the nearest same-token row's ratio when the row's own is unavailable and falling back to the raw tx_amount only when the token has no valued row at all, then priced at the receipt token's underlying oracle price AT ITS OWN BUCKET. Rows whose recorded underlying diverges from the registry's are refused and contribute 0, as do direct holdings. Totals only the events this bucket can price -- compare `priced_entity_count` with `entity_count` before treating it as complete. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards. Null on `series=balance`, which does not compute it.
        * @example 1234567.89
        */
       net_flow_usd?: string | null;
       /**
        * Priced Entity Count
-       * @description How many of the bucket's positions `balance_usd` accounts for, present only when `series=balance`. A position counts when its most recent recorded state could be priced; one carrying only an older price, superseded by a newer state that cannot be priced, does not. Null on `series=flow`.
+       * @description How many of the bucket's positions (`series=balance`) or receipt-token events (`series=flow`) the reported total accounts for. On `series=balance` a position counts when its most recent recorded state could be priced; one carrying only an older price, superseded by a newer state that cannot be priced, does not. On `series=flow` an event counts when its underlying has a known price at this bucket; one predating the underlying's own first in-window price does not. Direct (non-receipt-token) holdings need no price and are excluded from both counts.
        * @example 31
        */
       priced_entity_count?: number | null;
@@ -1366,11 +1366,23 @@ export interface components {
        */
       bucket_start: string;
       /**
+       * Entity Count
+       * @description How many receipt-token positions the bucket has observed. Equal to `priced_entity_count` when the total is complete, and greater when some position's underlying could not yet be priced this bucket. `null` under `source=reference`, which does not compute it.
+       * @example 12
+       */
+      entity_count?: number | null;
+      /**
        * Exposure Usd
-       * @description Sum across the prime's receipt-token positions of the carried-forward balance valued at the latest underlying oracle price (USD), serialized as a JSON string. `null` for leading buckets before the first observation.
+       * @description Sum across the prime's receipt-token positions of the carried-forward balance valued at the underlying oracle price AT THAT BUCKET (USD), serialized as a JSON string. `null` for leading buckets before the first observation, and for a bucket where nothing could be priced -- compare `priced_entity_count` with `entity_count` before treating a non-null value as complete.
        * @example 1459014561.88
        */
       exposure_usd?: string | null;
+      /**
+       * Priced Entity Count
+       * @description How many of the bucket's receipt-token positions `exposure_usd` accounts for. A position counts once its underlying has a known price at this bucket; one predating the underlying's own first in-window price does not. `null` under `source=reference`, which does not compute it.
+       * @example 12
+       */
+      priced_entity_count?: number | null;
       /**
        * Reference Exposure Usd
        * @description Sky's reported exposure for the same bucket, populated only under `source=both`. Carried beside STL's rather than replacing it: the two are computed differently and differ by around a percent, which a reader needs shown rather than reconciled.
