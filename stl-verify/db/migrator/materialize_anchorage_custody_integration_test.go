@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -339,6 +340,20 @@ func TestMaterializeAnchorageCustodyRefusesWhatItCannotPlace(t *testing.T) {
 				{pkg: "PKG-C", qty: 1, snapTS: "2026-04-07T00:00:00Z"},
 				{pkg: "PKG-C", qty: 2, snapTS: "2026-04-07T00:00:00Z", custody: anchorageCustody2}},
 			"has 2 snapshots within one second"},
+		// holder_id is the vault address in hex, so a short one renders fewer than 40 characters and
+		// fails the spine's CHECK with a 23514 naming no row. Guarded here instead (VEC-819).
+		{"a 19-byte vault address", func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+			tag, err := pool.Exec(ctx, `UPDATE prime SET vault_address = decode($1, 'hex') WHERE name = $2`,
+				anchorageHolder[:38], anchoragePrime)
+			if err != nil {
+				t.Fatalf("shorten the vault address: %v", err)
+			}
+			if tag.RowsAffected() != 1 {
+				t.Fatalf("shortened %d prime rows, want 1", tag.RowsAffected())
+			}
+		},
+			[]anchorageSnap{{pkg: "PKG-V", qty: 3, snapTS: "2026-04-07T00:00:00Z"}},
+			"has a vault address of 19 bytes"},
 		{"a blank asset id", nil,
 			[]anchorageSnap{{pkg: "PKG-B", asset: " ", qty: 1, snapTS: "2026-04-07T00:00:00Z"}},
 			"blank or delimiter-bearing identity"},
@@ -659,5 +674,200 @@ func TestMaterializeAnchorageCustodyNamesTheFirstFiveOffenders(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "FCustodian") {
 		t.Errorf("FCustodian is the sixth offender and must fall outside the cap: %s", err.Error())
+	}
+}
+
+// The wrapper is the only path the runner calls, so a window it cannot forward is a window this
+// projection can never run with. The run record stamps what the spine actually received.
+func TestMaterializeAnchorageCustodyForwardsTheWindow(t *testing.T) {
+	ctx, pool, _ := seedAnchorage(t)
+
+	if _, err := pool.Exec(ctx, `SELECT materialize_anchorage_custody(0, NULL, interval '36 hours')`); err != nil {
+		t.Fatalf("calling with a window: %v", err)
+	}
+
+	var window *string
+	if err := pool.QueryRow(ctx, `
+		SELECT window_interval::text FROM position_projection_run
+		 WHERE projection = $1 ORDER BY created_at DESC LIMIT 1`, anchorageProjection).Scan(&window); err != nil {
+		t.Fatalf("reading the run record: %v", err)
+	}
+	if window == nil {
+		t.Fatal("the run recorded no window, so the wrapper dropped it")
+	}
+	if *window != "36:00:00" {
+		t.Errorf("the run recorded window %q; want the 36 hours the wrapper was called with", *window)
+	}
+}
+
+// The guard reads only the primes the batch actually references, so a prime with a malformed vault
+// and no snapshots must not stop the run. Dropping that scoping passes every other test here.
+func TestMaterializeAnchorageCustodyIgnoresAnIdlePrimeWithABadVault(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+	addPrime(t, ctx, pool, "itest-anchorage-idle", anchorageHolder2[:38])
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-OK", qty: 4, snapTS: "2026-04-07T00:00:00Z"})
+
+	var written int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_anchorage_custody()`).Scan(&written); err != nil {
+		t.Fatalf("an idle prime with a 19-byte vault must not refuse the run: %v", err)
+	}
+	if written == 0 {
+		t.Error("the run appended nothing, so it cannot show the good prime still projected")
+	}
+}
+
+// Every width case is short, so <> 20 weakened to < 20 would survive. This is the case above it.
+func TestMaterializeAnchorageCustodyRefusesAnOversizeVault(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+	if _, err := pool.Exec(ctx, `UPDATE prime SET vault_address = decode($1, 'hex') WHERE name = $2`,
+		anchorageHolder+"ff", anchoragePrime); err != nil {
+		t.Fatalf("lengthen the vault address: %v", err)
+	}
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-W", qty: 2, snapTS: "2026-04-07T00:00:00Z"})
+
+	err := pool.QueryRow(ctx, `SELECT materialize_anchorage_custody()`).Scan(new(int64))
+	if err == nil {
+		t.Fatal("a 21-byte vault address must refuse by name")
+	}
+	if !strings.Contains(err.Error(), "has a vault address of 21 bytes") {
+		t.Errorf("error %q does not name the oversize vault", err.Error())
+	}
+}
+
+// VEC-809. The key was spelled twice: once in the view, once in the wrapper's injectivity guard, which
+// re-derived it from the source rather than reading the view's. The two agreed, so nothing was wrong
+// today — but changing the view alone left the guard validating the old shape, still passing and
+// protecting nothing. This pins the structural property the fix buys: exactly one definition.
+func TestAnchorageInstrumentKeyIsSpelledInOnePlace(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+
+	var helper, view, wrapper string
+	if err := pool.QueryRow(ctx, `
+		SELECT pg_get_functiondef('anchorage_instrument_key(text,text)'::regprocedure),
+		       pg_get_viewdef('position_anchorage_custody'::regclass),
+		       pg_get_functiondef('materialize_anchorage_custody(integer,bigint,interval)'::regprocedure)`).
+		Scan(&helper, &view, &wrapper); err != nil {
+		t.Fatalf("reading the catalogue definitions: %v", err)
+	}
+
+	if !strings.Contains(helper, "'anchorage:'") {
+		t.Error("anchorage_instrument_key does not build the prefix, so it is not the definition")
+	}
+	for _, c := range []struct{ what, def string }{
+		{"the view", view},
+		{"the wrapper's guard", wrapper},
+	} {
+		if strings.Contains(c.def, "'anchorage:'") {
+			t.Errorf("%s carries its own copy of the key expression; it must call anchorage_instrument_key", c.what)
+		}
+	}
+}
+
+// The structural test above can be satisfied by a helper nothing meaningfully depends on. This one
+// moves the single definition and requires BOTH the projected key and the guard to follow it: two
+// assets of one package render one key, which is precisely what the injectivity guard exists to catch.
+// Against the two-expression version the guard keeps deriving with asset_type, sees no collision, and
+// lets two assets interleave under one position_id with no error.
+func TestAnchorageGuardFollowsTheKeyDefinition(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-K", asset: "BTC", qty: 3, snapTS: "2026-04-07T00:00:00Z"})
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-K", asset: "ETH", qty: 7, snapTS: "2026-04-08T00:00:00Z"})
+
+	// Negative control: under the shipped key these are two instruments and the run is clean, so the
+	// refusal below is caused by the redefinition and not by the fixture.
+	var written int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_anchorage_custody()`).Scan(&written); err != nil {
+		t.Fatalf("two assets of one package are two instruments and must project: %v", err)
+	}
+	if written != 2 {
+		t.Fatalf("appended %d rows, want 2 — the fixture is not what this test assumes", written)
+	}
+
+	// Move the one definition so the key no longer separates assets.
+	if _, err := pool.Exec(ctx, `
+		CREATE OR REPLACE FUNCTION anchorage_instrument_key(p_package_id text, p_asset_type text)
+		    RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path FROM CURRENT AS
+		$fn$ SELECT 'anchorage:' || p_package_id $fn$`); err != nil {
+		t.Fatalf("redefining the key helper: %v", err)
+	}
+
+	// The view must follow it.
+	var keys []string
+	if err := pool.QueryRow(ctx, `
+		SELECT coalesce(array_agg(DISTINCT instrument_key), '{}') FROM position_anchorage_custody`).Scan(&keys); err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || keys[0] != "anchorage:PKG-K" {
+		t.Errorf("the view projects %v; it does not build instrument_key from the helper", keys)
+	}
+
+	// And so must the guard, which is the half that used to drift.
+	err := pool.QueryRow(ctx, `SELECT materialize_anchorage_custody()`).Scan(new(int64))
+	if err == nil {
+		t.Fatal("two assets now render one instrument_key and the guard permitted the run: it is not reading the key definition")
+	}
+	if !strings.Contains(err.Error(), "render the instrument_key") {
+		t.Errorf("the run failed, but not as the injectivity refusal: %s", err.Error())
+	}
+}
+
+// VEC-811. The unit and scale of a normalised quantity is not recoverable from NUMERIC, and
+// position_state.quantity is deliberately NOT normalised across protocols, so the source column has to
+// say which of the two it is.
+func TestAnchorageAssetQuantityDocumentsItsUnit(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+
+	var comment *string
+	if err := pool.QueryRow(ctx, `
+		SELECT col_description('anchorage_package_snapshot'::regclass, attnum)
+		FROM pg_attribute
+		WHERE attrelid = 'anchorage_package_snapshot'::regclass AND attname = 'asset_quantity'`).Scan(&comment); err != nil {
+		t.Fatalf("reading the column comment: %v", err)
+	}
+	if comment == nil {
+		t.Fatal("asset_quantity carries no COMMENT, so its unit and scale are recorded nowhere")
+	}
+	for _, want := range []string{"NORMALISED", "whole units"} {
+		if !strings.Contains(*comment, want) {
+			t.Errorf("the comment does not say the quantity is %q: %s", want, *comment)
+		}
+	}
+}
+
+// TestMaterializeAnchorageCustodyForwardsTheWindow proves the argument REACHES the spine, by reading
+// it back off the run record. It does not prove the window bounds anything. This does: the spine
+// applies `block_timestamp > now() - p_window` to the view's output, so an observation outside the
+// window must not reach position_state at all.
+func TestMaterializeAnchorageCustodyWindowBoundsWhatItReads(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+	recent := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-NEW", qty: 5, snapTS: recent})
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-OLD", qty: 9, snapTS: "2026-04-07T00:00:00Z"})
+
+	var written int64
+	if err := pool.QueryRow(ctx,
+		`SELECT materialize_anchorage_custody(0, NULL, interval '1 day')`).Scan(&written); err != nil {
+		t.Fatalf("bounded run: %v", err)
+	}
+
+	var keys []string
+	if err := pool.QueryRow(ctx, `
+		SELECT coalesce(array_agg(DISTINCT instrument_key ORDER BY instrument_key), '{}')
+		FROM position_state`).Scan(&keys); err != nil {
+		t.Fatal(err)
+	}
+	if written != 1 || len(keys) != 1 || keys[0] != anchorageKey("PKG-NEW", "BTC") {
+		t.Errorf("a 1-day window appended %d rows %v; want only the observation inside it, %s",
+			written, keys, anchorageKey("PKG-NEW", "BTC"))
+	}
+
+	// Negative control: unbounded, the same fixture carries both, so the exclusion above is the
+	// window's doing and not something else dropping the old row.
+	var total int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_anchorage_custody()`).Scan(&total); err != nil {
+		t.Fatalf("unbounded run: %v", err)
+	}
+	if total != 1 {
+		t.Errorf("the unbounded run appended %d rows; want the 1 the window had excluded", total)
 	}
 }
