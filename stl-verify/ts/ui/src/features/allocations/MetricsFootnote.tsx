@@ -37,8 +37,8 @@ export function MetricsFootnote({
   }
 
   const modeledPct =
-    parseNumericValue(riskCapital.prime_modeled_pct) !== null
-      ? formatRatioPercent(riskCapital.prime_modeled_pct)
+    parseNumericValue(riskCapital.modeled_pct) !== null
+      ? formatRatioPercent(riskCapital.modeled_pct)
       : 'partial';
 
   return (

@@ -110,32 +110,24 @@ def test_primes_excludes_the_subproxy_treasury_wallet(client: TestClient) -> Non
     assert {_SPARK_MAINNET_ALM, _SPARK_AVALANCHE_ALM} <= addresses
 
 
-def test_backwards_compat_risk_capital_exposure_stays_proxy_scoped(client: TestClient) -> None:
-    # The priced position sits on mainnet only, so the avalanche proxy's own
-    # exposure must still read zero — this is the field consumers read today.
-    body = client.get(f"/v1/primes/{_SPARK_AVALANCHE_ALM}/risk-capital").json()
-
-    assert body["exposure_usd"] == "0"
-
-
-def test_risk_capital_reports_the_same_prime_exposure_from_every_proxy(client: TestClient) -> None:
+def test_risk_capital_reports_the_same_exposure_from_every_proxy(client: TestClient) -> None:
     # Compared as Decimal, not raw strings: SQL arithmetic widens the scale
     # (e.g. "1000.000000000000000000"), matching test_allocation_api.py's
     # amount_usd assertions rather than the money-as-string serialization rule,
     # which is about type (str, not float) and does not pin an exact scale.
     exposures = {
-        Decimal(client.get(f"/v1/primes/{row['address']}/risk-capital").json()["prime_exposure_usd"])
+        Decimal(client.get(f"/v1/primes/{row['address']}/risk-capital").json()["exposure_usd"])
         for row in _spark_rows(client)
     }
 
     assert exposures == {Decimal(FAN_OUT_PRIME_EXPOSURE_USD)}
 
 
-def test_risk_capital_prime_exposure_is_non_zero(client: TestClient) -> None:
+def test_risk_capital_exposure_is_non_zero(client: TestClient) -> None:
     # Guards the test above from passing vacuously on an all-zero fixture.
     body = client.get(f"/v1/primes/{_SPARK_AVALANCHE_ALM}/risk-capital").json()
 
-    assert body["prime_exposure_usd"] != "0"
+    assert body["exposure_usd"] != "0"
 
 
 def test_risk_capital_reports_prime_identity_from_a_non_mainnet_proxy(client: TestClient) -> None:
@@ -144,10 +136,10 @@ def test_risk_capital_reports_prime_identity_from_a_non_mainnet_proxy(client: Te
     assert body["prime_name"] == "spark"
 
 
-def test_risk_capital_lists_the_sibling_proxies_it_aggregated(client: TestClient) -> None:
+def test_risk_capital_covers_the_chains_it_aggregated(client: TestClient) -> None:
     body = client.get(f"/v1/primes/{_SPARK_AVALANCHE_ALM}/risk-capital").json()
 
-    assert _SPARK_MAINNET_ALM in [address.lower() for address in body["prime_proxies"]]
+    assert {"mainnet", "avalanche-c"} <= {row["chain"] for row in body["prime_per_chain"]}
 
 
 def test_custody_leg_is_served_under_the_mainnet_proxy_only(client: TestClient) -> None:
@@ -160,21 +152,21 @@ def test_custody_leg_is_served_under_the_mainnet_proxy_only(client: TestClient) 
     assert carrying == [_SPARK_MAINNET_ALM]
 
 
-def test_risk_capital_reports_the_same_prime_encumbrance_ratio_from_every_proxy(client: TestClient) -> None:
+def test_risk_capital_reports_the_same_encumbrance_ratio_from_every_proxy(client: TestClient) -> None:
     ratios = {
-        client.get(f"/v1/primes/{row['address']}/risk-capital").json()["prime_encumbrance_ratio"]
+        client.get(f"/v1/primes/{row['address']}/risk-capital").json()["encumbrance_ratio"]
         for row in _spark_rows(client)
     }
 
     assert len(ratios) == 1
 
 
-def test_risk_capital_prime_encumbrance_ratio_is_non_null(client: TestClient) -> None:
+def test_risk_capital_encumbrance_ratio_is_non_null(client: TestClient) -> None:
     # Guards the test above from passing vacuously on a fixture where every
     # proxy resolves to a null ratio (e.g. a missing SubProxy treasury).
     body = client.get(f"/v1/primes/{_SPARK_AVALANCHE_ALM}/risk-capital").json()
 
-    assert body["prime_encumbrance_ratio"] is not None
+    assert body["encumbrance_ratio"] is not None
 
 
 def test_risk_capital_reports_null_for_a_chain_no_tracker_serves(client: TestClient) -> None:
@@ -206,27 +198,18 @@ def test_risk_capital_prime_per_chain_sums_to_the_prime_total(client: TestClient
     per_chain_total = sum(
         Decimal(row["exposure_usd"]) for row in body["prime_per_chain"] if row["exposure_usd"] is not None
     )
-    assert per_chain_total == Decimal(body["prime_exposure_usd"])
+    assert per_chain_total == Decimal(body["exposure_usd"])
 
 
-def test_the_whole_prime_scoped_projection_is_identical_from_every_proxy(client: TestClient) -> None:
-    """One assertion over every `prime_*` field, so a new field is covered by default.
+def test_the_whole_response_is_identical_from_every_proxy(client: TestClient) -> None:
+    """One assertion over every field, so a new one is covered by default.
 
-    The per-field tests above pin the values; this pins the invariant the fields
-    are sold on — that a consumer can dedupe on them — across the prime's proxies.
+    The per-field tests above pin the values; this pins the invariant the route
+    is sold on — the identifier does not change the answer.
     """
-    projections = {
-        tuple(
-            sorted(
-                (key, str(value))
-                for key, value in client.get(f"/v1/primes/{row['address']}/risk-capital").json().items()
-                if key.startswith("prime_") and key != "prime_id"
-            )
-        )
-        for row in _spark_rows(client)
-    }
+    bodies = {client.get(f"/v1/primes/{row['address']}/risk-capital").text for row in _spark_rows(client)}
 
-    assert len(projections) == 1
+    assert len(bodies) == 1
 
 
 def test_custody_leg_moves_with_the_data_not_the_contract_pin(client: TestClient) -> None:

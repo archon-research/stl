@@ -2,14 +2,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
-from app.domain.entities.allocation import EthAddress
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
 from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
 
-# A real axis-synome spark ALM proxy: the service resolves the star name through
-# the contract, so a placeholder address would resolve to no prime at all.
-_SPARK_ALM = "0x1601843c5e9bc251a3272907010afa41fa18347e"
-_UNKNOWN_PROXY = "0x" + "ab" * 20
 _TOKEN = "0x" + "cd" * 20
 _SYNCED_AT = datetime(2026, 8, 26, 9, 15, tzinfo=UTC)
 
@@ -58,9 +53,7 @@ def _snapshot(*allocations: ReferenceAllocation) -> ReferencePrimeRiskCapital:
 def _service(snapshot: ReferencePrimeRiskCapital | None):
     provider = AsyncMock()
     provider.get_prime.return_value = snapshot
-    directory = AsyncMock()
-    directory.list_primes.return_value = []
-    return ReferenceRiskCapitalService(provider, directory), provider
+    return ReferenceRiskCapitalService(provider), provider
 
 
 async def test_get_serves_the_stored_snapshot_with_its_resolved_registry_ids():
@@ -68,7 +61,7 @@ async def test_get_serves_the_stored_snapshot_with_its_resolved_registry_ids():
     # through untouched rather than re-resolving them per row.
     service, _ = _service(_snapshot(_allocation()))
 
-    result = await service.get(EthAddress(_SPARK_ALM))
+    result = await service.get("spark")
 
     assert result is not None
     assert result.synced_at == _SYNCED_AT
@@ -81,24 +74,17 @@ async def test_get_keeps_a_row_stl_does_not_index():
     # unresolved id must not drop the row.
     service, _ = _service(_snapshot(_allocation(receipt_token_id=None)))
 
-    result = await service.get(EthAddress(_SPARK_ALM))
+    result = await service.get("spark")
 
     assert result is not None
     assert result.per_allocation[0].receipt_token_id is None
     assert result.per_allocation[0].symbol == "spUSDT"
 
 
-async def test_get_returns_none_for_an_address_that_names_no_prime():
+async def test_get_asks_the_reader_for_the_named_star():
     service, provider = _service(_snapshot())
 
-    assert await service.get(EthAddress(_UNKNOWN_PROXY)) is None
-    provider.get_prime.assert_not_awaited()
-
-
-async def test_get_asks_the_reader_for_the_resolved_star():
-    service, provider = _service(_snapshot())
-
-    await service.get(EthAddress(_SPARK_ALM))
+    await service.get("spark")
 
     provider.get_prime.assert_awaited_once_with("spark")
 
@@ -106,7 +92,7 @@ async def test_get_asks_the_reader_for_the_resolved_star():
 async def test_get_returns_none_when_no_cycle_has_reported_on_the_prime():
     service, _ = _service(None)
 
-    assert await service.get(EthAddress(_SPARK_ALM)) is None
+    assert await service.get("spark") is None
 
 
 async def test_covered_stars_is_the_readers_answer():

@@ -192,15 +192,12 @@ export function narrowRiskCapital(
 
   return {
     ...response,
-    prime_exposure_usd: drop(response.prime_exposure_usd, false) ?? '0',
-    reference_prime_exposure_usd: drop(
-      response.reference_prime_exposure_usd,
-      true,
-    ),
-    prime_required_risk_capital_usd:
-      drop(response.prime_required_risk_capital_usd, false) ?? '0',
-    reference_prime_required_risk_capital_usd: drop(
-      response.reference_prime_required_risk_capital_usd,
+    exposure_usd: drop(response.exposure_usd, false) ?? '0',
+    reference_exposure_usd: drop(response.reference_exposure_usd, true),
+    required_risk_capital_usd:
+      drop(response.required_risk_capital_usd, false) ?? '0',
+    reference_required_risk_capital_usd: drop(
+      response.reference_required_risk_capital_usd,
       true,
     ),
     total_risk_capital_usd: drop(response.total_risk_capital_usd, false),
@@ -208,9 +205,9 @@ export function narrowRiskCapital(
       response.reference_total_risk_capital_usd,
       true,
     ),
-    prime_encumbrance_ratio: drop(response.prime_encumbrance_ratio, false),
-    reference_prime_encumbrance_ratio: drop(
-      response.reference_prime_encumbrance_ratio,
+    encumbrance_ratio: drop(response.encumbrance_ratio, false),
+    reference_encumbrance_ratio: drop(
+      response.reference_encumbrance_ratio,
       true,
     ),
     per_allocation: response.per_allocation.map((row) => ({

@@ -165,9 +165,9 @@ function computeEncumbranceFields(
   // chart's fallback value, so they cannot end up describing different
   // provenances — a Sky figure over a breach threshold beside STL's "within the
   // 100% breach level" would read as a bug in the threshold.
-  const skyEncumbranceRatio = riskCapital?.reference_prime_encumbrance_ratio;
+  const skyEncumbranceRatio = riskCapital?.reference_encumbrance_ratio;
   const encumbranceRatio = parseNumericValue(
-    preferReference(skyEncumbranceRatio, riskCapital?.prime_encumbrance_ratio),
+    preferReference(skyEncumbranceRatio, riskCapital?.encumbrance_ratio),
   );
   const encumbranceBreach = encumbranceSeverity(encumbranceRatio);
   // Only STL's ratio is bounded by the chains STL does not serve. Sky's covers

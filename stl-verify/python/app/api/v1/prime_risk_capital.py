@@ -9,24 +9,24 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
-from app.api._validators import ProxyAddressPathParam
+from app.api._validators import PrimeIdentifierPathParam
 from app.api.deps import (
     get_engine,
     get_model_registry,
     get_reference_as_of,
     get_reference_risk_capital_service_factory,
+    prime_scope,
     require_prime_view,
 )
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
 )
-from app.domain.entities.allocation import EthAddress
+from app.domain.entities.prime import PrimeScope
 from app.domain.entities.prime_risk_capital import AllocationRiskCapital, PrimeRiskCapital, UnpricedReason
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
 from app.domain.entities.risk import ModelName
 from app.domain.position_identity import PositionFacts, position_identities
-from app.domain.prime_registry import ProxyKind, alm_proxies_for_prime, classify_proxy
 from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
 from app.services.model_registry import ModelRegistry
@@ -153,72 +153,48 @@ class AllocationRiskCapitalResponse(BaseModel):
 
 
 class ChainRiskCapitalResponse(BaseModel):
-    """One ALM proxy's contribution to the prime's aggregated figures.
+    """One chain's contribution to the prime's aggregated figures.
 
-    A row exists for every ALM proxy the axis-synome contract lists for this
-    prime, including chains STL has no allocation tracker for. On such a chain the
-    figures are `null`, not `"0"`: STL holds no positions for it at all, so a zero
-    would assert the prime is empty there when the truth is that it is not
-    indexed. `prime_unserved_chains` names those chains, and the `prime_*` totals
-    exclude them.
+    A row exists for every chain the prime allocates on, including those STL has
+    no allocation tracker for. On such a chain the figures are `null`, not
+    `"0"`: STL holds no positions for it at all, so a zero would assert the
+    prime is empty there when the truth is that it is not indexed.
+    `prime_unserved_chains` names those chains, and the totals exclude them.
     """
 
-    proxy_address: str = Field(description="0x-prefixed ALM proxy address.")
-    chain: str | None = Field(
-        default=None,
-        description="Internal chain name. `null` for a proxy absent from the axis-synome contract.",
-        examples=["avalanche-c"],
-    )
+    chain: str = Field(description="Internal chain name.", examples=["avalanche-c"])
     exposure_usd: PlainDecimal | None = Field(
         default=None,
         description=(
-            "Priced receipt-token exposure held through this proxy (USD). `null` when no allocation "
-            "tracker serves this chain, so nothing is known either way."
+            "Priced receipt-token exposure the prime holds on this chain (USD). `null` when no "
+            "allocation tracker serves it, so nothing is known either way."
         ),
     )
     required_risk_capital_usd: PlainDecimal | None = Field(
         default=None,
-        description="Required Risk Capital from this proxy's positions (USD). `null` when the chain is unserved.",
+        description="Required Risk Capital from this chain's positions (USD). `null` when the chain is unserved.",
     )
     allocation_count: int | None = Field(
         default=None,
-        description="Number of allocations this proxy contributed. `null` when the chain is unserved.",
+        description="Number of allocations this chain contributed. `null` when the chain is unserved.",
     )
 
 
 class PrimeRiskCapitalResponse(BaseModel):
     """Capital metrics for a prime, from one of two provenances — see `source`.
 
+    Every figure is whole-prime, so it is the same answer whichever of the
+    prime's identifiers was passed. Additive quantities are summed across the
+    prime's ALM proxies and shared ones are counted once.
+
     Under `source: "self"` (the default) the figures are model-derived from
     on-chain data: `required_risk_capital_usd` sums per-allocation RRC from the
     default model (`model`), so it is **partial** — only allocations the model
     can price contribute — and **will not** match Sky's dashboard.
 
-    Under `source: "reference"` they are Sky's own published figures, and every
-    figure is **prime-scoped**: upstream reports per prime, so the unprefixed
-    fields carry the same values as their `prime_`-prefixed counterparts. Do not
-    sum them across a prime's proxies — dedupe, as for any `prime_` field.
+    Under `source: "reference"` they are Sky's own published figures.
     """
 
-    prime_id: str = Field(
-        deprecated=True,
-        description=(
-            "DEPRECATED — despite the `prime_` prefix this is the queried ALM **proxy** address, not a "
-            "prime identity, and it varies across a prime's proxies. It is byte-identical to "
-            "`proxy_address` in the same response. Its value is unchanged for backwards compatibility. "
-            "Use `proxy_address` to identify the proxy these figures are scoped to, and `prime_name` or "
-            "`prime_proxies` to group by prime."
-        ),
-        examples=["0x1601843c5e9bc251a3272907010afa41fa18347e"],
-    )
-    proxy_address: str = Field(
-        description=(
-            "The 0x-prefixed ALM proxy address from the path, echoed back. This is what the unprefixed "
-            "figures are scoped to, so a client fanning out across a prime's proxies can match each "
-            "response to the request it answers."
-        ),
-        examples=["0x1601843c5e9bc251a3272907010afa41fa18347e"],
-    )
     source: Provenance = Field(
         default=Provenance.INDEXED,
         description=(
@@ -241,8 +217,10 @@ class PrimeRiskCapitalResponse(BaseModel):
     )
     exposure_usd: PlainDecimal = Field(
         description=(
-            "Σ priced receipt-token allocation exposure (USD). Under `source=reference` this is upstream's "
-            "own total, which deliberately does not equal the sum of `per_allocation` — the two come "
+            "Σ priced receipt-token allocation exposure across the prime's ALM proxies on chains STL "
+            "indexes (USD). Chains listed in `prime_unserved_chains` contribute nothing, so this is a "
+            "lower bound on what the prime holds. Under `source=reference` this is upstream's own "
+            "total, which deliberately does not equal the sum of `per_allocation` — the two come "
             "from separately-computed snapshots and reconcile only to about 1e-6."
         )
     )
@@ -255,23 +233,25 @@ class PrimeRiskCapitalResponse(BaseModel):
     )
     required_risk_capital_usd: PlainDecimal = Field(
         description=(
-            "Σ per-allocation RRC from the default model (USD). Under `source=reference` this is upstream's "
-            "own Required Risk Capital total; no model runs."
+            "Σ per-allocation RRC from the default model across the prime's ALM proxies (USD). Bounded "
+            "by `prime_unserved_chains` the same way `exposure_usd` is, so `encumbrance_ratio` built "
+            "on it reads low rather than high. Under `source=reference` this is upstream's own "
+            "Required Risk Capital total; no model runs."
         )
     )
     encumbrance_ratio: PlainDecimal | None = Field(
         default=None,
-        deprecated=True,
         description=(
-            "DEPRECATED — divides this proxy's Required Risk Capital by the whole prime's Total "
-            "Risk Capital, mixing scopes, so the figure is not meaningful for either. Its value "
-            "is unchanged for backwards compatibility. Use `prime_encumbrance_ratio`."
+            "`required_risk_capital_usd / total_risk_capital_usd` — the prime's encumbrance. Both "
+            "sides are whole-prime, so this is identical whichever identifier named the prime. "
+            "`null` when Total Risk Capital is absent or zero."
         ),
+        examples=["0.9397"],
     )
     modeled_exposure_usd: PlainDecimal = Field(
         description=(
-            "Exposure the default model could price (USD). Under `source=reference` it equals "
-            "`exposure_usd`: the monitor publishes only positions it has already priced."
+            "Exposure the default model could price, prime-wide (USD). Under `source=reference` it "
+            "equals `exposure_usd`: the monitor publishes only positions it has already priced."
         )
     )
     modeled_pct: PlainDecimal | None = Field(
@@ -283,12 +263,8 @@ class PrimeRiskCapitalResponse(BaseModel):
             "re-sorted, so a row's position reflects STL's exposure where it has one and Sky's otherwise."
         )
     )
-    prime_name: str | None = Field(
-        default=None,
-        description="Prime this proxy belongs to. `null` for a proxy absent from the axis-synome contract.",
-        examples=["spark"],
-    )
-    reference_prime_exposure_usd: PlainDecimal | None = Field(
+    prime_name: str = Field(description="The prime these figures cover.", examples=["spark"])
+    reference_exposure_usd: PlainDecimal | None = Field(
         default=None,
         description=(
             "Sky's reported exposure for the prime, populated only under `source=both`. Beside "
@@ -296,7 +272,7 @@ class PrimeRiskCapitalResponse(BaseModel):
             "differ by that coverage and the gap is the point."
         ),
     )
-    reference_prime_required_risk_capital_usd: PlainDecimal | None = Field(
+    reference_required_risk_capital_usd: PlainDecimal | None = Field(
         default=None,
         description="Sky's reported required risk capital. Populated only under `source=both`.",
     )
@@ -304,7 +280,7 @@ class PrimeRiskCapitalResponse(BaseModel):
         default=None,
         description="Sky's reported total risk capital. Populated only under `source=both`.",
     )
-    reference_prime_encumbrance_ratio: PlainDecimal | None = Field(
+    reference_encumbrance_ratio: PlainDecimal | None = Field(
         default=None,
         description=(
             "Sky's reported encumbrance, its own required over its own total. Populated only under "
@@ -322,52 +298,15 @@ class PrimeRiskCapitalResponse(BaseModel):
         ),
         examples=["2026-08-26T09:15:00+00:00"],
     )
-    prime_exposure_usd: PlainDecimal = Field(
-        default=Decimal("0"),
-        description=(
-            "Σ priced exposure across the prime's ALM proxies on chains STL indexes (USD). "
-            "Prime-scoped: dedupe, never sum. Chains listed in `prime_unserved_chains` contribute "
-            "nothing, so this is a lower bound on what the prime holds."
-        ),
-    )
-    prime_required_risk_capital_usd: PlainDecimal = Field(
-        default=Decimal("0"),
-        description=(
-            "Σ Required Risk Capital across the prime's ALM proxies on chains STL indexes (USD). "
-            "Prime-scoped. Bounded by `prime_unserved_chains` in the same way as `prime_exposure_usd`, "
-            "so `prime_encumbrance_ratio` built on it reads low rather than high."
-        ),
-    )
-    prime_modeled_exposure_usd: PlainDecimal = Field(
-        default=Decimal("0"), description="Σ exposure the default model could price, prime-wide (USD)."
-    )
-    prime_modeled_pct: PlainDecimal | None = Field(
-        default=None, description="`prime_modeled_exposure_usd / prime_exposure_usd` (0-1)."
-    )
-    prime_encumbrance_ratio: PlainDecimal | None = Field(
-        default=None,
-        description=(
-            "`prime_required_risk_capital_usd / total_risk_capital_usd` — the prime's true "
-            "encumbrance. Both sides are prime-scoped, so this is identical whichever of the "
-            "prime's proxies is queried. `null` when Total Risk Capital is absent or zero."
-        ),
-        examples=["0.9397"],
-    )
-    prime_proxies: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Every ALM proxy of the prime, address-sorted. Those on served chains carry the figures the "
-            "`prime_*` totals are aggregated from; see `prime_per_chain` for which did."
-        ),
-    )
     prime_per_chain: list[ChainRiskCapitalResponse] = Field(
-        default_factory=list, description="Per-proxy breakdown of the aggregated numerator, so the sum is auditable."
+        default_factory=list,
+        description="Per-chain breakdown of the aggregated numerator, chain-sorted, so the sum is auditable.",
     )
     prime_unserved_chains: list[str] = Field(
         default_factory=list,
         description=(
             "Chains the prime has an ALM proxy on that no allocation tracker serves, so they contribute "
-            "nothing to the `prime_*` totals and read `null` in `prime_per_chain`. Non-empty means the "
+            "nothing to the totals and read `null` in `prime_per_chain`. Non-empty means the "
             "totals are a lower bound. Always empty under `source=reference`: upstream's totals are not "
             "bounded by what STL indexes, so the caveat does not apply to them."
         ),
@@ -435,61 +374,31 @@ async def _get_service(
         "model can price contribute Required Risk Capital) and will not match Sky's dashboard. "
         "A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an "
         "un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) "
-        "rather than failing the whole response. Returns `404` if the prime is unknown, and also "
-        "if the address is a SubProxy treasury wallet: those hold a prime's treasury rather than "
-        "its allocations, so they have no prime-level risk capital to report. Read the treasury at "
-        "`/v1/primes/{prime_id}/total-capital` with one of the prime's ALM proxies, which "
-        "`/v1/primes` lists.\n\n"
-        "Figures without a prefix are scoped to the proxy in the path. Figures prefixed `prime_` are "
-        "scoped to the whole prime — summed across the ALM proxies of the prime the given address "
-        "belongs to that sit on chains STL indexes — and are therefore identical whichever proxy you "
-        "query; use `prime_per_chain` for the split and `prime_unserved_chains` for what is missing "
-        "from it. The one exception is an address the axis-synome contract does not list: it has no "
-        "discoverable siblings, so its `prime_` figures cover that proxy alone and will not agree with "
-        "what the prime's known proxies report. `total_risk_capital_usd` is prime-wide despite having "
-        "no prefix. `prime_id` breaks the convention the other way — it is the queried proxy address "
-        "rather than the prime — and is deprecated in favour of the identically-valued `proxy_address`. "
-        "`encumbrance_ratio` is deprecated because it mixes the two scopes; use "
-        "`prime_encumbrance_ratio`."
+        "rather than failing the whole response. Returns `404` if the prime is unknown.\n\n"
+        "Every figure covers the whole prime and is therefore identical whichever of its "
+        "identifiers you pass. Exposure and Required Risk Capital are summed across the prime's ALM "
+        "proxies on chains STL indexes; Total Risk Capital is its SubProxy treasury, read once. Use "
+        "`prime_per_chain` for the split and `prime_unserved_chains` for what is missing from it."
     ),
 )
 async def get_prime_risk_capital(
-    prime_id: ProxyAddressPathParam,
+    prime_id: PrimeIdentifierPathParam,
     requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: PrimeRiskCapitalService = Depends(_get_service),
     reference_services: Callable[[], ReferenceRiskCapitalService] = Depends(get_reference_risk_capital_service_factory),
+    scope: PrimeScope = Depends(prime_scope),
     _authz: None = Depends(require_prime_view),
 ) -> PrimeRiskCapitalResponse:
-    # A SubProxy holds the prime's treasury, not its allocations, so it is not a
-    # member of the prime's ALM fan-out set. Answering for one folds the treasury
-    # into prime_exposure_usd and adds a chain-less prime_per_chain row, so the
-    # prime_ fields stop being identical across the prime's proxies — the one
-    # guarantee consumers are told to dedupe on. Checked before prime_exists: a
-    # SubProxy does have allocation_position rows, so that gate cannot catch it,
-    # and classify_proxy is an in-memory lookup that saves the round trip.
-    if classify_proxy(prime_id) is ProxyKind.SUB_PROXY:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                "SubProxy treasury wallets carry no prime-level risk capital; "
-                "query one of the prime's ALM proxies, or /total-capital for the treasury"
-            ),
-        )
-
-    prime_address = EthAddress(prime_id)
-    if not await service.prime_exists(prime_address):
-        raise HTTPException(status_code=404, detail="Prime not found")
-
     source = resolve_or_422(requested_provenance, available=frozenset(Provenance), default=Provenance.INDEXED)
 
     if source is Provenance.REFERENCE:
-        return _with_encumbrance_contributions(await _reference_response(prime_address, reference_services()))
+        return _with_encumbrance_contributions(await _reference_response(scope, reference_services()))
 
-    indexed = _self_response(await service.compute(prime_address, source))
+    indexed = _self_response(await service.compute(scope, source))
     if source is Provenance.INDEXED:
         return _with_encumbrance_contributions(indexed)
 
-    merged = await _with_reference_totals(prime_address, indexed, reference_services())
+    merged = await _with_reference_totals(scope, indexed, reference_services())
     return _with_encumbrance_contributions(merged)
 
 
@@ -588,7 +497,7 @@ def _merge_per_allocation(
 
 
 async def _with_reference_totals(
-    prime_address: EthAddress,
+    scope: PrimeScope,
     indexed: PrimeRiskCapitalResponse,
     reference_service: ReferenceRiskCapitalService,
 ) -> PrimeRiskCapitalResponse:
@@ -601,13 +510,13 @@ async def _with_reference_totals(
     it; every other outcome is an error, and surfaces as one.
     """
     try:
-        reference = await _reference_response(prime_address, reference_service)
+        reference = await _reference_response(scope, reference_service)
     except HTTPException as exc:
         if exc.status_code != 404:
             raise
         logger.info(
             "Serving STL's risk capital alone; no reference cycle has reported on this prime",
-            extra={"prime_address": str(prime_address)},
+            extra={"prime_name": scope.identity.name},
         )
         return indexed
 
@@ -615,10 +524,10 @@ async def _with_reference_totals(
         update={
             "source": Provenance.BOTH,
             "per_allocation": _merge_per_allocation(indexed, reference),
-            "reference_prime_exposure_usd": reference.prime_exposure_usd,
-            "reference_prime_required_risk_capital_usd": reference.prime_required_risk_capital_usd,
+            "reference_exposure_usd": reference.exposure_usd,
+            "reference_required_risk_capital_usd": reference.required_risk_capital_usd,
             "reference_total_risk_capital_usd": reference.total_risk_capital_usd,
-            "reference_prime_encumbrance_ratio": reference.prime_encumbrance_ratio,
+            "reference_encumbrance_ratio": reference.encumbrance_ratio,
             "reference_synced_at": reference.reference_synced_at,
             # Sky reports these and STL models none of them, so they belong to
             # the merged answer whole.
@@ -633,8 +542,6 @@ def _self_response(result: PrimeRiskCapital) -> PrimeRiskCapitalResponse:
     """Project STL's own model output onto the response."""
     return PrimeRiskCapitalResponse(
         source=Provenance.INDEXED,
-        prime_id=result.proxy_address,
-        proxy_address=result.proxy_address,
         model=result.model,
         exposure_usd=result.exposure_usd,
         total_risk_capital_usd=result.total_risk_capital_usd,
@@ -644,37 +551,29 @@ def _self_response(result: PrimeRiskCapital) -> PrimeRiskCapitalResponse:
         modeled_pct=result.modeled_pct,
         per_allocation=[_indexed_allocation(alloc) for alloc in result.per_allocation],
         prime_name=result.prime_name,
-        prime_exposure_usd=result.prime_exposure_usd,
-        prime_required_risk_capital_usd=result.prime_required_risk_capital_usd,
-        prime_modeled_exposure_usd=result.prime_modeled_exposure_usd,
-        prime_modeled_pct=result.prime_modeled_pct,
-        prime_encumbrance_ratio=result.prime_encumbrance_ratio,
-        prime_proxies=list(result.prime_proxies),
         prime_per_chain=[ChainRiskCapitalResponse(**row.__dict__) for row in result.prime_per_chain],
         prime_unserved_chains=list(result.prime_unserved_chains),
     )
 
 
 async def _reference_response(
-    prime_address: EthAddress, reference_service: ReferenceRiskCapitalService
+    scope: PrimeScope, reference_service: ReferenceRiskCapitalService
 ) -> PrimeRiskCapitalResponse:
     """Project STL's stored Star-monitor snapshot onto the same response."""
-    snapshot = await reference_service.get(prime_address)
+    snapshot = await reference_service.get(scope.identity.name)
     if snapshot is None:
         raise HTTPException(
             status_code=404,
             detail="No reference risk capital has been observed for this prime",
         )
-    return _project_reference(prime_address, snapshot)
+    return _project_reference(snapshot)
 
 
-def _project_reference(prime_address: EthAddress, snapshot: ReferencePrimeRiskCapital) -> PrimeRiskCapitalResponse:
-    """Map an observed snapshot onto the response, prime-scoped fields included.
+def _project_reference(snapshot: ReferencePrimeRiskCapital) -> PrimeRiskCapitalResponse:
+    """Map an observed snapshot onto the response.
 
-    Upstream reports per prime, so the proxy-scoped and `prime_`-scoped figures
-    carry the same values here — unlike self mode, where they genuinely differ.
     `prime_per_chain` stays empty because upstream publishes no proxy topology,
-    so there is no per-proxy split to audit the total against.
+    so there is no per-chain split to audit the total against.
     """
     # Upstream publishes only positions it has already priced, so its coverage
     # is complete by construction. Deriving a ratio from its own two endpoints
@@ -682,8 +581,6 @@ def _project_reference(prime_address: EthAddress, snapshot: ReferencePrimeRiskCa
     # 0-1 range, and would read as "STL priced all of this" — which no model did.
     return PrimeRiskCapitalResponse(
         source=Provenance.REFERENCE,
-        prime_id=str(prime_address),
-        proxy_address=str(prime_address),
         model=None,
         exposure_usd=snapshot.exposure_usd,
         total_risk_capital_usd=snapshot.total_risk_capital_usd,
@@ -693,12 +590,6 @@ def _project_reference(prime_address: EthAddress, snapshot: ReferencePrimeRiskCa
         modeled_pct=Decimal("1"),
         per_allocation=[_reference_allocation(row) for row in snapshot.per_allocation],
         prime_name=snapshot.star,
-        prime_exposure_usd=snapshot.exposure_usd,
-        prime_required_risk_capital_usd=snapshot.required_risk_capital_usd,
-        prime_modeled_exposure_usd=snapshot.exposure_usd,
-        prime_modeled_pct=Decimal("1"),
-        prime_encumbrance_ratio=snapshot.encumbrance_ratio,
-        prime_proxies=[entry.address for entry in alm_proxies_for_prime(snapshot.star)],
         prime_per_chain=[],
         prime_unserved_chains=[],
         junior_risk_capital_usd=snapshot.junior_risk_capital_usd,

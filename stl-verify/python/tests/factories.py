@@ -87,8 +87,10 @@ def make_prime_scope(**overrides: Any) -> PrimeScope:
     """A resolved scope with one ALM proxy and one SubProxy, as a real prime has."""
     defaults: dict[str, Any] = dict(
         identity=make_prime_identity(),
-        alm_proxies=(EthAddress("0x" + "11" * 20),),
-        subproxies=(EthAddress("0x" + "22" * 20),),
+        wallets=(
+            make_proxy_wallet(address=EthAddress("0x" + "11" * 20), kind=ProxyKind.ALM),
+            make_proxy_wallet(address=EthAddress("0x" + "22" * 20), kind=ProxyKind.SUB_PROXY),
+        ),
         unserved_chains=(),
     )
     defaults.update(overrides)

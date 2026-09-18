@@ -81,15 +81,15 @@ export function buildMetricCharts({
   // back to, which must land on the same number the card's value shows.
   const exposureValue = parseNumericValue(
     preferReference(
-      riskCapital?.reference_prime_exposure_usd,
-      riskCapital?.prime_exposure_usd,
+      riskCapital?.reference_exposure_usd,
+      riskCapital?.exposure_usd,
     ),
   );
 
   const requiredRiskCapitalValue = parseNumericValue(
     preferReference(
-      riskCapital?.reference_prime_required_risk_capital_usd,
-      riskCapital?.prime_required_risk_capital_usd,
+      riskCapital?.reference_required_risk_capital_usd,
+      riskCapital?.required_risk_capital_usd,
     ),
   );
 
@@ -110,8 +110,8 @@ export function buildMetricCharts({
 
   const encumbranceValue = parseNumericValue(
     preferReference(
-      riskCapital?.reference_prime_encumbrance_ratio,
-      riskCapital?.prime_encumbrance_ratio,
+      riskCapital?.reference_encumbrance_ratio,
+      riskCapital?.encumbrance_ratio,
     ),
   );
 

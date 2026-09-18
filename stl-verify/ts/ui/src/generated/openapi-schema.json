@@ -1116,7 +1116,7 @@
         "type": "object"
       },
       "ChainRiskCapitalResponse": {
-        "description": "One ALM proxy's contribution to the prime's aggregated figures.\n\nA row exists for every ALM proxy the axis-synome contract lists for this\nprime, including chains STL has no allocation tracker for. On such a chain the\nfigures are `null`, not `\"0\"`: STL holds no positions for it at all, so a zero\nwould assert the prime is empty there when the truth is that it is not\nindexed. `prime_unserved_chains` names those chains, and the `prime_*` totals\nexclude them.",
+        "description": "One chain's contribution to the prime's aggregated figures.\n\nA row exists for every chain the prime allocates on, including those STL has\nno allocation tracker for. On such a chain the figures are `null`, not\n`\"0\"`: STL holds no positions for it at all, so a zero would assert the\nprime is empty there when the truth is that it is not indexed.\n`prime_unserved_chains` names those chains, and the totals exclude them.",
         "properties": {
           "allocation_count": {
             "anyOf": [
@@ -1127,23 +1127,16 @@
                 "type": "null"
               }
             ],
-            "description": "Number of allocations this proxy contributed. `null` when the chain is unserved.",
+            "description": "Number of allocations this chain contributed. `null` when the chain is unserved.",
             "title": "Allocation Count"
           },
           "chain": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Internal chain name. `null` for a proxy absent from the axis-synome contract.",
+            "description": "Internal chain name.",
             "examples": [
               "avalanche-c"
             ],
-            "title": "Chain"
+            "title": "Chain",
+            "type": "string"
           },
           "exposure_usd": {
             "anyOf": [
@@ -1155,13 +1148,8 @@
                 "type": "null"
               }
             ],
-            "description": "Priced receipt-token exposure held through this proxy (USD). `null` when no allocation tracker serves this chain, so nothing is known either way.",
+            "description": "Priced receipt-token exposure the prime holds on this chain (USD). `null` when no allocation tracker serves it, so nothing is known either way.",
             "title": "Exposure Usd"
-          },
-          "proxy_address": {
-            "description": "0x-prefixed ALM proxy address.",
-            "title": "Proxy Address",
-            "type": "string"
           },
           "required_risk_capital_usd": {
             "anyOf": [
@@ -1173,12 +1161,12 @@
                 "type": "null"
               }
             ],
-            "description": "Required Risk Capital from this proxy's positions (USD). `null` when the chain is unserved.",
+            "description": "Required Risk Capital from this chain's positions (USD). `null` when the chain is unserved.",
             "title": "Required Risk Capital Usd"
           }
         },
         "required": [
-          "proxy_address"
+          "chain"
         ],
         "title": "ChainRiskCapitalResponse",
         "type": "object"
@@ -1841,7 +1829,7 @@
         "type": "object"
       },
       "PrimeRiskCapitalResponse": {
-        "description": "Capital metrics for a prime, from one of two provenances \u2014 see `source`.\n\nUnder `source: \"self\"` (the default) the figures are model-derived from\non-chain data: `required_risk_capital_usd` sums per-allocation RRC from the\ndefault model (`model`), so it is **partial** \u2014 only allocations the model\ncan price contribute \u2014 and **will not** match Sky's dashboard.\n\nUnder `source: \"reference\"` they are Sky's own published figures, and every\nfigure is **prime-scoped**: upstream reports per prime, so the unprefixed\nfields carry the same values as their `prime_`-prefixed counterparts. Do not\nsum them across a prime's proxies \u2014 dedupe, as for any `prime_` field.",
+        "description": "Capital metrics for a prime, from one of two provenances \u2014 see `source`.\n\nEvery figure is whole-prime, so it is the same answer whichever of the\nprime's identifiers was passed. Additive quantities are summed across the\nprime's ALM proxies and shared ones are counted once.\n\nUnder `source: \"self\"` (the default) the figures are model-derived from\non-chain data: `required_risk_capital_usd` sums per-allocation RRC from the\ndefault model (`model`), so it is **partial** \u2014 only allocations the model\ncan price contribute \u2014 and **will not** match Sky's dashboard.\n\nUnder `source: \"reference\"` they are Sky's own published figures.",
         "properties": {
           "encumbrance_ratio": {
             "anyOf": [
@@ -1853,8 +1841,10 @@
                 "type": "null"
               }
             ],
-            "deprecated": true,
-            "description": "DEPRECATED \u2014 divides this proxy's Required Risk Capital by the whole prime's Total Risk Capital, mixing scopes, so the figure is not meaningful for either. Its value is unchanged for backwards compatibility. Use `prime_encumbrance_ratio`.",
+            "description": "`required_risk_capital_usd / total_risk_capital_usd` \u2014 the prime's encumbrance. Both sides are whole-prime, so this is identical whichever identifier named the prime. `null` when Total Risk Capital is absent or zero.",
+            "examples": [
+              "0.9397"
+            ],
             "title": "Encumbrance Ratio"
           },
           "epi_utilization": {
@@ -1884,7 +1874,7 @@
             "title": "Exposure Share"
           },
           "exposure_usd": {
-            "description": "\u03a3 priced receipt-token allocation exposure (USD). Under `source=reference` this is upstream's own total, which deliberately does not equal the sum of `per_allocation` \u2014 the two come from separately-computed snapshots and reconcile only to about 1e-6.",
+            "description": "\u03a3 priced receipt-token allocation exposure across the prime's ALM proxies on chains STL indexes (USD). Chains listed in `prime_unserved_chains` contribute nothing, so this is a lower bound on what the prime holds. Under `source=reference` this is upstream's own total, which deliberately does not equal the sum of `per_allocation` \u2014 the two come from separately-computed snapshots and reconcile only to about 1e-6.",
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Exposure Usd",
             "type": "string"
@@ -1975,7 +1965,7 @@
             "title": "Model"
           },
           "modeled_exposure_usd": {
-            "description": "Exposure the default model could price (USD). Under `source=reference` it equals `exposure_usd`: the monitor publishes only positions it has already priced.",
+            "description": "Exposure the default model could price, prime-wide (USD). Under `source=reference` it equals `exposure_usd`: the monitor publishes only positions it has already priced.",
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Modeled Exposure Usd",
             "type": "string"
@@ -2001,98 +1991,24 @@
             "title": "Per Allocation",
             "type": "array"
           },
-          "prime_encumbrance_ratio": {
-            "anyOf": [
-              {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "`prime_required_risk_capital_usd / total_risk_capital_usd` \u2014 the prime's true encumbrance. Both sides are prime-scoped, so this is identical whichever of the prime's proxies is queried. `null` when Total Risk Capital is absent or zero.",
-            "examples": [
-              "0.9397"
-            ],
-            "title": "Prime Encumbrance Ratio"
-          },
-          "prime_exposure_usd": {
-            "default": "0",
-            "description": "\u03a3 priced exposure across the prime's ALM proxies on chains STL indexes (USD). Prime-scoped: dedupe, never sum. Chains listed in `prime_unserved_chains` contribute nothing, so this is a lower bound on what the prime holds.",
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Prime Exposure Usd",
-            "type": "string"
-          },
-          "prime_id": {
-            "deprecated": true,
-            "description": "DEPRECATED \u2014 despite the `prime_` prefix this is the queried ALM **proxy** address, not a prime identity, and it varies across a prime's proxies. It is byte-identical to `proxy_address` in the same response. Its value is unchanged for backwards compatibility. Use `proxy_address` to identify the proxy these figures are scoped to, and `prime_name` or `prime_proxies` to group by prime.",
-            "examples": [
-              "0x1601843c5e9bc251a3272907010afa41fa18347e"
-            ],
-            "title": "Prime Id",
-            "type": "string"
-          },
-          "prime_modeled_exposure_usd": {
-            "default": "0",
-            "description": "\u03a3 exposure the default model could price, prime-wide (USD).",
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Prime Modeled Exposure Usd",
-            "type": "string"
-          },
-          "prime_modeled_pct": {
-            "anyOf": [
-              {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "`prime_modeled_exposure_usd / prime_exposure_usd` (0-1).",
-            "title": "Prime Modeled Pct"
-          },
           "prime_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Prime this proxy belongs to. `null` for a proxy absent from the axis-synome contract.",
+            "description": "The prime these figures cover.",
             "examples": [
               "spark"
             ],
-            "title": "Prime Name"
+            "title": "Prime Name",
+            "type": "string"
           },
           "prime_per_chain": {
-            "description": "Per-proxy breakdown of the aggregated numerator, so the sum is auditable.",
+            "description": "Per-chain breakdown of the aggregated numerator, chain-sorted, so the sum is auditable.",
             "items": {
               "$ref": "#/components/schemas/ChainRiskCapitalResponse"
             },
             "title": "Prime Per Chain",
             "type": "array"
           },
-          "prime_proxies": {
-            "description": "Every ALM proxy of the prime, address-sorted. Those on served chains carry the figures the `prime_*` totals are aggregated from; see `prime_per_chain` for which did.",
-            "items": {
-              "type": "string"
-            },
-            "title": "Prime Proxies",
-            "type": "array"
-          },
-          "prime_required_risk_capital_usd": {
-            "default": "0",
-            "description": "\u03a3 Required Risk Capital across the prime's ALM proxies on chains STL indexes (USD). Prime-scoped. Bounded by `prime_unserved_chains` in the same way as `prime_exposure_usd`, so `prime_encumbrance_ratio` built on it reads low rather than high.",
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Prime Required Risk Capital Usd",
-            "type": "string"
-          },
           "prime_unserved_chains": {
-            "description": "Chains the prime has an ALM proxy on that no allocation tracker serves, so they contribute nothing to the `prime_*` totals and read `null` in `prime_per_chain`. Non-empty means the totals are a lower bound. Always empty under `source=reference`: upstream's totals are not bounded by what STL indexes, so the caveat does not apply to them.",
+            "description": "Chains the prime has an ALM proxy on that no allocation tracker serves, so they contribute nothing to the totals and read `null` in `prime_per_chain`. Non-empty means the totals are a lower bound. Always empty under `source=reference`: upstream's totals are not bounded by what STL indexes, so the caveat does not apply to them.",
             "examples": [
               [
                 "arbitrum",
@@ -2106,15 +2022,7 @@
             "title": "Prime Unserved Chains",
             "type": "array"
           },
-          "proxy_address": {
-            "description": "The 0x-prefixed ALM proxy address from the path, echoed back. This is what the unprefixed figures are scoped to, so a client fanning out across a prime's proxies can match each response to the request it answers.",
-            "examples": [
-              "0x1601843c5e9bc251a3272907010afa41fa18347e"
-            ],
-            "title": "Proxy Address",
-            "type": "string"
-          },
-          "reference_prime_encumbrance_ratio": {
+          "reference_encumbrance_ratio": {
             "anyOf": [
               {
                 "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -2125,9 +2033,9 @@
               }
             ],
             "description": "Sky's reported encumbrance, its own required over its own total. Populated only under `source=both`; never a ratio built from one provenance over the other.",
-            "title": "Reference Prime Encumbrance Ratio"
+            "title": "Reference Encumbrance Ratio"
           },
-          "reference_prime_exposure_usd": {
+          "reference_exposure_usd": {
             "anyOf": [
               {
                 "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -2138,9 +2046,9 @@
               }
             ],
             "description": "Sky's reported exposure for the prime, populated only under `source=both`. Beside STL's rather than replacing it: STL prices only the chains it indexes, so the two differ by that coverage and the gap is the point.",
-            "title": "Reference Prime Exposure Usd"
+            "title": "Reference Exposure Usd"
           },
-          "reference_prime_required_risk_capital_usd": {
+          "reference_required_risk_capital_usd": {
             "anyOf": [
               {
                 "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -2151,7 +2059,7 @@
               }
             ],
             "description": "Sky's reported required risk capital. Populated only under `source=both`.",
-            "title": "Reference Prime Required Risk Capital Usd"
+            "title": "Reference Required Risk Capital Usd"
           },
           "reference_synced_at": {
             "anyOf": [
@@ -2183,7 +2091,7 @@
             "title": "Reference Total Risk Capital Usd"
           },
           "required_risk_capital_usd": {
-            "description": "\u03a3 per-allocation RRC from the default model (USD). Under `source=reference` this is upstream's own Required Risk Capital total; no model runs.",
+            "description": "\u03a3 per-allocation RRC from the default model across the prime's ALM proxies (USD). Bounded by `prime_unserved_chains` the same way `exposure_usd` is, so `encumbrance_ratio` built on it reads low rather than high. Under `source=reference` this is upstream's own Required Risk Capital total; no model runs.",
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Required Risk Capital Usd",
             "type": "string"
@@ -2247,13 +2155,12 @@
           }
         },
         "required": [
-          "prime_id",
-          "proxy_address",
           "model",
           "exposure_usd",
           "required_risk_capital_usd",
           "modeled_exposure_usd",
-          "per_allocation"
+          "per_allocation",
+          "prime_name"
         ],
         "title": "PrimeRiskCapitalResponse",
         "type": "object"
@@ -4372,16 +4279,19 @@
     },
     "/v1/primes/{prime_id}/risk-capital": {
       "get": {
-        "description": "Compute the prime's capital metrics from on-chain data and the default RRC model (`core_model`, falling back to `gap_sweep` under `source=indexed` where core has no data), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) rather than failing the whole response. Returns `404` if the prime is unknown, and also if the address is a SubProxy treasury wallet: those hold a prime's treasury rather than its allocations, so they have no prime-level risk capital to report. Read the treasury at `/v1/primes/{prime_id}/total-capital` with one of the prime's ALM proxies, which `/v1/primes` lists.\n\nFigures without a prefix are scoped to the proxy in the path. Figures prefixed `prime_` are scoped to the whole prime \u2014 summed across the ALM proxies of the prime the given address belongs to that sit on chains STL indexes \u2014 and are therefore identical whichever proxy you query; use `prime_per_chain` for the split and `prime_unserved_chains` for what is missing from it. The one exception is an address the axis-synome contract does not list: it has no discoverable siblings, so its `prime_` figures cover that proxy alone and will not agree with what the prime's known proxies report. `total_risk_capital_usd` is prime-wide despite having no prefix. `prime_id` breaks the convention the other way \u2014 it is the queried proxy address rather than the prime \u2014 and is deprecated in favour of the identically-valued `proxy_address`. `encumbrance_ratio` is deprecated because it mixes the two scopes; use `prime_encumbrance_ratio`.",
+        "description": "Compute the prime's capital metrics from on-chain data and the default RRC model (`core_model`, falling back to `gap_sweep` under `source=indexed` where core has no data), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) rather than failing the whole response. Returns `404` if the prime is unknown.\n\nEvery figure covers the whole prime and is therefore identical whichever of its identifiers you pass. Exposure and Required Risk Capital are summed across the prime's ALM proxies on chains STL indexes; Total Risk Capital is its SubProxy treasury, read once. Use `prime_per_chain` for the split and `prime_unserved_chains` for what is missing from it.",
         "operationId": "get_prime_risk_capital_v1_primes__prime_id__risk_capital_get",
         "parameters": [
           {
-            "description": "A prime's 0x-prefixed ALM **proxy** address on one chain \u2014 not a prime identifier. A prime allocates through one proxy per chain; list them via `GET /v1/primes` and group by `prime_vault_address`.",
+            "description": "A prime, named by any of four forms: its **name** (preferred, e.g. `spark`), its vault address, or any of its ALM proxy or SubProxy addresses. Addresses must carry the `0x` prefix. All four resolve to the same prime, silently and with no redirect. **Results are always whole-prime**: passing a proxy address returns the entire prime, including the chains that proxy has nothing to do with.",
             "in": "path",
             "name": "prime_id",
             "required": true,
             "schema": {
-              "description": "A prime's 0x-prefixed ALM **proxy** address on one chain \u2014 not a prime identifier. A prime allocates through one proxy per chain; list them via `GET /v1/primes` and group by `prime_vault_address`.",
+              "description": "A prime, named by any of four forms: its **name** (preferred, e.g. `spark`), its vault address, or any of its ALM proxy or SubProxy addresses. Addresses must carry the `0x` prefix. All four resolve to the same prime, silently and with no redirect. **Results are always whole-prime**: passing a proxy address returns the entire prime, including the chains that proxy has nothing to do with.",
+              "examples": [
+                "spark"
+              ],
               "title": "Prime Id",
               "type": "string"
             }

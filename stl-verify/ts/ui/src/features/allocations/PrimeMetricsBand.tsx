@@ -254,8 +254,8 @@ function TotalRiskCapitalCard({
     riskCapital.total_risk_capital_usd,
   );
   const required = preferredFigure(
-    riskCapital.reference_prime_required_risk_capital_usd,
-    riskCapital.prime_required_risk_capital_usd,
+    riskCapital.reference_required_risk_capital_usd,
+    riskCapital.required_risk_capital_usd,
   );
   // The stamp is the reference feed's, and it sits on a line covering both
   // figures, so it is withheld unless both came from that feed.

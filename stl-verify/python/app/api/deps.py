@@ -577,10 +577,7 @@ def get_reference_risk_capital_service_factory(
     """
 
     def build() -> ReferenceRiskCapitalService:
-        return ReferenceRiskCapitalService(
-            ReferenceRiskCapitalRepository(request.app.state.engine),
-            AllocationRepository(request.app.state.engine, request.app.state.reference_effective_at),
-        )
+        return ReferenceRiskCapitalService(ReferenceRiskCapitalRepository(request.app.state.engine))
 
     return build
 
