@@ -2,7 +2,7 @@
 
 from typing import Protocol
 
-from app.domain.entities.prime import PrimeIdentity
+from app.domain.entities.prime import PrimeIdentity, ProxyWallet
 
 
 class PrimeResolver(Protocol):
@@ -14,4 +14,13 @@ class PrimeResolver(Protocol):
 
     async def resolve(self, identifier: str) -> PrimeIdentity | None:
         """Return the prime ``identifier`` names, or ``None`` when nothing matches."""
+        ...
+
+    async def list_proxies(self, prime_id: int) -> list[ProxyWallet]:
+        """Every wallet ``prime_proxy`` records for ``prime_id``, address-sorted.
+
+        Empty for a prime with a vault and no proxies. Raises ``ValueError`` on a
+        failed query, like ``resolve``, so the caller answers 503 rather than
+        reporting a prime that holds nothing.
+        """
         ...

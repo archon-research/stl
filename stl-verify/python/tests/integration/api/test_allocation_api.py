@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from app.api.deps import PRIME_DENIED_DETAIL
 from app.config import Settings
 from app.main import create_app
 from tests.integration.seed import (
@@ -508,14 +509,14 @@ def test_list_allocations_surfaces_anchorage_btc_custody(client: TestClient) -> 
 
 
 def test_list_allocations_returns_404_for_unknown_prime(client: TestClient) -> None:
-    """A well-formed address with no allocation_position history is not a
-    registered prime: the endpoint signals this with 404 rather than an
-    ambiguous empty list.
+    """A well-formed address naming no prime is 404 rather than an ambiguous
+    empty list, and carries the gate's denial body so the pair of answers is not
+    an existence oracle.
     """
     response = client.get(f"/v1/primes/0x{_UNKNOWN_PROXY_HEX}/allocations")
 
     assert response.status_code == 404
-    assert response.json()["detail"] == "Prime not found"
+    assert response.json()["detail"] == PRIME_DENIED_DETAIL
 
 
 def test_list_allocations_returns_422_for_malformed_prime_id(client: TestClient) -> None:

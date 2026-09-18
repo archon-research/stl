@@ -7,8 +7,11 @@ from typing import Any
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
     DirectAssetHolding,
+    EthAddress,
     ReceiptTokenPosition,
 )
+from app.domain.entities.prime import PrimeIdentity, PrimeScope, ProxyWallet
+from app.domain.prime_registry import ProxyKind
 
 # The live feed is frozen at this snapshot_time (upstream outage since
 # 2026-06-16). The staleness test asserts it surfaces verbatim.
@@ -57,3 +60,36 @@ def make_anchorage_custody_holding(**overrides: Any) -> AnchorageCustodyHolding:
     )
     defaults.update(overrides)
     return AnchorageCustodyHolding(**defaults)
+
+
+def make_prime_identity(**overrides: Any) -> PrimeIdentity:
+    defaults: dict[str, Any] = dict(
+        id=1,
+        name="spark",
+        external_id="4bd9ee3c-58df-4587-9c04-63b928f1a169",
+        vault_address=EthAddress("0x" + "ab" * 20),
+    )
+    defaults.update(overrides)
+    return PrimeIdentity(**defaults)
+
+
+def make_proxy_wallet(**overrides: Any) -> ProxyWallet:
+    defaults: dict[str, Any] = dict(
+        address=EthAddress("0x" + "11" * 20),
+        chain_id=1,
+        kind=ProxyKind.ALM,
+    )
+    defaults.update(overrides)
+    return ProxyWallet(**defaults)
+
+
+def make_prime_scope(**overrides: Any) -> PrimeScope:
+    """A resolved scope with one ALM proxy and one SubProxy, as a real prime has."""
+    defaults: dict[str, Any] = dict(
+        identity=make_prime_identity(),
+        alm_proxies=(EthAddress("0x" + "11" * 20),),
+        subproxies=(EthAddress("0x" + "22" * 20),),
+        unserved_chains=(),
+    )
+    defaults.update(overrides)
+    return PrimeScope(**defaults)

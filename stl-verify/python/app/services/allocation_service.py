@@ -13,6 +13,7 @@ from app.domain.entities.allocation import (
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
+from app.domain.entities.prime import PrimeScope
 from app.domain.entities.time_series_bucket import (
     AllocationActivityBucket,
     ExposureBucket,
@@ -134,15 +135,20 @@ class AllocationService:
 
     async def list_total_capital_buckets(
         self,
-        prime_address: EthAddress,
+        scope: PrimeScope,
         *,
         from_timestamp: datetime,
         to_timestamp: datetime,
         bucket_seconds: float,
         limit: int = 100,
     ) -> list[TotalCapitalBucket]:
+        """The prime's treasury series, read once over its SubProxy wallets.
+
+        Total capital is SHARED, so the wallet set scopes one read rather than
+        being fanned out per wallet and summed — see ``PrimeScope``.
+        """
         return await self._repository.list_total_capital_buckets(
-            prime_address,
+            scope.subproxies,
             from_timestamp=from_timestamp,
             to_timestamp=to_timestamp,
             bucket_seconds=bucket_seconds,

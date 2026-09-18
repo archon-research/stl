@@ -15,7 +15,6 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.prime_capital_stack_repository import PrimeCapitalStackRepository
-from app.domain.entities.allocation import EthAddress
 from tests.integration.seed import insert_allocation_position
 
 _PROXY = bytes.fromhex("1601843c5e9bc251a3272907010afa41fa18347e")
@@ -80,12 +79,12 @@ async def seeded(db_url: str):
         await conn.close()
 
 
-async def _buckets(async_db_url: str, *, hours: int = 6, bucket_seconds: float = 3600):
+async def _buckets(async_db_url: str, prime_id: int, *, hours: int = 6, bucket_seconds: float = 3600):
     engine = create_async_engine(async_db_url)
     try:
         repository = PrimeCapitalStackRepository(engine)
         return await repository.list_reference_capital_buckets(
-            EthAddress("0x" + _PROXY.hex()),
+            prime_id,
             from_timestamp=_WINDOW_START,
             to_timestamp=_WINDOW_START + timedelta(hours=hours),
             bucket_seconds=bucket_seconds,
@@ -99,7 +98,7 @@ async def test_carries_the_last_observation_forward_into_later_buckets(seeded, a
     conn, prime_id = seeded
     await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="48142491.08", exposure="2098090654.81")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     carried = [b for b in buckets if b.bucket_start > _FIRST_OBSERVATION]
     assert carried, "expected buckets after the observation"
@@ -111,7 +110,7 @@ async def test_leaves_buckets_before_the_first_observation_null(seeded, async_db
     conn, prime_id = seeded
     await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="48142491.08", exposure="2098090654.81")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     leading = [b for b in buckets if b.bucket_start < _FIRST_OBSERVATION]
     assert leading, "expected buckets before the observation"
@@ -124,7 +123,7 @@ async def test_prefers_a_correction_over_the_original_it_supersedes(seeded, asyn
     await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="1", exposure="1", build_id=1)
     await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="999", exposure="888", build_id=2)
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     observed = [b for b in buckets if b.total_capital_usd is not None]
     assert observed
@@ -135,7 +134,8 @@ async def test_prefers_a_correction_over_the_original_it_supersedes(seeded, asyn
 @pytest.mark.asyncio(loop_scope="module")
 async def test_returns_all_null_buckets_when_the_syncer_has_never_run(seeded, async_db_url: str):
     # An unobserved prime must read as absent, never as zero capital.
-    buckets = await _buckets(async_db_url)
+    _, prime_id = seeded
+    buckets = await _buckets(async_db_url, prime_id)
 
     assert buckets
     assert all(b.total_capital_usd is None and b.exposure_usd is None for b in buckets)
@@ -160,7 +160,7 @@ async def test_serves_backfilled_history_from_before_the_syncer_first_ran(seeded
     conn, prime_id = seeded
     await _insert_history(conn, prime_id, _WINDOW_START, treasury="111")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     observed = [b for b in buckets if b.total_capital_usd is not None]
     assert observed, "expected the backfilled day to populate the series"
@@ -175,7 +175,7 @@ async def test_prefers_a_snapshot_over_backfilled_history_at_the_same_instant(se
     await _insert_history(conn, prime_id, _FIRST_OBSERVATION, treasury="111")
     await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="222", exposure="5")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     observed = [b for b in buckets if b.total_capital_usd is not None]
     assert observed[0].total_capital_usd == Decimal("222")
@@ -188,7 +188,7 @@ async def test_never_serves_backfilled_allocated_assets_as_exposure(seeded, asyn
     conn, prime_id = seeded
     await _insert_history(conn, prime_id, _WINDOW_START, treasury="111")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     assert any(b.total_capital_usd is not None for b in buckets)
     assert all(b.exposure_usd is None for b in buckets)
@@ -200,7 +200,7 @@ async def test_pairs_each_bucket_from_one_snapshot_row(seeded, async_db_url: str
     await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="10", exposure="20")
     await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION + timedelta(hours=1), total_rc="30", exposure="40")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     # Asserted by membership, not by a guarded loop: a query that dropped either
     # snapshot would satisfy a per-bucket conditional vacuously.
@@ -215,7 +215,7 @@ async def test_carries_the_monitors_encumbrance_ratio(seeded, async_db_url: str)
     conn, prime_id = seeded
     await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="10", exposure="20")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     observed = [b for b in buckets if b.encumbrance_ratio is not None]
     assert observed, "the snapshot's encumbrance ratio should reach the series"
@@ -229,7 +229,7 @@ async def test_serves_assets_only_from_the_balance_sheet_feed(seeded, async_db_u
     conn, prime_id = seeded
     await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="10", exposure="20")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     assert all(b.assets_usd is None for b in buckets)
 
@@ -241,7 +241,7 @@ async def test_history_carries_assets_but_no_encumbrance(seeded, async_db_url: s
     conn, prime_id = seeded
     await _insert_history(conn, prime_id, _WINDOW_START, treasury="111")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     assert any(b.assets_usd == Decimal("1") for b in buckets)
     assert all(b.encumbrance_ratio is None for b in buckets)
@@ -256,7 +256,7 @@ async def test_keeps_assets_when_a_later_snapshot_lands_in_the_same_window(seede
     await _insert_history(conn, prime_id, _WINDOW_START, treasury="111")
     await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="222", exposure="5")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     latest = [b for b in buckets if b.bucket_start >= _FIRST_OBSERVATION]
     assert latest, "expected buckets at or after the snapshot"
@@ -272,7 +272,7 @@ async def test_carries_an_observation_from_before_the_window_into_it(seeded, asy
     conn, prime_id = seeded
     await _insert_history(conn, prime_id, _WINDOW_START - timedelta(days=2), treasury="111")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     assert buckets
     assert all(b.assets_usd == Decimal("1") for b in buckets)
@@ -287,7 +287,7 @@ async def test_stamps_the_monitor_figures_with_their_own_observation(seeded, asy
     observed = _WINDOW_START - timedelta(days=2)
     await _insert_snapshot(conn, prime_id, observed, total_rc="10", exposure="20")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     assert buckets
     assert all(b.capital_observed_at == observed for b in buckets), (
@@ -305,7 +305,7 @@ async def test_seeds_locf_from_the_newest_of_several_prior_observations(seeded, 
     await _insert_snapshot(conn, prime_id, _WINDOW_START - timedelta(days=2), total_rc="3", exposure="30")
     await _insert_snapshot(conn, prime_id, _WINDOW_START - timedelta(days=3), total_rc="2", exposure="20")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     assert buckets
     assert all(b.total_capital_usd == Decimal("3") for b in buckets)
@@ -322,7 +322,7 @@ async def test_prefers_the_snapshot_when_both_feeds_share_the_prior_instant(seed
     await _insert_history(conn, prime_id, observed, treasury="111")
     await _insert_snapshot(conn, prime_id, observed, total_rc="222", exposure="5")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     assert buckets
     assert all(b.total_capital_usd == Decimal("222") for b in buckets)
@@ -338,7 +338,7 @@ async def test_seeds_each_figure_from_its_own_newest_observation(seeded, async_d
     await _insert_history(conn, prime_id, _WINDOW_START - timedelta(days=3), treasury="111")
     await _insert_snapshot(conn, prime_id, _WINDOW_START - timedelta(days=1), total_rc="222", exposure="5")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     assert buckets
     assert all(b.total_capital_usd == Decimal("222") for b in buckets)
@@ -354,7 +354,7 @@ async def test_does_not_reach_back_past_the_staleness_bound(seeded, async_db_url
     conn, prime_id = seeded
     await _insert_history(conn, prime_id, _WINDOW_START - timedelta(days=120), treasury="111")
 
-    buckets = await _buckets(async_db_url)
+    buckets = await _buckets(async_db_url, prime_id)
 
     assert buckets
     assert all(b.assets_usd is None for b in buckets)

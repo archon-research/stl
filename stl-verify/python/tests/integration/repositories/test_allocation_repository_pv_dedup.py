@@ -27,6 +27,7 @@ from tests.integration.seed import (
     PVD_CORRECTED_AMOUNT,
     PVD_CREATED_AT,
     PVD_ORIGINAL_AMOUNT,
+    PVD_SUB_PROXY_HEX,
     PVD_TOTAL_CAPITAL_CORRECTED,
     PVD_TOTAL_CAPITAL_CREATED_AT,
     PVD_TOTAL_CAPITAL_ORIGINAL,
@@ -106,7 +107,7 @@ async def test_total_capital_bucket_locf_resolves_the_created_at_tie_to_the_corr
     """Same created_at-tie hazard as the exposure buckets, on the SubProxy
     treasury USDS read."""
     buckets = await repo.list_total_capital_buckets(
-        EthAddress(f"0x{PVD_ALM_PROXY_HEX}"),
+        [EthAddress(f"0x{PVD_SUB_PROXY_HEX}")],
         from_timestamp=PVD_TOTAL_CAPITAL_CREATED_AT - dt.timedelta(hours=1),
         to_timestamp=PVD_TOTAL_CAPITAL_CREATED_AT + dt.timedelta(hours=1),
         bucket_seconds=3600.0,

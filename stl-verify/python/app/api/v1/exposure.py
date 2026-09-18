@@ -15,6 +15,7 @@ from app.api.deps import (
     get_engine,
     get_reference_as_of,
     get_reference_capital_repository_factory,
+    prime_scope,
     require_prime_view,
 )
 from app.api.provenance import (
@@ -28,6 +29,7 @@ from app.api.time_series import (
     get_resampled_time_series_query_params,
 )
 from app.domain.entities.allocation import EthAddress
+from app.domain.entities.prime import PrimeScope
 from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery
@@ -91,7 +93,7 @@ def _merged_bucket_starts(*grids: dict) -> list:
 
 
 async def _reference_exposure_by_bucket(
-    prime_address: EthAddress,
+    prime_id: int,
     time_series: TimeSeriesQuery,
     limit: int,
     repository: ReferenceCapitalRepository,
@@ -103,7 +105,7 @@ async def _reference_exposure_by_bucket(
     neighbouring bucket.
     """
     buckets = await repository.list_reference_capital_buckets(
-        prime_address,
+        prime_id,
         from_timestamp=time_series.from_timestamp,
         to_timestamp=time_series.to_timestamp,
         bucket_seconds=time_series.bucket.total_seconds(),
@@ -135,6 +137,7 @@ async def list_prime_exposure(
     reference_repositories: Callable[[], ReferenceCapitalRepository] = Depends(
         get_reference_capital_repository_factory
     ),
+    scope: PrimeScope = Depends(prime_scope),
     _authz: None = Depends(require_prime_view),
 ) -> ExposureEnvelope:
     prime_address = EthAddress(prime_id)
@@ -150,7 +153,7 @@ async def list_prime_exposure(
 
     if source is Provenance.REFERENCE:
         reference_buckets = await reference_repositories().list_reference_capital_buckets(
-            prime_address,
+            scope.identity.id,
             from_timestamp=time_series.from_timestamp,
             to_timestamp=time_series.to_timestamp,
             bucket_seconds=time_series.bucket.total_seconds(),
@@ -168,7 +171,7 @@ async def list_prime_exposure(
 
     if source is Provenance.BOTH:
         reference_by_bucket, buckets = await asyncio.gather(
-            _reference_exposure_by_bucket(prime_address, time_series, limit, reference_repositories()),
+            _reference_exposure_by_bucket(scope.identity.id, time_series, limit, reference_repositories()),
             service.list_exposure_buckets(
                 prime_address,
                 from_timestamp=time_series.from_timestamp,

@@ -146,9 +146,9 @@ def test_self_mode_never_reads_the_reference_store(series):
     repository.list_reference_capital_buckets.assert_not_awaited()
 
 
-def test_reference_series_still_404s_for_an_unknown_prime(series):
-    client, path, _, service, _ = series
-    service.prime_exists.return_value = False
+def test_reference_series_still_404s_for_an_unknown_prime(series, prime_resolver):
+    client, path, _, _, _ = series
+    prime_resolver.identity = None
 
     response = client.get(f"/v1/primes/{_VALID_ADDR}/{path}?reference=true")
 

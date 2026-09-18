@@ -5,8 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres._reading import reading
 from app.domain.entities.allocation import EthAddress
-from app.domain.entities.prime import PrimeIdentity
+from app.domain.entities.prime import PrimeIdentity, ProxyWallet
 from app.domain.exceptions import InvalidPrimeIdentifierError
+from app.domain.prime_registry import classify_proxy
 
 # `prime.name`, `prime.vault_address` and `prime_proxy.proxy_address` are each UNIQUE, so at
 # most one row matches. The ORDER BY settles only one prime's proxy equalling another's vault.
@@ -27,6 +28,15 @@ RESOLVE_PRIME_SQL = """
           )
     ORDER BY (p.vault_address = decode(:address_hex, 'hex')) DESC NULLS LAST, p.id
     LIMIT 1
+"""
+
+
+# Address-sorted so two identifiers naming one prime build an identical scope.
+LIST_PRIME_PROXIES_SQL = """
+    SELECT pp.chain_id, encode(pp.proxy_address, 'hex') AS address_hex
+    FROM prime_proxy pp
+    WHERE pp.prime_id = :prime_id
+    ORDER BY address_hex
 """
 
 
@@ -65,3 +75,16 @@ class PrimeResolverRepository:
             external_id=str(row.external_id),
             vault_address=EthAddress("0x" + row.vault_hex),
         )
+
+    async def list_proxies(self, prime_id: int) -> list[ProxyWallet]:
+        async with reading(self._engine, what=f"listing proxies of prime {prime_id}") as conn:
+            rows = (await conn.execute(text(LIST_PRIME_PROXIES_SQL), {"prime_id": prime_id})).fetchall()
+
+        return [
+            ProxyWallet(
+                address=EthAddress("0x" + row.address_hex),
+                chain_id=row.chain_id,
+                kind=classify_proxy("0x" + row.address_hex),
+            )
+            for row in rows
+        ]

@@ -156,14 +156,21 @@ class AllocationRepositoryPort(Protocol):
 
     async def list_total_capital_buckets(
         self,
-        prime_address: EthAddress,
+        subproxies: Sequence[EthAddress],
         *,
         from_timestamp: datetime,
         to_timestamp: datetime,
         bucket_seconds: float,
         limit: int = 100,
     ) -> list[TotalCapitalBucket]:
-        """Return the prime's treasury USDS balance aggregated into time buckets."""
+        """Return the prime's treasury USDS balance aggregated into time buckets.
+
+        Scoped to the prime's SubProxy wallets, which the caller resolves
+        prime-wide. Total capital is shared rather than additive (see
+        ``PrimeScope``): an empty set matches no rows, and the window is
+        gapfilled either way, so the series is the same shape however little is
+        known.
+        """
         ...
 
     async def get_latest_total_capital_usd(self, prime_address: EthAddress) -> Decimal | None:

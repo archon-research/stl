@@ -13,7 +13,11 @@ from app.api.errors import ApiRejectionError
 from app.auth.fga import FgaClient, FgaError, FgaTruncated
 from app.auth.jwt import JwksUnavailable, Principal, TokenError
 from app.config import Settings, get_settings
+from app.domain.chain_names import chain_is_served
 from app.domain.entities.allocation import EthAddress, as_address
+from app.domain.entities.prime import PrimeIdentity, PrimeScope
+from app.domain.exceptions import InvalidPrimeIdentifierError
+from app.domain.prime_registry import alm_proxies_for_prime
 from app.logging import get_logger
 from app.ports.prime_resolver import PrimeResolver
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
@@ -265,6 +269,11 @@ async def check_prime_view(
             fields={"requested_prime": address.lower()},
         )
         raise HTTPException(status_code=404, detail=PRIME_DENIED_DETAIL)
+    await _check_vault_view(request, fga, principal, vault)
+
+
+async def _check_vault_view(request: Request, fga: FgaClient, principal: Principal, vault: str) -> None:
+    """Ask OpenFGA whether ``principal`` may view the prime owning ``vault``."""
     resource = f"prime:{vault.lower()}"
     try:
         allowed = await fga.check(principal.fga_user, "can_view", resource)
@@ -293,14 +302,129 @@ async def check_prime_view(
     log_auth_event(request, gate="prime", decision="allow", reason="permitted", principal=principal, resource=resource)
 
 
-async def require_prime_view(request: Request, principal: Principal | None = Depends(get_principal)) -> None:
-    """Per-resource check for routes that name the prime in the PATH.
+def get_prime_resolver(request: Request) -> PrimeResolver:
+    """Extract the prime resolver built at startup.
 
-    Reads the path param from the request rather than declaring it: a declared
-    parameter is merged into the OpenAPI operation and overrides each route's
-    own annotated description. The route's own param does the format validation.
+    Routes take the port from here rather than constructing the adapter, so a
+    prime-scoped route never names a concrete infrastructure class.
     """
-    await check_prime_view(request, principal, request.path_params.get("prime_id"))
+    return request.app.state.prime_resolver
+
+
+async def resolve_prime(
+    identifier: str,
+    resolver: PrimeResolver,
+    *,
+    request: Request | None = None,
+    principal: Principal | None = None,
+    not_found_reason: str = "prime_not_found",
+) -> PrimeIdentity:
+    """Return the prime ``identifier`` names, or raise 422, 503 or 404.
+
+    A malformed identifier is 422, a failed lookup is 503 rather than the
+    caller's fault, and the 404 detail is the denial body so an unknown prime
+    and one the caller may not view stay indistinguishable. ``request`` and
+    ``principal`` are supplied by the authz gate alone: they turn each denial
+    into an ADR-015 decision event, which is the only place the two 404s are
+    told apart.
+    """
+
+    def _denied(reason: str, status: int, **fields: object) -> None:
+        if request is not None and principal is not None:
+            log_auth_event(
+                request, gate="prime", decision="deny", reason=reason, status=status, principal=principal, fields=fields
+            )
+
+    try:
+        prime = await resolver.resolve(identifier)
+    except InvalidPrimeIdentifierError as exc:
+        _denied("malformed_prime_id", 422)
+        raise ApiRejectionError("malformed prime id") from exc
+    except ValueError as exc:
+        _denied("prime_lookup_unavailable", 503, error=str(exc))
+        raise HTTPException(status_code=503, detail="prime lookup unavailable") from exc
+    if prime is None:
+        _denied(not_found_reason, 404, requested_prime=identifier.lower())
+        raise HTTPException(status_code=404, detail=PRIME_DENIED_DETAIL)
+    return prime
+
+
+async def resolve_prime_scope(
+    identifier: str,
+    resolver: PrimeResolver,
+    *,
+    request: Request | None = None,
+    principal: Principal | None = None,
+) -> PrimeScope:
+    """Resolve any accepted identifier to the prime's whole wallet set.
+
+    Inherits ``resolve_prime``'s 422/404/503 contract. A failed proxy listing is
+    503 and never an empty wallet set: a scope that silently came back empty
+    would render as a prime holding nothing, which is the partial total this
+    resolution exists to remove.
+    """
+    identity = await resolve_prime(identifier, resolver, request=request, principal=principal)
+    try:
+        wallets = await resolver.list_proxies(identity.id)
+    except ValueError as exc:
+        # The gate's second query fails on its own, and the Loki alert reads one
+        # reason, so it emits the event a failed resolve does rather than none.
+        if request is not None and principal is not None:
+            log_auth_event(
+                request,
+                gate="prime",
+                decision="deny",
+                reason="prime_lookup_unavailable",
+                status=503,
+                principal=principal,
+                fields={"error": str(exc)},
+            )
+        raise HTTPException(status_code=503, detail="prime lookup unavailable") from exc
+    return PrimeScope.build(
+        identity,
+        wallets,
+        unserved_chains=(
+            entry.chain for entry in alm_proxies_for_prime(identity.name) if not chain_is_served(entry.chain)
+        ),
+    )
+
+
+async def prime_scope(
+    request: Request,
+    resolver: PrimeResolver = Depends(get_prime_resolver),
+    principal: Principal | None = Depends(get_principal),
+) -> PrimeScope:
+    """The resolved scope for a route that names the prime in the PATH.
+
+    Reads ``prime_id`` out of ``request.path_params`` rather than declaring it,
+    for the reason ``require_prime_view`` already does: a declared parameter is
+    merged into the OpenAPI operation and overrides the route's own annotated
+    description.
+
+    FastAPI caches a sub-dependency per request, so the gate below and the
+    handler share one resolution and cannot disagree about what the identifier
+    meant.
+    """
+    identifier = request.path_params.get("prime_id")
+    if identifier is None:
+        raise RuntimeError(f"{request.url.path} depends on prime_scope but has no {{prime_id}} path segment")
+    return await resolve_prime_scope(identifier, resolver, request=request, principal=principal)
+
+
+async def require_prime_view(
+    request: Request,
+    scope: PrimeScope = Depends(prime_scope),
+    principal: Principal | None = Depends(get_principal),
+) -> None:
+    """Per-resource ``prime:can_view`` over an already-resolved scope.
+
+    The vault comes from the resolved identity rather than a second point query,
+    so the object id is unchanged in value and the gate costs one lookup less.
+    """
+    if principal is None:  # auth off
+        return
+    fga = _fga_or_503(request, gate="prime", principal=principal)
+    await _check_vault_view(request, fga, principal, scope.identity.vault_address)
 
 
 async def require_prime_view_query(request: Request, principal: Principal | None = Depends(get_principal)) -> None:
@@ -440,15 +564,6 @@ def get_model_registry(request: Request) -> ModelRegistry:
 def get_receipt_token_lookup(request: Request) -> ReceiptTokenLookup:
     """Extract the receipt-token lookup built at startup."""
     return request.app.state.receipt_token_lookup
-
-
-def get_prime_resolver(request: Request) -> PrimeResolver:
-    """Extract the prime resolver built at startup.
-
-    Routes take the port from here rather than constructing the adapter, so a
-    prime-scoped route never names a concrete infrastructure class.
-    """
-    return request.app.state.prime_resolver
 
 
 def get_reference_risk_capital_service_factory(

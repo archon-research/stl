@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.prime_debt_repository import DEBT_BUCKETS_SQL, DEBT_SNAPSHOTS_SQL
+from app.api.deps import PRIME_DENIED_DETAIL
 from app.config import Settings
 from app.main import create_app
 from tests.integration.explain import plan_nodes
@@ -148,7 +149,7 @@ def test_unknown_address_is_not_found(client: TestClient) -> None:
     response = client.get(f"/v1/primes/{_UNKNOWN_ADDR}/debt")
 
     assert response.status_code == 404
-    assert response.json()["detail"] == "Prime not found"
+    assert response.json()["detail"] == PRIME_DENIED_DETAIL
 
 
 async def _explain(async_url: str, sql: str) -> tuple[list[dict], set[str]]:
