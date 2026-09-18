@@ -924,10 +924,14 @@ under a version no canonical block was archived under.
 Another **on-demand** Temporal worker (`temporal.RunWorker`, parameterless via
 `RegisterRunner` like `morpho-v2-bootstrap`). Everything said about
 `offchain-price-backfill` above applies — nothing is missed while it is down, and
-it is excluded from `VectorCronjobAllRunsFailing` for the same reason.
+it is excluded from `VectorCronjobAllRunsFailing` for the same reason. One
+Deployment and one task queue per chain, named the way `block-republisher`'s are:
+`uniswap-v4-position-bootstrap` on mainnet, `<chain>-uniswap-v4-position-bootstrap`
+elsewhere (the worker derives the queue from its `CHAIN_ID`).
 
-**One queue, two workflow types, two tables.** Both are hand-started and either
-one runs on its own; the task queue keeps the older name:
+**Two workflow types on that chain's queue, two tables.** Both are hand-started
+and either one runs on its own; the queue keeps the position bootstrap's older
+name for both:
 
 | Workflow Type | Writes | Closing log line | Row-growth tripwire |
 |---|---|---|---|
@@ -942,9 +946,11 @@ lands on its own tripwire, at a threshold one run stays under, while the live
 **Which of the two failed.** `cronjob_runs_total` (OTel `cronjob.runs.total`)
 carries only the task queue, so a
 [`VectorCronjobRunFailing`](#vectorcronjobrunfailing) for
-`uniswap-v4-position-bootstrap` names the worker, and the Temporal UI's execution
-list (namespace **`vector`**) names the type. The pod answers too:
-`kubectl -n vector logs deploy/uniswap-v4-position-bootstrap`. A run that
+`uniswap-v4-position-bootstrap` names mainnet's worker and
+`<chain>-uniswap-v4-position-bootstrap` another chain's, and the Temporal UI's
+execution list (namespace **`vector`**) names the type. The pod answers too:
+`kubectl -n vector logs deploy/$DEPLOY`, where `$DEPLOY` is the Deployment the
+alert names — the same string as its queue. A run that
 completed closes with its line from the table above; a failed attempt logs
 `uniswap-v4 position bootstrap stopped with partial progress` or
 `uniswap-v4 posm transfer backfill stopped with partial progress` at Warn, carrying

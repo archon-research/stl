@@ -18,6 +18,14 @@ type config struct {
 	bootstrap uniswapv4bootstrap.Config
 }
 
+// queueBaseName is this component's deployed name.
+const queueBaseName = "uniswap-v4-position-bootstrap"
+
+// archiveSource is what this component records itself as in the archive and on
+// its write counter; it is chain-independent, as every other binary's is,
+// because the archive records the chain alongside it.
+const archiveSource = "uniswap-v4-position-bootstrap"
+
 // loadConfig reads the scan knobs from the environment; an unset knob is the
 // service's default (zero means "use the default" all the way down).
 func loadConfig() (config, error) {

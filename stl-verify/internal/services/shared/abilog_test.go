@@ -488,6 +488,84 @@ func TestUnpackUintArray(t *testing.T) {
 	})
 }
 
+// Live mainnet stored_rates() returns: the fixed one from stETH-ng 0x21E27a5E,
+// the dynamic one from the ARCT-384 sUSDS/USDT pool 0x00836fe5.
+func TestUnpackUintArrayReadsBothOnChainEncodings(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+		want []*big.Int
+	}{
+		{
+			name: "fixed uint256[2]",
+			data: hexWords(
+				"0000000000000000000000000000000000000000000000000de0b6b3a7640000",
+				"0000000000000000000000000000000000000000000000000de0b6b3a7640000",
+			),
+			want: []*big.Int{mustBig("1000000000000000000"), mustBig("1000000000000000000")},
+		},
+		{
+			name: "dynamic array",
+			data: hexWords(
+				"0000000000000000000000000000000000000000000000000000000000000020",
+				"0000000000000000000000000000000000000000000000000000000000000002",
+				"0000000000000000000000000000000000000000000000000f667ae62ae4c304",
+				"000000000000000000000000000000000000000c9f2c9cd04674edea40000000",
+			),
+			want: []*big.Int{mustBig("1109709487174107908"), mustBig("1000000000000000000000000000000")},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := UnpackUintArray(outbound.Result{Success: true, ReturnData: tc.data}, 2)
+			if err != nil {
+				t.Fatalf("UnpackUintArray: %v", err)
+			}
+			for i, want := range tc.want {
+				if got[i].Cmp(want) != 0 {
+					t.Errorf("got[%d] = %s, want %s", i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestUnpackUintArrayRejectsMismatchedPayload(t *testing.T) {
+	// A dynamic head announcing 3 elements when the caller expects 2: neither
+	// shape matches, so it must error rather than decode the head as values.
+	data := hexWords(
+		"0000000000000000000000000000000000000000000000000000000000000020",
+		"0000000000000000000000000000000000000000000000000000000000000003",
+		"0000000000000000000000000000000000000000000000000000000000000001",
+		"0000000000000000000000000000000000000000000000000000000000000002",
+		"0000000000000000000000000000000000000000000000000000000000000003",
+	)
+	if _, err := UnpackUintArray(outbound.Result{Success: true, ReturnData: data}, 2); err == nil {
+		t.Fatal("expected error on a payload matching neither uint256[2] nor a 2-element dynamic array")
+	}
+}
+
+func hexWords(words ...string) []byte {
+	var out []byte
+	for _, w := range words {
+		b, ok := new(big.Int).SetString(w, 16)
+		if !ok {
+			panic("bad hex word: " + w)
+		}
+		out = append(out, common.LeftPadBytes(b.Bytes(), 32)...)
+	}
+	return out
+}
+
+func mustBig(s string) *big.Int {
+	b, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		panic("bad decimal: " + s)
+	}
+	return b
+}
+
 func TestOptionalUintResult(t *testing.T) {
 	a, err := abi.JSON(strings.NewReader(`[
 		{"type":"function","name":"v","outputs":[{"type":"uint256"}],"stateMutability":"view"}

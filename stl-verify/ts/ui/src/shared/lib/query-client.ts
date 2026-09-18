@@ -9,6 +9,11 @@ import {
 } from '@tanstack/react-query';
 
 import { logging } from './logging';
+import {
+  browserSessionReloadDeps,
+  isSessionExpired,
+  reloadForLogin,
+} from './session-expired';
 
 /**
  * How a query wants its failures reported, so that one central handler can log
@@ -72,8 +77,17 @@ const NETWORK_MODE: NetworkMode = 'always';
 function createAppQueryClient(): QueryClient {
   return createQueryClient({
     queryCache: new QueryCache({
-      onError: (error, query) =>
-        logQueryFailure(error, query.queryKey, query.meta),
+      onError: (error, query) => {
+        const browser = browserSessionReloadDeps();
+        if (
+          isSessionExpired(error) &&
+          browser !== null &&
+          reloadForLogin(browser)
+        ) {
+          return;
+        }
+        logQueryFailure(error, query.queryKey, query.meta);
+      },
     }),
     defaultOptions: {
       queries: {

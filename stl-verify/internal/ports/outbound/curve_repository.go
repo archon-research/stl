@@ -30,6 +30,20 @@ type CurvePoolRow struct {
 	// HasAPrecise is curated pool metadata (curve_pool.has_a_precise): whether the
 	// pool exposes the A_precise() getter. Gates the A_precise snapshot read.
 	HasAPrecise bool
+	// HasNoArgOracleGetters is curated pool metadata
+	// (curve_pool.has_no_arg_oracle_getters): whether this stableswap-NG pool
+	// exposes the no-arg oracle getters. Gates five NG snapshot reads.
+	HasNoArgOracleGetters bool
+	// CalcTokenAmountDynArray is curated pool metadata
+	// (curve_pool.calc_token_amount_dyn_array): whether calc_token_amount takes a
+	// dynamic uint256[] (true) or a fixed uint256[N] (false). nil when the pool has
+	// not been probed, which gates the read out entirely.
+	CalcTokenAmountDynArray *bool
+	// HasFutureFee and HasOffpegFeeMultiplier are curated pool metadata
+	// (curve_pool.has_future_fee, curve_pool.has_offpeg_fee_multiplier): which
+	// fee-schedule getter the pool exposes. Each gates its own snapshot read.
+	HasFutureFee           bool
+	HasOffpegFeeMultiplier bool
 }
 
 // SwapInput carries primitive values for a curve_swap insert.

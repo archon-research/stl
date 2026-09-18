@@ -339,5 +339,12 @@ const curveStableswapJSON = `[
 		"outputs": [{"name": "", "type": "uint256"}],
 		"stateMutability": "view",
 		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "offpeg_fee_multiplier",
+		"outputs": [{"name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
 	}
 ]`

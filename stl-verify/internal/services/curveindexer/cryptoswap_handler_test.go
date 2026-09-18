@@ -441,11 +441,12 @@ func TestCryptoswapHandler_Snapshot(t *testing.T) {
 	}
 	h := NewCryptoswapHandler(a)
 	pool := RegisteredPool{
-		ID:           10,
-		Address:      common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
-		Kind:         KindCryptoswap,
-		NCoins:       3,
-		CoinDecimals: []int{18, 18, 6},
+		ID:                      10,
+		Address:                 common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
+		Kind:                    KindCryptoswap,
+		NCoins:                  3,
+		CoinDecimals:            []int{18, 18, 6},
+		CalcTokenAmountDynArray: fixedCalcTokenAmount(),
 	}
 	mc := &fakeMulticaller{results: cryptoswapResults(t, a)}
 	st, cfg, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, common.Hash{}, time.Unix(2, 0).UTC())
@@ -576,12 +577,13 @@ func TestCryptoswapHandler_SnapshotTotalSupplyTargetsLpToken(t *testing.T) {
 	poolAddr := common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46")
 	lpAddr := common.HexToAddress("0x06325440D014e39736583c165C2963BA99fAf14E")
 	pool := RegisteredPool{
-		ID:             10,
-		Address:        poolAddr,
-		Kind:           KindCryptoswap,
-		NCoins:         3,
-		CoinDecimals:   []int{18, 18, 6},
-		LpTokenAddress: &lpAddr,
+		ID:                      10,
+		Address:                 poolAddr,
+		Kind:                    KindCryptoswap,
+		NCoins:                  3,
+		CoinDecimals:            []int{18, 18, 6},
+		CalcTokenAmountDynArray: fixedCalcTokenAmount(),
+		LpTokenAddress:          &lpAddr,
 	}
 
 	mc := &capturingMulticaller{results: cryptoswapResults(t, a)}
@@ -621,12 +623,13 @@ func TestCryptoswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken(t *testin
 
 	poolAddr := common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46")
 	pool := RegisteredPool{
-		ID:             10,
-		Address:        poolAddr,
-		Kind:           KindCryptoswap,
-		NCoins:         3,
-		CoinDecimals:   []int{18, 18, 6},
-		LpTokenAddress: nil,
+		ID:                      10,
+		Address:                 poolAddr,
+		Kind:                    KindCryptoswap,
+		NCoins:                  3,
+		CoinDecimals:            []int{18, 18, 6},
+		CalcTokenAmountDynArray: fixedCalcTokenAmount(),
+		LpTokenAddress:          nil,
 	}
 
 	mc := &capturingMulticaller{results: cryptoswapResults(t, a)}
@@ -652,11 +655,12 @@ func TestCryptoswapHandler_SnapshotRevertErrors(t *testing.T) {
 	}
 	h := NewCryptoswapHandler(a)
 	pool := RegisteredPool{
-		ID:           10,
-		Address:      common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
-		Kind:         KindCryptoswap,
-		NCoins:       3,
-		CoinDecimals: []int{18, 18, 6},
+		ID:                      10,
+		Address:                 common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
+		Kind:                    KindCryptoswap,
+		NCoins:                  3,
+		CoinDecimals:            []int{18, 18, 6},
+		CalcTokenAmountDynArray: fixedCalcTokenAmount(),
 	}
 
 	// Required call (balances(0)) reverts -> must error.
@@ -675,17 +679,53 @@ func TestCryptoswapHandler_SnapshotRevertErrors(t *testing.T) {
 // cryptoswapPool is the standard 3-coin fixture pool used across these tests.
 func cryptoswapPool() RegisteredPool {
 	return RegisteredPool{
-		ID:           10,
-		Address:      common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
-		Kind:         KindCryptoswap,
-		NCoins:       3,
-		CoinDecimals: []int{18, 18, 6},
+		ID:                      10,
+		Address:                 common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
+		Kind:                    KindCryptoswap,
+		NCoins:                  3,
+		CoinDecimals:            []int{18, 18, 6},
+		CalcTokenAmountDynArray: fixedCalcTokenAmount(),
 	}
 }
 
 // TestCryptoswapHandler_SnapshotAdminBalancesNotIssued verifies admin_balances is
 // not issued for cryptoswap pools (gated: Tricrypto-NG has no admin_balances
 // getter) and that the column is consequently NULL by structural design.
+// TestCryptoswapHandler_SnapshotUnprobedCalcTokenAmountGatesCall verifies that
+// the cryptoswap path honours the same curated gate as stableswap: a pool whose
+// calc_token_amount argument shape is not curated issues neither selector and
+// leaves the field a structural NULL.
+func TestCryptoswapHandler_SnapshotUnprobedCalcTokenAmountGatesCall(t *testing.T) {
+	a, err := abis.CurveCryptoswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewCryptoswapHandler(a)
+	pool := cryptoswapPool()
+	pool.CalcTokenAmountDynArray = nil
+
+	results := dropResults(cryptoswapResults(t, a), cryptoswap3CoinCalcTokenAmountIdx)
+
+	mc := &capturingMulticaller{results: results}
+	st, _, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, common.Hash{}, time.Unix(2, 0).UTC())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	assertCalcTokenAmountShape(t, mc.captured, nil)
+	if st.CalcTokenAmount != nil {
+		t.Errorf("calc_token_amount = %v, want nil (structural NULL when gated off)", st.CalcTokenAmount)
+	}
+	// Cursor stays aligned: the reads after the gated-off one still decode.
+	if len(st.CalcWithdrawOneCoin) != 3 {
+		t.Errorf("calc_withdraw_one_coin len = %d, want 3", len(st.CalcWithdrawOneCoin))
+	}
+}
+
+// cryptoswap3CoinCalcTokenAmountIdx is the index of calc_token_amount in the
+// 3-coin cryptoswap call list (see cryptoswapResults).
+const cryptoswap3CoinCalcTokenAmountIdx = 31
+
 func TestCryptoswapHandler_SnapshotAdminBalancesNotIssued(t *testing.T) {
 	a, err := abis.CurveCryptoswapABI()
 	if err != nil {

@@ -109,9 +109,14 @@ def configure_static_hosting(application: FastAPI, static_dir: Path) -> None:
     index_file = static_dir / "index.html"
     static_root = static_dir.resolve()
 
+    def serve_index() -> FileResponse:
+        # A cached index boots the app after the edge's logout redirect with no
+        # session, so the login redirect never happens (ADR-015).
+        return FileResponse(index_file, headers={"Cache-Control": "no-store"})
+
     @application.get("/", include_in_schema=False)
     async def serve_root() -> FileResponse:
-        return FileResponse(index_file)
+        return serve_index()
 
     @application.get("/{requested_path:path}", include_in_schema=False)
     async def serve_frontend(requested_path: str) -> FileResponse:
@@ -125,7 +130,7 @@ def configure_static_hosting(application: FastAPI, static_dir: Path) -> None:
         if _is_asset_path(requested_path):
             raise HTTPException(status_code=404, detail="Not Found")
 
-        return FileResponse(index_file)
+        return serve_index()
 
 
 def _is_reserved_frontend_path(requested_path: str) -> bool:

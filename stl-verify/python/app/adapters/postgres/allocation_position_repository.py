@@ -53,7 +53,10 @@ _USDS_ADDRESS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
 #     be a receipt_token or have its own oracle, so these are permanent
 #     members.
 # A deliberately curated set (VEC-450): the general widening to every vault,
-# and syrupUSDC, are owned separately. Add addresses here to widen.
+# and syrupUSDC, are owned separately. Add addresses here to widen. The
+# balance series (_ALLOCATION_BALANCE_BUCKETS_SQL) does not consult this set:
+# its last valuation arm prices ANY direct holding this way once the token's
+# own price is missing, and VEC-782 holds the two reads to agree.
 _UNDERLYING_VALUE_TOKEN_HEXES = frozenset(
     {
         "38464507e02c983f20428a6e8566693fe9e422a9",  # sparkPrimeUSDC1
@@ -1883,7 +1886,8 @@ token_context AS MATERIALIZED (
     -- One row per token: registry underlying, its protocol, and its latest
     -- price. Identical in shape and rationale to the flow read's, including
     -- MATERIALIZED being load-bearing. Direct holdings get a NULL underlying
-    -- and protocol, and are priced by their own token price instead.
+    -- and protocol, and are priced by their own token price instead; one
+    -- with no price of its own falls through to underlying_context below.
     SELECT
         wt.chain_id,
         wt.token_id,
@@ -1940,6 +1944,39 @@ token_context AS MATERIALIZED (
         LIMIT 1
     ) AS protocol_match ON TRUE
 ),
+underlying_context AS MATERIALIZED (
+    -- The latest enabled price of each underlying the TRACKER recorded on a
+    -- row (ap.underlying_token_id), for the last arm of the valuation below:
+    -- a direct holding the registry does not know and no oracle prices, whose
+    -- value the tracker nonetheless computed in units of an asset that IS
+    -- priced -- an ERC-4626 vault share read through convertToAssets, or a
+    -- pool position whose address is the pool contract and can never carry a
+    -- price of its own. Any enabled oracle serves, as for the direct arm: with
+    -- no registry protocol there is no protocol_oracle binding to prefer.
+    -- One row per underlying, resolved once, for the same reason token_context
+    -- is MATERIALIZED.
+    SELECT
+        u.underlying_token_id,
+        (
+            SELECT tpc.price_usd
+            FROM token_price_current tpc
+            WHERE tpc.token_id = u.underlying_token_id
+              AND EXISTS (
+                  SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
+                  WHERE oa.oracle_id = tpc.oracle_id
+                    AND oa.token_id = tpc.token_id
+                    AND oa.enabled
+              )
+            ORDER BY tpc.block_number DESC, tpc.block_version DESC,
+                     tpc.processing_version DESC, tpc.oracle_id DESC
+            LIMIT 1
+        ) AS price_usd
+    FROM (
+        SELECT DISTINCT underlying_token_id
+        FROM window_rows
+        WHERE underlying_token_id IS NOT NULL
+    ) u
+),
 valued_rows AS MATERIALIZED (
     SELECT
         ap.proxy_address,
@@ -1966,10 +2003,24 @@ valued_rows AS MATERIALIZED (
              AND ap.underlying_token_id <> tc.underlying_token_id THEN NULL
             WHEN tc.underlying_token_id IS NOT NULL
                 THEN COALESCE(ap.underlying_value, ap.balance) * tc.receipt_price_usd
-            ELSE ap.balance * tc.direct_price_usd
+            WHEN tc.direct_price_usd IS NOT NULL
+                THEN ap.balance * tc.direct_price_usd
+            -- Neither the registry nor an oracle knows the token, so the
+            -- tracker's own valuation is the only one there is: its recorded
+            -- value in underlying units times that underlying's price. NULL
+            -- when the tracker recorded no value or the underlying is not
+            -- priced either (a plain holding names itself as its underlying,
+            -- and its price is what the arm above already failed to find),
+            -- so this can only turn an unpriceable row into a priced one,
+            -- never change a number the arms above produce. The grid read
+            -- (_DIRECT_ASSET_HOLDINGS_SQL) prices the same rows through its
+            -- curated _UNDERLYING_VALUE_TOKEN_HEXES; this arm is the general
+            -- form, and VEC-782 is where the two are held to agree.
+            ELSE ap.underlying_value * uc.price_usd
         END AS value_usd
     FROM window_rows ap
     JOIN token_context tc ON tc.chain_id = ap.chain_id AND tc.token_id = ap.token_id
+    LEFT JOIN underlying_context uc ON uc.underlying_token_id = ap.underlying_token_id
     WHERE (CAST(:protocol_name AS TEXT) IS NULL OR LOWER(COALESCE(tc.protocol_name, ''))
            LIKE '%' || LOWER(CAST(:protocol_name AS TEXT)) || '%' ESCAPE '\\')
 ),
