@@ -563,14 +563,23 @@ func TestRun_GenuineArchiveHoleStillReportsAsAMiss(t *testing.T) {
 	svc := newTestServiceWithArchive(t, repo, reader, archive, 500)
 
 	total, err := svc.Run(context.Background())
+	requireReportedAsMiss(t, err, "200/0")
+	if total != 0 {
+		t.Errorf("total = %d, want 0", total)
+	}
+}
+
+// requireReportedAsMiss asserts err is Run's own miss-aggregation error naming ref, not some other
+// hard failure that happens to mention the same block/version pair: readOne's non-miss error paths
+// ("resolving the archived version", "at resolved version") also embed the pair, so a bare substring
+// check on ref alone cannot tell a miss from a bug that turned it into a hard failure.
+func requireReportedAsMiss(t *testing.T, err error, ref string) {
+	t.Helper()
 	if err == nil {
 		t.Fatal("want a failure naming the absent block, got none")
 	}
-	if !strings.Contains(err.Error(), "200/0") {
-		t.Errorf("error %q does not name the absent block", err)
-	}
-	if total != 0 {
-		t.Errorf("total = %d, want 0", total)
+	if !strings.Contains(err.Error(), "referenced block(s) absent from the archive") || !strings.Contains(err.Error(), ref) {
+		t.Fatalf("error %q is not Run's miss-aggregation error naming %s", err, ref)
 	}
 }
 
@@ -589,9 +598,7 @@ func TestRun_ArchiveAgreeingWithTheFailedReadIsAMissNotARetry(t *testing.T) {
 	svc := newTestServiceWithArchive(t, repo, reader, archive, 500)
 
 	total, err := svc.Run(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "250/0") {
-		t.Fatalf("want a failure naming block 250/0, got %v", err)
-	}
+	requireReportedAsMiss(t, err, "250/0")
 	if total != 0 {
 		t.Errorf("total = %d, want 0", total)
 	}
@@ -632,9 +639,7 @@ func TestRun_ResolvedVersionWithNoBlockObjectIsAMissNotAFailure(t *testing.T) {
 	svc := newTestServiceWithArchive(t, repo, reader, archive, 500)
 
 	total, err := svc.Run(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "400/0") {
-		t.Fatalf("want a miss naming block 400/0, got %v", err)
-	}
+	requireReportedAsMiss(t, err, "400/0")
 	if total != 0 {
 		t.Errorf("total = %d, want 0", total)
 	}
