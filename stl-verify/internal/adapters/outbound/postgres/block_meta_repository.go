@@ -54,31 +54,40 @@ func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID bui
 // from it silently: a table gaining a fill and no arm is never enumerated, every one of its values
 // resolves NULL, and the conformance check still passes because the declaration alone satisfies it.
 //
-// Chain resolution comes from the same register. A table with a chain_id fill reaches chain through its
-// parent (borrower -> protocol.chain_id); one without carries chain_id natively. The partition column
-// is read from the live catalogue rather than declared, so a window can never be expressed on a column
-// the table is no longer partitioned by.
+// Chain comes from the same register: a parent join, a fill constant, or the table's own column. The
+// partition column is read from the live catalogue, so a window is never expressed on a stale column.
 type workListArm struct {
 	table   string // the referencing table, and the hypertable whose chunks give the windows
 	partCol string // its partition column, read from the catalogue; the window is expressed on it alone
 	sql     string // $1 = chain id; %s = the window predicate on partCol
 }
 
-// armSQL builds one arm. parent is empty for a table carrying chain_id natively; otherwise the arm
-// joins parent on parentRef = table.parentKey and takes chain from there.
-func armSQL(table, parent, parentKey, parentRef string) string {
+// armSQL builds one arm. The chain expression is both selected and compared to $1, so a constant arm
+// filters out another chain's run rather than labelling its blocks; unbuildable shapes are errors.
+func armSQL(table string, chain schemamaster.Fill, declared bool) (string, error) {
 	const shape = `
 		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
-		SELECT %s.chain_id, t.block_number, t.block_version
+		SELECT %s, t.block_number, t.block_version
 		  FROM %s t%s
-		 WHERE %s.chain_id = $1 AND %%s
+		 WHERE %s = $1 AND %%s
 		ON CONFLICT DO NOTHING`
-	src, join := "t", ""
-	if parent != "" {
-		src = "p"
-		join = fmt.Sprintf(" JOIN %s p ON p.%s = t.%s", quoteIdent(parent), quoteIdent(parentRef), quoteIdent(parentKey))
+	chainExpr, join := "t.chain_id", ""
+	switch {
+	case chain.ThenParent != "":
+		return "", fmt.Errorf("%s resolves chain_id through two hops (%s then %s), which the work list does not build", table, chain.Parent, chain.ThenParent)
+	case chain.Parent != "" && chain.Const != nil:
+		return "", fmt.Errorf("%s declares chain_id as both a %s join and a constant", table, chain.Parent)
+	case chain.Const != nil && *chain.Const <= 0:
+		return "", fmt.Errorf("%s declares chain_id as the constant %d; no chain has that id, so the arm would match no run and enumerate nothing", table, *chain.Const)
+	case declared && chain.Parent == "" && chain.Const == nil:
+		return "", fmt.Errorf("%s declares a chain_id fill with neither a parent nor a constant; a fill exists because the column is not native, so t.chain_id would not resolve", table)
+	case chain.Parent != "":
+		chainExpr = "p.chain_id"
+		join = fmt.Sprintf(" JOIN %s p ON p.%s = t.%s", quoteIdent(chain.Parent), quoteIdent(chain.Ref), quoteIdent(chain.Key))
+	case chain.Const != nil:
+		chainExpr = strconv.Itoa(*chain.Const)
 	}
-	return fmt.Sprintf(shape, src, quoteIdent(table), join, src)
+	return fmt.Sprintf(shape, chainExpr, quoteIdent(table), join, chainExpr), nil
 }
 
 // quoteIdent quotes a catalogue identifier. Every value reaching it comes from schema_master.json or
@@ -96,17 +105,15 @@ func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, 
 	if err != nil {
 		return nil, fmt.Errorf("loading the column register: %w", err)
 	}
-	chainParent := map[string]schemamaster.Fill{}
 	var tables []string
 	for _, f := range register.Fills {
 		if f.BlockMeta {
 			tables = append(tables, f.Table)
 		}
 	}
-	for _, f := range register.Fills {
-		if f.Column == "chain_id" && f.Parent != "" {
-			chainParent[f.Table] = f
-		}
+	chainFill, err := chainFillsByTable(register.Fills)
+	if err != nil {
+		return nil, err
 	}
 	if len(tables) == 0 {
 		return nil, fmt.Errorf("no table declares a block_meta fill; the register did not load as expected")
@@ -120,14 +127,55 @@ func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, 
 		if err != nil {
 			return nil, err
 		}
-		f := chainParent[table]
+		chain, declared := chainFill[table]
+		if !declared {
+			if err := r.requireNativeChainColumn(ctx, table); err != nil {
+				return nil, err
+			}
+		}
+		sql, err := armSQL(table, chain, declared)
+		if err != nil {
+			return nil, err
+		}
 		arms = append(arms, workListArm{
 			table:   table,
 			partCol: "t." + quoteIdent(partCol),
-			sql:     armSQL(table, f.Parent, f.Key, f.Ref),
+			sql:     sql,
 		})
 	}
 	return arms, nil
+}
+
+// chainFillsByTable indexes the chain_id fills by table, refusing a second fill for one table rather
+// than building its arm from whichever the register happens to list last.
+func chainFillsByTable(fills []schemamaster.Fill) (map[string]schemamaster.Fill, error) {
+	byTable := map[string]schemamaster.Fill{}
+	for _, f := range fills {
+		if f.Column != "chain_id" {
+			continue
+		}
+		if _, seen := byTable[f.Table]; seen {
+			return nil, fmt.Errorf("%s declares more than one chain_id fill", f.Table)
+		}
+		byTable[f.Table] = f
+	}
+	return byTable, nil
+}
+
+// requireNativeChainColumn refuses a table with neither a chain_id fill nor its own chain_id column,
+// which would otherwise fail as SQL part way through a run.
+func (r *BlockMetaRepository) requireNativeChainColumn(ctx context.Context, table string) error {
+	var present bool
+	if err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		                WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'chain_id')`,
+		table).Scan(&present); err != nil {
+		return fmt.Errorf("reading %s's columns: %w", table, err)
+	}
+	if !present {
+		return fmt.Errorf("%s declares a block_meta fill but resolves chain_id neither natively nor by a fill", table)
+	}
+	return nil
 }
 
 // partitionColumn reads a hypertable's primary dimension from the catalogue.
@@ -135,7 +183,7 @@ func (r *BlockMetaRepository) partitionColumn(ctx context.Context, table string)
 	var col string
 	if err := r.pool.QueryRow(ctx, `
 		SELECT column_name FROM timescaledb_information.dimensions
-		 WHERE hypertable_name = $1 AND dimension_number = 1`, table).Scan(&col); err != nil {
+		 WHERE hypertable_schema = 'public' AND hypertable_name = $1 AND dimension_number = 1`, table).Scan(&col); err != nil {
 		return "", fmt.Errorf("reading %s's partition column: %w", table, err)
 	}
 	return col, nil
@@ -154,16 +202,18 @@ const chunksPerWindow = 16
 // The OSM view is absent wherever the tiering extension is not installed, including the local harness,
 // and a missing relation is a parse error rather than an empty result — hence the probe rather than a
 // LEFT JOIN or a to_regclass inside the query.
+//
+// Both halves are read as public only: the transformed layer reuses the raw tables' names.
 const chunkRangeSQL = `
 		SELECT range_start_integer, range_end_integer, range_start, range_end
 		  FROM timescaledb_information.chunks
-		 WHERE hypertable_name = $1`
+		 WHERE hypertable_schema = 'public' AND hypertable_name = $1`
 
 const chunkRangeWithTieredSQL = chunkRangeSQL + `
 		 UNION ALL
 		SELECT range_start_integer, range_end_integer, range_start, range_end
 		  FROM timescaledb_osm.tiered_chunks
-		 WHERE hypertable_name = $1`
+		 WHERE hypertable_schema = 'public' AND hypertable_name = $1`
 
 func (r *BlockMetaRepository) windowPredicates(ctx context.Context, table, partCol string) ([]string, error) {
 	var tieredVisible bool

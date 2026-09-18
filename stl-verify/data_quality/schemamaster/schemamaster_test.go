@@ -223,3 +223,30 @@ func TestLoad_BlockMetaFillsUnmarshal(t *testing.T) {
 		t.Errorf("%d of %d parentless block_timestamp fills carry the block_meta flag; want all of them", flagged, blockTimestampFills)
 	}
 }
+
+// A column both renamed onto and filled has two producers, and the conformance check passes on either
+// alone, so the collision is otherwise invisible.
+func TestNoColumnHasBothATransformAndAFill(t *testing.T) {
+	r, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	filled := map[string]bool{}
+	for _, f := range r.Fills {
+		filled[f.Table+"."+f.Column] = true
+	}
+	var checked int
+	for _, tr := range r.Transforms {
+		if tr.Canonical == "" {
+			continue
+		}
+		checked++
+		if key := tr.Table + "." + tr.Canonical; filled[key] {
+			t.Errorf("%s is produced by a %s of %s AND by a fill; one column, one producer",
+				key, tr.Action, tr.Column)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no transform declares a canonical target; this test no longer guards anything")
+	}
+}

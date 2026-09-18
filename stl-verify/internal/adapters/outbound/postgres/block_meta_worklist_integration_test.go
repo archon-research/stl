@@ -38,6 +38,12 @@ func seedWorkListSources(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 		       (SELECT id FROM token WHERE address='\x9002'),
 		       900000 + g * 25000, 0
 		  FROM generate_series(0, 8) g;
+		-- One row on another chain, so a run for 8453 has work of its own and a test asserting what it
+		-- does NOT enumerate cannot pass on an empty list.
+		INSERT INTO protocol (chain_id, address, name) VALUES (8453, '\x9004', 'wl-base') ON CONFLICT DO NOTHING;
+		INSERT INTO sparklend_reserve_data (protocol_id, token_id, block_number, block_version)
+		VALUES ((SELECT id FROM protocol WHERE address='\x9004'),
+		        (SELECT id FROM token WHERE address='\x9002'), 1250000, 0);
 		-- Sky contributes only on chain 1, and carries no chain column of its own.
 		INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at)
 		SELECT (SELECT id FROM prime WHERE name='wl-prime'), 'WL-A', 1, 7000000 + g, 0,
@@ -87,7 +93,9 @@ func TestWorkListWindowsCoverEveryReferencedBlock(t *testing.T) {
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM (
 		  SELECT sr.block_number FROM sparklend_reserve_data sr
-		    JOIN protocol p ON p.id = sr.protocol_id WHERE p.chain_id = 1) s`).Scan(&want); err != nil {
+		    JOIN protocol p ON p.id = sr.protocol_id WHERE p.chain_id = 1
+		  UNION
+		  SELECT pd.block_number FROM prime_debt pd) s`).Scan(&want); err != nil {
 		t.Fatalf("count referenced blocks: %v", err)
 	}
 	got := openList(t, ctx, pool, 1)
@@ -106,6 +114,44 @@ func TestWorkListWindowsCoverEveryReferencedBlock(t *testing.T) {
 		if !seen[b] {
 			t.Errorf("block %d is missing; integer chunk ranges must order numerically, not as text", b)
 		}
+	}
+}
+
+// prime_debt's chain is a register constant, and its blocks are work under that chain.
+func TestWorkListEnumeratesAConstChainArm(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	got := openList(t, ctx, pool, 1)
+	for _, b := range []int64{7000000, 7000005} {
+		if !slices.Contains(got, b) {
+			t.Errorf("block %d is referenced by prime_debt and is not in the work list; the const-chain arm is missing", b)
+		}
+	}
+}
+
+// Asserted on the table, not the run's cursor: a Sky row written under chain 1 is invisible to a
+// chain-8453 cursor and survives that run's chain-scoped DELETE.
+func TestWorkListConstChainArmIsScopedToItsChain(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	got := openList(t, ctx, pool, 8453)
+	if !slices.Contains(got, int64(1250000)) {
+		t.Fatalf("chain 8453 enumerated %v, which does not include its own block 1250000; the run found nothing and the assertion below would be vacuous", got)
+	}
+
+	var sky int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM block_meta_worklist WHERE block_number BETWEEN 7000000 AND 7000005`).Scan(&sky); err != nil {
+		t.Fatalf("count Sky rows in the work list: %v", err)
+	}
+	if sky != 0 {
+		t.Errorf("a chain-8453 run left %d of Sky's chain-1 blocks in the work list; the constant must filter the run, not label the rows", sky)
 	}
 }
 
@@ -622,6 +668,7 @@ func TestWindowPredicatesCoverTieredChunkRanges(t *testing.T) {
 	for _, ddl := range []string{
 		`CREATE SCHEMA IF NOT EXISTS timescaledb_osm`,
 		`CREATE TABLE IF NOT EXISTS timescaledb_osm.tiered_chunks (
+		    hypertable_schema    text,
 		    hypertable_name      text,
 		    range_start_integer  bigint,
 		    range_end_integer    bigint,
@@ -634,8 +681,9 @@ func TestWindowPredicatesCoverTieredChunkRanges(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO timescaledb_osm.tiered_chunks
-		    (hypertable_name, range_start_integer, range_end_integer)
-		VALUES ('sparklend_reserve_data', $1, $2)`, tieredLo, tieredHi); err != nil {
+		    (hypertable_schema, hypertable_name, range_start_integer, range_end_integer)
+		VALUES ('public', 'sparklend_reserve_data', $1, $2),
+		       ('transformed', 'sparklend_reserve_data', $1 - 50000, $2 - 50000)`, tieredLo, tieredHi); err != nil {
 		t.Fatalf("seed the tiered chunk range: %v", err)
 	}
 
@@ -645,7 +693,7 @@ func TestWindowPredicatesCoverTieredChunkRanges(t *testing.T) {
 	}
 	covered := false
 	for _, w := range after {
-		if strings.Contains(w, strconv.Itoa(tieredLo)) {
+		if strings.Contains(w, lowerBound(tieredLo)) {
 			covered = true
 			break
 		}
@@ -654,4 +702,15 @@ func TestWindowPredicatesCoverTieredChunkRanges(t *testing.T) {
 		t.Errorf("the tiered range [%d, %d) is in no window (%d windows: %v); the loader would never scan "+
 			"the tiered tail and would report success having skipped it", tieredLo, tieredHi, len(after), after)
 	}
+	// The transformed twin shares the raw table's name; its range unioned in makes the groups overlap.
+	for _, w := range after {
+		if strings.Contains(w, lowerBound(tieredLo-50000)) {
+			t.Errorf("a window covers the transformed twin's tiered range: %s", w)
+		}
+	}
+}
+
+// lowerBound renders a window's opening bound whole, so 100000 cannot match inside 1000000.
+func lowerBound(n int) string {
+	return "sr.block_number >= " + strconv.Itoa(n) + " AND"
 }
