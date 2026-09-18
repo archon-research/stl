@@ -21,8 +21,17 @@ mutations = []
 _next_id = 0
 
 
+def _is_sql_comment(line):
+    return line.strip().startswith("--")
+
+
 def mut(family, operator, target, filename, patches):
     global _next_id
+    # A patch set touching only comment lines cannot change behaviour, so the
+    # mutation is unkillable by construction and would inflate the denominator.
+    # A mixed set (a deleted block containing a comment) is still a real mutation.
+    if all(_is_sql_comment(p["old"]) for p in patches):
+        return
     _next_id += 1
     mutations.append({
         "id": f"M{_next_id:03d}",
