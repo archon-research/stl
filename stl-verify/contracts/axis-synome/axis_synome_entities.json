@@ -740,6 +740,16 @@
                 "token_type": "erc4626"
               },
               {
+                "contract_address": "0xfc8c624b6080a0a780583799f2a862de936f6e22",
+                "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                "asset_address": "0x8292bb45bf1ee4d140127049757c2e0ff06317ed",
+                "star": "spark",
+                "chain": "mainnet",
+                "protocol": "sentora-x-spark-rlusd-morpho-vault",
+                "allocation_type": "allocation",
+                "token_type": "erc4626"
+              },
+              {
                 "contract_address": "0xa632d59b9b804a956bfaa9b48af3a1b74808fc1f",
                 "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
                 "asset_address": "0x6c3ea9036406852006290770bedfcaba0e23a0e8",

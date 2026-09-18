@@ -121,10 +121,10 @@ func TestDefaultStubSources(t *testing.T) {
 	for _, s := range sources {
 		names[s.Name()] = true
 	}
-	if !names["psm3"] {
-		t.Error("psm3 stub not found")
+	if !names["galaxy-clo"] {
+		t.Error("galaxy-clo stub not found")
 	}
-	for _, gone := range []string{"centrifuge", "centrifuge-feeder"} {
+	for _, gone := range []string{"centrifuge", "centrifuge-feeder", "psm3"} {
 		if names[gone] {
 			t.Errorf("%s should no longer be a stub source", gone)
 		}

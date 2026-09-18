@@ -47,6 +47,7 @@ class Token(Enum):
     SP_DAI = "spDai"
     SP_PY_USD = "sppyUSD"
     STAC = "STAC"
+    SXS_RLUSD = "sxsRLUSD"
     STEAK_USDC = "steakUSDC"
     S_USDE = "sUSDe"
     S_USDS = "sUSDS"

@@ -82,7 +82,6 @@ func defaultSkipSources(logger *slog.Logger) []PositionSource {
 // defaultStubSources returns placeholders for types not yet implemented.
 func defaultStubSources(logger *slog.Logger) []PositionSource {
 	return []PositionSource{
-		NewStubSource("psm3", "psm3", logger),
 		NewStubSource("galaxy-clo", "galaxy_clo", logger),
 	}
 }
