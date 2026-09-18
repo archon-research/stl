@@ -158,10 +158,11 @@ func (s *Service) publishCacheRows(ctx context.Context) {
 	s.telemetry.SetCacheRows(estimates)
 }
 
-// publishWithheld exports positions_refused for each projection that completed a run within the tick:
-// positions whose new observations were withheld, and positions whose re-emitted stored key was
-// declined. The shared function does both and reports success, so this level is what shows it; the
-// two classes are told apart by position_projection_refusal.reason.
+// publishWithheld exports, for each projection that completed a run within the tick, how many of its
+// positions are currently withheld or declined: positions whose new observations were withheld,
+// positions whose re-emitted stored key was declined, and inputs the wrapper cannot key at all. Each
+// reports success, so this level is what shows them; the three classes are told apart by
+// position_projection_refusal.reason.
 //
 // A projection that did not complete this tick is absent, so its gauge does not hold an old level.
 // A failed read does not fail the run: it is logged, counted in read_failures, and every level goes

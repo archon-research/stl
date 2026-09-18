@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -247,5 +248,142 @@ func TestPositionMaterializer_RefusedByProjection(t *testing.T) {
 	}
 	if _, ok := got["public.position_never_run"]; ok {
 		t.Error("a projection with no run row is reported; it must be absent so absence stays distinguishable")
+	}
+}
+
+// withheldPairViewDDL stands in for the view the wrapper migrations create (VEC-402), which this branch
+// does not carry. TestPositionProjectionWithheldPairView_MatchesTheContract in db/migrator asserts the
+// real view exposes exactly these two columns with these types, so a drift there fails that test rather
+// than silently diverging from this stand-in.
+const withheldPairViewDDL = `
+	CREATE VIEW position_projection_withheld_pair AS
+	SELECT * FROM (VALUES %s) AS v(projection, pair)`
+
+// A pair the wrapper cannot key is recorded after the run row is written, so it can never be in
+// positions_refused. It is the one withholding class that reaches no alert unless the level adds it here.
+func TestPositionMaterializer_RefusedByProjectionAddsUnkeyablePairs(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	ctx := context.Background()
+
+	// One row per pair per reason: pair 1:10 fails two checks and is still one withheld position, so the
+	// count must be DISTINCT. position_b withholds nothing and keeps its own refused count untouched.
+	if _, err := pool.Exec(ctx, fmt.Sprintf(withheldPairViewDDL,
+		`('public.position_morpho_market'::text, '1:10'::text),
+		 ('public.position_morpho_market', '1:10'),
+		 ('public.position_morpho_market', '2:10'),
+		 ('public.position_morpho_market', '3:11'),
+		 ('public.position_other', '7:70')`)); err != nil {
+		t.Fatalf("seeding the withheld view: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO position_projection_run
+		    (projection, created_at, build_id, run_id, block_timestamp, rows_emitted, rows_appended, positions_refused)
+		VALUES ('public.position_morpho_market', now() - interval '5 minutes', 0, 42, NULL, 10, 10, 2),
+		       ('public.position_b',             now() - interval '5 minutes', 0, 42, NULL, 10, 10, 1)`); err != nil {
+		t.Fatalf("seeding the runs: %v", err)
+	}
+
+	repo := postgres.NewPositionMaterializerRepository(pool, slog.Default())
+	got, err := repo.RefusedByProjection(ctx, 42, time.Hour)
+	if err != nil {
+		t.Fatalf("RefusedByProjection: %v", err)
+	}
+	if got["public.position_morpho_market"] != 5 {
+		t.Errorf("position_morpho_market = %d, want 5: 2 from positions_refused plus 3 DISTINCT unkeyable pairs",
+			got["public.position_morpho_market"])
+	}
+	if got["public.position_b"] != 1 {
+		t.Errorf("position_b = %d, want 1: a projection withholding nothing keeps its own refused count", got["public.position_b"])
+	}
+	if _, ok := got["public.position_other"]; ok {
+		t.Error("a projection that withholds pairs but completed no run this tick is reported; withheld pairs must not resurrect it")
+	}
+}
+
+// The withheld pairs are a level, not a reason to resurrect a projection that did not complete: the run
+// row is what says the projection ran, and absence is what ViewFailing and ViewNotCompleting read.
+func TestPositionMaterializer_RefusedByProjectionKeepsANonRunningProjectionAbsent(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, fmt.Sprintf(withheldPairViewDDL,
+		`('public.position_morpho_market'::text, '1:10'::text)`)); err != nil {
+		t.Fatalf("seeding the withheld view: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO position_projection_run
+		    (projection, created_at, build_id, run_id, block_timestamp, rows_emitted, rows_appended, positions_refused)
+		VALUES ('public.position_morpho_market', now() - interval '2 hours', 0, 42, NULL, 10, 10, 0)`); err != nil {
+		t.Fatalf("seeding a stale run: %v", err)
+	}
+
+	repo := postgres.NewPositionMaterializerRepository(pool, slog.Default())
+	got, err := repo.RefusedByProjection(ctx, 42, time.Hour)
+	if err != nil {
+		t.Fatalf("RefusedByProjection: %v", err)
+	}
+	if _, ok := got["public.position_morpho_market"]; ok {
+		t.Errorf("a projection whose newest run predates the tick reports %d; want absent, or withheld pairs "+
+			"alone would hold a level for a projection that is not completing", got["public.position_morpho_market"])
+	}
+}
+
+// A projection that completed a run and is withholding nothing must read 0, not go absent: 0 is what
+// says the alert is being answered, and absence is reserved for a projection that did not complete.
+func TestPositionMaterializer_RefusedByProjectionWithAnEmptyWithheldView(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		CREATE VIEW position_projection_withheld_pair AS
+		SELECT NULL::text AS projection, NULL::text AS pair WHERE false;
+		INSERT INTO position_projection_run
+		    (projection, created_at, build_id, run_id, block_timestamp, rows_emitted, rows_appended, positions_refused)
+		VALUES ('public.position_morpho_market', now() - interval '5 minutes', 0, 42, NULL, 10, 10, 0)`); err != nil {
+		t.Fatalf("seeding an empty withheld view and its run: %v", err)
+	}
+
+	repo := postgres.NewPositionMaterializerRepository(pool, slog.Default())
+	got, err := repo.RefusedByProjection(ctx, 42, time.Hour)
+	if err != nil {
+		t.Fatalf("RefusedByProjection: %v", err)
+	}
+	if level, ok := got["public.position_morpho_market"]; !ok || level != 0 {
+		t.Errorf("position_morpho_market = %d (present %t); want 0 and present", level, ok)
+	}
+}
+
+// The runner ships independently of the wrappers that define the view, so it can start against a
+// database that has it and one that does not. A missing view contributes nothing rather than failing
+// the read, which would take every other projection's level down with it.
+func TestPositionMaterializer_RefusedByProjectionWithoutTheWithheldView(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	ctx := context.Background()
+
+	var present bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('public.position_projection_withheld_pair') IS NOT NULL`).Scan(&present); err != nil {
+		t.Fatal(err)
+	}
+	if present {
+		t.Fatal("position_projection_withheld_pair exists on this branch; this test no longer covers the missing-view path")
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO position_projection_run
+		    (projection, created_at, build_id, run_id, block_timestamp, rows_emitted, rows_appended, positions_refused)
+		VALUES ('public.position_morpho_market', now() - interval '5 minutes', 0, 42, NULL, 10, 10, 3)`); err != nil {
+		t.Fatalf("seeding the run: %v", err)
+	}
+
+	repo := postgres.NewPositionMaterializerRepository(pool, slog.Default())
+	got, err := repo.RefusedByProjection(ctx, 42, time.Hour)
+	if err != nil {
+		t.Fatalf("RefusedByProjection with no withheld view: %v", err)
+	}
+	if got["public.position_morpho_market"] != 3 {
+		t.Errorf("position_morpho_market = %d, want 3 from positions_refused alone", got["public.position_morpho_market"])
 	}
 }

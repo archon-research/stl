@@ -74,9 +74,48 @@ func (r *PositionMaterializerRepository) Materialize(ctx context.Context, materi
 	})
 }
 
-// RefusedByProjection reads positions_refused from the latest run row of each projection runID wrote
-// within the last `within`. created_at is set by the database clock, so the bound is taken from it too.
+// withheldPairView reports, per projection, the inputs whose wrapper cannot key them. Those pairs are
+// recorded after the run row is written, so positions_refused — the one level the withholding alert
+// reads — can never count them, and a permanently withheld position would page nobody.
+//
+// Read live rather than from position_projection_refusal: that table is append-only, so a count taken
+// from it would outlive the defect and the alert would never clear.
+const withheldPairView = "public.position_projection_withheld_pair"
+
+// DISTINCT because the view emits one row per pair per reason, and a pair failing two checks is still
+// one withheld position.
+const withheldPairQuery = `SELECT projection, count(DISTINCT pair) FROM public.position_projection_withheld_pair GROUP BY projection`
+
+// RefusedByProjection reads the level the withholding alert watches: positions_refused from the latest
+// run row of each projection runID wrote within the last `within`, plus the pairs that projection is
+// currently withholding as unkeyable. created_at is set by the database clock, so the bound is taken
+// from it too.
+//
+// The withheld count is added only to a projection that completed a run in this span. A projection
+// absent from the run table stays absent, so "did not complete this tick" is still distinguishable
+// from "completed, withholding nothing".
 func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context, runID int64, within time.Duration) (map[string]int64, error) {
+	out, err := r.refusedByCompletedRun(ctx, runID, within)
+	if err != nil {
+		return nil, err
+	}
+	withheld, err := r.withheldPairsByProjection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for projection, pairs := range withheld {
+		// Only onto a projection that completed a run: absence has to keep meaning "did not complete",
+		// which is what ViewFailing and ViewNotCompleting read.
+		if _, ran := out[projection]; ran {
+			out[projection] += pairs
+		}
+	}
+	return out, nil
+}
+
+// refusedByCompletedRun reads positions_refused from the latest run row of each projection runID wrote
+// within the last `within`.
+func (r *PositionMaterializerRepository) refusedByCompletedRun(ctx context.Context, runID int64, within time.Duration) (map[string]int64, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT DISTINCT ON (projection) projection, positions_refused
 		  FROM position_projection_run
@@ -98,6 +137,39 @@ func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating positions_refused: %w", err)
+	}
+	return out, nil
+}
+
+// withheldPairsByProjection counts the pairs each projection currently withholds, or nothing at all
+// when the view has not been migrated yet — the runner ships independently of the wrappers that define
+// it, so its absence is a deployment order, not a fault.
+func (r *PositionMaterializerRepository) withheldPairsByProjection(ctx context.Context) (map[string]int64, error) {
+	var present bool
+	if err := r.pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, withheldPairView).Scan(&present); err != nil {
+		return nil, fmt.Errorf("resolving %s: %w", withheldPairView, err)
+	}
+	if !present {
+		return nil, nil
+	}
+
+	rows, err := r.pool.Query(ctx, withheldPairQuery)
+	if err != nil {
+		return nil, fmt.Errorf("reading withheld pairs: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]int64{}
+	for rows.Next() {
+		var projection string
+		var pairs int64
+		if err := rows.Scan(&projection, &pairs); err != nil {
+			return nil, fmt.Errorf("scanning withheld pairs: %w", err)
+		}
+		out[projection] = pairs
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating withheld pairs: %w", err)
 	}
 	return out, nil
 }

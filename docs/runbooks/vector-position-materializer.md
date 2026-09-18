@@ -68,7 +68,21 @@ Before bumping an environment to 1:
 3. Confirm no schedule exists yet (`temporal schedule describe --schedule-id position-materializer`).
    A schedule keeps the activity timeouts it was created with, and a redeploy updates only its
    interval, so changing the timeouts later means deleting the schedule and letting the worker recreate it.
-4. Run the bootstrap by hand, with the deployment still at 0, so it is not bound by the schedule's
+4. Read what the projections will withhold, before running them rather than after. A pair listed here
+   never reaches `position_state` and stays withheld on every run until the registry is fixed, so this
+   is the point to decide between fixing it and accepting the gap knowingly:
+
+   ```sql
+   SELECT reason, count(*) AS pairs FROM morpho_market_withheld_pair GROUP BY 1 ORDER BY 2 DESC;
+   SELECT * FROM morpho_market_withheld_pair ORDER BY reason LIMIT 50;
+   ```
+
+   It is also what says whether the per-run `WARNING` will be steady log noise from day one. On staging
+   (2026-09-18) every one of the 50,006 cached `(user, market)` pairs is keyable, so this reads zero.
+   `morpho_market_withheld_pair` reads the `morpho_market_position_current` cache, so it is only as
+   complete as that cache: after a history load that bypassed the cache's trigger, re-run the
+   `20260909_150100` backfill first or a shared address it never saw is not listed here.
+5. Run the bootstrap by hand, with the deployment still at 0, so it is not bound by the schedule's
    activity timeouts:
    - Pick an off-peak window and tell the channel first: the call is one long transaction and trips the
      long-running-transaction alert.
@@ -152,14 +166,15 @@ backfill command exists or is needed — the full projection *is* the backfill.
 
 **What it means.** A projection is withholding positions rather than failing. Its run succeeds, the
 other positions land, and these sit at whatever was last stored, which every downstream reader treats
-as current. `position_projection_run.positions_refused` is the per-run count the alert reads, taken from
-each projection's run in the latest tick under the running pod's writer run. It fires when every reading
+as current. The level the alert reads is `position_projection_run.positions_refused` from each
+projection's run in the latest tick under the running pod's writer run, plus the pairs that projection
+currently withholds as unkeyable, which are recorded too late to be in it. It fires when every reading
 over 3 hours is above zero, readings exist 90 minutes to 3 hours back, and one arrived in the last 65
 minutes, so a restart does not reset it and a level first seen minutes ago does not fire it and a
 projection that has stopped completing stops firing it (`ViewFailing` or `ViewNotCompleting` takes over).
 
 **Which positions.** The refusal table holds one row per refused observation for the life of the
-refusal, and the two classes need different questions asked of them.
+refusal, and the three classes need different questions asked of them.
 
 Withheld by a block-against-instant inversion, so nothing of that position landed:
 
@@ -186,11 +201,36 @@ SELECT r.projection, encode(r.position_id, 'hex') AS position_id, r.reason,
  LIMIT 50;
 ```
 
+An input the wrapper cannot key at all, so no observation of that position has ever landed and none
+will until the registry is fixed:
+
+```sql
+SELECT r.projection, encode(r.position_id, 'hex') AS position_id, r.detail,
+       min(r.created_at) AS first_recorded_at, max(r.block_number) AS latest_block
+  FROM position_projection_refusal r
+ WHERE r.reason = 'unkeyable_input'
+ GROUP BY 1, 2, 3
+ ORDER BY first_recorded_at;
+```
+
+That table is append-only, so its rows outlive the defect. What is withheld *now* is
+`SELECT projection, count(DISTINCT pair) FROM position_projection_withheld_pair GROUP BY 1;`, with
+`morpho_market_withheld_pair` giving the Morpho reasons behind it. The fix is upstream in
+`morpho_market` or `"user"`, not here.
+
 An inversion means the source gave a higher block an earlier instant and needs fixing upstream; the
 position leaves the first result by storing an observation at or beyond `from_block`, so a source
 correction clears it with no intervention here. A drift means the view re-emitted a stored key with
 a different value, which a real correction expresses by bumping `block_version` or
-`processing_version` instead. Both classes count towards `positions_refused`.
+`processing_version` instead. An unkeyable input is a registry defect: two `"user"` rows sharing an
+address in one market, a holder address that is not 20 bytes, or a market taking a leg's token from
+another chain.
+
+All three classes reach the alert, but by two different routes. The spine counts the first two into
+`position_projection_run.positions_refused` as it writes the run row. An unkeyable pair is recorded
+*after* that row is written and can never be in it, so the runner adds what
+`position_projection_withheld_pair` currently reports for that projection to the level it exports. A
+projection that did not complete a run this tick stays absent either way.
 
 ## VectorPositionMaterializerViewFailing
 
