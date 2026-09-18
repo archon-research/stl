@@ -49,6 +49,9 @@ var convertedAppendOnlyTables = []string{
 	// parents and enforce append-only through reference_table_immutable() (20260714_160000, #574).
 	"sec_node",
 	"sec_edge",
+	// VEC-616: same terms as the stores above — nothing FKs the registers either.
+	"instrument_register",
+	"alias_register",
 	// VEC-475 (#711): append-only from birth; the creating migration REVOKEs all seven.
 	"uniswap_v4_pool_manager",
 	"uniswap_v4_pool",
