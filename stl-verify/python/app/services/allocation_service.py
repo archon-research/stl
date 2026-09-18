@@ -157,15 +157,22 @@ class AllocationService:
 
     async def list_exposure_buckets(
         self,
-        prime_address: EthAddress,
+        scope: PrimeScope,
         *,
         from_timestamp: datetime,
         to_timestamp: datetime,
         bucket_seconds: float,
         limit: int = 100,
     ) -> list[ExposureBucket]:
+        """The prime's priced exposure, summed across the wallets that hold it.
+
+        Exposure is ADDITIVE (see ``PrimeScope``): each ALM proxy holds
+        its own positions, so the whole prime's figure is their sum. The sum runs
+        in SQL over ``proxy_address``, a segmentby column, rather than one query
+        per wallet.
+        """
         return await self._repository.list_exposure_buckets(
-            await self._repository.list_prime_proxy_addresses(prime_address),
+            scope.alm_proxies,
             from_timestamp=from_timestamp,
             to_timestamp=to_timestamp,
             bucket_seconds=bucket_seconds,

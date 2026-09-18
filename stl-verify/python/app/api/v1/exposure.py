@@ -4,13 +4,13 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
-from app.api._validators import ProxyAddressPathParam
+from app.api._validators import PrimeIdentifierPathParam
 from app.api.deps import (
     get_engine,
     get_reference_as_of,
@@ -28,7 +28,6 @@ from app.api.time_series import (
     build_resampled_window,
     get_resampled_time_series_query_params,
 )
-from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime import PrimeScope
 from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
@@ -123,12 +122,14 @@ async def _reference_exposure_by_bucket(
         "buckets. Per bucket, each receipt-token position's carried-forward balance is valued at "
         "the latest underlying oracle price and summed (the current `balance * price` exposure "
         "extended over time). Direct (non-receipt-token) holdings are excluded, matching "
-        "the risk-capital exposure basis. Returns `404` if the prime is unknown. Defaults to the "
+        "the risk-capital exposure basis. The series is the whole prime's whichever of its "
+        "identifiers you pass: exposure is held per proxy, so it is summed across them. "
+        "Returns `404` if the prime is unknown. Defaults to the "
         "last 24h; pass a window and `frequency` for longer ranges."
     ),
 )
 async def list_prime_exposure(
-    prime_id: ProxyAddressPathParam,
+    prime_id: PrimeIdentifierPathParam,
     response: Response,
     time_series: TimeSeriesQuery = Depends(get_resampled_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max buckets returned (default 100, max 500)."),
@@ -140,10 +141,6 @@ async def list_prime_exposure(
     scope: PrimeScope = Depends(prime_scope),
     _authz: None = Depends(require_prime_view),
 ) -> ExposureEnvelope:
-    prime_address = EthAddress(prime_id)
-    if not await service.prime_exists(prime_address):
-        raise HTTPException(status_code=404, detail="Prime not found")
-
     source = resolve_or_422(requested_provenance, available=frozenset(Provenance), default=Provenance.INDEXED)
 
     # Exposure observations are immutable once written, so a fully-pinned window
@@ -173,7 +170,7 @@ async def list_prime_exposure(
         reference_by_bucket, buckets = await asyncio.gather(
             _reference_exposure_by_bucket(scope.identity.id, time_series, limit, reference_repositories()),
             service.list_exposure_buckets(
-                prime_address,
+                scope,
                 from_timestamp=time_series.from_timestamp,
                 to_timestamp=time_series.to_timestamp,
                 bucket_seconds=time_series.bucket.total_seconds(),
@@ -196,7 +193,7 @@ async def list_prime_exposure(
         )
 
     buckets = await service.list_exposure_buckets(
-        prime_address,
+        scope,
         from_timestamp=time_series.from_timestamp,
         to_timestamp=time_series.to_timestamp,
         bucket_seconds=time_series.bucket.total_seconds(),

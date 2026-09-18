@@ -1,6 +1,5 @@
 from datetime import datetime
 
-from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_debt import PrimeDebtSnapshot
 from app.domain.entities.time_series_bucket import PrimeDebtBucket
 from app.ports.prime_debt_repository import PrimeDebtRepositoryPort
@@ -11,9 +10,6 @@ class PrimeDebtService:
 
     def __init__(self, repository: PrimeDebtRepositoryPort) -> None:
         self._repository = repository
-
-    async def resolve_prime_id(self, prime_address: EthAddress) -> int | None:
-        return await self._repository.resolve_prime_id(prime_address)
 
     async def list_debt_snapshots(
         self,
