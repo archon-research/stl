@@ -63,6 +63,9 @@ var convertedAppendOnlyTables = []string{
 	"position_projection_run",
 	// VEC-491: block header dimension; a mis-parse is corrected at a higher processing_version.
 	"block_meta",
+	// VEC-828: CORE reference results, append-only from birth; the creating migration REVOKEs both.
+	"core_model_reference_market_result",
+	"core_model_reference_vault_result",
 	"position_projection_refusal",
 	// VEC-404: SELECT+INSERT only, with the owner-side REVOKE too.
 	"aave_projection_note",

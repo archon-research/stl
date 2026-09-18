@@ -991,6 +991,14 @@ dev-env-files:
 		"TEMPORAL_NAMESPACE=vector" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/reference-capital-indexer/.env
+	@printf '%s\n' \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"CORE_MODEL_REFERENCE_URL=https://core.data.blockanalitica.com/core" \
+		"CORE_MODEL_REFERENCE_SYNC_INTERVAL=30m" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
+		"LOG_LEVEL=debug" \
+		> cmd/cronjobs/core-model-reference-indexer/.env
 # The two Morpho history jobs sweep ~2.4M blocks and log one line per replayed
 # event, so they run at info: debug buries the run in per-call noise. Both need
 # JAEGER_ENDPOINT set — unset, telemetry pretty-prints every span to stdout and
@@ -2374,7 +2382,7 @@ kind-load-python-api:
 CRONJOBS := $(sort $(notdir $(patsubst %/main.go,%,$(wildcard cmd/cronjobs/*/main.go))))
 # core-model-runner has no image of its own — it is a Python entry point served
 # from the python-api image (see k8s/overlays/dev/kustomization.yaml).
-CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer reference-capital-indexer morpho-v2-bootstrap core-model-runner
+CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer reference-capital-indexer core-model-reference-indexer morpho-v2-bootstrap core-model-runner
 
 # The Deployment behind one cmd/cronjobs package name — the same name, except for the
 # anchorage-indexer mismatch above. Targets that take NAME= take the package name.

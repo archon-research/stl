@@ -1,0 +1,271 @@
+# Unit tests for the core-model-reference-indexer rules (VEC-828): the `unless`
+# absence shape on WritesZero, the one-stale-cycle-must-not-page window on
+# StaleUpstream, the plain-table growth tripwire, and the Deployment-name regex
+# that VectorCronjobWorkerDown keys on, plus the rejected-row and
+# unmapped-network data-quality signals that fire on a successful cycle.
+#
+# The job ticks every 30m. Series step at 1m, so a "cycle" is 30 samples.
+rule_files:
+  - ../alerts/vector-cronjobs.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: "writes-zero: cycling with nothing written fires"
+    interval: 1m
+    input_series:
+      - series: 'cronjob_runs_total{service_name="core-model-reference-indexer", status="success", k8s_namespace_name="vector", cluster="c1"}'
+        values: '0+1x300'
+      - series: 'core_model_reference_sync_markets_written_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0x300'
+    alert_rule_test:
+      - eval_time: 5h
+        alertname: VectorCoreModelReferenceIndexerWritesZero
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "core-model-reference-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: &writes_zero
+              description: |
+                `core_model_reference_market_result` received 0 rows over 3h while cycles
+                succeeded. The CORE reference series has stopped advancing, and any
+                day that passes unobserved cannot be recovered afterwards — the
+                dashboard publishes no history route.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcoremodelreferenceindexerwriteszero"
+              summary: "Vector core-model-reference-indexer wrote 0 CORE reference rows"
+
+  # `unless` fires on an absent series too: a collector drop or a metric rename
+  # must not read as healthy.
+  - name: "writes-zero: cycling with the written counter absent fires"
+    interval: 1m
+    input_series:
+      - series: 'cronjob_runs_total{service_name="core-model-reference-indexer", status="success", k8s_namespace_name="vector", cluster="c1"}'
+        values: '0+1x300'
+    alert_rule_test:
+      - eval_time: 5h
+        alertname: VectorCoreModelReferenceIndexerWritesZero
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "core-model-reference-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations: *writes_zero
+
+  - name: "writes-zero: rows landing every cycle stays quiet"
+    interval: 1m
+    input_series:
+      - series: 'cronjob_runs_total{service_name="core-model-reference-indexer", status="success", k8s_namespace_name="vector", cluster="c1"}'
+        values: '0+1x300'
+      - series: 'core_model_reference_sync_markets_written_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0x29 32x30 64x30 96x30 128x30 160x30 192x30 224x30 256x30 288x30 320x1'
+    alert_rule_test:
+      - eval_time: 5h
+        alertname: VectorCoreModelReferenceIndexerWritesZero
+        exp_alerts: []
+
+  # Gated on "cycling": a worker that is simply down is VectorCronjobWorkerDown's.
+  - name: "writes-zero: no cycles at all stays quiet"
+    interval: 1m
+    input_series:
+      - series: 'cronjob_runs_total{service_name="core-model-reference-indexer", status="success", k8s_namespace_name="vector", cluster="c1"}'
+        values: '0x300'
+      - series: 'core_model_reference_sync_markets_written_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0x300'
+    alert_rule_test:
+      - eval_time: 5h
+        alertname: VectorCoreModelReferenceIndexerWritesZero
+        exp_alerts: []
+
+  # One late upstream run: a single stale cycle keeps increase()[1h] above zero
+  # for under an hour, so `for: 2h` never elapses.
+  - name: "stale-upstream: one stale cycle stays quiet"
+    interval: 1m
+    input_series:
+      - series: 'core_model_reference_sync_stale_cycles_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0x59 1x300'
+    alert_rule_test:
+      - eval_time: 1h30m
+        alertname: VectorCoreModelReferenceIndexerStaleUpstream
+        exp_alerts: []
+      - eval_time: 3h
+        alertname: VectorCoreModelReferenceIndexerStaleUpstream
+        exp_alerts: []
+      - eval_time: 6h
+        alertname: VectorCoreModelReferenceIndexerStaleUpstream
+        exp_alerts: []
+
+  # Upstream stuck: every 30m cycle is stale, so the counter steps every cycle.
+  - name: "stale-upstream: every cycle stale for two hours fires"
+    interval: 1m
+    input_series:
+      - series: 'core_model_reference_sync_stale_cycles_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0x29 1x30 2x30 3x30 4x30 5x30 6x30 7x30 8x30 9x1'
+    alert_rule_test:
+      - eval_time: 4h30m
+        alertname: VectorCoreModelReferenceIndexerStaleUpstream
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "core-model-reference-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations:
+              description: |
+                For 2h+ every cycle's freshest row carried an upstream `model_date`
+                more than a day behind. The upstream CORE model has stopped
+                publishing a new day; STL is recording the last one it did publish,
+                correctly labelled. Nothing to fix in the service — confirm against
+                the dashboard and flag it upstream.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcoremodelreferenceindexerstaleupstream"
+              summary: "Vector core-model-reference-indexer: upstream CORE results are stale"
+
+  # The budget is 2.9 rows/s over a 6h rate window held for 6h: 180 rows/min
+  # combined is 3.0 rows/s and breaches, 168 is 2.8 and does not.
+  - name: "growth: the market and vault terms are added and a sustained rate over budget fires"
+    interval: 1m
+    input_series:
+      - series: 'core_model_reference_sync_markets_written_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0+90x720'
+      - series: 'core_model_reference_sync_vaults_written_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0+90x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorCoreModelReferenceResultGrowthHigh
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "core-model-reference-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations:
+              description: |
+                Combined write rate into `core_model_reference_market_result` +
+                `core_model_reference_vault_result` has exceeded 250k rows/day (2.9 rows/s)
+                sustained for 6h — about 90M rows/year against the ~100M-row budget
+                those deliberately-plain (non-hypertable) tables were sized for.
+                Nothing is broken; this is the tripwire on that design choice. Check
+                the real row counts, and if the rate is the new normal plan the
+                hypertable conversion migration described in the runbook.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcoremodelreferenceresultgrowthhigh"
+              summary: "Vector core_model_reference_* tables outgrowing their plain-table budget"
+
+  - name: "growth: a sustained rate under budget stays quiet"
+    interval: 1m
+    input_series:
+      - series: 'core_model_reference_sync_markets_written_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0+84x720'
+      - series: 'core_model_reference_sync_vaults_written_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0+84x720'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: VectorCoreModelReferenceResultGrowthHigh
+        exp_alerts: []
+
+  - name: "worker-down: the core-model-reference-indexer Deployment is in the regex"
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{deployment="core-model-reference-indexer", namespace="vector", cluster="c1"}'
+        values: '0x30'
+      - series: 'kube_deployment_spec_replicas{deployment="core-model-reference-indexer", namespace="vector", cluster="c1"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: VectorCronjobWorkerDown
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "temporal-cronjobs"
+              deployment: "core-model-reference-indexer"
+              namespace: "vector"
+              severity: "critical"
+              team: "vector"
+            exp_annotations:
+              description: |
+                Deployment `core-model-reference-indexer` has <1 available replica for
+                >10m. The Temporal cron worker is not running, so its schedule
+                fires with no worker to pick it up and no snapshots/validations are
+                produced. Check the pod (CrashLoopBackOff, OOM, image pull) before
+                data goes stale.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcronjobworkerdown"
+              summary: "Vector cronjob `core-model-reference-indexer` has no available replica"
+
+  # One rejected row is a lost day for that market or vault; any increase fires.
+  - name: "rows-rejected: a single rejected row fires"
+    interval: 1m
+    input_series:
+      - series: 'core_model_reference_sync_rows_rejected_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0x29 1x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: VectorCoreModelReferenceIndexerRowsRejected
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "core-model-reference-indexer"
+              namespace: "vector"
+              severity: "warning"
+              team: "vector"
+            exp_annotations:
+              description: |
+                `1` upstream row(s) failed validation in
+                the last hour and were left out of their cycle. Each is a market or
+                vault day the reference series will never get back. The pod log
+                names the row and the reason (`upstream row rejected`); fix the
+                parser if the feed's shape drifted, or flag the row upstream.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcoremodelreferenceindexerrowsrejected"
+              summary: "Vector core-model-reference-indexer dropped upstream rows"
+
+  - name: "rows-rejected: a seeded zero counter stays quiet"
+    interval: 1m
+    input_series:
+      - series: 'core_model_reference_sync_rows_rejected_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: VectorCoreModelReferenceIndexerRowsRejected
+        exp_alerts: []
+
+  - name: "unmapped-network: rows of an unknown network fire per network"
+    interval: 1m
+    input_series:
+      - series: 'core_model_reference_sync_unmapped_network_rows_total{k8s_namespace_name="vector", cluster="c1", network="plasma"}'
+        values: '0x29 2x30 4x30'
+      - series: 'core_model_reference_sync_unmapped_network_rows_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0x89'
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: VectorCoreModelReferenceIndexerUnmappedNetwork
+        exp_alerts:
+          - exp_labels:
+              cluster: "c1"
+              component: "core-model-reference-indexer"
+              namespace: "vector"
+              network: "plasma"
+              severity: "warning"
+              team: "vector"
+            exp_annotations:
+              description: |
+                Rows for upstream network `plasma` are being stored
+                with `chain_id = NULL` because the feed client's network map has no
+                entry for it. The rows are correct as recorded; add the chain id to
+                `networkToChainID` in `internal/adapters/outbound/coremodelfeed` so
+                read-time registry joins stop dropping them.
+              runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcoremodelreferenceindexerunmappednetwork"
+              summary: "Vector core-model-reference-indexer: network `plasma` has no chain id"
+
+  - name: "unmapped-network: only the seeded unlabelled zero stays quiet"
+    interval: 1m
+    input_series:
+      - series: 'core_model_reference_sync_unmapped_network_rows_total{k8s_namespace_name="vector", cluster="c1"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: VectorCoreModelReferenceIndexerUnmappedNetwork
+        exp_alerts: []

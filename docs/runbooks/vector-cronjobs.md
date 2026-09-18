@@ -16,6 +16,7 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `offchain-price-backfill` | `offchain-price-backfill` | **on demand** | Backfills CoinGecko price history for a range supplied at trigger time |
 | `reference-capital-indexer` | `reference-capital-indexer` | 15m | Sky Star-monitor reference risk capital; the only writer of forward reference history |
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
+| `core-model-reference-indexer` | `core-model-reference-indexer` | 30m | the upstream CORE model's dashboard results → `core_model_reference_market_result` + `core_model_reference_vault_result`; reference data, the only writer of that history (VEC-828) |
 | `morpho-vault-backfill` | `morpho-vault-backfill` | **on demand** | Discovers Morpho vaults from the archived S3 receipts and replays their VaultV2 structured events, for a block range supplied at start time (VEC-218) |
 | `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **on demand** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
 | `uniswap-v4-position-bootstrap` | `uniswap-v4-position-bootstrap` | **on demand** | Two hand-started workflow types on one queue, each closing a gap event-driven indexing cannot: `UniswapV4PositionBootstrap` snapshots every historical Uniswap V4 LP position of the registered pools at one finality-safe block into `uniswap_v4_position` (VEC-639), `UniswapV4PosmTransferBackfill` replays the PositionManager's whole ERC-721 `Transfer` history into `uniswap_v4_position_nft_transfer` (VEC-790); operated from [vector-indexers.md](vector-indexers.md#uniswap-v4-indexer-vec-475) |
@@ -1756,6 +1757,214 @@ would splice a different measurement.
 on a fresh rollout, so this can fire once before the first day lands even on a
 healthy worker. Check the deployment timestamp before treating a very-recent
 first firing as a real stall.
+
+---
+
+## VectorCoreModelReferenceIndexerWritesZero
+
+**Severity:** warning · **For:** 1h (over a 3h window)
+
+**What it means.** Cycles are succeeding but `core_model_reference_market_result`
+received no rows for three hours. `core-model-reference-indexer` is the only writer of
+the CORE reference series, and the upstream dashboard
+(`$CORE_MODEL_REFERENCE_URL/overview/`) publishes one result per calendar
+day with no history route (it accepts `?date=` and ignores it), so a day that
+passes unobserved is a permanent hole.
+
+**Why it is not caught by the generic rules.** The run returns no error, so
+`VectorCronjobRunFailing` stays quiet. A successful cycle always writes both
+tables — the service fails the cycle outright when the overview has no markets
+or no vaults — so zero rows on a successful cycle means the write path or the
+counter broke, not the feed. The counter is fed what the database inserted
+(the repositories sum `RowsAffected`), not the batch size, so it also catches a
+cycle whose rows all conflicted away: a host clock stepping back onto a
+`synced_at` already written under the same build. That case logs `some rows of
+this cycle were already written under this build and conflicted away`.
+
+This alert also fires if `core_model_reference_sync_markets_written_total` stops
+being emitted at all (a collector drop or a metric rename); the counter is
+seeded at 0 from process start, so an absent series is itself the fault.
+
+**Serving impact.** Nothing serves these rows yet (the API and UI switcher are
+follow-ups on VEC-828); the impact is the hole in the reference history.
+
+**Triage.**
+
+1. Confirm the worker is cycling rather than wedged:
+   `kubectl -n vector logs deploy/core-model-reference-indexer --tail=100`. A healthy
+   cycle (every 30 minutes) logs `core reference sync complete` with non-zero
+   `markets` and `vaults` counts.
+2. Check the feed answers at all:
+   `curl -s "$CORE_MODEL_REFERENCE_URL/overview/" | jq '.data.markets | length, .data.vaults | length'`.
+   Zero on either, or a missing array, is an upstream fault that the service
+   turns into a failed cycle — if cycles still report success, the payload
+   changed shape and the client is parsing an empty structure.
+3. If the feed and the logs both look healthy, the counter is the fault: check
+   the series exists in Prometheus and that the metric names in
+   `internal/services/core_model_reference_indexer/telemetry.go` still match this rule.
+
+**Resolution.** A shape drift is fixed in the client
+(`internal/adapters/outbound/coremodelfeed/core_client.go`); its required-field
+checks are what should have failed the cycle. The gap in the series stays — say
+so rather than splicing figures from a different day.
+
+---
+
+## VectorCoreModelReferenceIndexerStaleUpstream
+
+**Severity:** warning · **For:** 2h (over a 3h window)
+
+**Nothing is broken in STL.** Cycles succeed and rows land, but every one of
+them carries an old `model_date`: The upstream CORE model has stopped
+publishing a new day's result. The service calls a cycle stale when its
+*freshest* row is more than one day behind the cycle's UTC day (a run early in
+the morning that still sees yesterday's date is not counted) and increments
+`core_model_reference_sync_stale_cycles_total` once per such cycle.
+
+**Why the cycle, not the row.** Upstream does not re-run every small market
+daily: on 17 Sep 2026 a $59k Morpho market sat three days behind while every
+other row was current. `core_model_reference_sync_stale_rows_total` counts those and
+is a dashboard figure, not an alert signal — keyed on it, this alert would fire
+forever. Only "no row is fresh" says upstream itself has stopped.
+
+**Why it exists.** Without it the series would keep advancing with yesterday's
+figures and look perfectly healthy: the write counters increase, the cycles
+succeed, and the rows are correctly labelled with the old date. Only the date
+says anything is wrong.
+
+**Triage.**
+
+1. Read the latest date the feed reports:
+   `curl -s "$CORE_MODEL_REFERENCE_URL/overview/" | jq '.data.kpis.latest_run_date'`.
+   If it is two or more days behind today (UTC), upstream is stuck and this is
+   confirmed.
+2. Cross-check with the stored rows:
+   `SELECT max(model_date), max(synced_at) FROM core_model_reference_market_result;`
+   `max(model_date)` should lag `max(synced_at)` by at most a day in health.
+3. Look at the dashboard's own cron health page (`/system` on the dashboard host) for
+   a failing liquidator or forecaster run.
+
+**Resolution.** Flag it to the model's owners; there is nothing to fix here. Do
+not stop the indexer — the rows it records are true statements ("upstream
+still says X for date D") and the series stays contiguous.
+
+---
+
+## VectorCoreModelReferenceIndexerRowsRejected
+
+**Severity:** warning · **For:** 5m (over a 1h window)
+
+**What it means.** The feed client dropped at least one upstream row this hour:
+a field was missing, a figure was out of range (`prob_no_bad_debt` outside 0
+to 1, a negative CRR or supply), or an `override` vault carried a standard
+error or expected shortfall it must not have. The rest of the cycle landed. The
+dropped row's day is gone for good — the dashboard publishes no history route —
+which is why any rejection is worth a look, even a single one.
+
+**Why rows are dropped rather than the cycle failed.** One bad row out of ~42
+used to cost all of them, every cycle, until upstream changed. The sibling
+`reference-capital-indexer` lost a whole staging cycle set that way (#824). The
+duplicate-identity guard still fails the cycle, because writing a duplicate
+would corrupt identity; a row upstream reported incompletely threatens nothing
+already written, so it is quarantined and counted instead.
+
+**Triage.**
+
+1. Read the reasons: `kubectl -n vector logs deploy/core-model-reference-indexer --tail=300 | grep "upstream row rejected"`.
+   Each line names the row (`network/protocol/uid`, or its index when the
+   identity itself is missing) and the field or range that failed.
+2. Compare with the feed: `curl -s "$CORE_MODEL_REFERENCE_URL/overview/" | jq '.data.markets[] | select(.market_uid == "<uid>")'`.
+   A `null` where the client requires a value is a shape drift; a value outside
+   the documented range is an upstream data problem.
+3. Decide: if upstream now legitimately omits the field for some rows (the way
+   it omits `crr_el_se` on an override vault), make the client accept it
+   structurally and relax the column; if the value is wrong, flag it upstream
+   and leave the row rejected.
+
+**Resolution.** A code change to `internal/adapters/outbound/coremodelfeed`
+(and the matching column comment or CHECK) for a shape drift; nothing for a
+bad upstream value. The alert clears an hour after the last rejected cycle.
+
+---
+
+## VectorCoreModelReferenceIndexerUnmappedNetwork
+
+**Severity:** warning · **For:** 5m (over a 1h window)
+
+**What it means.** Upstream published rows for a network the feed client's
+`networkToChainID` map does not know. The rows landed with `chain_id = NULL`,
+which is correct as a record of what upstream said, but a read-time join on
+`chain_id` against STL's registries drops them silently. Every other signal
+stays green: the cycle succeeds, the written counters advance.
+
+**Triage.**
+
+1. The alert label names the network. Confirm it in the feed:
+   `curl -s "$CORE_MODEL_REFERENCE_URL/overview/" | jq '[.data.markets[].network, .data.vaults[].network] | unique'`.
+2. Look up the chain id from an authoritative source (the chain's own
+   documentation or explorer), never guessed.
+
+**Resolution.** Add the entry to `networkToChainID` in
+`internal/adapters/outbound/coremodelfeed/core_client.go` (and to
+`chainutil` if STL does not know the chain yet), with a client test. Rows
+already stored keep their NULL: they are an honest record of the mapping at
+write time, and a later processing_version would be the way to restate them if
+that ever matters. The alert clears an hour after the map is deployed.
+
+---
+
+## VectorCoreModelReferenceResultGrowthHigh
+
+**Severity:** warning · **For:** 6h
+
+**Nothing is broken.** This is the tripwire on a *design decision*: the two
+CORE reference tables are plain PostgreSQL tables, not hypertables, under the
+create-plain rule in `stl-verify/db/migrations/AGENTS.md`. It fires when their
+combined write rate has been high enough, for long enough, that the choice
+should be revisited. Treat it as a planning ticket, not an incident.
+
+### What it means
+
+`core_model_reference_market_result` and `core_model_reference_vault_result` receive one row
+per market and per vault per 30-minute cycle: ~32 + ~10 rows per cycle, ~2k
+rows/day. The threshold sits two orders of magnitude above that (mirrored in
+the rule comment):
+
+| | |
+|---|---|
+| Plain-table comfort ceiling | ~100M rows |
+| Observed rate today | ~2k rows/day, both tables combined |
+| Alert threshold | 250k rows/day sustained = **2.9 rows/s** (`250000 / 86400 = 2.894`) |
+| Implied growth | ~90M rows/year — about a year of runway |
+
+Reaching it means the upstream model grew by two orders of magnitude in
+coverage, or the sync interval was cut from hours to seconds. Check
+`CORE_MODEL_REFERENCE_SYNC_INTERVAL` first.
+
+### First checks
+
+```sql
+SELECT count(*), min(synced_at), max(synced_at) FROM core_model_reference_market_result;
+SELECT count(*), min(synced_at), max(synced_at) FROM core_model_reference_vault_result;
+```
+
+### Conversion path
+
+If the rate is the new normal, convert in a new migration (never edit the
+creating one):
+
+1. `SELECT create_hypertable('core_model_reference_market_result', 'synced_at', chunk_time_interval => INTERVAL '7 days', migrate_data => true);`
+   and the same for the vault table. `migrate_data => true` keeps the PK, the
+   `processing_version` trigger and the revoked grants.
+2. Columnstore explicitly (`tsdb.columnstore = false` is not in play because the
+   table was created plain; declare `timescaledb.compress`,
+   `compress_segmentby = 'network, protocol_name'`,
+   `compress_orderby = 'synced_at DESC'`) and
+   `add_compression_policy(..., INTERVAL '14 days')`. Assert the effective
+   policy interval in the migration test (VEC-570 trap).
+3. Confirm the latest-per-market read prunes chunks before shipping
+   (`EXPLAIN` the `ORDER BY synced_at DESC LIMIT 1` per identity), and retire
+   this alert in the same PR — a hypertable does not need it.
 
 ---
 

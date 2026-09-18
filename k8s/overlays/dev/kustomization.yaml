@@ -15,6 +15,7 @@ resources:
   - ../../base/spark-anchorage-indexer
   - ../../base/offchain-price-indexer
   - ../../base/reference-capital-indexer
+  - ../../base/core-model-reference-indexer
   - ../../base/morpho-v2-bootstrap
   - ../../base/core-model-runner
   - config.yaml
@@ -39,6 +40,9 @@ images:
     newTag: local
   - name: reference-capital-indexer
     newName: localhost/stl-reference-capital-indexer
+    newTag: local
+  - name: core-model-reference-indexer
+    newName: localhost/stl-core-model-reference-indexer
     newTag: local
   # On-demand: registers no schedule and idles on its task queue until a run is
   # started, so having it in dev-up costs nothing but proves the wiring.
