@@ -769,18 +769,18 @@ func TestMaterializeMorphoMarketWithholdsATokenOnAnotherChain(t *testing.T) {
 // The position-materializer reads this view by name and by column to export the withholding level, and
 // it ships in a different repository branch from this migration: nothing else fails if the shape drifts.
 // The runner's own tests build a stand-in from exactly this contract.
-func TestPositionProjectionWithheldPairViewMatchesTheContract(t *testing.T) {
+func TestProjectionWithheldPairViewMatchesTheContract(t *testing.T) {
 	ctx, pool := morphoMarketSeedOnly(t)
 	var shape string
 	if err := pool.QueryRow(ctx, `
 		SELECT string_agg(a.attname || ' ' || format_type(a.atttypid, NULL::integer), ', ' ORDER BY a.attnum)
 		  FROM pg_attribute a
-		 WHERE a.attrelid = 'public.position_projection_withheld_pair'::regclass
+		 WHERE a.attrelid = 'public.projection_withheld_pair'::regclass
 		   AND a.attnum > 0 AND NOT a.attisdropped`).Scan(&shape); err != nil {
 		t.Fatalf("read the view's columns: %v", err)
 	}
 	if want := "projection text, pair text"; shape != want {
-		t.Errorf("position_projection_withheld_pair is (%s); want (%s) — the runner counts DISTINCT pair per projection", shape, want)
+		t.Errorf("projection_withheld_pair is (%s); want (%s) — the runner counts DISTINCT pair per projection", shape, want)
 	}
 
 	// The projection column must name the view the spine stamps on position_state and on the run row,
@@ -788,7 +788,7 @@ func TestPositionProjectionWithheldPairViewMatchesTheContract(t *testing.T) {
 	seedMorphoMarketHolder(ctx, t, pool, 8453, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", `\x1234`, 951)
 	var projections, pairs int
 	if err := pool.QueryRow(ctx, `
-		SELECT count(DISTINCT projection), count(DISTINCT pair) FROM position_projection_withheld_pair
+		SELECT count(DISTINCT projection), count(DISTINCT pair) FROM projection_withheld_pair
 		 WHERE projection = 'public.position_morpho_market'`).Scan(&projections, &pairs); err != nil {
 		t.Fatal(err)
 	}
