@@ -55,13 +55,27 @@ func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID bui
 // resolves NULL, and the conformance check still passes because the declaration alone satisfies it.
 //
 // Chain resolution comes from the same register. A table with a chain_id fill reaches chain through its
-// parent (borrower -> protocol.chain_id); one without carries chain_id natively. The partition column
+// parent (borrower -> protocol.chain_id) or is pinned to a constant chain (prime_debt, the Sky Vat on
+// chain 1); one without carries chain_id natively. The partition column
 // is read from the live catalogue rather than declared, so a window can never be expressed on a column
 // the table is no longer partitioned by.
 type workListArm struct {
 	table   string // the referencing table, and the hypertable whose chunks give the windows
 	partCol string // its partition column, read from the catalogue; the window is expressed on it alone
 	sql     string // $1 = chain id; %s = the window predicate on partCol
+}
+
+// constChainArmSQL builds the arm for a table whose chain is a register constant rather than a column.
+// Its rows belong to that chain alone, so the arm finds nothing on any other chain instead of
+// attributing the table's blocks to whichever chain the run is for.
+func constChainArmSQL(table string, chain int) string {
+	const shape = `
+		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
+		SELECT $1::integer, t.block_number, t.block_version
+		  FROM %s t
+		 WHERE $1 = %d AND %%s
+		ON CONFLICT DO NOTHING`
+	return fmt.Sprintf(shape, quoteIdent(table), chain)
 }
 
 // armSQL builds one arm. parent is empty for a table carrying chain_id natively; otherwise the arm
@@ -97,6 +111,7 @@ func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, 
 		return nil, fmt.Errorf("loading the column register: %w", err)
 	}
 	chainParent := map[string]schemamaster.Fill{}
+	chainConst := map[string]int{}
 	var tables []string
 	for _, f := range register.Fills {
 		if f.BlockMeta {
@@ -106,6 +121,9 @@ func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, 
 	for _, f := range register.Fills {
 		if f.Column == "chain_id" && f.Parent != "" {
 			chainParent[f.Table] = f
+		}
+		if f.Column == "chain_id" && f.Const != nil {
+			chainConst[f.Table] = *f.Const
 		}
 	}
 	if len(tables) == 0 {
@@ -120,11 +138,14 @@ func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, 
 		if err != nil {
 			return nil, err
 		}
-		f := chainParent[table]
+		sql := armSQL(table, chainParent[table].Parent, chainParent[table].Key, chainParent[table].Ref)
+		if chain, ok := chainConst[table]; ok {
+			sql = constChainArmSQL(table, chain)
+		}
 		arms = append(arms, workListArm{
 			table:   table,
 			partCol: "t." + quoteIdent(partCol),
-			sql:     armSQL(table, f.Parent, f.Key, f.Ref),
+			sql:     sql,
 		})
 	}
 	return arms, nil

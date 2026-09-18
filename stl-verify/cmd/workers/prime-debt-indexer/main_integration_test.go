@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -722,5 +723,22 @@ func TestRunIntegration_InvalidVatFlag(t *testing.T) {
 	}, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid vat address")
+	}
+}
+
+// position_sky_prime_debt keys every snapshot on one Vat address, because prime_debt does not record
+// which Vat it was read from. If this default drifts from that literal, every position is keyed on a Vat
+// this indexer never read.
+func TestDefaultVatAddressMatchesTheProjectionKey(t *testing.T) {
+	sql, err := os.ReadFile(filepath.Join("..", "..", "..", "db", "migrations", "20260917_130000_materialize_sky_prime_debt.sql"))
+	if err != nil {
+		t.Fatalf("read the Sky migration: %v", err)
+	}
+	want := "'" + strings.TrimPrefix(defaultVatAddress, "0x") + ":' || o.ilk_name"
+	if !strings.Contains(string(sql), want) {
+		t.Fatalf("the Sky projection does not key on %s; the migration and the indexer default have drifted apart", want)
+	}
+	if strings.ToLower(defaultVatAddress) != defaultVatAddress {
+		t.Fatalf("defaultVatAddress %s is not lowercase; the projection key is lowercase hex", defaultVatAddress)
 	}
 }

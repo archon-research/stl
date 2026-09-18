@@ -545,7 +545,20 @@ func TestSync_WritesSnapshotPerPrime(t *testing.T) {
 		}
 	}
 
+	// One ilk per prime per block: prime_debt's unique key omits ilk_name, so a second snapshot for a
+	// prime at one block would be dropped at insert and never reach position_sky_prime_debt.
+	type blockKey struct {
+		prime   int64
+		block   int64
+		version int
+	}
+	seen := map[blockKey]string{}
 	for _, snap := range repo.allSaved() {
+		k := blockKey{snap.PrimeID, snap.BlockNumber, snap.BlockVersion}
+		if ilk, dup := seen[k]; dup {
+			t.Errorf("prime_id %d block %d: two snapshots (ilks %q and %q); prime_debt keeps only one", snap.PrimeID, snap.BlockNumber, ilk, snap.IlkName)
+		}
+		seen[k] = snap.IlkName
 		if snap.IlkName == "" {
 			t.Errorf("prime_id %d: empty ilk_name", snap.PrimeID)
 		}

@@ -104,7 +104,8 @@ type loaderFixture struct {
 const (
 	b100Hex    = "0x67c00000" // referenced by protocol_event: the native chain_id arm
 	b200Hex    = "0x67c00e10" // referenced by borrower: the protocol.chain_id join arm
-	b500Hex    = "0x67c01c20" // referenced by prime_debt, which is NOT an arm: the control below
+	b500Hex    = "0x67c01c20" // referenced by prime_debt: the constant-chain arm
+	b700Hex    = "0x67c02ee0" // referenced by token_total_supply, which is NOT an arm: the control below
 	b600v0Hex  = "0x67c02710"
 	b600v1Hex  = "0x67c03a98"
 	b300Seeded = int64(1_700_000_000)
@@ -174,6 +175,14 @@ func newLoaderFixture(t *testing.T, ctx context.Context) loaderFixture {
 	}
 	uploadBlock(t, ctx, s3Client, bucket, 500, 0, b500Hex)
 
+	// token_total_supply carries its own block_timestamp and declares no block_meta fill.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO token_total_supply (chain_id, token_id, total_supply, block_number, block_version, block_timestamp, source)
+		VALUES (1, 1, 0, 700, 0, now(), 'sweep')`); err != nil {
+		t.Fatalf("seed token_total_supply block 700: %v", err)
+	}
+	uploadBlock(t, ctx, s3Client, bucket, 700, 0, b700Hex)
+
 	// Block 400 is referenced only on Base. Its object is deliberately absent, so a broken chain
 	// filter fails hard rather than passing silently.
 	var baseProtocolID int64
@@ -213,16 +222,17 @@ func TestRunIntegration_FillsEachArm(t *testing.T) {
 	}
 	assertBlockTimestamp(t, ctx, f.pool, f.chainID, 100, hexSeconds(t, b100Hex)) // native chain_id
 	assertBlockTimestamp(t, ctx, f.pool, f.chainID, 200, hexSeconds(t, b200Hex)) // protocol join
-	// Control: prime_debt references block 500 and is not an arm, because it renames synced_at to
-	// block_timestamp by transform and so declares no block_meta fill. A table nobody declared a need
-	// for must not pull its blocks into the loader's work.
+	assertBlockTimestamp(t, ctx, f.pool, f.chainID, 500, hexSeconds(t, b500Hex)) // constant chain (prime_debt)
+	// Control: token_total_supply references block 700 and is not an arm, because it stores its own
+	// block_timestamp and declares no block_meta fill. A table nobody declared a need for must not pull
+	// its blocks into the loader's work.
 	var unreferenced int
 	if err := f.pool.QueryRow(ctx,
-		`SELECT count(*) FROM block_meta WHERE chain_id = $1 AND block_number = 500`, f.chainID).Scan(&unreferenced); err != nil {
+		`SELECT count(*) FROM block_meta WHERE chain_id = $1 AND block_number = 700`, f.chainID).Scan(&unreferenced); err != nil {
 		t.Fatal(err)
 	}
 	if unreferenced != 0 {
-		t.Errorf("block 500 was loaded, but only prime_debt references it and it declares no block_meta fill")
+		t.Errorf("block 700 was loaded, but only token_total_supply references it and it declares no block_meta fill")
 	}
 }
 
@@ -297,9 +307,9 @@ func TestRunIntegration_StampsTheWriterRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	// Four, not five: prime_debt's block 500 is no longer enumerated (it is not an arm).
-	if upserted != 4 {
-		t.Fatalf("upserted %d rows, want 4", upserted)
+	// Five: blocks 100, 200, 500 and 600 at two versions; 300 is pre-loaded and 700 is not an arm.
+	if upserted != 5 {
+		t.Fatalf("upserted %d rows, want 5", upserted)
 	}
 	var loaded int
 	if err := f.pool.QueryRow(ctx,
@@ -307,8 +317,8 @@ func TestRunIntegration_StampsTheWriterRun(t *testing.T) {
 		int64(f.runID)).Scan(&loaded); err != nil {
 		t.Fatalf("count loader-stamped rows: %v", err)
 	}
-	if loaded != 4 {
-		t.Errorf("%d rows stamped with run_id %d at processing_version 0, want 4", loaded, f.runID)
+	if loaded != 5 {
+		t.Errorf("%d rows stamped with run_id %d at processing_version 0, want 5", loaded, f.runID)
 	}
 }
 

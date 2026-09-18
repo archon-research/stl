@@ -74,6 +74,31 @@ func openList(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int
 	}
 }
 
+// prime_debt carries no chain column; the register pins it to chain 1. Its blocks are work on chain 1
+// and on no other chain, where the arm would otherwise stamp Sky's blocks with that chain's id.
+func TestWorkListTakesAConstantChainTableOnlyOnItsChain(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	seedWorkListSources(t, ctx, pool)
+
+	sky := func(blocks []int64) int {
+		n := 0
+		for _, b := range blocks {
+			if b >= 7000000 && b <= 7000005 {
+				n++
+			}
+		}
+		return n
+	}
+	if got := sky(openList(t, ctx, pool, 1)); got != 6 {
+		t.Errorf("chain 1 work list holds %d of prime_debt's 6 blocks; want all 6", got)
+	}
+	if got := sky(openList(t, ctx, pool, 8453)); got != 0 {
+		t.Errorf("chain 8453 work list holds %d prime_debt blocks; want none, prime_debt is chain 1 only", got)
+	}
+}
+
 // The windows must partition the source exactly: every referenced block appears once, none is lost at
 // a window boundary. Asserted against the set the arms' own sources hold, not against a second copy of
 // the windowing logic.
@@ -87,7 +112,9 @@ func TestWorkListWindowsCoverEveryReferencedBlock(t *testing.T) {
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM (
 		  SELECT sr.block_number FROM sparklend_reserve_data sr
-		    JOIN protocol p ON p.id = sr.protocol_id WHERE p.chain_id = 1) s`).Scan(&want); err != nil {
+		    JOIN protocol p ON p.id = sr.protocol_id WHERE p.chain_id = 1
+		  UNION
+		  SELECT block_number FROM prime_debt) s`).Scan(&want); err != nil {
 		t.Fatalf("count referenced blocks: %v", err)
 	}
 	got := openList(t, ctx, pool, 1)

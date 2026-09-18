@@ -116,6 +116,20 @@ func TestParseConfigRejectsUnusableConfig(t *testing.T) {
 			wantError: "invalid vat address",
 		},
 		{
+			name:      "a Vat other than the MCD Vat",
+			args:      []string{"-vat", "0x0000000000000000000000000000000000000001"},
+			envVars:   parseEnv(map[string]string{"ETH_RPC_URL": "http://localhost:8545"}),
+			wantError: "is not the MCD Vat",
+		},
+		{
+			name: "a chain other than mainnet",
+			envVars: parseEnv(map[string]string{
+				"ETH_RPC_URL": "http://localhost:8545",
+				"CHAIN_ID":    "8453",
+			}),
+			wantError: "CHAIN_ID 8453 is not 1",
+		},
+		{
 			name: "non-numeric CHAIN_ID",
 			envVars: parseEnv(map[string]string{
 				"ETH_RPC_URL": "http://localhost:8545",
