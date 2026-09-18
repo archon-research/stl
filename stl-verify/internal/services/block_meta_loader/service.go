@@ -189,8 +189,11 @@ func (s *Service) readBatch(ctx context.Context, refs []outbound.BlockRef) ([]ou
 			break
 		}
 		g.Go(func() error {
-			if gctx.Err() != nil {
-				return nil
+			// Returning nil here would hand Run a batch that is neither loaded nor missed: the
+			// skipped refs land in no list, and errgroup does not treat a cancelled derived context
+			// as an error, so Wait would report success for a short batch.
+			if err := gctx.Err(); err != nil {
+				return err
 			}
 			row, miss, err := s.readOne(gctx, r)
 			if err != nil {
@@ -222,14 +225,9 @@ func (s *Service) readBatch(ctx context.Context, refs []outbound.BlockRef) ([]ou
 	return out, absent, nil
 }
 
-// readOne reads one block's header at its requested version, falling back to the archive's
-// own highest version at that height when the requested one is absent.
-//
-// The raw-block-bulk-downloader's December backfill wrote a swath of deep history under key
-// version 1 regardless of the referencing table's own bookkeeping, so a read pinned to the
-// requested version 404s even though the archive holds that block elsewhere. Resolving the real
-// version is the same rule listHighestVersionReceipts and internal/pkg/blockversion already
-// apply to raw-bucket reads.
+// readOne reads one block's header, falling back to the versions the archive actually holds when
+// the requested one is absent. A December backfill wrote deep history under key version 1 whatever
+// the referencing table records, so a read pinned to the requested version 404s (VEC-835).
 func (s *Service) readOne(ctx context.Context, r outbound.BlockRef) (outbound.BlockMetaRow, string, error) {
 	ts, err := s.readAt(ctx, r.Number, r.Version)
 	if err == nil {
@@ -244,36 +242,37 @@ func (s *Service) readOne(ctx context.Context, r outbound.BlockRef) (outbound.Bl
 		return outbound.BlockMetaRow{}, "", fmt.Errorf(
 			"chain %d block %d/%d: resolving the archived version: %w", s.cfg.ChainID, r.Number, r.Version, err)
 	}
-	if !found || highest == r.Version {
-		// Nothing archived at this height at all, or the listing agrees with what already
-		// 404ed: a genuine hole, not a version mismatch.
+	if !found {
+		// Nothing archived at this height at all: a genuine hole, not a version mismatch.
 		return outbound.BlockMetaRow{}, fmt.Sprintf("%d/%d", r.Number, r.Version), nil
 	}
 
-	ts, err = s.readAt(ctx, r.Number, highest)
-	if err != nil {
-		if errors.Is(err, outbound.ErrObjectNotFound) {
-			// The occupied version can hold receipts/traces with no block object (a
-			// raw-block-bulk-downloader partial upload) — still a miss, nothing else to try.
-			return outbound.BlockMetaRow{}, fmt.Sprintf("%d/%d", r.Number, r.Version), nil
+	// A slot counts as occupied whatever data type fills it, so the top one can hold receipts from a
+	// partial upload while a lower version holds the block. Stopping at the first 404 would report a
+	// block the archive holds as absent; descending takes the newest block, never an orphan below it.
+	for v := highest; v >= 0; v-- {
+		if v == r.Version {
+			continue // already read above, already 404ed
 		}
-		return outbound.BlockMetaRow{}, "", fmt.Errorf(
-			"chain %d block %d/%d at resolved version %d: %w", s.cfg.ChainID, r.Number, r.Version, highest, err)
+		ts, err := s.readAt(ctx, r.Number, v)
+		if err == nil {
+			s.metrics.recordResolved(ctx, s.cfg.ChainID)
+			s.logger.Warn("block_meta header read from a different archived version",
+				"chain", s.cfg.ChainID, "block", r.Number, "requested", r.Version, "read", v)
+			return s.row(r, ts), "", nil
+		}
+		if !errors.Is(err, outbound.ErrObjectNotFound) {
+			return outbound.BlockMetaRow{}, "", fmt.Errorf(
+				"chain %d block %d/%d at archived version %d: %w", s.cfg.ChainID, r.Number, r.Version, v, err)
+		}
 	}
-	return s.row(r, ts), "", nil
+	// Every occupied version at this height holds something other than a block object.
+	return outbound.BlockMetaRow{}, fmt.Sprintf("%d/%d", r.Number, r.Version), nil
 }
 
-// row records the block under the version that REFERENCED it, never the version the timestamp was
-// read from. Two things depend on that and neither works otherwise: the work-list anti-join clears a
-// row only when block_meta holds its exact (chain_id, block_number, block_version), and an
-// observation table joins block_meta on the version its own column carries. Filing a resolved read
-// under the resolved version satisfies neither, so those blocks are re-enumerated and re-read every
-// run while the join that needed them still finds nothing.
-//
-// A height whose requested version is absent therefore inherits the surviving version's header time.
-// Where both versions are archived each is read directly and keeps its own time; only the absent one
-// inherits, and a reorg replacement is one slot later (measured on staging: 521 chain-1 heights hold
-// v0 and v1, every disagreement exactly 12s), which is the bounded error this trades for a row.
+// row records the block under the version that REFERENCED it, never the one read from: the anti-join
+// clears only on the exact (chain_id, block_number, block_version), and observation tables join on
+// their own column. An absent version inherits the surviving one's time — a slot apart for a reorg.
 func (s *Service) row(r outbound.BlockRef, ts time.Time) outbound.BlockMetaRow {
 	return outbound.BlockMetaRow{
 		ChainID:        s.cfg.ChainID,

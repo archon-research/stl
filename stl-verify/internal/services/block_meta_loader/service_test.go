@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -71,15 +72,16 @@ func streamTimestampByBlock(_ context.Context, _ string, key string) (io.ReadClo
 // blocks. Like the SQL adapter, the universe is snapshotted when the work list is opened and paged
 // with a keyset cursor, so a block that appears mid-run is not picked up until the next run.
 type mockBlockMetaRepo struct {
-	universe  []outbound.BlockRef // sorted by (Number, Version)
-	loaded    map[outbound.BlockRef]bool
-	upserted  []outbound.BlockMetaRow
-	upsertErr error
-	openErr   error
-	nextErr   error
-	calls     int
-	opened    int
-	closed    int
+	universe   []outbound.BlockRef // sorted by (Number, Version)
+	loaded     map[outbound.BlockRef]bool
+	upserted   []outbound.BlockMetaRow
+	upsertErr  error
+	openErr    error
+	nextErr    error
+	headMargin int64
+	calls      int
+	opened     int
+	closed     int
 }
 
 type mockWorkList struct {
@@ -88,13 +90,27 @@ type mockWorkList struct {
 	after outbound.BlockRef
 }
 
-func (m *mockBlockMetaRepo) OpenWorkList(_ context.Context, _ int64, _ int64) (outbound.BlockWorkList, error) {
+func (m *mockBlockMetaRepo) OpenWorkList(_ context.Context, _ int64, headMargin int64) (outbound.BlockWorkList, error) {
 	if m.openErr != nil {
 		return nil, m.openErr
 	}
 	m.opened++
-	snap := make([]outbound.BlockRef, len(m.universe))
-	copy(snap, m.universe)
+	m.headMargin = headMargin
+	// The real OpenWorkList enumerates the referenced set and then DELETEs every row block_meta
+	// already holds at that exact (chain_id, block_number, block_version), so the filter belongs
+	// here, at open time -- not in Upsert, which would hand out an already-loaded block as pending.
+	var snap []outbound.BlockRef
+	for _, b := range m.universe {
+		if !m.loaded[b] {
+			snap = append(snap, b)
+		}
+	}
+	sort.Slice(snap, func(i, j int) bool {
+		if snap[i].Number != snap[j].Number {
+			return snap[i].Number < snap[j].Number
+		}
+		return snap[i].Version < snap[j].Version
+	})
 	return &mockWorkList{repo: m, snap: snap, after: outbound.BlockRef{Number: -1, Version: -1}}, nil
 }
 
@@ -138,17 +154,6 @@ func (m *mockBlockMetaRepo) Upsert(_ context.Context, rows []outbound.BlockMetaR
 		m.loaded[k] = true
 		inserted++
 	}
-	// The real anti-join (OpenWorkList) drops a pending row only when block_meta holds its exact
-	// (chain_id, block_number, block_version), so a block filed under a DIFFERENT version does not
-	// clear it. Consuming by row count instead — as this mock used to — makes a run that never
-	// converges look like a run that finished, which is the one failure worth catching here.
-	kept := m.universe[:0]
-	for _, b := range m.universe {
-		if !m.loaded[b] {
-			kept = append(kept, b)
-		}
-	}
-	m.universe = kept
 	return inserted, nil
 }
 
@@ -219,20 +224,18 @@ func TestRun_NoPendingBlocksIsNoop(t *testing.T) {
 	}
 }
 
+// A block the archive does not hold fails the run naming it. The reader must return the
+// ErrObjectNotFound sentinel: a bare error is a transport failure and takes a different branch
+// entirely, which is what this test used to assert while claiming to cover the miss path.
 func TestRun_FailsHardOnMissingArchivedBlock(t *testing.T) {
 	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 42, Version: 0}}}
 	reader := &mockS3Reader{streamFn: func(context.Context, string, string) (io.ReadCloser, error) {
-		return nil, errors.New("NoSuchKey")
+		return nil, outbound.ErrObjectNotFound
 	}}
 	svc := newTestService(t, repo, reader, 500)
 
 	total, err := svc.Run(context.Background())
-	if err == nil {
-		t.Fatal("expected Run to fail hard on a missing archived block, got nil")
-	}
-	if !strings.Contains(err.Error(), "block 42/0") {
-		t.Errorf("error = %v, want it to identify block 42/0", err)
-	}
+	requireReportedAsMiss(t, err, "42/0")
 	if total != 0 {
 		t.Errorf("total = %d, want 0 (nothing upserted before the failure)", total)
 	}
@@ -323,15 +326,17 @@ func TestNew_DefaultsBatchSize(t *testing.T) {
 // expensive to compute (measured ~7s per evaluation against staging's 1.4M referenced blocks), so
 // re-evaluating it per batch is what this shape exists to avoid.
 func TestRunOpensTheWorkListOnceAndAlwaysClosesIt(t *testing.T) {
-	universe := []outbound.BlockRef{{Number: 1}, {Number: 2}, {Number: 3}, {Number: 4}, {Number: 5}}
+	universe := func() []outbound.BlockRef {
+		return []outbound.BlockRef{{Number: 1}, {Number: 2}, {Number: 3}, {Number: 4}, {Number: 5}}
+	}
 	for _, c := range []struct {
 		name    string
 		repo    *mockBlockMetaRepo
 		wantErr bool
 	}{
-		{name: "a clean run", repo: &mockBlockMetaRepo{universe: universe}},
+		{name: "a clean run", repo: &mockBlockMetaRepo{universe: universe()}},
 		{name: "a run whose upsert fails",
-			repo:    &mockBlockMetaRepo{universe: universe, upsertErr: errors.New("boom")},
+			repo:    &mockBlockMetaRepo{universe: universe(), upsertErr: errors.New("boom")},
 			wantErr: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -524,11 +529,9 @@ func TestRun_RecordsTheWorkListRowsItPages(t *testing.T) {
 	}
 }
 
-// A December raw-block backfill hardcoded key version 1 for a swath of deep history regardless of
-// what a referencing table's own block_version column says, so a read pinned to the requested
-// version 404s even though the archive holds the block under a different version. This must fail on
-// the code before it: without the fallback, a 404 at the requested version was reported as an
-// absent object with no second attempt.
+// A December backfill hardcoded key version 1 for deep history whatever the referencing table says,
+// so a read pinned to the requested version 404s though the archive holds the block. Without the
+// fallback that was reported as absent with no second attempt.
 func TestRun_RecoversAVersionMismatchFromTheArchive(t *testing.T) {
 	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 100, Version: 0}}}
 	reader := &mockS3Reader{
@@ -590,10 +593,9 @@ func TestRun_GenuineArchiveHoleStillReportsAsAMiss(t *testing.T) {
 	}
 }
 
-// requireReportedAsMiss asserts err is Run's own miss-aggregation error naming ref, not some other
-// hard failure that happens to mention the same block/version pair: readOne's non-miss error paths
-// ("resolving the archived version", "at resolved version") also embed the pair, so a bare substring
-// check on ref alone cannot tell a miss from a bug that turned it into a hard failure.
+// requireReportedAsMiss asserts err is Run's miss-aggregation error naming ref, not a hard failure
+// mentioning the same pair: readOne's non-miss paths embed it too, so checking ref alone cannot tell
+// a miss from a bug that turned one into a hard failure.
 func requireReportedAsMiss(t *testing.T, err error, ref string) {
 	t.Helper()
 	if err == nil {
@@ -645,10 +647,8 @@ func TestRun_ArchiveResolutionFailureDuringFallbackSurfaces(t *testing.T) {
 	}
 }
 
-// The version the archive resolves to can hold receipts/traces with no block object at all — a
-// raw-block-bulk-downloader partial upload, not a corrupted read. This must still be a miss, not a
-// hard failure: treating it as a failure would stall an entire chain's load on an ordinary partial-
-// archive state the codebase already anticipates elsewhere (internal/pkg/blockversion).
+// Every occupied version holding no block object is still a miss, not a hard failure: a partial
+// upload is an ordinary archive state, and failing on it would stall the whole chain's load.
 func TestRun_ResolvedVersionWithNoBlockObjectIsAMissNotAFailure(t *testing.T) {
 	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 400, Version: 0}}}
 	reader := &mockS3Reader{streamFn: func(context.Context, string, string) (io.ReadCloser, error) {
@@ -709,11 +709,10 @@ func versionedReader(t *testing.T, archived map[int64]map[int]int64) *mockS3Read
 	}}
 }
 
-// A real batch is not one block. readBatch fans out across goroutines and writes each result into a
-// per-index slot, so a batch mixing clean reads, archive-resolved recoveries and genuine holes is the
-// case that catches a result landing in the wrong slot: every previous fallback test used a single
-// block, where any index bug is invisible because there is only one index.
-func TestRun_MixedBatchUnderConcurrencyKeepsResultsWithTheirOwnBlocks(t *testing.T) {
+// readBatch writes each result into a per-index slot, so a mixed batch catches one landing in the
+// wrong slot -- invisible in the single-block fallback tests. This does NOT force overlap; it passes
+// sequentially, and TestRun_ReadsWithinABatchOverlap is what pins the concurrency.
+func TestRun_MixedBatchKeepsResultsWithTheirOwnBlocks(t *testing.T) {
 	archived := map[int64]map[int]int64{
 		10: {0: tsBase + 10}, // clean read at the requested version
 		20: {3: tsBase + 20}, // requested v0 absent; archive resolves v3
@@ -798,13 +797,12 @@ func runCancelledDuringFallback(t *testing.T, cancelAt string) (int64, error) {
 // cancellation test cancels before the run starts, so neither point inside readOne's fallback was
 // covered: a context error swallowed here would record a real block as permanently missing.
 func TestRun_CancellationDuringTheFallbackAbortsRatherThanRecordingAMiss(t *testing.T) {
-	// wantStage is asserted because errors.Is(err, context.Canceled) alone does NOT distinguish the
-	// fallback surfacing the cancellation from Run's next loop-top check returning a bare context
-	// error after the block was quietly recorded as a miss: both wrap context.Canceled and neither
-	// mentions the miss list. Only the stage name proves the fallback itself refused to continue.
+	// errors.Is(err, context.Canceled) alone cannot tell the fallback surfacing the cancellation from
+	// Run's loop-top check reporting it after the block was quietly missed: both wrap context.Canceled
+	// and neither mentions the miss list. Only the stage name proves the fallback refused.
 	for _, c := range []struct{ name, when, wantStage string }{
 		{"while resolving the version", "resolve", "resolving the archived version"},
-		{"between resolving and the retry read", "retry", "at resolved version"},
+		{"between resolving and the retry read", "retry", "at archived version"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			total, err := runCancelledDuringFallback(t, c.when)
@@ -825,10 +823,9 @@ func TestRun_CancellationDuringTheFallbackAbortsRatherThanRecordingAMiss(t *test
 	}
 }
 
-// A corrupt payload at the RESOLVED version must fail the run, not count as a miss. blockheader
-// enforces block_meta_ts_sane_chk's own [2009, 2100) window, but only its own package tests that;
-// nothing proved the fallback path propagates the refusal instead of folding it into the miss list,
-// where a corrupt object would look like an ordinary archive hole forever.
+// A corrupt payload at the resolved version must fail the run, not count as a miss. blockheader
+// enforces block_meta_ts_sane_chk's [2009, 2100) window, but only its own package tested that -- a
+// refusal folded into the miss list would look like an ordinary archive hole forever.
 func TestRun_CorruptHeaderAtTheResolvedVersionFailsRatherThanCountingAsAMiss(t *testing.T) {
 	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 800, Version: 0}}}
 	reader := &mockS3Reader{streamFn: func(_ context.Context, _ string, key string) (io.ReadCloser, error) {
@@ -861,10 +858,8 @@ func TestRun_CorruptHeaderAtTheResolvedVersionFailsRatherThanCountingAsAMiss(t *
 	}
 }
 
-// Reorg semantics, taken from staging: 521 chain-1 heights hold both v0 and v1, and every single
-// disagreement is exactly 12 seconds -- one Ethereum slot, the replacement block. Resolving to the
-// highest version therefore has to write the LATER timestamp; writing v0's would silently record the
-// orphaned block's time for a height whose canonical block is v1.
+// Reorg semantics from staging: 521 chain-1 heights hold both v0 and v1 and every disagreement is
+// exactly 12 seconds, one slot. Resolving must take the LATER time; the earlier one is the orphan.
 func TestRun_ResolvingAReorgedHeightTakesTheReplacementBlocksTimestamp(t *testing.T) {
 	const height = 24484220
 	const orphanTs = int64(1771423703) // v0
@@ -892,12 +887,9 @@ func TestRun_ResolvingAReorgedHeightTakesTheReplacementBlocksTimestamp(t *testin
 	}
 }
 
-// Convergence: a resolved read has to CLEAR its work-list row, not just stop failing. This is the
-// exact staging state -- all 469 stuck chain-1 rows request version 0 at heights block_meta already
-// holds at version 1 -- and it is the case that separates filing the row under the requested version
-// from filing it under the resolved one. Filed under the resolved version the upsert hits a row that
-// already exists, inserts nothing, and leaves the anti-join still looking for version 0, so the same
-// blocks are re-enumerated and re-read from S3 on every run, forever, while the run reports success.
+// A resolved read has to CLEAR its work-list row, not just stop failing. The exact staging state:
+// 469 stuck rows request version 0 at heights block_meta already holds at version 1, where filing
+// under the resolved version inserts nothing and re-reads them from S3 every run, reporting success.
 func TestRun_AResolvedBlockClearsItsWorkListRowAndDoesNotRecur(t *testing.T) {
 	const height = 23419201
 	repo := &mockBlockMetaRepo{
@@ -932,8 +924,183 @@ func TestRun_AResolvedBlockClearsItsWorkListRowAndDoesNotRecur(t *testing.T) {
 	if again != 0 {
 		t.Errorf("second run inserted %d rows, want 0", again)
 	}
-	if len(repo.universe) != 0 {
+	// Asserted through a fresh work list rather than the mock's raw universe: the anti-join is what
+	// has to clear, and it is evaluated at open time against what block_meta now holds.
+	list, err := repo.OpenWorkList(context.Background(), 1, 0)
+	if err != nil {
+		t.Fatalf("reopening the work list: %v", err)
+	}
+	defer list.Close(context.Background())
+	refs, err := list.Next(context.Background(), 500)
+	if err != nil {
+		t.Fatalf("paging the reopened work list: %v", err)
+	}
+	if len(refs) != 0 {
 		t.Errorf("%d block(s) still pending after a successful run -- they will be re-read from S3 "+
-			"on every run indefinitely", len(repo.universe))
+			"on every run indefinitely", len(refs))
+	}
+}
+
+// The top occupied version can hold receipts/traces with no block object while a LOWER version holds
+// the block, because a slot counts as occupied whatever fills it. Stopping at the first 404 reports
+// a block the archive holds as absent, fails the run, and never converges.
+func TestRun_FallsBackPastAVersionHoldingNoBlockObject(t *testing.T) {
+	const height = 900
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: height, Version: 0}}}
+	// v2 is occupied by receipts only; v1 holds the block; v0 (requested) holds nothing.
+	reader := versionedReader(t, map[int64]map[int]int64{height: {1: tsBase + height}})
+	archive := &fakeArchive{highestVersionFn: func(context.Context, int64) (int, bool, error) {
+		return 2, true, nil
+	}}
+	svc := newTestServiceWithArchive(t, repo, reader, archive, 500)
+
+	if _, err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v (v1 holds the block and was never tried)", err)
+	}
+	if len(repo.upserted) != 1 {
+		t.Fatalf("upserted %d rows, want 1", len(repo.upserted))
+	}
+	if got := repo.upserted[0]; got.BlockVersion != 0 || got.BlockTimestamp.Unix() != tsBase+height {
+		t.Errorf("row = v%d/%d, want v0 carrying v1's header time %d",
+			got.BlockVersion, got.BlockTimestamp.Unix(), tsBase+height)
+	}
+}
+
+// HeadMargin holds back the newest blocks while the archive catches up. Dropped, every scheduled run
+// reports normal archive lag as missing objects and fails.
+func TestRun_PassesTheHeadMarginToTheWorkList(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 10, Version: 0}}}
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 500, HeadMargin: 300},
+		repo, &mockS3Reader{streamFn: streamTimestampByBlock}, &fakeArchive{}, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if repo.headMargin != 300 {
+		t.Errorf("work list opened with head margin %d, want 300", repo.headMargin)
+	}
+}
+
+// OnProgress is the Temporal activity's heartbeat. Silently dropped, a long run looks dead.
+func TestRun_ReportsProgressAfterEveryBatch(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
+		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0},
+	}}
+	var seen []int64
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 2,
+		OnProgress: func(total int64) { seen = append(seen, total) }},
+		repo, &mockS3Reader{streamFn: streamTimestampByBlock}, &fakeArchive{}, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Three blocks over two batches, reporting the running total each time.
+	want := []int64{2, 3}
+	if len(seen) != len(want) {
+		t.Fatalf("progress reported %v, want %v", seen, want)
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Errorf("progress[%d] = %d, want %d", i, seen[i], want[i])
+		}
+	}
+}
+
+// Every header in a batch is held in memory before one INSERT, so an operator-set BATCH_SIZE in the
+// tens of thousands is clamped rather than honoured.
+func TestNew_ClampsAnOversizedBatchSize(t *testing.T) {
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 10 * maxBatchSize},
+		&mockBlockMetaRepo{}, &mockS3Reader{streamFn: streamTimestampByBlock}, &fakeArchive{}, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if svc.cfg.BatchSize != maxBatchSize {
+		t.Errorf("BatchSize = %d, want it clamped to %d", svc.cfg.BatchSize, maxBatchSize)
+	}
+}
+
+// The concurrency default is the difference between a one-hour first pass and a seven-hour one.
+func TestNew_DefaultsConcurrency(t *testing.T) {
+	svc, err := New(Config{ChainID: 1, Bucket: "b", Concurrency: 0},
+		&mockBlockMetaRepo{}, &mockS3Reader{streamFn: streamTimestampByBlock}, &fakeArchive{}, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if svc.cfg.Concurrency != defaultConcurrency {
+		t.Errorf("Concurrency = %d, want %d", svc.cfg.Concurrency, defaultConcurrency)
+	}
+}
+
+// The miss list is a lead for a bulk-download, not a manifest: the count carries the scale and the
+// names are capped, so a sparse deep-tail run cannot emit a megabyte-long error.
+func TestRun_CapsTheBlocksItNamesButNotTheCount(t *testing.T) {
+	const misses = maxNamedMisses + 12
+	universe := make([]outbound.BlockRef, 0, misses)
+	for i := range misses {
+		universe = append(universe, outbound.BlockRef{Number: int64(1000 + i), Version: 0})
+	}
+	repo := &mockBlockMetaRepo{universe: universe}
+	reader := &mockS3Reader{streamFn: func(context.Context, string, string) (io.ReadCloser, error) {
+		return nil, outbound.ErrObjectNotFound
+	}}
+	svc := newTestServiceWithArchive(t, repo, reader, &fakeArchive{}, 500)
+
+	_, err := svc.Run(context.Background())
+	if err == nil {
+		t.Fatal("want a failure naming the absent blocks, got none")
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("%d referenced block(s)", misses)) {
+		t.Errorf("error %q does not carry the full count %d", err, misses)
+	}
+	if !strings.Contains(err.Error(), "...") {
+		t.Errorf("error %q names every miss instead of capping the list", err)
+	}
+	if named := strings.Count(err.Error(), "/0"); named > maxNamedMisses {
+		t.Errorf("named %d blocks, want at most %d", named, maxNamedMisses)
+	}
+}
+
+// A batch abandoned mid-flight must fail, not commit a short batch: the skipped refs are in neither
+// the rows nor the miss list, so reporting success would call a partial pass complete.
+func TestRun_CancellationMidBatchFailsRatherThanCommittingAShortBatch(t *testing.T) {
+	const batch = 40
+	universe := make([]outbound.BlockRef, 0, batch)
+	for i := range batch {
+		universe = append(universe, outbound.BlockRef{Number: int64(10 + i), Version: 0})
+	}
+	repo := &mockBlockMetaRepo{universe: universe}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var reads int
+	// The reader never fails, so the only way the run can abort is the skip inside readBatch. A
+	// reader that returned ctx.Err() would raise the error itself and mask exactly that path.
+	reader := &mockS3Reader{streamFn: func(rctx context.Context, bucket, key string) (io.ReadCloser, error) {
+		mu.Lock()
+		reads++
+		hit := reads
+		mu.Unlock()
+		if hit == 3 {
+			cancel()
+		}
+		return streamTimestampByBlock(rctx, bucket, key)
+	}}
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: batch, Concurrency: 2},
+		repo, reader, &fakeArchive{}, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	total, runErr := svc.Run(ctx)
+	if !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("error = %v, want it to wrap context.Canceled", runErr)
+	}
+	if total != 0 {
+		t.Errorf("total = %d, want 0 -- a short batch was committed and reported as progress", total)
 	}
 }
