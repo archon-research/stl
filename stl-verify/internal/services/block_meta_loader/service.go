@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockheader"
 	"golang.org/x/sync/errgroup"
@@ -224,16 +225,15 @@ func (s *Service) readBatch(ctx context.Context, refs []outbound.BlockRef) ([]ou
 // readOne reads one block's header at its requested version, falling back to the archive's
 // own highest version at that height when the requested one is absent.
 //
-// block_meta.block_version matches the archive's own version, not a referencing table's — the
-// two usually agree, but the raw-block-bulk-downloader's December backfill wrote a swath of
-// deep history under key version 1 regardless of the referencing table's own bookkeeping, so a
-// read pinned to the requested version 404s even though the archive holds the block elsewhere.
-// Resolving the real version is the correct read, not a workaround: it is the same rule
-// listHighestVersionReceipts and internal/pkg/blockversion already apply to raw-bucket reads.
+// The raw-block-bulk-downloader's December backfill wrote a swath of deep history under key
+// version 1 regardless of the referencing table's own bookkeeping, so a read pinned to the
+// requested version 404s even though the archive holds that block elsewhere. Resolving the real
+// version is the same rule listHighestVersionReceipts and internal/pkg/blockversion already
+// apply to raw-bucket reads.
 func (s *Service) readOne(ctx context.Context, r outbound.BlockRef) (outbound.BlockMetaRow, string, error) {
-	row, err := s.readAt(ctx, r.Number, r.Version)
+	ts, err := s.readAt(ctx, r.Number, r.Version)
 	if err == nil {
-		return row, "", nil
+		return s.row(r, ts), "", nil
 	}
 	if !errors.Is(err, outbound.ErrObjectNotFound) {
 		return outbound.BlockMetaRow{}, "", fmt.Errorf("chain %d block %d/%d: %w", s.cfg.ChainID, r.Number, r.Version, err)
@@ -250,7 +250,7 @@ func (s *Service) readOne(ctx context.Context, r outbound.BlockRef) (outbound.Bl
 		return outbound.BlockMetaRow{}, fmt.Sprintf("%d/%d", r.Number, r.Version), nil
 	}
 
-	row, err = s.readAt(ctx, r.Number, highest)
+	ts, err = s.readAt(ctx, r.Number, highest)
 	if err != nil {
 		if errors.Is(err, outbound.ErrObjectNotFound) {
 			// The occupied version can hold receipts/traces with no block object (a
@@ -260,18 +260,29 @@ func (s *Service) readOne(ctx context.Context, r outbound.BlockRef) (outbound.Bl
 		return outbound.BlockMetaRow{}, "", fmt.Errorf(
 			"chain %d block %d/%d at resolved version %d: %w", s.cfg.ChainID, r.Number, r.Version, highest, err)
 	}
-	return row, "", nil
+	return s.row(r, ts), "", nil
 }
 
-func (s *Service) readAt(ctx context.Context, blockNumber int64, version int) (outbound.BlockMetaRow, error) {
-	ts, err := blockheader.ReadTimestampFromS3(ctx, s.reader, s.cfg.Bucket, blockNumber, version)
-	if err != nil {
-		return outbound.BlockMetaRow{}, err
-	}
+// row records the block under the version that REFERENCED it, never the version the timestamp was
+// read from. Two things depend on that and neither works otherwise: the work-list anti-join clears a
+// row only when block_meta holds its exact (chain_id, block_number, block_version), and an
+// observation table joins block_meta on the version its own column carries. Filing a resolved read
+// under the resolved version satisfies neither, so those blocks are re-enumerated and re-read every
+// run while the join that needed them still finds nothing.
+//
+// A height whose requested version is absent therefore inherits the surviving version's header time.
+// Where both versions are archived each is read directly and keeps its own time; only the absent one
+// inherits, and a reorg replacement is one slot later (measured on staging: 521 chain-1 heights hold
+// v0 and v1, every disagreement exactly 12s), which is the bounded error this trades for a row.
+func (s *Service) row(r outbound.BlockRef, ts time.Time) outbound.BlockMetaRow {
 	return outbound.BlockMetaRow{
 		ChainID:        s.cfg.ChainID,
-		BlockNumber:    blockNumber,
-		BlockVersion:   version,
+		BlockNumber:    r.Number,
+		BlockVersion:   r.Version,
 		BlockTimestamp: ts,
-	}, nil
+	}
+}
+
+func (s *Service) readAt(ctx context.Context, blockNumber int64, version int) (time.Time, error) {
+	return blockheader.ReadTimestampFromS3(ctx, s.reader, s.cfg.Bucket, blockNumber, version)
 }

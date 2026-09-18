@@ -72,6 +72,7 @@ func streamTimestampByBlock(_ context.Context, _ string, key string) (io.ReadClo
 // with a keyset cursor, so a block that appears mid-run is not picked up until the next run.
 type mockBlockMetaRepo struct {
 	universe  []outbound.BlockRef // sorted by (Number, Version)
+	loaded    map[outbound.BlockRef]bool
 	upserted  []outbound.BlockMetaRow
 	upsertErr error
 	openErr   error
@@ -124,12 +125,31 @@ func (m *mockBlockMetaRepo) Upsert(_ context.Context, rows []outbound.BlockMetaR
 		return 0, m.upsertErr
 	}
 	m.upserted = append(m.upserted, rows...)
-	// Consume from the universe, as the real anti-join against block_meta does, so a service that
-	// re-opened the work list per batch terminates with a wrong open count instead of spinning.
-	if len(rows) <= len(m.universe) {
-		m.universe = m.universe[len(rows):]
+	if m.loaded == nil {
+		m.loaded = map[outbound.BlockRef]bool{}
 	}
-	return int64(len(rows)), nil
+	// ON CONFLICT DO NOTHING: a row whose exact key is already present inserts nothing.
+	var inserted int64
+	for _, r := range rows {
+		k := outbound.BlockRef{Number: r.BlockNumber, Version: r.BlockVersion}
+		if m.loaded[k] {
+			continue
+		}
+		m.loaded[k] = true
+		inserted++
+	}
+	// The real anti-join (OpenWorkList) drops a pending row only when block_meta holds its exact
+	// (chain_id, block_number, block_version), so a block filed under a DIFFERENT version does not
+	// clear it. Consuming by row count instead — as this mock used to — makes a run that never
+	// converges look like a run that finished, which is the one failure worth catching here.
+	kept := m.universe[:0]
+	for _, b := range m.universe {
+		if !m.loaded[b] {
+			kept = append(kept, b)
+		}
+	}
+	m.universe = kept
+	return inserted, nil
 }
 
 func testLogger() *slog.Logger {
@@ -544,8 +564,9 @@ func TestRun_RecoversAVersionMismatchFromTheArchive(t *testing.T) {
 		t.Fatalf("upserted %d rows, want 1", len(repo.upserted))
 	}
 	got := repo.upserted[0]
-	if got.BlockVersion != 1 {
-		t.Errorf("BlockVersion = %d, want 1 (the archive's real version, not the requested 0)", got.BlockVersion)
+	if got.BlockVersion != 0 {
+		t.Errorf("BlockVersion = %d, want 0 -- the row is filed under the version that REFERENCED it, "+
+			"so the work-list anti-join clears and an observation table's join finds it", got.BlockVersion)
 	}
 	if want := tsBase + 100; got.BlockTimestamp.Unix() != want {
 		t.Errorf("BlockTimestamp = %d, want %d", got.BlockTimestamp.Unix(), want)
@@ -668,4 +689,246 @@ func collectPagedRows(t *testing.T, r *metricsdk.ManualReader) (int64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// versionedReader serves a header only at the versions a height actually has archived, so a test can
+// state "this height exists at v3 and nowhere else" the way the real bucket does. Absent coordinates
+// return ErrObjectNotFound, which is the only thing the fallback is allowed to act on.
+func versionedReader(t *testing.T, archived map[int64]map[int]int64) *mockS3Reader {
+	t.Helper()
+	return &mockS3Reader{streamFn: func(_ context.Context, _ string, key string) (io.ReadCloser, error) {
+		parsed, ok := s3key.Parse(key)
+		if !ok {
+			return nil, fmt.Errorf("unparseable key %q", key)
+		}
+		ts, ok := archived[parsed.BlockNumber][parsed.Version]
+		if !ok {
+			return nil, outbound.ErrObjectNotFound
+		}
+		return io.NopCloser(strings.NewReader(fmt.Sprintf(`{"timestamp":"0x%x"}`, ts))), nil
+	}}
+}
+
+// A real batch is not one block. readBatch fans out across goroutines and writes each result into a
+// per-index slot, so a batch mixing clean reads, archive-resolved recoveries and genuine holes is the
+// case that catches a result landing in the wrong slot: every previous fallback test used a single
+// block, where any index bug is invisible because there is only one index.
+func TestRun_MixedBatchUnderConcurrencyKeepsResultsWithTheirOwnBlocks(t *testing.T) {
+	archived := map[int64]map[int]int64{
+		10: {0: tsBase + 10}, // clean read at the requested version
+		20: {3: tsBase + 20}, // requested v0 absent; archive resolves v3
+		40: {0: tsBase + 40}, // clean read
+		50: {2: tsBase + 50}, // requested v0 absent; archive resolves v2
+		60: {1: tsBase + 60}, // archive claims v0 (agrees with the 404) -> miss despite v1 existing
+	}
+	highest := map[int64]int{20: 3, 50: 2, 60: 0} // 30 absent entirely -> found=false
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
+		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0},
+		{Number: 40, Version: 0}, {Number: 50, Version: 0}, {Number: 60, Version: 0},
+	}}
+	archive := &fakeArchive{highestVersionFn: func(_ context.Context, bn int64) (int, bool, error) {
+		v, ok := highest[bn]
+		return v, ok, nil
+	}}
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 6, Concurrency: 6},
+		repo, versionedReader(t, archived), archive, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	total, runErr := svc.Run(context.Background())
+	requireReportedAsMiss(t, runErr, "30/0")
+	if !strings.Contains(runErr.Error(), "60/0") {
+		t.Errorf("error %q does not also name the archive-agrees miss 60/0", runErr)
+	}
+	if total != 4 {
+		t.Fatalf("loaded %d rows, want 4", total)
+	}
+	// Each row must carry ITS OWN block's version and timestamp: a slot mix-up shows up here and
+	// nowhere else, because every value is a distinct function of the block number.
+	want := map[int64]struct {
+		version int
+		ts      int64
+	}{10: {0, tsBase + 10}, 20: {0, tsBase + 20}, 40: {0, tsBase + 40}, 50: {0, tsBase + 50}}
+	for _, got := range repo.upserted {
+		w, ok := want[got.BlockNumber]
+		if !ok {
+			t.Errorf("upserted unexpected block %d", got.BlockNumber)
+			continue
+		}
+		if got.BlockVersion != w.version {
+			t.Errorf("block %d: version = %d, want %d", got.BlockNumber, got.BlockVersion, w.version)
+		}
+		if got.BlockTimestamp.Unix() != w.ts {
+			t.Errorf("block %d: timestamp = %d, want %d (a result landed on the wrong block)",
+				got.BlockNumber, got.BlockTimestamp.Unix(), w.ts)
+		}
+		delete(want, got.BlockNumber)
+	}
+	if len(want) != 0 {
+		t.Errorf("never upserted: %v", want)
+	}
+}
+
+// Cancellation during the fallback must abort, not be mistaken for an absent block. The existing
+// cancellation test cancels before the run starts, so neither point inside readOne's fallback was
+// covered: a context error swallowed here would record a real block as permanently missing.
+func TestRun_CancellationDuringTheFallbackAbortsRatherThanRecordingAMiss(t *testing.T) {
+	// wantStage is asserted because errors.Is(err, context.Canceled) alone does NOT distinguish the
+	// fallback surfacing the cancellation from Run's next loop-top check returning a bare context
+	// error after the block was quietly recorded as a miss: both wrap context.Canceled and neither
+	// mentions the miss list. Only the stage name proves the fallback itself refused to continue.
+	for _, c := range []struct{ name, when, wantStage string }{
+		{"while resolving the version", "resolve", "resolving the archived version"},
+		{"between resolving and the retry read", "retry", "at resolved version"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 700, Version: 0}}}
+
+			reader := &mockS3Reader{streamFn: func(rctx context.Context, _ string, _ string) (io.ReadCloser, error) {
+				if rctx.Err() != nil {
+					return nil, rctx.Err()
+				}
+				return nil, outbound.ErrObjectNotFound
+			}}
+			archive := &fakeArchive{highestVersionFn: func(actx context.Context, _ int64) (int, bool, error) {
+				cancel()
+				if c.when == "resolve" {
+					return 0, false, actx.Err()
+				}
+				return 1, true, nil // resolves fine; the cancelled retry read is what must surface
+			}}
+			svc := newTestServiceWithArchive(t, repo, reader, archive, 500)
+
+			total, err := svc.Run(ctx)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("error = %v, want it to wrap context.Canceled", err)
+			}
+			if strings.Contains(err.Error(), "absent from the archive") {
+				t.Errorf("cancellation was recorded as an absent block: %v", err)
+			}
+			if !strings.Contains(err.Error(), c.wantStage) {
+				t.Errorf("error %q does not name %q -- the fallback swallowed the cancellation and Run "+
+					"reported its own loop-top context check instead", err, c.wantStage)
+			}
+			if total != 0 {
+				t.Errorf("total = %d, want 0", total)
+			}
+		})
+	}
+}
+
+// A corrupt payload at the RESOLVED version must fail the run, not count as a miss. blockheader
+// enforces block_meta_ts_sane_chk's own [2009, 2100) window, but only its own package tests that;
+// nothing proved the fallback path propagates the refusal instead of folding it into the miss list,
+// where a corrupt object would look like an ordinary archive hole forever.
+func TestRun_CorruptHeaderAtTheResolvedVersionFailsRatherThanCountingAsAMiss(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 800, Version: 0}}}
+	reader := &mockS3Reader{streamFn: func(_ context.Context, _ string, key string) (io.ReadCloser, error) {
+		parsed, ok := s3key.Parse(key)
+		if !ok {
+			return nil, fmt.Errorf("unparseable key %q", key)
+		}
+		if parsed.Version != 1 {
+			return nil, outbound.ErrObjectNotFound
+		}
+		return io.NopCloser(strings.NewReader(`{"timestamp":"0x1"}`)), nil // 1970: below the floor
+	}}
+	archive := &fakeArchive{highestVersionFn: func(context.Context, int64) (int, bool, error) {
+		return 1, true, nil
+	}}
+	svc := newTestServiceWithArchive(t, repo, reader, archive, 500)
+
+	total, err := svc.Run(context.Background())
+	if err == nil {
+		t.Fatal("a corrupt header at the resolved version was accepted")
+	}
+	if strings.Contains(err.Error(), "absent from the archive") {
+		t.Fatalf("corrupt payload was recorded as an absent block: %v", err)
+	}
+	if !strings.Contains(err.Error(), "outside") {
+		t.Errorf("error %q does not name the sanity-window refusal", err)
+	}
+	if total != 0 {
+		t.Errorf("total = %d, want 0", total)
+	}
+}
+
+// Reorg semantics, taken from staging: 521 chain-1 heights hold both v0 and v1, and every single
+// disagreement is exactly 12 seconds -- one Ethereum slot, the replacement block. Resolving to the
+// highest version therefore has to write the LATER timestamp; writing v0's would silently record the
+// orphaned block's time for a height whose canonical block is v1.
+func TestRun_ResolvingAReorgedHeightTakesTheReplacementBlocksTimestamp(t *testing.T) {
+	const height = 24484220
+	const orphanTs = int64(1771423703) // v0
+	const canonicalTs = orphanTs + 12  // v1, one slot later
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: height, Version: 0}}}
+	// The December backfill left this height's v0 key absent while v1 holds the canonical block.
+	reader := versionedReader(t, map[int64]map[int]int64{height: {1: canonicalTs}})
+	archive := &fakeArchive{highestVersionFn: func(context.Context, int64) (int, bool, error) {
+		return 1, true, nil
+	}}
+	svc := newTestServiceWithArchive(t, repo, reader, archive, 500)
+
+	if _, err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(repo.upserted) != 1 {
+		t.Fatalf("upserted %d rows, want 1", len(repo.upserted))
+	}
+	got := repo.upserted[0]
+	if got.BlockVersion != 0 {
+		t.Errorf("BlockVersion = %d, want 0 (the referencing version)", got.BlockVersion)
+	}
+	if got.BlockTimestamp.Unix() != canonicalTs {
+		t.Errorf("BlockTimestamp = %d, want %d (wrote the orphaned block's time)", got.BlockTimestamp.Unix(), canonicalTs)
+	}
+}
+
+// Convergence: a resolved read has to CLEAR its work-list row, not just stop failing. This is the
+// exact staging state -- all 469 stuck chain-1 rows request version 0 at heights block_meta already
+// holds at version 1 -- and it is the case that separates filing the row under the requested version
+// from filing it under the resolved one. Filed under the resolved version the upsert hits a row that
+// already exists, inserts nothing, and leaves the anti-join still looking for version 0, so the same
+// blocks are re-enumerated and re-read from S3 on every run, forever, while the run reports success.
+func TestRun_AResolvedBlockClearsItsWorkListRowAndDoesNotRecur(t *testing.T) {
+	const height = 23419201
+	repo := &mockBlockMetaRepo{
+		universe: []outbound.BlockRef{{Number: height, Version: 0}},
+		// block_meta already holds this height at the version the archive actually has.
+		loaded: map[outbound.BlockRef]bool{{Number: height, Version: 1}: true},
+	}
+	reader := versionedReader(t, map[int64]map[int]int64{height: {1: tsBase + height}})
+	archive := &fakeArchive{highestVersionFn: func(context.Context, int64) (int, bool, error) {
+		return 1, true, nil
+	}}
+	svc := newTestServiceWithArchive(t, repo, reader, archive, 500)
+
+	inserted, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if inserted != 1 {
+		t.Fatalf("first run inserted %d rows, want 1 -- the row was filed under a key block_meta "+
+			"already had, so nothing was written and the work list cannot clear", inserted)
+	}
+	if !repo.loaded[outbound.BlockRef{Number: height, Version: 0}] {
+		t.Error("no block_meta row exists at the REQUESTED version, so the anti-join still finds " +
+			"nothing and an observation table joining on its own block_version still misses this height")
+	}
+
+	// The run has to converge: a second pass must find nothing left to do.
+	again, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if again != 0 {
+		t.Errorf("second run inserted %d rows, want 0", again)
+	}
+	if len(repo.universe) != 0 {
+		t.Errorf("%d block(s) still pending after a successful run -- they will be re-read from S3 "+
+			"on every run indefinitely", len(repo.universe))
+	}
 }
