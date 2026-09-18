@@ -45,6 +45,7 @@ resources:
   - ../../base/robinhood-backup-worker
   - ../../base/robinhood-allocation-tracker
   - ../../base/prime-debt-indexer
+  - ../../base/position-materializer
   - ../../base/base-psm3-indexer
   - ../../base/optimism-psm3-indexer
   - ../../base/unichain-psm3-indexer
@@ -337,3 +338,10 @@ patches:
       metadata:
         name: python-api-verify
       $patch: delete
+
+# position-materializer ships at 0 in base. Its first run is an irreversible bootstrap of position_state,
+# so each environment is switched on here, separately: staging first, prod after a staging soak
+# (docs/runbooks/vector-position-materializer.md, "Before the first run").
+replicas:
+  - name: position-materializer
+    count: 0

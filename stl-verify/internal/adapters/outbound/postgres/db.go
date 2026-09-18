@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
@@ -55,6 +56,9 @@ type DBConfig struct {
 	// this pool builder run legitimately long statements. Set it only on
 	// latency-bounded services that should never run a long single statement.
 	StatementTimeout time.Duration
+
+	// NoticeLogger, if non-nil, receives the server's WARNINGs, which pgx otherwise discards.
+	NoticeLogger *slog.Logger
 
 	// MeterProvider supplies the pool's query metrics. Defaults to the global
 	// provider, whose instruments record nothing until telemetry.InitMetrics
@@ -166,8 +170,29 @@ func buildPoolConfig(cfg DBConfig) (*pgxpool.Config, error) {
 	if err := attachQueryTracer(poolConfig, cfg.MeterProvider); err != nil {
 		return nil, err
 	}
+	if cfg.NoticeLogger != nil {
+		attachNoticeLogger(poolConfig, cfg.NoticeLogger)
+	}
 
 	return poolConfig, nil
+}
+
+// attachNoticeLogger logs server WARNINGs to logger and drops lower severities. Severity follows the
+// server's lc_messages, so the unlocalized one is compared.
+func attachNoticeLogger(poolConfig *pgxpool.Config, logger *slog.Logger) {
+	poolConfig.ConnConfig.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
+		if n == nil || n.SeverityUnlocalized != "WARNING" {
+			return
+		}
+		attrs := []any{"severity", n.SeverityUnlocalized, "code", n.Code, "message", n.Message}
+		if n.Detail != "" {
+			attrs = append(attrs, "detail", n.Detail)
+		}
+		if n.Hint != "" {
+			attrs = append(attrs, "hint", n.Hint)
+		}
+		logger.Warn("postgres notice", attrs...)
+	}
 }
 
 // attachQueryTracer gives the pool the pgx tracer behind the fleet-wide database

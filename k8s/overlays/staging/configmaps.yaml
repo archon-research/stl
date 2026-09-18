@@ -1050,3 +1050,21 @@ data:
   CHAIN_ID: "1"
   AWS_REGION: "eu-west-1"
   DEPLOY_ENV: "staging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: position-materializer
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # The schedule lives in Temporal state; the worker reconciles a changed
+  # interval into it on startup, so a redeploy is enough (stl-verify/AGENTS.md).
+  MATERIALIZE_INTERVAL: "1h"
+  # Off the hour: the watcher data validators tick at :00-:25 and the indexers roll over on the hour.
+  MATERIALIZE_SCHEDULE_OFFSET: "40m"
+  # The materialize_<projection>() wrappers to run, each doing its projection's own
+  # pre-flight refusals first (docs/runbooks/vector-position-materializer.md). The worker
+  # exits if one is not callable. Prerequisites before replicas go to 1: #624
+  # (materialize_morpho_market) and #626 (materialize_morpho_vault) merged and migrated.
+  POSITION_PROJECTIONS: "materialize_morpho_market,materialize_morpho_vault"

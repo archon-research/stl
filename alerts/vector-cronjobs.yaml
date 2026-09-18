@@ -126,6 +126,10 @@ groups:
         # for a full day. VectorCronjobRunFailing still warns on it, and
         # VectorCoreModelRunnerStale below is its critical rule.
         #
+        # position-materializer: one failing view fails its hourly run, which is
+        # errors=1/successes=0 for the window while the other views wrote.
+        # VectorPositionMaterializerViewFailing and ViewNotCompleting replace it.
+        #
         # The 1h window spans >=1 cycle for every other covered cronjob — even
         # the slowest of them, watcher-data-validator (1h), and many cycles for
         # the faster ones. Distinct from VectorCronjobWorkerDown: here the
@@ -144,6 +148,7 @@ groups:
                 service_name!~"([a-z0-9-]+-)?block-republisher",
                 service_name!~"([a-z0-9-]+-)?block-meta-loader",
                 service_name!="core-model-runner",
+                service_name!="position-materializer",
                 k8s_namespace_name="vector"
               }[1h])
             ) > 0
@@ -162,6 +167,7 @@ groups:
                 service_name!~"([a-z0-9-]+-)?block-republisher",
                 service_name!~"([a-z0-9-]+-)?block-meta-loader",
                 service_name!="core-model-runner",
+                service_name!="position-materializer",
                 k8s_namespace_name="vector"
               }[1h])
             ) == 0
@@ -219,7 +225,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|reference-capital-indexer|core-model-runner"
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|reference-capital-indexer|core-model-runner|position-materializer"
               }
             ) < 1
           )
@@ -227,7 +233,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|reference-capital-indexer|core-model-runner"
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|reference-capital-indexer|core-model-runner|position-materializer"
               }
             ) > 0
           )
@@ -710,3 +716,186 @@ groups:
             /debt and /total-capital series is now frozen on its last value via
             locf.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerbalancesheetstalled
+
+  - name: vector-position-materializer
+    interval: 60s
+    rules:
+      - alert: VectorPositionMaterializerSilentlyEmpty
+        # Runs succeed but no view appended anything in 6h, which on a live chain means an upstream
+        # stall. The offset gate needs the seeded series to exist 6h back, so a cold start does not fire.
+        expr: |
+          (
+            sum by (service_name, cluster) (
+              increase(position_materializer_projection_runs_total{
+                status="ok",
+                k8s_namespace_name="vector"
+              }[6h])
+            ) > 0
+          )
+          and
+          (
+            sum by (service_name, cluster) (
+              increase(position_materializer_rows_changed_total{
+                k8s_namespace_name="vector"
+              }[6h])
+            ) == 0
+          )
+          and on (service_name, cluster)
+          (
+            sum by (service_name, cluster) (
+              count_over_time(position_materializer_rows_changed_total{
+                k8s_namespace_name="vector"
+              }[1h] offset 5h)
+            ) > 0
+          )
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "{{ $labels.service_name }} has appended no observations in 6h"
+          description: >-
+            Runs are succeeding on {{ $labels.cluster }} but
+            position_materializer_rows_changed_total has not moved in 6 hours, so
+            position_state is not tracking new positions. Most likely an upstream
+            indexer has stalled, or a projection view's join has gone empty.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializersilentlyempty"
+
+      - alert: VectorPositionMaterializerWithholdingPositions
+        # Every sample in 3h > 0, with samples 90m-3h back and in the last 65m. A restart leaves the gauge
+        # absent for up to a tick, so the window is read with min_over_time and does not use for:.
+        expr: |
+          min_over_time((max by (projection, cluster) (
+            position_materializer_positions_refused{k8s_namespace_name="vector"}
+          ))[3h:1m]) > 0
+          and on (projection, cluster)
+          count_over_time((max by (projection, cluster) (
+            position_materializer_positions_refused{k8s_namespace_name="vector"}
+          ))[90m:1m] offset 90m) > 0
+          and on (projection, cluster)
+          count_over_time((max by (projection, cluster) (
+            position_materializer_positions_refused{k8s_namespace_name="vector"}
+          ))[65m:1m]) > 0
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "position-materializer is withholding positions in {{ $labels.projection }}"
+          description: >-
+            {{ $labels.projection }} has withheld or declined {{ $value }} position(s) on
+            {{ $labels.cluster }} for 3h. A withheld position reads as current downstream while
+            sitting at a stale value; a declined correction means the view and the spine disagree.
+            The runbook has a query per class.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerwithholdingpositions"
+
+      - alert: VectorPositionMaterializerViewFailing
+        # One view is failing while others succeed. The generic cronjob alerts fire
+        # on the RUN, so a single bad view among several is visible there only as a
+        # whole-run error; this names the view, which is what the runbook needs.
+        expr: |
+          sum by (materializer, cluster) (
+            increase(position_materializer_projection_runs_total{
+              status="error",
+              k8s_namespace_name="vector"
+            }[15m])
+          ) > 0
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "position-materializer view {{ $labels.materializer }} is failing"
+          description: >-
+            Projection {{ $labels.materializer }} returned an error on
+            {{ $labels.cluster }} in the last 15m. The runner logs the failure
+            and continues, so the other views in the same run did write; only
+            this one did not.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerviewfailing"
+
+      - alert: VectorPositionMaterializerViewNotCompleting
+        # A cancelled projection is recorded as status="canceled", which ViewFailing and the
+        # shared failure alerts ignore so a rollout does not fire them. A view cancelled on
+        # every tick for 3h (runs longer than the rollout cadence, or cancelled by Temporal)
+        # would then fire nothing, so this catches cancellations with no completed run.
+        expr: |
+          sum by (materializer, cluster) (
+            increase(position_materializer_projection_runs_total{
+              status="canceled",
+              k8s_namespace_name="vector"
+            }[3h])
+          ) > 0
+          unless
+          sum by (materializer, cluster) (
+            increase(position_materializer_projection_runs_total{
+              status="ok",
+              k8s_namespace_name="vector"
+            }[3h])
+          ) > 0
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "position-materializer view {{ $labels.materializer }} is not completing"
+          description: >-
+            Projection {{ $labels.materializer }} on {{ $labels.cluster }} was cancelled at
+            least once in 3h and completed no run. It appends nothing while no failure alert
+            fires.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerviewnotcompleting"
+
+      - alert: VectorPositionMaterializerLevelReadFailing
+        # Two failed reads in 3h. While a read fails its gauge is absent, so WithholdingPositions or
+        # CacheTableGrowthHigh cannot fire; this is what says so.
+        expr: |
+          sum by (read, cluster) (
+            increase(position_materializer_read_failures_total{k8s_namespace_name="vector"}[3h])
+          ) >= 2
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "position-materializer cannot read its {{ $labels.read }} level"
+          description: >-
+            The {{ $labels.read }} read failed at least twice in 3h on {{ $labels.cluster }}. Its gauge
+            is absent while the read fails, so the alert that reads it cannot fire.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerlevelreadfailing"
+
+      - alert: VectorPositionMaterializerCacheTableGrowthHigh
+        # Tripwire for plain caches fed by position_state triggers (db/migrations/AGENTS.md). Threshold:
+        # half the ~100M plain-table budget (VectorUniswapV4AppendOnChangeGrowthHigh), so conversion is
+        # planned early. Read with min_over_time over the restart gap, as WithholdingPositions is.
+        expr: |
+          min_over_time((max by (table, cluster) (
+            position_materializer_cache_rows{k8s_namespace_name="vector"}
+          ))[6h:5m]) > 5e7
+          and on (table, cluster)
+          count_over_time((max by (table, cluster) (
+            position_materializer_cache_rows{k8s_namespace_name="vector"}
+          ))[3h:5m] offset 3h) > 0
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "Vector {{ $labels.table }} outgrowing its plain-table budget"
+          description: >-
+            {{ $labels.table }} holds an estimated {{ $value | humanize }} rows on
+            {{ $labels.cluster }}, past the 50M mark at which a plain table needs
+            revisiting. Nothing is broken; the runbook carries the action. The
+            figure is an estimate from planner statistics, so it moves with
+            autovacuum rather than continuously.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializercachetablegrowthhigh"

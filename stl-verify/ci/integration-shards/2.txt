@@ -71,3 +71,5 @@
 ./internal/services/block_republish
 ./internal/services/block_meta_loader
 ./cmd/cronjobs/block-meta-loader
+./cmd/cronjobs/position-materializer
+./internal/services/position_materializer

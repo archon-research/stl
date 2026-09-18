@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: position-materializer
+spec:
+  # Ships at 0 on purpose: every tick re-projects each configured view's whole
+  # history and appends the observations not yet stored, so the FIRST tick is the
+  # bootstrap. Rollout is in the runbook ("Before the first run"); bump to 1 in a
+  # separate change, per environment, through the replicas: entry in each
+  # overlay's kustomization.yaml rather than here.
+  replicas: 0
+  # Recreate, because replicas: 1 is a correctness bound (one pod on the Temporal
+  # task queue), not a cost choice.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: position-materializer
+  template:
+    metadata:
+      labels:
+        app: position-materializer
+    spec:
+      serviceAccountName: position-materializer
+      containers:
+        - name: position-materializer
+          image: position-materializer
+          env:
+            # Inject the deployment name so the worker registers its Temporal
+            # schedule/task queue under this name (cfg.Name) and its metrics
+            # carry service_name="position-materializer".
+            - name: SERVICE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app']
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            # Carries POSITION_PROJECTIONS (the explicit materialize_<projection> list) and
+            # MATERIALIZE_INTERVAL; the secret carries DATABASE_URL — interim
+            # credentials until the dedicated stl_materialize role (VEC-562).
+            - configMapRef:
+                name: position-materializer
+            - secretRef:
+                name: position-materializer
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      terminationGracePeriodSeconds: 90
