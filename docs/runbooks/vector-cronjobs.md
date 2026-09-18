@@ -1324,23 +1324,29 @@ which the worker's startup guard rejects — it requires the deployed
 The block-meta loader paged more than 3,000,000 `block_meta_worklist` rows for one
 chain in 24h — about three times chain 1's full first pass of 981,915 pending
 blocks. **Nothing is broken.** `block_meta_worklist` is an UNLOGGED scratch table
-holding one chain's pending blocks for the length of a run, and a run that reaches
-the end clears its own chain. This is the tripwire on the assumption that the
-pending set stays bounded, so that the table can stay plain and unpartitioned.
+holding one chain's pending blocks for the length of a run, and a run clears its
+own rows when it closes. Two runs may cover one chain at once — an operator's
+on-demand pass and the hourly top-up — and each holds its own slice, so an overlap
+doubles the rows for as long as it lasts. This is the tripwire on the assumption
+that the pending set stays bounded, so that the table can stay plain and
+unpartitioned.
 
 Warning severity: no data is wrong and nothing is stale. It is a capacity signal.
 
 ### First checks
 
-1. **Is the same run failing repeatedly?** A run that dies before it finishes
-   leaves its rows behind, and the next run resumes from them rather than
-   re-enumerating. Repeated failures re-page the same set over and over:
+1. **Is the same run failing repeatedly?** A run that dies before it closes leaves
+   its slice behind, and a later run sweeps it only once the owning run is 48h old.
+   Repeated failures leave one slice per attempt:
 
    ```sql
-   SELECT chain_id, count(*) FROM block_meta_worklist GROUP BY chain_id;
+   SELECT w.chain_id, w.run_id, count(*), min(r.started_at) AS run_started
+     FROM block_meta_worklist w JOIN writer_run r ON r.id = w.run_id
+    GROUP BY w.chain_id, w.run_id ORDER BY run_started;
    ```
 
-   Rows sitting there while no run is in flight mean the last one did not finish.
+   Several slices on one chain with no run in flight mean repeated failures; two
+   slices with both runs live is an ordinary overlap.
    Check `VectorCronjobRunFailing` for that chain's `service_name`, and the
    Temporal UI for the workflow's last outcome.
 

@@ -28,8 +28,10 @@ type BlockMetaRepository struct {
 }
 
 // NewBlockMetaRepository creates a new PostgreSQL block_meta repository. buildID and runID are the
-// build and the writer run
-// opened by the process; it stamps every row the loader writes (ADR-0006 §2).
+// build and the writer run opened by the process; it stamps every row the loader writes (ADR-0006 §2).
+//
+// runID must belong to this logical run and no other: it also owns the run's work-list slice, and a
+// run id shared with a second concurrent pass means each clears the other's list at its own start.
 func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, runID buildregistry.RunID) (*BlockMetaRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
@@ -61,17 +63,21 @@ func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID bui
 type workListArm struct {
 	table   string // the referencing table, and the hypertable whose chunks give the windows
 	partCol string // its partition column, read from the catalogue; the window is expressed on it alone
-	sql     string // $1 = chain id; %s = the window predicate on partCol
+	sql     string // $1 = chain id, $2 = run id; %s = the window predicate on partCol
 }
 
-// armSQL builds one arm. parent is empty for a table carrying chain_id natively; otherwise the arm
-// joins parent on parentRef = table.parentKey and takes chain from there.
+// armSQL builds one arm, taking chain natively or from parent joined on parentRef = table.parentKey. Rows
+// carry the enumerating run, and a block block_meta already holds is never written.
 func armSQL(table, parent, parentKey, parentRef string) string {
 	const shape = `
-		INSERT INTO block_meta_worklist (chain_id, block_number, block_version)
-		SELECT %s.chain_id, t.block_number, t.block_version
+		INSERT INTO block_meta_worklist (chain_id, run_id, block_number, block_version)
+		SELECT %s.chain_id, $2, t.block_number, t.block_version
 		  FROM %s t%s
 		 WHERE %s.chain_id = $1 AND %%s
+		   AND NOT EXISTS (SELECT 1 FROM block_meta m
+		                    WHERE m.chain_id = $1
+		                      AND m.block_number = t.block_number
+		                      AND m.block_version = t.block_version)
 		ON CONFLICT DO NOTHING`
 	src, join := "t", ""
 	if parent != "" {
@@ -226,7 +232,7 @@ func (r *BlockMetaRepository) enumerateWindow(ctx context.Context, arm workListA
 	if _, err := tx.Exec(ctx, `SET LOCAL timescaledb.enable_tiered_reads = on`); err != nil {
 		return fmt.Errorf("enabling tiered reads for %s: %w", arm.table, err)
 	}
-	if _, err := tx.Exec(ctx, fmt.Sprintf(arm.sql, where), chainID); err != nil {
+	if _, err := tx.Exec(ctx, fmt.Sprintf(arm.sql, where), chainID, r.runID); err != nil {
 		return fmt.Errorf("enumerating %s for chain %d: %w", arm.table, chainID, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -240,15 +246,17 @@ func quoteTimestamp(t time.Time) string {
 	return "'" + t.UTC().Format("2006-01-02 15:04:05.999999-07") + "'::timestamptz"
 }
 
-// blockWorkList pages the run's work list. The list is a committed table, so nothing is held open
-// between batches: each page is its own pooled query, and a run that dies leaves the list behind for
-// the next one to resume from rather than discarding hours of enumeration; a pass that reaches the
-// end clears its own chain, so surviving rows always mean an interrupted run.
+// blockWorkList pages one run's slice of the work list. The list is a committed table, so nothing is
+// held open between batches: each page is its own pooled query. Every statement here is scoped to the
+// run that enumerated the slice, so a second run on the same chain -- the scheduled top-up overlapping
+// an operator's pass -- reads and deletes its own rows only.
 type blockWorkList struct {
-	pool    *pgxpool.Pool
-	logger  *slog.Logger
-	chainID int64
-	after   outbound.BlockRef
+	pool       *pgxpool.Pool
+	logger     *slog.Logger
+	chainID    int64
+	runID      buildregistry.RunID
+	enumerated int64 // rows this run put on the list; the cursor must account for every one of them
+	after      outbound.BlockRef
 }
 
 // OpenWorkList enumerates the blocks chainID references that block_meta lacks, once, into
@@ -258,60 +266,163 @@ type blockWorkList struct {
 // run because its temp table was ON COMMIT DROP, and that transaction's backend_xid pins VACUUM's
 // removable cutoff database-wide even with no snapshot held -- for chain 1 that is hours.
 func (r *BlockMetaRepository) OpenWorkList(ctx context.Context, chainID int64, headMargin int64) (outbound.BlockWorkList, error) {
-	// Every run enumerates from scratch. Rows surviving a previous run say nothing about whether its
-	// enumeration FINISHED -- windows commit one at a time, so a run killed part way leaves the arms it
-	// reached and none of the rest, and resuming that reads a partial list as a complete one. Resuming
-	// the expensive half is the anti-join's job below, and it works whether or not this table survived.
-	if _, err := r.pool.Exec(ctx,
-		`DELETE FROM block_meta_worklist WHERE chain_id = $1`, chainID); err != nil {
-		return nil, fmt.Errorf("clearing the work list for chain %d: %w", chainID, err)
+	if err := r.clearOwnSlice(ctx, chainID); err != nil {
+		return nil, err
 	}
+	// Fatal, deliberately: the sweep is a DELETE on the same pool every statement below uses, so one
+	// that fails is a database this run cannot finish against either.
+	if err := r.sweepAbandonedSlices(ctx); err != nil {
+		return nil, fmt.Errorf("opening the work list for chain %d: %w", chainID, err)
+	}
+	if err := r.enumerateArms(ctx, chainID); err != nil {
+		return nil, err
+	}
+	if err := r.removeAlreadyLoaded(ctx, chainID); err != nil {
+		return nil, err
+	}
+	if err := r.applyHeadMargin(ctx, chainID, headMargin); err != nil {
+		return nil, err
+	}
+	enumerated, err := r.measureSlice(ctx, chainID)
+	if err != nil {
+		return nil, fmt.Errorf("opening the work list for chain %d: %w", chainID, err)
+	}
+	return &blockWorkList{pool: r.pool, logger: r.logger, chainID: chainID, runID: r.runID,
+		enumerated: enumerated, after: outbound.BlockRef{Number: -1, Version: -1}}, nil
+}
+
+// clearOwnSlice restarts this run's slice. Isolation comes from the run id, not from this DELETE,
+// which only matters to a caller that opens two lists under one run. Rows left by a previous run say
+// nothing about whether its enumeration FINISHED -- windows commit one at a time, so a run killed part
+// way leaves the arms it reached and none of the rest. Resuming the expensive half is the anti-join's
+// job, and that works whether or not this table survived.
+func (r *BlockMetaRepository) clearOwnSlice(ctx context.Context, chainID int64) error {
+	if _, err := r.pool.Exec(ctx,
+		`DELETE FROM block_meta_worklist WHERE chain_id = $1 AND run_id = $2`, chainID, r.runID); err != nil {
+		return fmt.Errorf("clearing the work list for chain %d: %w", chainID, err)
+	}
+	return nil
+}
+
+// enumerateArms runs every arm the register declares, one partition-column window at a time.
+func (r *BlockMetaRepository) enumerateArms(ctx context.Context, chainID int64) error {
 	arms, err := r.workListArms(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for _, arm := range arms {
 		windows, err := r.windowPredicates(ctx, arm.table, arm.partCol)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for _, where := range windows {
 			if err := r.enumerateWindow(ctx, arm, where, chainID); err != nil {
-				return nil, err
+				return err
 			}
 		}
 		r.logger.Debug("work list arm enumerated", "table", arm.table, "chain", chainID, "windows", len(windows))
 	}
-	// The pending set is what the arms found minus what block_meta already has. Subtracting here rather
-	// than inside every arm keeps block_meta out of six plans, and it is a plain table, so this is one
-	// relation-level pass instead of six.
+	return nil
+}
+
+// removeAlreadyLoaded drops blocks another run loaded while this run's windows were enumerating.
+func (r *BlockMetaRepository) removeAlreadyLoaded(ctx context.Context, chainID int64) error {
 	if _, err := r.pool.Exec(ctx, `
 		DELETE FROM block_meta_worklist w
-		 WHERE w.chain_id = $1
+		 WHERE w.chain_id = $1 AND w.run_id = $2
 		   AND EXISTS (SELECT 1 FROM block_meta m
 		                WHERE m.chain_id = w.chain_id
 		                  AND m.block_number = w.block_number
-		                  AND m.block_version = w.block_version)`, chainID); err != nil {
-		return nil, fmt.Errorf("removing already-loaded blocks for chain %d: %w", chainID, err)
+		                  AND m.block_version = w.block_version)`, chainID, r.runID); err != nil {
+		return fmt.Errorf("removing already-loaded blocks for chain %d: %w", chainID, err)
 	}
-	// The head margin holds back the newest blocks while the archive catches up, so it measures from
-	// the chain's head: the highest block either still pending or already loaded. Measured from the
-	// pending set alone, a gap narrower than the margin sits entirely inside it and is deleted whole.
-	if headMargin > 0 {
-		if _, err := r.pool.Exec(ctx, `
-			DELETE FROM block_meta_worklist w
-			 WHERE w.chain_id = $1
-			   AND w.block_number > (
-			        SELECT max(head) - $2 FROM (
-			          SELECT max(block_number) AS head FROM block_meta_worklist WHERE chain_id = $1
-			          UNION ALL
-			          SELECT max(block_number) FROM block_meta WHERE chain_id = $1) t)`,
-			chainID, headMargin); err != nil {
-			return nil, fmt.Errorf("applying the head margin for chain %d: %w", chainID, err)
-		}
+	return nil
+}
+
+// applyHeadMargin holds back the newest blocks while the archive catches up, measured from the chain's
+// head: the highest block either still pending or already loaded. Measured from the pending set alone,
+// a gap narrower than the margin sits entirely inside it and is deleted whole. The head is read across
+// runs on purpose -- it is the chain's, not this run's.
+func (r *BlockMetaRepository) applyHeadMargin(ctx context.Context, chainID, headMargin int64) error {
+	if headMargin <= 0 {
+		return nil
 	}
-	return &blockWorkList{pool: r.pool, logger: r.logger, chainID: chainID,
-		after: outbound.BlockRef{Number: -1, Version: -1}}, nil
+	if _, err := r.pool.Exec(ctx, `
+		DELETE FROM block_meta_worklist w
+		 WHERE w.chain_id = $1 AND w.run_id = $3
+		   AND w.block_number > (
+		        SELECT max(head) - $2 FROM (
+		          SELECT max(block_number) AS head FROM block_meta_worklist
+		           WHERE chain_id = $1 AND run_id = $3
+		          UNION ALL
+		          SELECT max(block_number) FROM block_meta WHERE chain_id = $1) t)`,
+		chainID, headMargin, r.runID); err != nil {
+		return fmt.Errorf("applying the head margin for chain %d: %w", chainID, err)
+	}
+	return nil
+}
+
+// abandonedSliceAge is how old a run must be before another run may delete its rows. A slice belongs
+// to its run until then, whether or not that run is still alive: writer_run records no end, so age is
+// the only signal.
+//
+// It must exceed the longest attempt the system permits -- the loader's activityTimeout, 24h
+// (cmd/cronjobs/block-meta-loader/load.go) -- or a pass still running at its own ceiling has its slice
+// taken. Doubling that is the margin; sweeping a slice whose run is alive is caught by the cursor
+// rather than silently ending the run, but it still costs that run its work.
+//
+// A literal, not a bind parameter, so the planner sees the window it is filtering on.
+const abandonedSliceAge = "48 hours"
+
+// closeTimeout bounds the slice delete on the shutdown path, which runs outside the run's context.
+const closeTimeout = 30 * time.Second
+
+// sweepAbandonedSlices removes rows left by runs old enough that no live run can own them. Without it
+// a killed run's slice stays forever, because nothing else deletes another run's rows.
+//
+// Every chain, not just this one: a chain whose deployment is retired never opens another list, so a
+// slice abandoned there would have no other sweeper. The age predicate already excludes any run that
+// could still be alive, which is what makes the wider scope safe.
+//
+// The join to writer_run is what dates a slice. A row whose run is gone is therefore never swept; the
+// foreign key makes that unreachable, and it stays unreachable only while writer_run has no retention.
+func (r *BlockMetaRepository) sweepAbandonedSlices(ctx context.Context) error {
+	tag, err := r.pool.Exec(ctx, `
+		DELETE FROM block_meta_worklist w
+		 USING writer_run run
+		 WHERE w.run_id = run.id
+		   AND w.run_id <> $1
+		   AND run.started_at < now() - interval '`+abandonedSliceAge+`'`,
+		r.runID)
+	if err != nil {
+		return fmt.Errorf("sweeping abandoned work-list slices: %w", err)
+	}
+	if n := tag.RowsAffected(); n > 0 {
+		r.logger.Info("swept abandoned work-list rows", "rows", n)
+	}
+	return nil
+}
+
+// sliceSizeSQL counts one run's rows on a chain. Nothing but that run inserts them and nothing but
+// that run deletes them, so the count is fixed for the run's lifetime -- which is what lets the cursor
+// tell a drained list from one deleted under it.
+const sliceSizeSQL = `SELECT count(*) FROM block_meta_worklist WHERE chain_id = $1 AND run_id = $2`
+
+// measureSlice sizes this run's slice and reports whether another run is loading the same chain. An
+// overlap is legal and costs both runs the blocks they read twice, so it is logged where the cost is
+// paid rather than inferred afterwards from an archive bill.
+func (r *BlockMetaRepository) measureSlice(ctx context.Context, chainID int64) (int64, error) {
+	var mine, others int64
+	if err := r.pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE run_id = $2), count(*) FILTER (WHERE run_id <> $2)
+		  FROM block_meta_worklist WHERE chain_id = $1`, chainID, r.runID).Scan(&mine, &others); err != nil {
+		return 0, fmt.Errorf("sizing the work list for chain %d: %w", chainID, err)
+	}
+	if others > 0 {
+		r.logger.Info("another run holds a work list on this chain; the overlap is read twice",
+			"chain", chainID, "run", r.runID, "mine", mine, "theirs", others)
+	}
+	return mine, nil
 }
 
 // Next pages the work-list with a keyset cursor, so the ordered read is not restarted per batch.
@@ -321,9 +432,9 @@ func (w *blockWorkList) Next(ctx context.Context, limit int) ([]outbound.BlockRe
 	}
 	rows, err := w.pool.Query(ctx, `
 		SELECT block_number, block_version FROM block_meta_worklist
-		 WHERE chain_id = $1 AND (block_number, block_version) > ($2, $3)
+		 WHERE chain_id = $1 AND run_id = $2 AND (block_number, block_version) > ($3, $4)
 		 ORDER BY block_number, block_version
-		 LIMIT $4`, w.chainID, w.after.Number, w.after.Version, limit)
+		 LIMIT $5`, w.chainID, w.runID, w.after.Number, w.after.Version, limit)
 	if err != nil {
 		return nil, fmt.Errorf("reading the work list: %w", err)
 	}
@@ -341,13 +452,43 @@ func (w *blockWorkList) Next(ctx context.Context, limit int) ([]outbound.BlockRe
 	}
 	if len(out) > 0 {
 		w.after = out[len(out)-1]
+		return out, nil
 	}
-	return out, nil
+	// An empty page is the end of the list or a slice swept under this run. Rows stay until Close, so a
+	// short slice means blocks this run never reached.
+	if err := w.requireWholeSlice(ctx); err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
 
+func (w *blockWorkList) requireWholeSlice(ctx context.Context) error {
+	var left int64
+	if err := w.pool.QueryRow(ctx, sliceSizeSQL, w.chainID, w.runID).Scan(&left); err != nil {
+		return fmt.Errorf("checking the work-list slice for chain %d: %w", w.chainID, err)
+	}
+	if left != w.enumerated {
+		return fmt.Errorf("the work-list slice for chain %d was deleted under run %d: %d of %d rows remain, "+
+			"so this run reached the end of a list it did not finish", w.chainID, w.runID, left, w.enumerated)
+	}
+	return nil
+}
+
+// Close drops this run's slice. SIGTERM is the ordinary stop, and it reaches here with the run's
+// context already cancelled, so the delete runs on a context detached from it -- otherwise the one
+// path Close exists for is the one on which it always fails. A run killed outright still leaves its
+// slice behind, and a later run sweeps it once the owning run is old enough.
 func (w *blockWorkList) Close(ctx context.Context) {
-	// Nothing to clear: the chain is cleared at the start of every run, which is the one boundary, so
-	// rows left here are scratch the next Open discards rather than state anything depends on.
+	if w.pool == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	defer cancel()
+	if _, err := w.pool.Exec(ctx,
+		`DELETE FROM block_meta_worklist WHERE chain_id = $1 AND run_id = $2`, w.chainID, w.runID); err != nil {
+		w.logger.Warn("could not drop the work-list slice; the next run on this chain sweeps it",
+			"chain", w.chainID, "run", w.runID, "error", err)
+	}
 	w.pool = nil
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockmetacfg"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/block_meta_loader"
@@ -76,7 +77,7 @@ func loadWorkflow(ctx workflow.Context, params LoadParams) (LoadProgress, error)
 // loadActivities holds what the activity needs for the life of the worker, so a
 // run does not pay for opening the pool or the archive reader.
 type loadActivities struct {
-	cfg    config
+	cfg    blockmetacfg.Config
 	pool   *pgxpool.Pool
 	reader outbound.S3Reader
 	logger *slog.Logger
@@ -100,18 +101,18 @@ func (a *loadActivities) LoadBlockMeta(ctx context.Context, params LoadParams) (
 		return out, fmt.Errorf("creating block_meta repository: %w", err)
 	}
 
-	batchSize := a.cfg.batchSize
+	batchSize := a.cfg.BatchSize
 	if params.BatchSize > 0 {
 		batchSize = params.BatchSize
 	}
 
 	heartbeat := temporal.NewActivityProgress[LoadProgress]()
 	svc, err := block_meta_loader.New(block_meta_loader.Config{
-		ChainID:     a.cfg.chainID,
-		Bucket:      a.cfg.bucket,
+		ChainID:     a.cfg.ChainID,
+		Bucket:      a.cfg.Bucket,
 		BatchSize:   batchSize,
-		Concurrency: a.cfg.concurrency,
-		HeadMargin:  a.cfg.headMargin,
+		Concurrency: a.cfg.Concurrency,
+		HeadMargin:  a.cfg.HeadMargin,
 		OnProgress: func(total int64) {
 			_ = heartbeat.SaveProgress(ctx, LoadProgress{Loaded: total})
 		},
@@ -121,13 +122,13 @@ func (a *loadActivities) LoadBlockMeta(ctx context.Context, params LoadParams) (
 	}
 
 	a.logger.Info("block-meta-loader run starting",
-		"chain", a.cfg.chainID, "bucket", a.cfg.bucket, "batchSize", batchSize)
+		"chain", a.cfg.ChainID, "bucket", a.cfg.Bucket, "batchSize", batchSize)
 	loaded, err := svc.Run(ctx)
 	out.Loaded = loaded
 	if err != nil {
 		return out, err
 	}
-	a.logger.Info("block-meta-loader run complete", "chain", a.cfg.chainID, "rows", loaded)
+	a.logger.Info("block-meta-loader run complete", "chain", a.cfg.ChainID, "rows", loaded)
 	return out, nil
 }
 

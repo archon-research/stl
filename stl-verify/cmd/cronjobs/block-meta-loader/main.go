@@ -23,7 +23,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -37,6 +36,7 @@ import (
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockmetacfg"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 )
@@ -52,19 +52,6 @@ func main() {
 	}
 }
 
-// exitCode decides what a finished run is worth to the supervisor. It is a function rather than an
-// inline branch in main so the decision is testable without exiting the test binary.
-//
-// A SIGTERM arrives as a cancelled context and is how a drain or a deliberate stop reaches this
-// process, so it exits clean: counted as a failure it would consume a restart budget, and two node
-// drains in a long run would leave one real attempt.
-func exitCode(err error) int {
-	if err == nil || errors.Is(err, context.Canceled) {
-		return 0
-	}
-	return 1
-}
-
 var (
 	GitCommit string
 	GitBranch string
@@ -74,6 +61,9 @@ var (
 func init() {
 	buildinfo.Populate(&GitCommit, &GitBranch, &BuildTime)
 }
+
+// queueBaseName is this component's deployed name, and the base of its per-chain task queue.
+const queueBaseName = "block-meta-loader"
 
 // workflowTypeName is what an operator types into the Temporal UI's "Workflow
 // Type" field, so it is registered explicitly rather than derived from the Go
@@ -86,7 +76,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("resolving the task queue: %w", err)
 	}
 
-	cfg, err := loadConfig()
+	cfg, err := blockmetacfg.Load()
 	if err != nil {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
@@ -95,14 +85,14 @@ func run(ctx context.Context) error {
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.WorkerConfig{
 		Name:         taskQueue,
-		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(cfg.dsn)),
+		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(cfg.DSN)),
 		Register: func(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
 			return register(ctx, cfg, deps, r)
 		},
 	})
 }
 
-func register(ctx context.Context, cfg config, deps temporal.Dependencies, r worker.Registry) error {
+func register(ctx context.Context, cfg blockmetacfg.Config, deps temporal.Dependencies, r worker.Registry) error {
 	reader, err := newS3Reader(ctx, deps.Logger)
 	if err != nil {
 		return err
@@ -111,8 +101,8 @@ func register(ctx context.Context, cfg config, deps temporal.Dependencies, r wor
 	// s3:ListBucket and s3:GetObject come from an EKS Pod Identity association granted in the infra
 	// repo. Proven here, a missing grant is a pod that will not start rather than a run an operator
 	// started and has to come back to.
-	if err := s3adapter.NewArchiveReader(reader, cfg.bucket).Ping(ctx); err != nil {
-		return fmt.Errorf("the raw archive %s is unusable: %w", cfg.bucket, err)
+	if err := s3adapter.NewArchiveReader(reader, cfg.Bucket).Ping(ctx); err != nil {
+		return fmt.Errorf("the raw archive %s is unusable: %w", cfg.Bucket, err)
 	}
 
 	activities := &loadActivities{cfg: cfg, pool: deps.Pool, reader: reader, logger: deps.Logger}
@@ -121,7 +111,7 @@ func register(ctx context.Context, cfg config, deps temporal.Dependencies, r wor
 	activities.register(r)
 
 	deps.Logger.Info("block-meta-loader configured",
-		"chainID", cfg.chainID, "bucket", cfg.bucket, "environment", cfg.deployEnv)
+		"chainID", cfg.ChainID, "bucket", cfg.Bucket, "environment", cfg.DeployEnv)
 	return nil
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -56,6 +57,7 @@ type mockBlockMetaRepo struct {
 	upsertErr error
 	openErr   error
 	nextErr   error
+	failCall  int // when set, Next fails on this call number (1-based) with nextErr
 	calls     int
 	opened    int
 	closed    int
@@ -78,10 +80,10 @@ func (m *mockBlockMetaRepo) OpenWorkList(_ context.Context, _ int64, _ int64) (o
 }
 
 func (w *mockWorkList) Next(_ context.Context, limit int) ([]outbound.BlockRef, error) {
-	if w.repo.nextErr != nil {
+	w.repo.calls++
+	if w.repo.nextErr != nil && (w.repo.failCall == 0 || w.repo.failCall == w.repo.calls) {
 		return nil, w.repo.nextErr
 	}
-	w.repo.calls++
 	var out []outbound.BlockRef
 	for _, b := range w.snap {
 		if b.Number > w.after.Number || (b.Number == w.after.Number && b.Version > w.after.Version) {
@@ -153,6 +155,124 @@ func TestRun_FillsAllPendingBlocksAcrossBatches(t *testing.T) {
 	}
 	if repo.calls < 2 {
 		t.Errorf("expected at least 2 PendingBlocks calls (batched), got %d", repo.calls)
+	}
+}
+
+// A bounded run reads its cap and stops, and the next one carries on. This is what lets a schedule
+// exist at all: an unbounded tick on an unbootstrapped chain is the multi-hour pass a deploy must
+// never start.
+func TestRun_StopsAtTheBlockCapAndTheNextRunResumes(t *testing.T) {
+	universe := []outbound.BlockRef{
+		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0},
+		{Number: 40, Version: 0}, {Number: 50, Version: 0},
+	}
+	repo := &mockBlockMetaRepo{universe: universe}
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 2, MaxBlocks: 3},
+		repo, &mockS3Reader{streamFn: streamTimestampByBlock}, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	total, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Three, not four: the cap cuts the second page short rather than letting a full batch overrun it.
+	if total != 3 {
+		t.Fatalf("first run upserted %d blocks, want 3 (the cap)", total)
+	}
+
+	// The blocks the cap left behind are the next run's work.
+	repo.universe = universe[3:]
+	repo.upserted = nil
+	rest, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if rest != 2 {
+		t.Errorf("second run upserted %d blocks, want the 2 the cap left", rest)
+	}
+}
+
+// readerMissing streams every block except those given, which are absent from the archive.
+func readerMissing(blocks ...int64) *mockS3Reader {
+	return &mockS3Reader{streamFn: func(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+		parsed, ok := s3key.Parse(key)
+		if !ok {
+			return nil, fmt.Errorf("unparseable key %q", key)
+		}
+		if slices.Contains(blocks, parsed.BlockNumber) {
+			return nil, outbound.ErrObjectNotFound
+		}
+		return streamTimestampByBlock(ctx, bucket, key)
+	}}
+}
+
+// A run whose cap equals what is pending has drained the list, not been capped, so its misses fail it.
+func TestRun_ACapThatExactlyDrainsTheListStillReportsMisses(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
+		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0},
+	}}
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 2, MaxBlocks: 3}, repo, readerMissing(20), testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := svc.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "20/0") {
+		t.Fatalf("Run returned %v; a drained list with an absent block must fail naming it", err)
+	}
+}
+
+// A run that stops with blocks still pending is capped, and does not report the misses it saw.
+func TestRun_ACapWithBlocksStillPendingDoesNotReportMisses(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
+		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0}, {Number: 40, Version: 0},
+	}}
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 2, MaxBlocks: 3}, repo, readerMissing(20), testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	total, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v; a capped run with blocks pending must not fail on the misses it saw", err)
+	}
+	if total != 2 {
+		t.Errorf("upserted %d, want 2 (three read under the cap, one absent)", total)
+	}
+}
+
+func TestRun_AFailedCheckPastTheCapSurfaces(t *testing.T) {
+	repo := &mockBlockMetaRepo{
+		universe: []outbound.BlockRef{{Number: 10, Version: 0}, {Number: 20, Version: 0}},
+		nextErr:  errors.New("connection reset"),
+		failCall: 2,
+	}
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 2, MaxBlocks: 2},
+		repo, &mockS3Reader{streamFn: streamTimestampByBlock}, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := svc.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "past the cap") {
+		t.Fatalf("Run returned %v; a failed check past the cap must fail the run", err)
+	}
+}
+
+// Zero is unbounded, which is what a first pass over a chain needs.
+func TestRun_ZeroCapIsUnbounded(t *testing.T) {
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
+		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0},
+	}}
+	svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 1, MaxBlocks: 0},
+		repo, &mockS3Reader{streamFn: streamTimestampByBlock}, testLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	total, err := svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if total != 3 {
+		t.Errorf("total = %d, want every pending block (3)", total)
 	}
 }
 
@@ -443,10 +563,9 @@ func TestRun_PagingFailureSurfaces(t *testing.T) {
 	}
 }
 
-// The growth tripwire reads this counter, so it has to carry the run's real pending-set size and it
-// has to exist before the first run: an unseeded counter first appears at its first increment, and
-// rate() never observes the 0->1.
-func TestRun_RecordsTheWorkListRowsItPages(t *testing.T) {
+// useManualMeter installs a manual metric reader as the global meter provider for one test.
+func useManualMeter(t *testing.T) *metricsdk.ManualReader {
+	t.Helper()
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
 	prev := otel.GetMeterProvider()
@@ -455,6 +574,13 @@ func TestRun_RecordsTheWorkListRowsItPages(t *testing.T) {
 		otel.SetMeterProvider(prev)
 		_ = mp.Shutdown(context.Background())
 	})
+	return reader
+}
+
+// The growth tripwire reads this counter, so it must carry the real pending-set size and exist before
+// the first run: rate() never observes an unseeded counter's 0->1.
+func TestRun_RecordsTheWorkListRowsItPages(t *testing.T) {
+	reader := useManualMeter(t)
 
 	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
 		{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0},
@@ -476,18 +602,23 @@ func TestRun_RecordsTheWorkListRowsItPages(t *testing.T) {
 
 func collectPagedRows(t *testing.T, r *metricsdk.ManualReader) (int64, bool) {
 	t.Helper()
+	return collectCounter(t, r, "block_meta.worklist.rows.paged")
+}
+
+func collectCounter(t *testing.T, r *metricsdk.ManualReader, name string) (int64, bool) {
+	t.Helper()
 	var rm metricdata.ResourceMetrics
 	if err := r.Collect(context.Background(), &rm); err != nil {
 		t.Fatalf("collect: %v", err)
 	}
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name != "block_meta.worklist.rows.paged" {
+			if m.Name != name {
 				continue
 			}
 			sum, ok := m.Data.(metricdata.Sum[int64])
 			if !ok {
-				t.Fatalf("metric is %T, want Sum[int64]", m.Data)
+				t.Fatalf("metric %s is %T, want Sum[int64]", name, m.Data)
 			}
 			var total int64
 			for _, dp := range sum.DataPoints {
@@ -497,4 +628,38 @@ func collectPagedRows(t *testing.T, r *metricsdk.ManualReader) (int64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// A capped run whose every read was absent made no progress, and would repeat that on every tick, so it
+// is counted apart from ordinary capped runs.
+func TestRun_ACapReachedOnlyByAbsentBlocksIsCounted(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		missing []int64
+		want    int64
+	}{
+		{name: "every block read was absent", missing: []int64{10, 20}, want: 1},
+		{name: "one block read loaded", missing: []int64{10}, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := useManualMeter(t)
+			repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{
+				{Number: 10, Version: 0}, {Number: 20, Version: 0}, {Number: 30, Version: 0}, {Number: 40, Version: 0},
+			}}
+			svc, err := New(Config{ChainID: 1, Bucket: "b", BatchSize: 2, MaxBlocks: 2}, repo, readerMissing(tc.missing...), testLogger())
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if _, err := svc.Run(context.Background()); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if capped, _ := collectCounter(t, reader, "block_meta.runs.capped"); capped != 1 {
+				t.Fatalf("block_meta.runs.capped = %d, want 1; the run under test must be capped", capped)
+			}
+			got, ok := collectCounter(t, reader, "block_meta.runs.capped_without_progress")
+			if !ok || got != tc.want {
+				t.Errorf("block_meta.runs.capped_without_progress = %d (present=%t), want %d", got, ok, tc.want)
+			}
+		})
+	}
 }

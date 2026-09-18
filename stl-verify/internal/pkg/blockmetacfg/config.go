@@ -1,4 +1,9 @@
-package main
+// Package blockmetacfg is the deployment configuration both block_meta jobs read: the on-demand
+// loader that fills a chain's history, and the scheduled top-up that keeps it current. One chain per
+// deployment and the same environment shape for both, so the guards cannot drift between them.
+//
+// The task queue is not here: chainutil.TaskQueueName derives it from each binary's own base name.
+package blockmetacfg
 
 import (
 	"fmt"
@@ -9,89 +14,83 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
-// config is the deployment's static configuration. One deployment serves one
+// Config is the deployment's static configuration. One deployment serves one
 // chain: the chain is not workflow input, because the S3 bucket, the Pod
 // Identity grant and the task queue are all per-chain and a run that took the
 // chain as a parameter could address none of them.
-type config struct {
-	chainID     int64
-	bucket      string
-	deployEnv   string
-	dsn         string
-	batchSize   int
-	concurrency int
-	headMargin  int64
+type Config struct {
+	ChainID     int64
+	Bucket      string
+	DeployEnv   string
+	DSN         string
+	BatchSize   int
+	Concurrency int
+	HeadMargin  int64
 }
 
-const (
-	// queueBaseName is this component's deployed name.
-	queueBaseName = "block-meta-loader"
+// defaultHeadMargin keeps the newest blocks out of a run, because the archive trails the indexers at the
+// head. HEAD_MARGIN tunes it per chain and 0 disables it.
+const defaultHeadMargin = int64(300)
 
-	// defaultHeadMargin keeps the newest blocks out of a run, because the archive trails the
-	// indexers at the head. A starting value covering ordinary lag, not a measured one;
-	// HEAD_MARGIN tunes it per chain and 0 disables it.
-	defaultHeadMargin = int64(300)
-)
-
-// loadConfig reads the deployment's environment. It runs at registration rather
+// Load reads the deployment's environment. It runs at registration rather
 // than per run, so a misconfigured deployment is a worker that will not start
 // instead of a run an operator has to start before finding out.
-func loadConfig() (config, error) {
-	var cfg config
+func Load() (Config, error) {
+	var cfg Config
 
 	chainID, err := chainutil.RequireChainID()
 	if err != nil {
 		return cfg, err
 	}
-	cfg.chainID = int64(chainID)
+	cfg.ChainID = int64(chainID)
 
-	cfg.dsn = os.Getenv("DATABASE_URL")
-	if cfg.dsn == "" {
+	cfg.DSN = os.Getenv("DATABASE_URL")
+	if cfg.DSN == "" {
 		return cfg, fmt.Errorf("DATABASE_URL is required")
 	}
-	cfg.bucket = os.Getenv("S3_BUCKET")
-	if cfg.bucket == "" {
+	cfg.Bucket = os.Getenv("S3_BUCKET")
+	if cfg.Bucket == "" {
 		return cfg, fmt.Errorf("S3_BUCKET is required")
 	}
 	// Required, not defaulted: it selects which environment's bucket names the guard
 	// below accepts, and empty surfaces from chainutil as a error naming neither.
-	if cfg.deployEnv, err = env.Require("DEPLOY_ENV"); err != nil {
+	if cfg.DeployEnv, err = env.Require("DEPLOY_ENV"); err != nil {
 		return cfg, err
 	}
 
 	if v := os.Getenv("BATCH_SIZE"); v != "" {
-		if cfg.batchSize, err = strconv.Atoi(v); err != nil {
+		if cfg.BatchSize, err = strconv.Atoi(v); err != nil {
 			return cfg, fmt.Errorf("BATCH_SIZE: %w", err)
 		}
 		// A negative parses fine and then reads as "unset" downstream, running at the
 		// default while the operator believes they set something.
-		if cfg.batchSize <= 0 {
-			return cfg, fmt.Errorf("BATCH_SIZE must be positive, got %d", cfg.batchSize)
+		if cfg.BatchSize <= 0 {
+			return cfg, fmt.Errorf("BATCH_SIZE must be positive, got %d", cfg.BatchSize)
 		}
 	}
 
-	if cfg.concurrency, err = positiveEnv("CONCURRENCY", 0); err != nil {
+	if cfg.Concurrency, err = PositiveEnv("CONCURRENCY", 0); err != nil {
 		return cfg, err
 	}
-	margin, err := positiveEnv("HEAD_MARGIN", int(defaultHeadMargin))
+	margin, err := PositiveEnv("HEAD_MARGIN", int(defaultHeadMargin))
 	if err != nil {
 		return cfg, err
 	}
-	cfg.headMargin = int64(margin)
+	cfg.HeadMargin = int64(margin)
 
 	// The same guard raw-data-backup takes at startup: the chain and the bucket
 	// arrive as independent variables, and reading the wrong chain's archive
 	// would write that chain's header times under this chain's id.
-	if err := chainutil.ValidateS3BucketForChain(cfg.chainID, cfg.bucket, cfg.deployEnv); err != nil {
+	if err := chainutil.ValidateS3BucketForChain(cfg.ChainID, cfg.Bucket, cfg.DeployEnv); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
 }
 
-// positiveEnv reads an optional non-negative integer, falling back to def when unset.
+// PositiveEnv reads an optional non-negative integer, falling back to def when unset.
 // A negative parses fine and then reads as "unset" downstream, running at a default
 // the operator believes they overrode.
-func positiveEnv(key string, def int) (int, error) {
+func PositiveEnv(key string, def int) (int, error) {
 	v := os.Getenv(key)
 	if v == "" {
 		return def, nil
