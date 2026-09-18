@@ -492,10 +492,12 @@ func TestRunCountsRowsOfANetworkTheMapDoesNotKnow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProvider() = %v", err)
 	}
+	// Two spellings of one network: the client's lookup folds case, so the
+	// counter must too, or one missing map entry fires as two alerts.
 	unmappedA := marketRow("0xaaa", "2026-09-17")
 	unmappedA.Network, unmappedA.ChainID = "plasma", nil
 	unmappedB := marketRow("0xbbb", "2026-09-17")
-	unmappedB.Network, unmappedB.ChainID = "plasma", nil
+	unmappedB.Network, unmappedB.ChainID = "Plasma", nil
 	h := newHarness(overview(
 		[]outbound.CoreModelReferenceMarketRow{unmappedA, unmappedB, marketRow("0xccc", "2026-09-17")},
 		[]outbound.CoreModelReferenceVaultRow{vaultRow("0xbeef", "2026-09-17")}))
@@ -506,20 +508,21 @@ func TestRunCountsRowsOfANetworkTheMapDoesNotKnow(t *testing.T) {
 	if len(h.markets.saved) != 3 {
 		t.Errorf("saved %d markets, want all 3: the rows land with a NULL chain id", len(h.markets.saved))
 	}
-	network, count := unmappedNetworkMetric(t, reader)
-	if network != "plasma" || count != 2 {
-		t.Errorf("unmapped_network_rows = %s/%d, want plasma/2", network, count)
+	series := unmappedNetworkSeries(t, reader)
+	if len(series) != 1 || series["plasma"] != 2 {
+		t.Errorf("unmapped_network_rows series = %v, want exactly {plasma: 2}: one folded label for both spellings", series)
 	}
 }
 
-// unmappedNetworkMetric extracts the single labelled data point of the
-// unmapped-network counter; the seeded unlabelled zero is ignored.
-func unmappedNetworkMetric(t *testing.T, reader *metric.ManualReader) (network string, count int64) {
+// unmappedNetworkSeries extracts the labelled data points of the
+// unmapped-network counter by network; the seeded unlabelled zero is ignored.
+func unmappedNetworkSeries(t *testing.T, reader *metric.ManualReader) map[string]int64 {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {
 		t.Fatalf("Collect() = %v", err)
 	}
+	series := map[string]int64{}
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
 			if m.Name != "core_model_reference.sync.unmapped_network_rows.total" {
@@ -531,12 +534,12 @@ func unmappedNetworkMetric(t *testing.T, reader *metric.ManualReader) (network s
 			}
 			for _, dp := range sum.DataPoints {
 				if v, ok := dp.Attributes.Value("network"); ok {
-					return v.AsString(), dp.Value
+					series[v.AsString()] = dp.Value
 				}
 			}
 		}
 	}
-	return "", 0
+	return series
 }
 
 func TestRunRecordsNothingWrittenWhenTheCycleFails(t *testing.T) {

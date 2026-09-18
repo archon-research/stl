@@ -213,15 +213,18 @@ func (s *Service) reportUnmappedNetworks(
 	markets []entity.CoreModelReferenceMarketResult,
 	vaults []entity.CoreModelReferenceVaultResult,
 ) {
+	// Keyed on the folded name the client's lookup missed on, so one gap in the
+	// map is one series and one alert whatever casing upstream used, and the
+	// label is the key an operator will type into the map.
 	unmapped := map[string]int{}
 	for _, m := range markets {
 		if m.ChainID == nil {
-			unmapped[m.Network]++
+			unmapped[strings.ToLower(m.Network)]++
 		}
 	}
 	for _, v := range vaults {
 		if v.ChainID == nil {
-			unmapped[v.Network]++
+			unmapped[strings.ToLower(v.Network)]++
 		}
 	}
 	for network, count := range unmapped {
