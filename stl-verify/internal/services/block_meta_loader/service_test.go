@@ -770,6 +770,30 @@ func TestRun_MixedBatchUnderConcurrencyKeepsResultsWithTheirOwnBlocks(t *testing
 	}
 }
 
+// runCancelledDuringFallback drives one block into the archive fallback and cancels the run's context
+// at cancelAt: "resolve" cancels inside HighestVersion, "retry" lets resolution succeed and cancels
+// before the read at the resolved version.
+func runCancelledDuringFallback(t *testing.T, cancelAt string) (int64, error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 700, Version: 0}}}
+	reader := &mockS3Reader{streamFn: func(rctx context.Context, _ string, _ string) (io.ReadCloser, error) {
+		if rctx.Err() != nil {
+			return nil, rctx.Err()
+		}
+		return nil, outbound.ErrObjectNotFound
+	}}
+	archive := &fakeArchive{highestVersionFn: func(actx context.Context, _ int64) (int, bool, error) {
+		cancel()
+		if cancelAt == "resolve" {
+			return 0, false, actx.Err()
+		}
+		return 1, true, nil // resolves fine; the cancelled retry read is what must surface
+	}}
+	return newTestServiceWithArchive(t, repo, reader, archive, 500).Run(ctx)
+}
+
 // Cancellation during the fallback must abort, not be mistaken for an absent block. The existing
 // cancellation test cancels before the run starts, so neither point inside readOne's fallback was
 // covered: a context error swallowed here would record a real block as permanently missing.
@@ -783,26 +807,7 @@ func TestRun_CancellationDuringTheFallbackAbortsRatherThanRecordingAMiss(t *test
 		{"between resolving and the retry read", "retry", "at resolved version"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			repo := &mockBlockMetaRepo{universe: []outbound.BlockRef{{Number: 700, Version: 0}}}
-
-			reader := &mockS3Reader{streamFn: func(rctx context.Context, _ string, _ string) (io.ReadCloser, error) {
-				if rctx.Err() != nil {
-					return nil, rctx.Err()
-				}
-				return nil, outbound.ErrObjectNotFound
-			}}
-			archive := &fakeArchive{highestVersionFn: func(actx context.Context, _ int64) (int, bool, error) {
-				cancel()
-				if c.when == "resolve" {
-					return 0, false, actx.Err()
-				}
-				return 1, true, nil // resolves fine; the cancelled retry read is what must surface
-			}}
-			svc := newTestServiceWithArchive(t, repo, reader, archive, 500)
-
-			total, err := svc.Run(ctx)
+			total, err := runCancelledDuringFallback(t, c.when)
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("error = %v, want it to wrap context.Canceled", err)
 			}
