@@ -766,6 +766,135 @@ func TestMaterializeMorphoMarketWithholdsATokenOnAnotherChain(t *testing.T) {
 	}
 }
 
+// The position-materializer reads this view by name and by column to export the withholding level, and
+// it ships in a different repository branch from this migration: nothing else fails if the shape drifts.
+// The runner's own tests build a stand-in from exactly this contract.
+func TestPositionProjectionWithheldPairViewMatchesTheContract(t *testing.T) {
+	ctx, pool := morphoMarketSeedOnly(t)
+	var shape string
+	if err := pool.QueryRow(ctx, `
+		SELECT string_agg(a.attname || ' ' || format_type(a.atttypid, NULL::integer), ', ' ORDER BY a.attnum)
+		  FROM pg_attribute a
+		 WHERE a.attrelid = 'public.position_projection_withheld_pair'::regclass
+		   AND a.attnum > 0 AND NOT a.attisdropped`).Scan(&shape); err != nil {
+		t.Fatalf("read the view's columns: %v", err)
+	}
+	if want := "projection text, pair text"; shape != want {
+		t.Errorf("position_projection_withheld_pair is (%s); want (%s) — the runner counts DISTINCT pair per projection", shape, want)
+	}
+
+	// The projection column must name the view the spine stamps on position_state and on the run row,
+	// or the runner adds the level to a projection that is not there and it reaches no alert.
+	seedMorphoMarketHolder(ctx, t, pool, 8453, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", `\x1234`, 951)
+	var projections, pairs int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(DISTINCT projection), count(DISTINCT pair) FROM position_projection_withheld_pair
+		 WHERE projection = 'public.position_morpho_market'`).Scan(&projections, &pairs); err != nil {
+		t.Fatal(err)
+	}
+	if projections != 1 || pairs == 0 {
+		t.Errorf("withheld pairs report %d projections and %d pairs under public.position_morpho_market; want 1 and at least 1",
+			projections, pairs)
+	}
+}
+
+// morpho_market_withheld_pair reads the cache, so a pair missing from it is excluded by the view's OWN
+// chain predicates and nothing else. That is the case the view's COMMENT promises is covered ("applies
+// the malformed-holder and token checks to every row itself"), and the case a cache rebuild is judged
+// against. The two legs run separately because each kills only its own predicate: with lt0's removed the
+// loan case stores a row keyed on a token from another chain, with ct0's removed the collateral case does.
+func TestMaterializeMorphoMarketWithholdsATokenOnAnotherChainMissingFromTheCache(t *testing.T) {
+	for _, leg := range []string{"loan", "collateral"} {
+		t.Run(leg, func(t *testing.T) {
+			ctx, pool := morphoMarketSeedOnly(t)
+			loan, coll := "1", "8453"
+			if leg == "loan" {
+				loan, coll = "8453", "1"
+			}
+			// The legs take DIFFERENT addresses, or a same-address market nets into one leg and the
+			// merge this predicate prevents — two tokens rendering one instrument_key — never happens.
+			// Market 9abd is the control: same shape, both legs on the market's own chain.
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO chain (chain_id, name) VALUES (8453, 'base') ON CONFLICT (chain_id) DO NOTHING;
+				INSERT INTO token (chain_id, address, symbol, decimals) VALUES (8453, '\xcafe', 'USDC', 6) ON CONFLICT DO NOTHING;
+				INSERT INTO token (chain_id, address, symbol, decimals) VALUES (1, '\xcafe', 'USDC', 6) ON CONFLICT DO NOTHING;
+				INSERT INTO token (chain_id, address, symbol, decimals) VALUES (8453, '\xbabe', 'WBTC', 8) ON CONFLICT DO NOTHING;
+				INSERT INTO token (chain_id, address, symbol, decimals) VALUES (1, '\xbabe', 'WBTC', 8) ON CONFLICT DO NOTHING;
+				INSERT INTO morpho_market (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, lltv, oracle_address, irm_address, created_at_block)
+				SELECT 1, p.id, '\x9abc', lt.id, ct.id, 0, '\x00', '\x00', 1
+				FROM protocol p, token lt, token ct
+				WHERE p.chain_id = 1 AND p.address = '\xff'
+				  AND lt.chain_id = `+loan+` AND lt.address = '\xcafe' AND ct.chain_id = `+coll+` AND ct.address = '\xbabe';
+				INSERT INTO morpho_market (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, lltv, oracle_address, irm_address, created_at_block)
+				SELECT 1, p.id, '\x9abd', lt.id, ct.id, 0, '\x00', '\x00', 1
+				FROM protocol p, token lt, token ct
+				WHERE p.chain_id = 1 AND p.address = '\xff'
+				  AND lt.chain_id = 1 AND lt.address = '\xcafe' AND ct.chain_id = 1 AND ct.address = '\xbabe';
+				INSERT INTO "user" (chain_id, address) VALUES (1, '\x7777777777777777777777777777777777777777');
+				INSERT INTO "user" (chain_id, address) VALUES (1, '\x8888888888888888888888888888888888888888');
+				INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+				SELECT u.id, m.id, 970, 0, '2026-02-01T00:00:00Z', 0, 0, 40, 100, 0
+				FROM "user" u, morpho_market m
+				WHERE u.chain_id = 1 AND u.address = '\x7777777777777777777777777777777777777777' AND m.market_id = '\x9abc';
+				INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+				SELECT u.id, m.id, 970, 0, '2026-02-01T00:00:00Z', 0, 0, 40, 100, 0
+				FROM "user" u, morpho_market m
+				WHERE u.chain_id = 1 AND u.address = '\x8888888888888888888888888888888888888888' AND m.market_id = '\x9abd'`); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			tag, err := pool.Exec(ctx, `
+				DELETE FROM morpho_market_position_current c USING "user" u
+				 WHERE u.id = c.user_id AND u.address = '\x7777777777777777777777777777777777777777'`)
+			if err != nil {
+				t.Fatalf("drop the holder from the cache: %v", err)
+			}
+			if tag.RowsAffected() != 1 {
+				t.Fatalf("removed %d cache rows for the holder; want 1, or the test does not cover a pair missing from the cache", tag.RowsAffected())
+			}
+			// Negative control: with the cache row gone the view withholds nothing for this pair, so a row
+			// that lands below can only have come through the join predicates.
+			var listed int
+			if err := pool.QueryRow(ctx, `
+				SELECT count(*) FROM morpho_market_withheld_pair w JOIN "user" u ON u.id = w.user_id
+				 WHERE u.address = '\x7777777777777777777777777777777777777777'`).Scan(&listed); err != nil {
+				t.Fatal(err)
+			}
+			if listed != 0 {
+				t.Fatalf("morpho_market_withheld_pair lists the pair %d time(s) with no cache row; the test no longer covers the view's own checks", listed)
+			}
+			if err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(new(int64)); err != nil {
+				t.Fatalf("a cross-chain pair missing from the cache aborted the run: %v", err)
+			}
+			var stored int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state WHERE holder_id = '7777777777777777777777777777777777777777'`).Scan(&stored); err != nil {
+				t.Fatal(err)
+			}
+			if stored != 0 {
+				t.Errorf("stored %d rows for a holder in a market taking its %s token from another chain; want 0, the view's own chain predicate must exclude it when the cache does not", stored, leg)
+			}
+			// Positive control: the same shape on the market's own chain lands, so the assertion above
+			// cannot pass because the seed or the run did nothing.
+			var control int
+			if err := pool.QueryRow(ctx, `
+				SELECT count(*) FROM position_state
+				 WHERE holder_id = '8888888888888888888888888888888888888888'
+				   AND instrument_key IN ('9abd:cafe', '9abd:babe')`).Scan(&control); err != nil {
+				t.Fatal(err)
+			}
+			if control != 2 {
+				t.Errorf("the same-chain control holder stored %d legs; want 2, or this test proves nothing about the cross-chain pair", control)
+			}
+			var leaked int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state WHERE instrument_key LIKE '9abc:%'`).Scan(&leaked); err != nil {
+				t.Fatal(err)
+			}
+			if leaked != 0 {
+				t.Errorf("%d rows carry the cross-chain market's instrument_key; a leg keyed on a token from another chain merges two tokens under one key", leaked)
+			}
+		})
+	}
+}
+
 // The refusal check and the spine's read are separate statements under READ COMMITTED, so a negative amount
 // committed between them is visible only to the append, which abs() would store as a plausible magnitude. The
 // spine's advisory lock holds the run between the two while the row commits; the check after the append refuses.
