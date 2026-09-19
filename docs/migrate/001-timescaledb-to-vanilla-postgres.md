@@ -511,72 +511,70 @@ Key rules to update:
 
 ---
 
-## 9. Verification Matrix
+## 9. Progress Tracker
 
-### Per-phase verification
+### Done (branch `toreluntang/vec-na/timescaledb-to-vanilla-postgres`, 10 commits)
 
-| Phase | Verification | Command | Pass criteria |
-|-------|-------------|---------|---------------|
-| 1 | Go unit tests | `make test` | All pass |
-| 1 | Go integration tests | `make test-integration` | All pass |
-| 1 | Python unit tests | `cd python && make test-unit` | All pass |
-| 1 | Python integration tests | `cd python && make test-integration` | All pass |
-| 2 | CI pipeline | Push branch, watch GH Actions | Green |
-| 3 | Migration on vanilla PG | `make test-integration` (migrator tests) | All migrations apply cleanly |
-| 3 | Append-only test | `TestConvertedTablesAreAppendOnly` | Pass |
-| 4 | Local dev cluster | `make dev-up && make dev-migrate` | Clean startup |
-| 4 | Workers function | `make run-watcher` + spot-check | Blocks indexed |
-| 5 | Staging deploy | ArgoCD sync after secret update | All pods healthy |
-| 5 | Staging smoke test | API queries, Grafana dashboards | Data present and correct |
-| 5 | Staging row-count audit | Compare TigerData vs RDS counts | Match within tolerance |
-| 5 | Prod deploy | After staging soak (48h+) | All pods healthy |
-| 5 | Prod smoke test | Same as staging | Data present and correct |
-| 6 | Terraform plan clean | `terraform plan` shows no drift | Clean |
+| Item | Commit | What changed |
+|------|--------|-------------|
+| Migrator pre-processor | `999ef11`, `8ca2152` | `tsdb_compat.go` strips `WITH (tsdb.*)`, `ALTER TABLE SET (timescaledb.*)`, `SET timescaledb.*` GUCs from migration SQL on vanilla PG. Checksums stay on original content. All 162 migrations pass. |
+| `block_meta_repository` | `999ef11` | Detects TimescaleDB at runtime; falls back to `information_schema` for partition column, skips chunk-window optimization and tiered-reads SET on vanilla PG. |
+| `time_bucket` → `date_bin` | `999ef11` | `_time_window.py`: `date_bin(make_interval(...), col, '2000-01-01'::timestamptz)` anchored at Postgres epoch matching `gap_policy._BUCKET_ORIGIN`. |
+| `time_bucket_gapfill` + `locf` → vanilla SQL | `39e1283` | 7 call sites across 3 Python repos replaced with `generate_series` + `LEFT JOIN` + count-group LOCF (`count(d.col) OVER ... AS grp` → `first_value(col) OVER (PARTITION BY grp ...)`). `last()` → `(array_agg(... ORDER BY ts DESC))[1]`. PG18-compatible (no `IGNORE NULLS`). |
+| Identifier rename | `9736fe9` | 56 Go files: `ImageTimescaleDB` → `ImagePostgres`, `StartTimescaleDBForMain` → `StartPostgresForMain`, `TimescaleDSN` → `PostgresDSN`, `timescaleDB` field → `postgres`. |
+| CI images | `6988622` | `go-ci.yml` service → `postgres:18`. `python-ci.yml` grep → `POSTGRES_IMAGE`. `conftest.py` → `postgres:18`. |
+| k8s dev-infra | `b499484` | `timescaledb.yaml` → `postgres.yaml` (postgres:18). Bootstrap removes `CREATE EXTENSION`. Migrate job, kind.yaml, dev config, Makefile all updated. |
+| `DisableScheduledJobs` | `9736fe9` | Now detects TimescaleDB; no-op on vanilla PG. `templateFormat` bumped to 3. |
+| Skip guards | `a11c4c5`, `666c4fc`, `18451d3` | `SkipWithoutTimescaleDB` helper + 48 skip guards across 13 test files covering all compression/tiering/chunk-specific tests. |
+| Plan + critique docs | `999ef11`, `5ee3141` | `docs/migrate/001-003`: plan, self-review, Fable 5.1 critique. |
+
+### Remaining (separate PRs)
+
+#### Next up — can start now
+
+| Item | Effort | Description |
+|------|--------|-------------|
+| **Baseline squash** | 3-5 days | Generate `00000000_000000_baseline.sql` from `pg_dump --schema-only` of a migrated TimescaleDB container. Move 162 migration files to `archive/`. Add `-- migrate: baseline` directive to migrator. Audit 37 `db/migrator/*_integration_test.go` files (many test specific migration transformations that lose their subject after squash). This is the **production migration path** — the pre-processor is transitional only. |
+| **`transformed._parity_*` redesign** | 2-3 days | `_parity_refresh` and `_parity_verify_all` iterate `timescaledb_information.chunks` at runtime. They `CREATE FUNCTION` fine on vanilla PG then fail on first call from `transform-worker`. Replace with a day-bucket approach. Also update `cmd/util/gen-transformed/emit.go` so regeneration doesn't reintroduce hypertable DDL. |
+| **`block_states` partitioning** | 1-2 days | The 30-day `add_retention_policy` disappears. Without replacement, `block_states` grows unbounded. Native range partitioning (daily, via `pg_partman` on RDS or a manual migration) makes retention `DROP PARTITION`. |
+| **Phase 0 sizing** | 0.5 day | Run `hypertable_compression_stats()` and `timescaledb_osm.tiered_chunks` sizes on prod to get the actual uncompressed data volume. Drives RDS instance class, storage, and downtime estimate. |
+| **RDS provisioning** | 1-2 days | Terraform in the infrastructure repo: `aws_db_instance`, parameter group, security groups, secrets, bootstrap script. Mirrors the existing `auth_db` pattern. Can start in parallel with everything above. |
+
+#### After baseline lands + RDS is provisioned
+
+| Item | Effort | Description |
+|------|--------|-------------|
+| **Staging data copy + cutover rehearsal** | 3-5 days | Schema from migrator on RDS. Data via parallel `COPY (SELECT * FROM t) TO STDOUT` with `enable_tiered_reads=on`. Untier S3 chunks first. Pre-copy history while live; at cutover copy only the delta. Verify row counts + checksums. Flip secrets. |
+| **Prod cutover** | 1 day | After 48h+ staging soak. Same procedure as staging. |
+
+#### After 2-week prod rollback window
+
+| Item | Effort | Description |
+|------|--------|-------------|
+| **Cleanup** | 2-3 days | Remove `02_tigerdata.tf`, VPC peering, `timescale` provider, PITR drill workflow, TigerData Grafana dashboards, TigerData alerts, runbooks. Update AGENTS.md rules (remove hypertable/compression/tiering guidance, keep append-only). ~40 files in the infrastructure repo. |
+
+### Open decisions
+
+1. **PG17 vs PG18** — verify `postgres:18` is GA for RDS Multi-AZ in your region
+2. **Connection pooling** — RDS has no built-in pooler; need RDS Proxy or in-cluster pgbouncer
+3. **Read replica** — TigerData has one; decide if RDS needs one
+4. **Database name** — TigerData uses `tsdb`, local uses `stl_verify`; pick one for RDS
+5. **TigerData contract** — when does the current term end? Coordinate decommission timing
+6. **Autovacuum tuning** — large append-only tables need `autovacuum_vacuum_insert_scale_factor` tuned low on RDS
 
 ### Rollback plan
 
-- **Phase 1-4** (code changes): Revert the branch. Old code still works against TigerData.
-- **Phase 5** (data migration): Keep TigerData running in parallel during the soak period. Rollback = update secrets to point back to TigerData, scale deployments.
-- **Phase 6** (cleanup): Only execute after extended soak (2+ weeks). No rollback needed — TigerData contract would need to be re-established.
+- **Code changes** (this branch): Revert. Old code still works against TigerData.
+- **Staging/prod cutover**: Keep TigerData running in parallel. Rollback = flip secrets back. Off-chain tables (Anchorage, Maple, CEX orderbooks) are not replayable — document a reverse-delta copy and a max rollback window (72h).
+- **Cleanup**: Only after extended soak. TigerData contract re-establishment would be needed.
 
----
+### Realistic timeline: ~5-7 weeks elapsed
 
-## 10. Risk Register
-
-| Risk | Impact | Likelihood | Mitigation |
-|------|--------|------------|------------|
-| `time_bucket_gapfill` + `locf` replacement produces different results | Data correctness | Medium | Integration tests compare old vs new output; manual spot-check on staging |
-| Data migration takes longer than maintenance window | Extended downtime | Medium | Pre-test with staging data; have logical replication as fallback |
-| Old migrations fail on vanilla PG (no shim coverage) | CI broken | Low | Comprehensive shim covering all TimescaleDB functions called in migrations |
-| Performance regression without hypertable chunk exclusion | Slow queries | Medium | Add native PG range partitioning for largest tables if needed (Phase 5 follow-up) |
-| RDS cost higher than TigerData | Budget | Low | Size comparison before provisioning; spot-check pricing |
-| `block_meta_repository` window optimization loss | Slower block_meta loads | Low | Profile on staging; add PG partitioning if needed |
-
----
-
-## 11. Open Questions
-
-1. **Target PostgreSQL version**: PG18 (matches current TimescaleDB base)? Or PG17?
-2. **RDS vs Aurora**: Aurora Serverless v2 auto-scales and may fit the bursty workload better. Cost comparison needed.
-3. **Staging data migration strategy**: Fresh start (re-backfill) or dump-and-load?
-4. **Native PG partitioning**: Should we add range partitioning for the largest tables (`block_states`, `allocation_position`, `protocol_event`) as part of this migration, or defer?
-5. **TigerData contract/billing**: When does the current term end? Coordinate decommission timing.
-6. **Logical replication**: Does TigerData support `pg_logical` for zero-downtime migration?
-
----
-
-## 12. Implementation Order (Dependency Graph)
-
-```
-Phase 1.1-1.4 (Go code) ──┐
-Phase 1.5-1.6 (Python)  ──┤
-Phase 1.7 (test cleanup) ──┼── Phase 2 (test images) ── Phase 3 (SQL migration)
-                           │                                      │
-                           │                            Phase 4 (dev-infra)
-                           │                                      │
-                           └─────────── Phase 5 (RDS provision + data migration)
-                                                                  │
-                                                        Phase 6 (cleanup)
-```
-
-Phases 1.1-1.7 can be parallelized. Phase 2 depends on Phase 1 (code must not call TimescaleDB APIs). Phase 3 depends on Phase 2 (migrations must run on vanilla PG). Phase 5 can start in parallel with Phase 3 (RDS provisioning doesn't depend on code changes).
+| Phase | Duration | Notes |
+|-------|----------|-------|
+| Baseline squash + parity redesign + partitioning | 1-2 weeks | Critical path |
+| RDS provisioning | 1-2 days | Parallel with above |
+| Staging rehearsal | 3-5 days | Copy + verify + soak |
+| Prod cutover | 1 day | After 48h staging soak |
+| Rollback window | 2 weeks | TigerData stays live |
+| Cleanup | 2-3 days | After rollback window closes |
