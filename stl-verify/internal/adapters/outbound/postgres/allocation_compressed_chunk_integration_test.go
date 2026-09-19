@@ -177,6 +177,7 @@ func compressAllocationPositionChunks(t *testing.T, ctx context.Context, pool *p
 // gets through if it arrives already carrying a processing_version the
 // columnstore does not hold.
 func TestSavePositions_CorrectionLandsInACompressedChunk(t *testing.T) {
+	testutil.SkipWithoutTimescaleDB(t, allocCompressedPool)
 	ctx := context.Background()
 	f := newAllocCompressedFixture(t, ctx)
 	compressAllocationPositionChunks(t, ctx, allocCompressedPool)
@@ -199,6 +200,7 @@ func TestSavePositions_CorrectionLandsInACompressedChunk(t *testing.T) {
 // what shipped, and it is why the caller has to believe the count rather than
 // len(positions).
 func TestSavePositions_ReportsZeroInsertedWhenACompressedChunkDiscardsTheWrite(t *testing.T) {
+	testutil.SkipWithoutTimescaleDB(t, allocCompressedPool)
 	ctx := context.Background()
 	f := newAllocCompressedFixture(t, ctx)
 	compressAllocationPositionChunks(t, ctx, allocCompressedPool)
@@ -218,6 +220,7 @@ func TestSavePositions_ReportsZeroInsertedWhenACompressedChunkDiscardsTheWrite(t
 // TestSavePositions_UnversionedWriteStillLandsInARowstoreChunk is the live
 // tracker's path: it supplies no version and must keep relying on the trigger.
 func TestSavePositions_UnversionedWriteStillLandsInARowstoreChunk(t *testing.T) {
+	testutil.SkipWithoutTimescaleDB(t, allocCompressedPool)
 	ctx := context.Background()
 	f := newAllocCompressedFixture(t, ctx)
 

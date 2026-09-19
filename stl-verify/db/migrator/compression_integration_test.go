@@ -46,6 +46,7 @@ func TestCompressedChunkReadPathReturnsTheSameRows(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 	fixture := seedCompressionFixture(t, ctx, pool)
 
 	before := fixture.readDay(t, ctx, pool, compressedFixtureDay)
@@ -72,6 +73,7 @@ func TestVersionedTablesKeepTheirColumnstoreLayout(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 
 	for _, tc := range processingVersionIndexCases() {
 		t.Run(tc.tableName, func(t *testing.T) {
@@ -104,6 +106,7 @@ func TestProcessingVersionTriggerLookupsPruneToOneCompressedChunk(t *testing.T) 
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 	seedProcessingVersionPlanRows(t, ctx, pool, 2_000)
 
 	conn, err := pool.Acquire(ctx)

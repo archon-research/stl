@@ -31,6 +31,7 @@ func TestCompressedConvertedHypertablesHaveAVersionFunction(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 
 	tables := compressedConvertedTables(t, ctx, pool)
 	if len(tables) == 0 {
@@ -140,6 +141,7 @@ func TestVersionFunctionGuardCountsOnlyBeforeInsertRowTriggers(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 
 	// The guard skips position_state on the premise that it carries none; TimescaleDB's own insert blocker
 	// must stay out of the count for that to hold.

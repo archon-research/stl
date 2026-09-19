@@ -23,6 +23,7 @@ func TestHypertableCheckConstraintsSurviveTheTieringRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 
 	rows, err := pool.Query(ctx, `
 		SELECT format('%I.%I', hypertable_schema, hypertable_name)
