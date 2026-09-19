@@ -33,7 +33,7 @@ export function AllocationRoute() {
     isLoading: isPrimesLoading,
     unknownPrimeMessage,
   } = usePrimeSelection();
-  const { rangePreset, timeRange } = useTimeRange();
+  const { rangePreset, timeRange, onCustomRangeSelect } = useTimeRange();
   const search = useSearch({ from: '/allocation' });
   const updateSearch = useUpdateSearch();
   const chainLabels = useChainLabels();
@@ -135,6 +135,7 @@ export function AllocationRoute() {
         primeCollateralUsd={series.primeCollateralValue}
         primeCollateralObservedAt={series.primeCollateralObservedAt}
         capitalObservedAt={series.capitalObservedAt}
+        onCustomRangeSelect={onCustomRangeSelect}
       />
 
       <AllocationDrawer

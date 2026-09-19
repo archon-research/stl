@@ -1,4 +1,4 @@
-import type { SortingState } from '@archon-research/design-system';
+import type { SortingState, TimeRange } from '@archon-research/design-system';
 
 import { css } from '#styled-system/css';
 
@@ -57,6 +57,7 @@ type AllocationGridProps = {
   primeCollateralUsd: number | null;
   primeCollateralObservedAt: string | null;
   capitalObservedAt: string | null;
+  onCustomRangeSelect: (range: TimeRange) => void;
 };
 
 export function AllocationGrid(props: AllocationGridProps) {
@@ -79,6 +80,7 @@ export function AllocationGrid(props: AllocationGridProps) {
     primeCollateralUsd,
     primeCollateralObservedAt,
     capitalObservedAt,
+    onCustomRangeSelect,
   } = props;
 
   const {
@@ -167,6 +169,7 @@ export function AllocationGrid(props: AllocationGridProps) {
           }}
           isChartsLoading={isChartsLoading}
           chartsErrorMessage={chartsErrorMessage}
+          onCustomRangeSelect={onCustomRangeSelect}
         />
         {/* The provenance footnote lived here. Extracted whole to
             `MetricsFootnote` and deliberately not rendered — see that file for
