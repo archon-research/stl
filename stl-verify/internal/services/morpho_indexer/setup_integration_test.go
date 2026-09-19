@@ -12,7 +12,7 @@ import (
 var sharedDSN string
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
+	dsn, cleanup := testutil.StartPostgresForMain()
 	sharedDSN = dsn
 
 	code := m.Run()

@@ -47,7 +47,7 @@ const (
 
 func TestMain(m *testing.M) {
 	os.Exit(testutil.RunShared(m, testutil.Shared{
-		TimescaleDSN:       &sharedDSN,
+		PostgresDSN:       &sharedDSN,
 		RedisAddr:          &sharedRedisAddr,
 		LocalStack:         &sharedLocalStackCfg,
 		LocalStackServices: "s3",

@@ -22,7 +22,7 @@ func (r *recorder) cleanupFor(service string) func() {
 // container and no server.
 func (r *recorder) starters() serviceStarters {
 	return serviceStarters{
-		timescaleDB: func() (string, func()) {
+		postgres: func() (string, func()) {
 			r.record("start timescaledb")
 			return "postgres://fake/db", r.cleanupFor("timescaledb")
 		},
@@ -54,7 +54,7 @@ func TestRunShared_StopsServicesInReverseStartOrder(t *testing.T) {
 	var localStack LocalStackConfig
 
 	runShared(rec.run(0), Shared{
-		TimescaleDSN:       &dsn,
+		PostgresDSN:       &dsn,
 		RedisAddr:          &redisAddr,
 		LocalStack:         &localStack,
 		LocalStackServices: "s3,sqs",
@@ -105,7 +105,7 @@ func TestRunShared_PublishesEveryServiceHandleBeforeTheTestsRun(t *testing.T) {
 	}
 
 	runShared(run, Shared{
-		TimescaleDSN:       &dsn,
+		PostgresDSN:       &dsn,
 		RedisAddr:          &redisAddr,
 		LocalStack:         &localStack,
 		LocalStackServices: "s3",
@@ -117,7 +117,7 @@ func TestRunShared_RunsTheCallersHooksAroundTheTests(t *testing.T) {
 	var dsn string
 
 	runShared(rec.run(0), Shared{
-		TimescaleDSN: &dsn,
+		PostgresDSN: &dsn,
 		BeforeRun:    func() { rec.record("before") },
 		AfterRun:     func() { rec.record("after") },
 	}, rec.starters())
@@ -168,7 +168,7 @@ func TestRunShared_HandsTheTestRunsExitCodeToTheLeakCheck(t *testing.T) {
 	}
 }
 
-// The timescaleDB and redis starters have the same signature, so swapping them in
+// The postgres and redis starters have the same signature, so swapping them in
 // liveStarters compiles and every DSN-only package would dial Redis instead. The
 // fakes above cannot reach that wiring, so assert it directly.
 func TestLiveStarters_WiresEachHandleToItsOwnHelper(t *testing.T) {
@@ -179,7 +179,7 @@ func TestLiveStarters_WiresEachHandleToItsOwnHelper(t *testing.T) {
 		got   any
 		want  any
 	}{
-		{"timescaleDB", live.timescaleDB, StartTimescaleDBForMain},
+		{"postgres", live.postgres, StartPostgresForMain},
 		{"redis", live.redis, StartRedisForMain},
 		{"localStack", live.localStack, StartLocalStackForMain},
 		{"checkLeaks", live.checkLeaks, CheckGoroutineLeaks},

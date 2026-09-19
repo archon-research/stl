@@ -11,7 +11,7 @@ import (
 // package does not want that service; a non-nil one is where its address is
 // published before the tests run, so package vars stay the way tests reach it.
 type Shared struct {
-	TimescaleDSN *string
+	PostgresDSN *string
 	RedisAddr    *string
 	LocalStack   *LocalStackConfig
 	// LocalStackServices is LocalStack's SERVICES list, required alongside it. Keep
@@ -30,7 +30,7 @@ type Shared struct {
 // the caller a single statement:
 //
 //	func TestMain(m *testing.M) {
-//		os.Exit(testutil.RunShared(m, testutil.Shared{TimescaleDSN: &sharedDSN}))
+//		os.Exit(testutil.RunShared(m, testutil.Shared{PostgresDSN: &sharedDSN}))
 //	}
 //
 // The order it keeps is load-bearing and unenforceable by the compiler: a package
@@ -49,18 +49,18 @@ func RunShared(m *testing.M, s Shared) int {
 // serviceStarters is the set of service constructors runShared drives, injected
 // so the lifecycle can be tested without a container in sight.
 type serviceStarters struct {
-	timescaleDB func() (dsn string, cleanup func())
-	redis       func() (addr string, cleanup func())
-	localStack  func(services string) (cfg LocalStackConfig, cleanup func())
-	checkLeaks  func(code int) int
+	postgres   func() (dsn string, cleanup func())
+	redis      func() (addr string, cleanup func())
+	localStack func(services string) (cfg LocalStackConfig, cleanup func())
+	checkLeaks func(code int) int
 }
 
 func liveStarters() serviceStarters {
 	return serviceStarters{
-		timescaleDB: StartTimescaleDBForMain,
-		redis:       StartRedisForMain,
-		localStack:  StartLocalStackForMain,
-		checkLeaks:  CheckGoroutineLeaks,
+		postgres:   StartPostgresForMain,
+		redis:      StartRedisForMain,
+		localStack: StartLocalStackForMain,
+		checkLeaks: CheckGoroutineLeaks,
 	}
 }
 
@@ -81,9 +81,9 @@ func runShared(run func() int, s Shared, start serviceStarters) int {
 func (s Shared) startServices(start serviceStarters) (stopServices func()) {
 	var stops []func()
 
-	if s.TimescaleDSN != nil {
-		dsn, stop := start.timescaleDB()
-		*s.TimescaleDSN = dsn
+	if s.PostgresDSN != nil {
+		dsn, stop := start.postgres()
+		*s.PostgresDSN = dsn
 		stops = append(stops, stop)
 	}
 	if s.RedisAddr != nil {

@@ -403,7 +403,7 @@ func setupLargePostgres(tb testing.TB) (*BlockStateRepository, func()) {
 	ctx := context.Background()
 
 	req := testcontainers.ContainerRequest{
-		Image:        testutil.ImageTimescaleDB,
+		Image:        testutil.ImagePostgres,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "test",

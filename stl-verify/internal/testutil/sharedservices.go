@@ -10,8 +10,8 @@ import (
 // starts its own container from TestMain instead.
 //
 // The Postgres server named here must be disposable, and reached as a superuser: the
-// suite creates and drops databases freely, flips template flags, evicts sessions it
-// does not own, and turns off the TimescaleDB policy jobs (see DisableScheduledJobs).
+// suite creates and drops databases freely, flips template flags, and evicts sessions
+// it does not own.
 const (
 	EnvPostgresDSN        = "STL_TEST_POSTGRES_DSN"
 	EnvRedisAddr          = "STL_TEST_REDIS_ADDR"

@@ -38,7 +38,7 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	dsn, cleanupDB := testutil.StartTimescaleDBForMain()
+	dsn, cleanupDB := testutil.StartPostgresForMain()
 	sharedDSN = dsn
 
 	localstack, cleanupLocalStack := testutil.StartLocalStackForMain("s3")

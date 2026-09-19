@@ -41,7 +41,7 @@ func setupLargePostgres(b *testing.B) (*pgxpool.Pool, *postgres.BlockStateReposi
 
 	// Use a more performant PostgreSQL configuration for benchmarking
 	req := testcontainers.ContainerRequest{
-		Image:        testutil.ImageTimescaleDB,
+		Image:        testutil.ImagePostgres,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "bench",

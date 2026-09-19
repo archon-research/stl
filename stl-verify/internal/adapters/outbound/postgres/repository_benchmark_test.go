@@ -33,7 +33,7 @@ func setupBenchmarkPostgres(b *testing.B) (*pgxpool.Pool, func()) {
 	ctx := context.Background()
 
 	req := testcontainers.ContainerRequest{
-		Image:        testutil.ImageTimescaleDB,
+		Image:        testutil.ImagePostgres,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "bench",

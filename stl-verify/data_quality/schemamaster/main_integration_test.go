@@ -22,7 +22,7 @@ const packageDBName = "test_schemamaster"
 
 func TestMain(m *testing.M) {
 	os.Exit(testutil.RunShared(m, testutil.Shared{
-		TimescaleDSN: &sharedDSN,
+		PostgresDSN: &sharedDSN,
 		BeforeRun:    func() { sharedPool = testutil.SetupDBForMain(sharedDSN, packageDBName) },
 		AfterRun:     func() { testutil.CleanupDBForMain(sharedDSN, sharedPool, packageDBName) },
 	}))

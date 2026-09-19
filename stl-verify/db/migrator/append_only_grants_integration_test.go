@@ -81,7 +81,7 @@ var convertedAppendOnlyTables = []string{
 // a future change fails at runtime instead of silently corrupting history.
 //
 // It asserts the CATALOGUE rather than a denied statement, because the harness connects
-// as the container's bootstrap superuser (testutil.StartTimescaleDBForMain sets
+// as the container's bootstrap superuser (testutil.StartPostgresForMain sets
 // POSTGRES_USER=test) and a superuser bypasses ACLs entirely — the trap
 // 20260714_130000 and 20260714_160000 both recorded in writing. has_table_privilege on
 // the NOLOGIN group role needs no SET ROLE and reports exactly what production will do.

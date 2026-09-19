@@ -26,7 +26,7 @@ var (
 
 func TestMain(m *testing.M) {
 	os.Exit(testutil.RunShared(m, testutil.Shared{
-		TimescaleDSN:       &sharedDSN,
+		PostgresDSN:       &sharedDSN,
 		LocalStack:         &sharedLocalStackCfg,
 		LocalStackServices: "s3",
 	}))

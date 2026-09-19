@@ -20,7 +20,7 @@ import (
 // in ci/integration-shards/1.txt, so no shard manifest changes.
 //
 // A note that applies to all four: the harness migrates as the container's BOOTSTRAP
-// SUPERUSER (testutil.StartTimescaleDBForMain sets POSTGRES_USER=test), and a superuser
+// SUPERUSER (testutil.StartPostgresForMain sets POSTGRES_USER=test), and a superuser
 // bypasses privilege checks entirely. That is the #574 trap these migrations were reviewed
 // against, and it means has_table_privilege() on the table OWNER reports true here no
 // matter what the migration revoked. Owner-side assertions therefore read the ACL itself

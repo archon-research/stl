@@ -26,31 +26,31 @@ func ConnectPool(t *testing.T, dsn string) *pgxpool.Pool {
 	return pool
 }
 
-// StartTimescaleDBForMain gives this test binary a Postgres to work in, for use in
+// StartPostgresForMain gives this test binary a Postgres to work in, for use in
 // TestMain (which receives *testing.M, not *testing.T). On error it calls log.Fatal
 // instead of t.Fatalf.
 //
 // When STL_TEST_POSTGRES_DSN is set it carves a database for this process out of
-// that server instead, so CI can own one TimescaleDB per shard rather than one
+// that server instead, so CI can own one Postgres per shard rather than one
 // per package.
-func StartTimescaleDBForMain() (dsn string, cleanup func()) {
+func StartPostgresForMain() (dsn string, cleanup func()) {
 	if shared, ok := sharedService(EnvPostgresDSN); ok {
 		return createProcessDatabase(shared)
 	}
 
-	dsn, cleanup, err := startTimescaleDBContainer()
+	dsn, cleanup, err := startPostgresContainer()
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
 	return dsn, cleanup
 }
 
-func startTimescaleDBContainer() (dsn string, cleanup func(), err error) {
+func startPostgresContainer() (dsn string, cleanup func(), err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	req := testcontainers.ContainerRequest{
-		Image:        ImageTimescaleDB,
+		Image:        ImagePostgres,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "test",

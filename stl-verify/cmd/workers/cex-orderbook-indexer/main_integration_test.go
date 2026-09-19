@@ -17,7 +17,7 @@ import (
 var sharedDSN string
 
 func TestMain(m *testing.M) {
-	os.Exit(testutil.RunShared(m, testutil.Shared{TimescaleDSN: &sharedDSN}))
+	os.Exit(testutil.RunShared(m, testutil.Shared{PostgresDSN: &sharedDSN}))
 }
 
 // fakeProvider feeds run() one snapshot then keeps the channel open until ctx is

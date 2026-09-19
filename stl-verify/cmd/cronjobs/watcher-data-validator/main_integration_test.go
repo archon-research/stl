@@ -16,7 +16,7 @@ import (
 var sharedDSN string
 
 func TestMain(m *testing.M) {
-	os.Exit(testutil.RunShared(m, testutil.Shared{TimescaleDSN: &sharedDSN}))
+	os.Exit(testutil.RunShared(m, testutil.Shared{PostgresDSN: &sharedDSN}))
 }
 
 // TestSetupRunner_WiresService covers setupRunner end to end: chain ID resolved,

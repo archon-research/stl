@@ -81,16 +81,12 @@ func createTestDatabase(t *testing.T) (dsn string, cleanup func()) {
 	u.Path = "/" + dbName
 	dsn = u.String()
 
-	// Enable TimescaleDB in the new database
+	// Enable TimescaleDB when the extension is available (skip on vanilla PG).
 	tmpPool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatalf("connect to new db: %v", err)
 	}
-	_, err = tmpPool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS timescaledb")
-	if err != nil {
-		tmpPool.Close()
-		t.Fatalf("enable timescaledb: %v", err)
-	}
+	_, _ = tmpPool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS timescaledb")
 	tmpPool.Close()
 
 	cleanup = func() {
@@ -135,11 +131,7 @@ func createBenchDatabase(b *testing.B) (dsn string, cleanup func()) {
 	if err != nil {
 		b.Fatalf("connect to new db: %v", err)
 	}
-	_, err = tmpPool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS timescaledb")
-	if err != nil {
-		tmpPool.Close()
-		b.Fatalf("enable timescaledb: %v", err)
-	}
+	_, _ = tmpPool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS timescaledb")
 	tmpPool.Close()
 
 	cleanup = func() {

@@ -14,7 +14,7 @@ import (
 var sharedDSN string
 
 func TestMain(m *testing.M) {
-	os.Exit(RunShared(m, Shared{TimescaleDSN: &sharedDSN}))
+	os.Exit(RunShared(m, Shared{PostgresDSN: &sharedDSN}))
 }
 
 // The clone's name carries this process's pid, so nothing reclaims it as stale on a

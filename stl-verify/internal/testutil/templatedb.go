@@ -343,18 +343,16 @@ func isLockTimeout(err error) bool {
 }
 
 // DisableScheduledJobs stops TimescaleDB's policy jobs from running in this
-// database. Compression is the one that bites: a job firing mid-test rewrites a
-// chunk into a columnstore chunk plus its columnstore twin, and any test
-// asserting on chunk layout then sees two chunks where it seeded one.
-//
-// Per database, because the server-wide knob cannot be reached from here:
-// timescaledb.max_background_workers is postmaster-scoped, so ALTER SYSTEM only
-// marks it pending_restart, and a `services:` container takes no command line and
-// cannot be restarted mid-job. Migrations register the policies as a catalog write;
-// no test depends on one running.
+// database when the extension is present. On vanilla PostgreSQL this is a no-op.
 func DisableScheduledJobs(ctx context.Context, pool *pgxpool.Pool) error {
-	// job_id >= 1000 is TimescaleDB's own boundary between policy jobs and its
-	// built-ins, which belong to the extension rather than to our migrations.
+	var hasExt bool
+	if err := pool.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')").Scan(&hasExt); err != nil {
+		return fmt.Errorf("check for timescaledb: %w", err)
+	}
+	if !hasExt {
+		return nil
+	}
 	if _, err := pool.Exec(ctx,
 		"SELECT alter_job(job_id, scheduled => false) FROM timescaledb_information.jobs WHERE job_id >= 1000",
 	); err != nil {
@@ -464,9 +462,8 @@ func dropTemplate(ctx context.Context, conn *pgx.Conn, name string) error {
 // Bump whenever buildTemplate changes what a finished template contains — a new
 // bootstrap step, a dropped one, different flags. The migration digest below cannot
 // see any of that, so without this a server outliving one tree would keep handing
-// out templates built under the old semantics: the run that introduced
-// DisableScheduledJobs would have cloned policy jobs back in.
-const templateFormat = 2
+// out templates built under the old semantics.
+const templateFormat = 3
 
 // templateFingerprint digests everything a finished template is made of, so one
 // built from an older tree is never cloned: the name changes with the contents.
