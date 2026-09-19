@@ -16,6 +16,8 @@ import (
 type Migrator struct {
 	pool          *pgxpool.Pool
 	migrationsDir string
+	// Cached per ApplyAll run; nil means not yet checked.
+	hasTimescaleDB *bool
 }
 
 func New(pool *pgxpool.Pool, migrationsDir string) *Migrator {
@@ -36,6 +38,11 @@ func (m *Migrator) ApplyAll(ctx context.Context) error {
 		return fmt.Errorf("failed to get migration files: %w", err)
 	}
 
+	// Check once whether TimescaleDB is installed.
+	if _, err := m.HasTimescaleDB(ctx); err != nil {
+		return fmt.Errorf("failed to detect TimescaleDB: %w", err)
+	}
+
 	for _, filename := range files {
 		if applied[filename] {
 			if err := m.verifyChecksum(ctx, filename); err != nil {
@@ -50,6 +57,30 @@ func (m *Migrator) ApplyAll(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// maybeSanitize strips TimescaleDB-specific syntax when running on vanilla PostgreSQL.
+// The cached hasTimescaleDB flag must be populated (by ApplyAll or HasTimescaleDB) first.
+func (m *Migrator) maybeSanitize(content []byte) string {
+	if m.hasTimescaleDB != nil && !*m.hasTimescaleDB {
+		return stripTimescaleDBSyntax(string(content))
+	}
+	return string(content)
+}
+
+func (m *Migrator) HasTimescaleDB(ctx context.Context) (bool, error) {
+	if m.hasTimescaleDB != nil {
+		return *m.hasTimescaleDB, nil
+	}
+
+	var exists bool
+	err := m.pool.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')").Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	m.hasTimescaleDB = &exists
+	return exists, nil
 }
 
 func (m *Migrator) getAppliedMigrations(ctx context.Context) (map[string]bool, error) {
@@ -181,7 +212,8 @@ func (m *Migrator) applyMigrationWithTx(ctx context.Context, filename string, co
 		}
 	}()
 
-	if _, err := tx.Exec(ctx, string(content)); err != nil {
+	sql := m.maybeSanitize(content)
+	if _, err := tx.Exec(ctx, sql); err != nil {
 		return fmt.Errorf("failed to execute migration SQL: %w", err)
 	}
 
@@ -207,7 +239,8 @@ func (m *Migrator) applyMigrationNoTx(ctx context.Context, filename string, cont
 	// Split the content into individual statements and execute each one separately.
 	// This ensures each statement runs in its own implicit transaction (or no transaction
 	// for statements like CREATE INDEX CONCURRENTLY that cannot run in a transaction).
-	statements := splitStatements(string(content))
+	sql := m.maybeSanitize(content)
+	statements := splitStatements(sql)
 
 	for i, stmt := range statements {
 		stmt = strings.TrimSpace(stmt)
