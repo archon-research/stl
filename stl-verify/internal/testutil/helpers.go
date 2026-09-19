@@ -100,19 +100,6 @@ func WaitFor(t *testing.T, timeout time.Duration, interval time.Duration, condit
 	}
 }
 
-// SkipWithoutTimescaleDB skips the test when TimescaleDB is not installed.
-func SkipWithoutTimescaleDB(t *testing.T, pool *pgxpool.Pool) {
-	t.Helper()
-	var has bool
-	if err := pool.QueryRow(context.Background(),
-		"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')").Scan(&has); err != nil {
-		t.Fatalf("check for timescaledb: %v", err)
-	}
-	if !has {
-		t.Skip("test requires TimescaleDB extension")
-	}
-}
-
 // DisableAllOracles disables all migration-seeded oracles for test isolation.
 func DisableAllOracles(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
