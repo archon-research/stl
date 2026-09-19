@@ -1,8 +1,21 @@
 # Migration Plan: TimescaleDB/TigerData to Vanilla PostgreSQL
 
-**Status**: DRAFT — awaiting critique and approval
+**Status**: REVISED — Phase 3 superseded by baseline squash (see critiques)
 **Date**: 2026-09-19
 **Scope**: Both repos (`stl` and `infrastructure`)
+
+> **Post-critique revisions**: This plan was critiqued by Fable 5.1
+> ([003-fable-critique.md](003-fable-critique.md)) and self-review
+> ([002-plan-critique-and-revisions.md](002-plan-critique-and-revisions.md)).
+> Key changes:
+> - Phase 3 "compatibility shim" replaced by **baseline squash** (generate one
+>   baseline.sql from pg_dump, archive 162 migration files)
+> - `LAG IGNORE NULLS` is PG19 — gapfill uses count-group LOCF instead
+> - `first()`/`last()` are TimescaleDB aggregates — replaced with `array_agg`
+> - Tiered chunks not in pg_dump — data migration uses parallel COPY
+> - `transformed._parity_*` functions need redesign (read TimescaleDB catalogs at runtime)
+> - `block_states` needs native range partitioning for retention replacement
+> - Realistic timeline: **5-7 weeks**, not 7 days
 
 ---
 
