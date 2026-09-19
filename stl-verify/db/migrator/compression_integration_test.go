@@ -15,6 +15,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// This file tests TimescaleDB-specific behavior (compression/tiering) that does not
+// apply to vanilla PostgreSQL. All tests are skipped when TimescaleDB is not present.
+
 // Two days one chunk apart, so a write into a compressed chunk can be compared against the same write
 // into a row-store one. Well clear of the 2035 range the plan fixtures seed. Spelled with an explicit
 // UTC offset because chunk boundaries are absolute: a bare date would be read in the session's time
@@ -155,6 +158,7 @@ func TestProcessingVersionTriggerLookupsPruneToOneCompressedChunk(t *testing.T) 
 func TestReprocessingACompressedKeyIsRejectedBeforeTheVersionTriggerRuns(t *testing.T) {
 	ctx := context.Background()
 	pool, fixture := setupCompressedFixture(t, ctx)
+	testutil.SkipWithoutTimescaleDB(t, pool)
 
 	_, err := fixture.reprocess(ctx, pool, compressedFixtureDay, firstFixtureBlock, probeBuildID)
 	if !testutil.IsUniqueViolation(err) {
@@ -171,6 +175,7 @@ func TestReprocessingACompressedKeyIsRejectedBeforeTheVersionTriggerRuns(t *test
 func TestReprocessingARowStoreKeyAssignsTheNextVersion(t *testing.T) {
 	ctx := context.Background()
 	pool, fixture := setupCompressedFixture(t, ctx)
+	testutil.SkipWithoutTimescaleDB(t, pool)
 
 	version, err := fixture.reprocess(ctx, pool, rowStoreFixtureDay, firstFixtureBlock, probeBuildID)
 	if err != nil {
@@ -188,6 +193,7 @@ func TestReprocessingARowStoreKeyAssignsTheNextVersion(t *testing.T) {
 func TestWritingANewKeyIntoACompressedChunkIsVersionedNormally(t *testing.T) {
 	ctx := context.Background()
 	pool, fixture := setupCompressedFixture(t, ctx)
+	testutil.SkipWithoutTimescaleDB(t, pool)
 
 	for _, build := range []struct {
 		id          int
@@ -213,6 +219,7 @@ func TestWritingANewKeyIntoACompressedChunkIsVersionedNormally(t *testing.T) {
 func TestCompressedChunkStoresAKeyWhoseVersionIsSuppliedUpFront(t *testing.T) {
 	ctx := context.Background()
 	pool, fixture := setupCompressedFixture(t, ctx)
+	testutil.SkipWithoutTimescaleDB(t, pool)
 
 	if err := fixture.insertVersionDirectly(ctx, pool, compressedFixtureDay, firstFixtureBlock, 1); err != nil {
 		t.Fatalf("storing version 1 at a compressed key: %v", err)

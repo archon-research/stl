@@ -371,6 +371,7 @@ func TestCurrentTables_ProductionWritePath_BackfilledOldRowDoesNotRegress(t *tes
 // writes would never reach the cache and nothing would report it.
 func TestCurrentTables_TriggerFiresOnInsertIntoCompressedChunk(t *testing.T) {
 	withCurrentTablesPool(t)
+	testutil.SkipWithoutTimescaleDB(t, currentTablesPool)
 	ctx := context.Background()
 	f := setupCurrentTables(t)
 
@@ -843,6 +844,7 @@ func TestCurrentTables_AllocationReprocessWinsAndSameBuildIsNoop(t *testing.T) {
 // proxy would never reach the cache and nothing would report it.
 func TestCurrentTables_AllocationTriggerFiresOnInsertIntoCompressedChunk(t *testing.T) {
 	withCurrentTablesPool(t)
+	testutil.SkipWithoutTimescaleDB(t, currentTablesPool)
 	ctx := context.Background()
 	f := setupCurrentTables(t)
 

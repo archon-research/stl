@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -300,6 +301,7 @@ func psTestStructurePhysical(t *testing.T, f *psFixture) {
 	})
 
 	t.Run("position_state is a hypertable with 1-day chunks", func(t *testing.T) {
+		testutil.SkipWithoutTimescaleDB(t, pool)
 		var n int
 		if err := pool.QueryRow(ctx, `SELECT count(*) FROM timescaledb_information.hypertables WHERE hypertable_name = 'position_state'`).Scan(&n); err != nil {
 			t.Fatal(err)
@@ -535,6 +537,7 @@ func psTestEmptyProjectionReturnCount(t *testing.T, f *psFixture) {
 	})
 
 	t.Run("compression is configured and its policy exists", func(t *testing.T) {
+		testutil.SkipWithoutTimescaleDB(t, pool)
 		// Deleting the policy, or changing the segmentby/orderby, was an unkillable mutation. Unlike
 		// tiering (a Cloud primitive no CI engine has) compression is available in OSS TimescaleDB, so
 		// this is assertable here.
@@ -591,6 +594,7 @@ func psTestEmptyProjectionReturnCount(t *testing.T, f *psFixture) {
 	})
 
 	t.Run("a correction for a position an already-compressed chunk holds is stored, not dropped", func(t *testing.T) {
+		testutil.SkipWithoutTimescaleDB(t, pool)
 		// The exact failure TestCompressedConvertedHypertablesHaveAVersionFunction (on main) says a
 		// compressed converted hypertable suffers without a next_processing_version_<table> function:
 		// "every correction row for a position an already-compressed chunk holds is silently dropped".
@@ -663,6 +667,7 @@ func psTestEmptyProjectionReturnCount(t *testing.T, f *psFixture) {
 	})
 
 	t.Run("the write path works against a COMPRESSED chunk", func(t *testing.T) {
+		testutil.SkipWithoutTimescaleDB(t, pool)
 		// The compression subtests above assert catalogue state only, so every load-bearing sentence in
 		// the migration's compression paragraphs was unfalsifiable by CI. Compression is available in OSS
 		// TimescaleDB (unlike tiering), so the behaviour IS testable here.
@@ -908,6 +913,7 @@ func psTestEmptyProjectionReturnCount(t *testing.T, f *psFixture) {
 	})
 
 	t.Run("the materializer pins timescaledb.enable_tiered_reads", func(t *testing.T) {
+		testutil.SkipWithoutTimescaleDB(t, pool)
 		// Asserted on the mechanism because it is not behaviourally killable here: tiered storage is a
 		// Timescale Cloud primitive, so no CI engine can produce a tiered chunk to read. Without the pin,
 		// every read in the function answers "what is new / what drifted / who owns this" over local

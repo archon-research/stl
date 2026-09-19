@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -212,6 +213,7 @@ func TestPositionDailyAnswersAsOfATimeReproducibly(t *testing.T) {
 // function result before the caller's WHERE applies and loses chunk exclusion.
 func TestPositionDailyReadsAreInlined(t *testing.T) {
 	f := newPositionDailyFixture(t)
+	testutil.SkipWithoutTimescaleDB(t, f.pool)
 	f.observe("d-inline", dailyObs{qty: 1, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
 	for _, q := range []string{
 		`EXPLAIN SELECT * FROM position_daily_between('2026-01-01', '2026-01-03') WHERE position_id = sha256('d-inline'::bytea)`,
@@ -234,6 +236,7 @@ func TestPositionDailyReadsAreInlined(t *testing.T) {
 // instead of on block_timestamp reads every chunk and fails every case here.
 func TestPositionDailyOnReadsOneChunk(t *testing.T) {
 	f := newPositionDailyFixture(t)
+	testutil.SkipWithoutTimescaleDB(t, f.pool)
 	const days = 12
 	for d := range days {
 		for p := range 3 {
@@ -332,6 +335,7 @@ func TestPositionDailyOnReadsOneChunk(t *testing.T) {
 // A window on the ::date expression reads every chunk; an exclusive d_to drops the last day.
 func TestPositionDailyBetweenReadsOneChunkPerDay(t *testing.T) {
 	f := newPositionDailyFixture(t)
+	testutil.SkipWithoutTimescaleDB(t, f.pool)
 	const days = 12
 	for d := range days {
 		for p := range 3 {
@@ -509,6 +513,7 @@ func TestPositionDailyRefusesNullArguments(t *testing.T) {
 // same without it, so only the plan can catch it.
 func TestPositionDailyHolderSeriesUsesTheSegmentIndex(t *testing.T) {
 	f := newPositionDailyFixture(t)
+	testutil.SkipWithoutTimescaleDB(t, f.pool)
 	for d := range 3 {
 		for i := range 40 {
 			f.observe(fmt.Sprintf("d-holder-%02d", i), dailyObs{qty: d*100 + i, block: 1000 + d*100 + i,

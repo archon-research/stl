@@ -2,6 +2,9 @@
 
 package postgres
 
+// This file tests TimescaleDB-specific behavior (compression/tiering) that does not
+// apply to vanilla PostgreSQL. All tests are skipped when TimescaleDB is not present.
+
 import (
 	"context"
 	"math/big"

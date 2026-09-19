@@ -19,6 +19,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // One synthetic chain per scenario, so a deliberately-broken or multi-version
@@ -971,6 +972,7 @@ func TestUniswapV4Repository_SaveBlock_NewBuildBumpsProcessingVersion(t *testing
 // (VEC-615). Every fact table here compresses at 2 days, so that is every chunk a
 // rebuild or a backfill replay touches.
 func TestUniswapV4Repository_SaveBlock_NewBuildAppendsIntoACompressedChunk(t *testing.T) {
+	testutil.SkipWithoutTimescaleDB(t, uniswapV4TestPool)
 	ctx := context.Background()
 	poolID := seedUniswapV4RepoTestPool(t, ctx, 0x1c)
 

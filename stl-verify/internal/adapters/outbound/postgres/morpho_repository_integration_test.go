@@ -2841,6 +2841,7 @@ func (f *morphoTestFixture) adapterStateVersions(t *testing.T, ctx context.Conte
 // a backfill replay touches. Why the version cannot be left to the trigger there:
 // 20260821_120000_morpho_adapter_state_version_function.sql.
 func TestSaveAdapterState_NewBuildAppendsIntoACompressedChunk(t *testing.T) {
+	testutil.SkipWithoutTimescaleDB(t, morphoPool)
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x21))
@@ -2872,6 +2873,7 @@ func TestSaveAdapterState_NewBuildAppendsIntoACompressedChunk(t *testing.T) {
 // to be the one the trigger would assign, or the arbiter misses the compressed row and the
 // primary key gains a duplicate that no unique index reaches.
 func TestSaveAdapterState_SameBuildDedupesInACompressedChunk(t *testing.T) {
+	testutil.SkipWithoutTimescaleDB(t, morphoPool)
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x23))

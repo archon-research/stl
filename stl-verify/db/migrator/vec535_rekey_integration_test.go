@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -283,6 +284,7 @@ func TestVEC535Rekey_MovesVaultHistoryOntoTheShare(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 
 	seed := seedVec535(ctx, t, pool, vec535RowsPerPair)
 	chunks := compressAllocationPositionChunks(ctx, t, pool)
@@ -313,6 +315,7 @@ func TestVEC535Rekey_DecompressionCapCountsPerStatement(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 
 	seed := seedVec535(ctx, t, pool, vec535RowsPerPair)
 	compressAllocationPositionChunks(ctx, t, pool)

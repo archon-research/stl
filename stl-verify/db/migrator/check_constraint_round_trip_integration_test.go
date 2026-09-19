@@ -6,8 +6,12 @@ import (
 	"context"
 	"testing"
 
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/jackc/pgx/v5"
 )
+
+// This file tests TimescaleDB-specific behavior (compression/tiering) that does not
+// apply to vanilla PostgreSQL. All tests are skipped when TimescaleDB is not present.
 
 // TestHypertableCheckConstraintsSurviveTheTieringRoundTrip performs, for every
 // hypertable, the attach Tiger Cloud's tiering performs when it adds the OSM chunk: a

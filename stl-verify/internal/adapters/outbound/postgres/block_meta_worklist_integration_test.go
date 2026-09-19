@@ -81,6 +81,7 @@ func TestWorkListWindowsCoverEveryReferencedBlock(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 	seedWorkListSources(t, ctx, pool)
 
 	var want int
@@ -114,6 +115,7 @@ func TestWorkListExcludesBlocksAlreadyLoaded(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 	seedWorkListSources(t, ctx, pool)
 
 	before := len(openList(t, ctx, pool, 1))
@@ -137,6 +139,7 @@ func TestWorkListHoldsNoOpenTransactionWhilePaging(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 	seedWorkListSources(t, ctx, pool)
 
 	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
@@ -172,6 +175,7 @@ func TestWorkListClearsAndReEnumeratesOnEveryOpen(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 	seedWorkListSources(t, ctx, pool)
 
 	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
@@ -253,6 +257,7 @@ func TestWorkListEnumeratesWithTieredReadsOn(t *testing.T) {
 	ctx := context.Background()
 	pool, dsn, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 	seedWorkListSources(t, ctx, pool)
 
 	if _, err := pool.Exec(ctx, `CREATE TABLE tiered_probe (setting text NOT NULL)`); err != nil {
@@ -439,6 +444,7 @@ func TestHeadMarginMeasuresFromTheChainHeadNotThePendingSet(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 
 	// A gap of eleven blocks spanning ten, four million blocks below the head.
 	if _, err := pool.Exec(ctx, `
@@ -490,6 +496,7 @@ func TestWorkListArmsAreExactlyTheRegistersBlockMetaFills(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 
 	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
 	repo, err := NewBlockMetaRepository(pool, nil, buildID, runID)
@@ -539,6 +546,7 @@ func TestWorkListReEnumeratesAfterAnInterruptedEnumeration(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 	seedWorkListSources(t, ctx, pool)
 
 	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
@@ -598,6 +606,7 @@ func TestWindowPredicatesCoverTieredChunkRanges(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 	seedWorkListSources(t, ctx, pool)
 
 	buildID, runID := testutil.OpenTestRun(t, ctx, pool)

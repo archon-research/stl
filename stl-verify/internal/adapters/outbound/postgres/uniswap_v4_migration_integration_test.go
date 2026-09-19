@@ -134,6 +134,7 @@ func TestUniswapV4MigrationCreatesTables(t *testing.T) {
 }
 
 func TestUniswapV4MigrationRegistersHypertables(t *testing.T) {
+	testutil.SkipWithoutTimescaleDB(t, uniswapV4TestPool)
 	ctx := context.Background()
 
 	for _, table := range uniswapV4Hypertables {
@@ -168,6 +169,7 @@ var uniswapV4HypertableCompressionOrder = map[string]string{
 }
 
 func TestUniswapV4HypertablesChunkIntervalAndCompressionOrder(t *testing.T) {
+	testutil.SkipWithoutTimescaleDB(t, uniswapV4TestPool)
 	ctx := context.Background()
 
 	for _, table := range uniswapV4Hypertables {
@@ -203,6 +205,7 @@ func TestUniswapV4HypertablesChunkIntervalAndCompressionOrder(t *testing.T) {
 }
 
 func TestUniswapV4PlainTablesAreNotHypertables(t *testing.T) {
+	testutil.SkipWithoutTimescaleDB(t, uniswapV4TestPool)
 	ctx := context.Background()
 
 	for _, table := range slices.Concat(uniswapV4PlainTables, uniswapV4CreatedPlainTables) {
@@ -385,6 +388,7 @@ func TestUniswapV4ProcessingVersionTriggersForceCustomPlan(t *testing.T) {
 // function the INSERT calls and the trigger delegates to. VOLATILE and force_custom_plan
 // are asserted because both are load-bearing and neither is checked by the catalogue.
 func TestUniswapV4CompressedFactTablesHaveAVersionFunction(t *testing.T) {
+	testutil.SkipWithoutTimescaleDB(t, uniswapV4TestPool)
 	ctx := context.Background()
 
 	for _, table := range uniswapV4Hypertables {
@@ -2030,6 +2034,7 @@ func insertTestUniswapV4Pool(t *testing.T, ctx context.Context, poolIDHex string
 // A WITH (tsdb.hypertable, …) declaration creates its own 1-day compression
 // policy, and add_compression_policy then returns -1 instead of widening it.
 func TestUniswapV4HypertablesCompressAfterTwoDays(t *testing.T) {
+	testutil.SkipWithoutTimescaleDB(t, uniswapV4TestPool)
 	ctx := context.Background()
 
 	for _, table := range uniswapV4Hypertables {

@@ -10,9 +10,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// This file tests TimescaleDB-specific behavior (compression/tiering) that does not
+// apply to vanilla PostgreSQL. All tests are skipped when TimescaleDB is not present.
 
 // prime_debt carries the many-chunk fixture: chunk fan-out only shows up once a table has far more
 // chunks than a handful, and spreading every table that wide would cost the suite more than the one
@@ -359,6 +363,7 @@ func TestProcessingVersionCoveringIndexesExist(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 
 	for _, tc := range processingVersionIndexCases() {
 		t.Run(tc.tableName, func(t *testing.T) {
@@ -390,6 +395,7 @@ func TestProcessingVersionTriggerLookupsPruneToOneChunk(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 	seedProcessingVersionPlanRows(t, ctx, pool, 2_000)
 
 	conn, err := pool.Acquire(ctx)
@@ -427,6 +433,7 @@ func TestProcessingVersionLatestVersionLookupFansOutUnderGenericPlan(t *testing.
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 	seedProcessingVersionPlanRows(t, ctx, pool, 2_000)
 
 	conn, err := pool.Acquire(ctx)
@@ -465,6 +472,7 @@ func TestProcessingVersionBuildIDLookupDefersChunkExclusionUnderGenericPlan(t *t
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 	seedProcessingVersionPlanRows(t, ctx, pool, 2_000)
 
 	conn, err := pool.Acquire(ctx)
@@ -501,6 +509,7 @@ func TestProcessingVersionTriggerInsertStaysUnderPerRowBudget(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
+	testutil.SkipWithoutTimescaleDB(t, pool)
 	seedProcessingVersionPlanRows(t, ctx, pool, 2_000)
 	primeID := upsertFixturePrime(t, ctx, pool)
 

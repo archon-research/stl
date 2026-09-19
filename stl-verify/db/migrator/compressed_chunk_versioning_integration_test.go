@@ -6,8 +6,12 @@ import (
 	"context"
 	"testing"
 
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// This file tests TimescaleDB-specific behavior (compression/tiering) that does not
+// apply to vanilla PostgreSQL. All tests are skipped when TimescaleDB is not present.
 
 // TestCompressedConvertedHypertablesHaveAVersionFunction guards the one thing that keeps
 // ADR-0002's corrections-as-new-rows model working on a columnstored chunk: the INSERT,
