@@ -61,9 +61,9 @@ if _missing_durations:
     raise RuntimeError(f"TimeSeriesFrequency members missing a duration mapping: {_missing_durations}")
 
 
-# One member, because the bucketing in the Postgres adapters
-# (``time_bucket_gapfill`` + ``locf(last(...))``) is end-period and nothing else
-# is implemented. See ADR-0005 for the reserved methods and why they wait.
+# One member, because the bucketing in the Postgres adapters (``generate_series``
+# gapfill + count-group LOCF) is end-period and nothing else is implemented.
+# See ADR-0005 for the reserved methods and why they wait.
 class AggregationMethod(StrEnum):
     """Resampling method applied to a resampled response.
 

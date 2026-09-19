@@ -15,7 +15,12 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres._time_window import clamp_limit, required_time_window_clause
+from app.adapters.postgres._time_window import (
+    clamp_limit,
+    gapfill_series_cte,
+    required_time_window_clause,
+    time_bucket_expr,
+)
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.reference_risk_capital import ReferenceCapitalBucket
 
@@ -108,10 +113,11 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
             min(rank) AS capital
         FROM ranked
     ), corrected AS (
-        -- One series from two feeds. `last()` has no defined order among rows
-        -- sharing a timestamp, so precedence is explicit rather than left to
-        -- chance: a backfilled day and a snapshot can land on the same instant
-        -- when a cycle runs at midnight, and the snapshot is the finer cadence.
+        -- One series from two feeds. The aggregate has no defined order among
+        -- rows sharing a timestamp, so precedence is explicit rather than left
+        -- to chance: a backfilled day and a snapshot can land on the same
+        -- instant when a cycle runs at midnight, and the snapshot is the finer
+        -- cadence.
         SELECT DISTINCT ON (merged.observed_at)
             merged.observed_at,
             merged.total_risk_capital_usd,
@@ -128,8 +134,9 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
         ) merged
         ORDER BY merged.observed_at, merged.precedence
     ), prior AS (
-        -- The last observation before the window, per figure, fed to `locf` as
-        -- its `prev`. Without it a figure whose newest row predates the window
+        -- The last observation before the window, per figure, seeding the
+        -- carry-forward for leading buckets that predate the first in-window
+        -- observation. Without it a figure whose newest row predates the window
         -- reads as never observed — and the balance sheet is daily, so from one
         -- minute past midnight its newest row already sits outside a 24h window
         -- and the collateral series would be empty for most of every day.
@@ -150,65 +157,85 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
             max(ranked.observed_at) FILTER (WHERE ranked.rank = first_rank.capital)
                 AS capital_observed_at
         FROM ranked CROSS JOIN first_rank
+    ), """
+    + gapfill_series_cte()
+    + """,
+    data AS (
+        SELECT
+            """
+    + time_bucket_expr("corrected.observed_at")
+    + """ AS bucket_start,
+            -- FILTER keeps each column's carry-forward independent: the two
+            -- feeds NULL each other's columns, so without it the newest row's
+            -- NULL would overwrite a prior feed's value. The daily balance
+            -- sheet is stamped at midnight and the monitor runs intraday, so
+            -- that is every live bucket.
+            (array_agg(corrected.total_risk_capital_usd ORDER BY corrected.observed_at DESC)
+                FILTER (WHERE corrected.total_risk_capital_usd IS NOT NULL))[1] AS total_capital_usd,
+            (array_agg(corrected.exposure_usd ORDER BY corrected.observed_at DESC)
+                FILTER (WHERE corrected.exposure_usd IS NOT NULL))[1] AS exposure_usd,
+            (array_agg(corrected.encumbrance_ratio ORDER BY corrected.observed_at DESC)
+                FILTER (WHERE corrected.encumbrance_ratio IS NOT NULL))[1] AS encumbrance_ratio,
+            (array_agg(corrected.assets_usd ORDER BY corrected.observed_at DESC)
+                FILTER (WHERE corrected.assets_usd IS NOT NULL))[1] AS assets_usd,
+            -- The instant the assets figure above was observed, not the bucket
+            -- it was carried into. The feed is daily and the value is carried
+            -- forward, so without this a figure up to a day old renders as a
+            -- current one.
+            (array_agg(corrected.assets_observed_at ORDER BY corrected.observed_at DESC)
+                FILTER (WHERE corrected.assets_observed_at IS NOT NULL))[1] AS assets_observed_at,
+            -- When total capital, exposure and encumbrance were last observed.
+            -- One stamp for the three because they arrive on one row, so a
+            -- stamp each would be three copies of the same instant.
+            MAX(corrected.observed_at) AS capital_observed_at
+        FROM corrected
+        GROUP BY 1
+    ),
+    filled AS (
+        SELECT gs.bucket,
+               d.total_capital_usd,
+               d.exposure_usd,
+               d.encumbrance_ratio,
+               d.assets_usd,
+               d.assets_observed_at,
+               d.capital_observed_at,
+               count(d.total_capital_usd) OVER w AS grp_capital,
+               count(d.exposure_usd) OVER w AS grp_exposure,
+               count(d.encumbrance_ratio) OVER w AS grp_encumbrance,
+               count(d.assets_usd) OVER w AS grp_assets,
+               count(d.assets_observed_at) OVER w AS grp_assets_at,
+               count(d.capital_observed_at) OVER w AS grp_capital_at
+        FROM gs LEFT JOIN data d ON d.bucket_start = gs.bucket
+        WINDOW w AS (ORDER BY gs.bucket)
     )
     SELECT
-        time_bucket_gapfill(
-            make_interval(secs => :bucket_seconds),
-            corrected.observed_at,
-            CAST(:from_timestamp AS TIMESTAMPTZ),
-            CAST(:to_timestamp AS TIMESTAMPTZ)
-        ) AS bucket_start,
-        locf(
-            last(corrected.total_risk_capital_usd, corrected.observed_at)
-                FILTER (WHERE corrected.total_risk_capital_usd IS NOT NULL),
-            (SELECT prior.total_capital_usd FROM prior),
-            treat_null_as_missing => true
+        bucket AS bucket_start,
+        COALESCE(
+            first_value(total_capital_usd) OVER (PARTITION BY grp_capital ORDER BY bucket),
+            (SELECT prior.total_capital_usd FROM prior)
         ) AS total_capital_usd,
-        -- FILTER, not just treat_null_as_missing: the two feeds NULL each other's
-        -- columns, so without it last() returns the NULL of whichever feed wrote
-        -- the bucket's newest row and locf then carries that NULL forever. The
-        -- daily balance sheet is stamped at midnight and the monitor runs
-        -- intraday, so that is every live bucket.
-        locf(
-            last(corrected.exposure_usd, corrected.observed_at)
-                FILTER (WHERE corrected.exposure_usd IS NOT NULL),
-            (SELECT prior.exposure_usd FROM prior),
-            treat_null_as_missing => true
+        COALESCE(
+            first_value(exposure_usd) OVER (PARTITION BY grp_exposure ORDER BY bucket),
+            (SELECT prior.exposure_usd FROM prior)
         ) AS exposure_usd,
-        locf(
-            last(corrected.encumbrance_ratio, corrected.observed_at)
-                FILTER (WHERE corrected.encumbrance_ratio IS NOT NULL),
-            (SELECT prior.encumbrance_ratio FROM prior),
-            treat_null_as_missing => true
+        COALESCE(
+            first_value(encumbrance_ratio) OVER (PARTITION BY grp_encumbrance ORDER BY bucket),
+            (SELECT prior.encumbrance_ratio FROM prior)
         ) AS encumbrance_ratio,
-        locf(
-            last(corrected.assets_usd, corrected.observed_at)
-                FILTER (WHERE corrected.assets_usd IS NOT NULL),
-            (SELECT prior.assets_usd FROM prior),
-            treat_null_as_missing => true
+        COALESCE(
+            first_value(assets_usd) OVER (PARTITION BY grp_assets ORDER BY bucket),
+            (SELECT prior.assets_usd FROM prior)
         ) AS assets_usd,
-        -- The instant the assets figure above was observed, not the bucket it
-        -- was carried into. The feed is daily and the value is carried forward,
-        -- so without this a figure up to a day old renders as a current one.
-        locf(
-            last(corrected.assets_observed_at, corrected.observed_at)
-                FILTER (WHERE corrected.assets_observed_at IS NOT NULL),
-            (SELECT prior.assets_observed_at FROM prior),
-            treat_null_as_missing => true
+        COALESCE(
+            first_value(assets_observed_at) OVER (PARTITION BY grp_assets_at ORDER BY bucket),
+            (SELECT prior.assets_observed_at FROM prior)
         ) AS assets_observed_at,
-        -- When total capital, exposure and encumbrance were last observed. One
-        -- stamp for the three because they arrive on one row, so a stamp each
-        -- would be three copies of the same instant. The prior seeding reaches
-        -- up to 90 days back, so without this a figure that old serves as
-        -- current with nothing to say so.
-        locf(
-            last(corrected.observed_at, corrected.observed_at),
-            (SELECT prior.capital_observed_at FROM prior),
-            treat_null_as_missing => true
+        COALESCE(
+            first_value(capital_observed_at) OVER (PARTITION BY grp_capital_at ORDER BY bucket),
+            (SELECT prior.capital_observed_at FROM prior)
         ) AS capital_observed_at
-    FROM corrected
-    GROUP BY bucket_start
-    ORDER BY bucket_start DESC
+    FROM filled
+    ORDER BY bucket DESC
     LIMIT :limit
     """
 )

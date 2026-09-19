@@ -6,8 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres._time_window import (
     clamp_limit,
+    gapfill_series_cte,
     optional_time_window_clause,
     required_time_window_clause,
+    time_bucket_expr,
 )
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_debt import PrimeDebtSnapshot
@@ -38,19 +40,26 @@ DEBT_SNAPSHOTS_SQL = f"""
 """
 
 DEBT_BUCKETS_SQL = f"""
+    WITH {gapfill_series_cte()},
+    data AS (
+        SELECT
+            {time_bucket_expr("pd.synced_at")} AS bucket_start,
+            (array_agg(pd.debt_wad ORDER BY pd.synced_at DESC))[1] AS debt_wad
+        FROM prime_debt pd
+        WHERE pd.prime_id = :prime_id
+        {required_time_window_clause("pd.synced_at")}
+        GROUP BY 1
+    ),
+    filled AS (
+        SELECT gs.bucket, d.debt_wad,
+               count(d.debt_wad) OVER (ORDER BY gs.bucket) AS grp
+        FROM gs LEFT JOIN data d ON d.bucket_start = gs.bucket
+    )
     SELECT
-        time_bucket_gapfill(
-            make_interval(secs => :bucket_seconds),
-            pd.synced_at,
-            CAST(:from_timestamp AS TIMESTAMPTZ),
-            CAST(:to_timestamp AS TIMESTAMPTZ)
-        ) AS bucket_start,
-        locf(last(pd.debt_wad, pd.synced_at)) AS debt_wad
-    FROM prime_debt pd
-    WHERE pd.prime_id = :prime_id
-    {required_time_window_clause("pd.synced_at")}
-    GROUP BY bucket_start
-    ORDER BY bucket_start DESC
+        bucket AS bucket_start,
+        first_value(debt_wad) OVER (PARTITION BY grp ORDER BY bucket) AS debt_wad
+    FROM filled
+    ORDER BY bucket DESC
     LIMIT :limit
 """
 
@@ -176,20 +185,19 @@ class PrimeDebtRepository:
             WITH corrected AS (
                 SELECT DISTINCT ON (b.observed_at)
                     b.observed_at,
-                    -- Rescaled here, not around locf(): TimescaleDB requires
-                    -- locf to be the top-level call in its select expression.
                     b.debt_usd * 1e18 AS debt_wad
                 FROM prime_reference_balance_sheet b
                 WHERE b.prime_id = :prime_id
                 {required_time_window_clause("b.observed_at")}
                 ORDER BY b.observed_at, b.processing_version DESC
             ), prior AS (
-                -- The last figure before the window, fed to locf as its
-                -- `prev`. Upstream publishes one row per prime per day, so
-                -- from a minute past midnight the newest row already sits
-                -- outside a 24h window and the series would read as absent
-                -- for most of every day. Bounded, because a figure this
-                -- stale is not a current reading.
+                -- The last figure before the window, seeding the
+                -- carry-forward for leading buckets that predate the first
+                -- in-window observation. Upstream publishes one row per
+                -- prime per day, so from a minute past midnight the newest
+                -- row already sits outside a 24h window and the series
+                -- would read as absent for most of every day. Bounded,
+                -- because a figure this stale is not a current reading.
                 SELECT b.debt_usd * 1e18 AS debt_wad
                 FROM prime_reference_balance_sheet b
                 WHERE b.prime_id = :prime_id
@@ -198,22 +206,27 @@ class PrimeDebtRepository:
                       CAST(:from_timestamp AS TIMESTAMPTZ) - INTERVAL '90 days'
                 ORDER BY b.observed_at DESC, b.processing_version DESC
                 LIMIT 1
+            ), {gapfill_series_cte()},
+            data AS (
+                SELECT
+                    {time_bucket_expr("corrected.observed_at")} AS bucket_start,
+                    (array_agg(corrected.debt_wad ORDER BY corrected.observed_at DESC))[1] AS debt_wad
+                FROM corrected
+                GROUP BY 1
+            ),
+            filled AS (
+                SELECT gs.bucket, d.debt_wad,
+                       count(d.debt_wad) OVER (ORDER BY gs.bucket) AS grp
+                FROM gs LEFT JOIN data d ON d.bucket_start = gs.bucket
             )
             SELECT
-                time_bucket_gapfill(
-                    make_interval(secs => :bucket_seconds),
-                    corrected.observed_at,
-                    CAST(:from_timestamp AS TIMESTAMPTZ),
-                    CAST(:to_timestamp AS TIMESTAMPTZ)
-                ) AS bucket_start,
-                locf(
-                    last(corrected.debt_wad, corrected.observed_at),
-                    (SELECT prior.debt_wad FROM prior),
-                    treat_null_as_missing => true
+                bucket AS bucket_start,
+                COALESCE(
+                    first_value(debt_wad) OVER (PARTITION BY grp ORDER BY bucket),
+                    (SELECT prior.debt_wad FROM prior)
                 ) AS debt_wad
-            FROM corrected
-            GROUP BY bucket_start
-            ORDER BY bucket_start DESC
+            FROM filled
+            ORDER BY bucket DESC
             LIMIT :limit
             """
         )

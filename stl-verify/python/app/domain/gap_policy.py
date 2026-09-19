@@ -49,7 +49,7 @@ class GapFilledPoint[T]:
 
     ``value`` is ``None`` where there is nothing to report: before the series'
     first observation, or where a level series' last observation was itself
-    ``None`` — which is what ``locf`` carries. ``filled`` is true only where a
+    ``None`` — which is what the carry-forward produces. ``filled`` is true only where a
     value was carried into an empty bucket rather than observed in it, so it
     never sits beside a ``None``.
     """
@@ -64,7 +64,7 @@ def _floor_to_bucket(moment: datetime, width: timedelta) -> datetime:
 
 
 def bucket_starts(query: TimeSeriesQuery) -> list[datetime]:
-    """Every bucket ``time_bucket_gapfill`` generates for the query, newest first.
+    """Every bucket the gapfill grid generates for the query, newest first.
 
     A bound inside a bucket is answered by that whole bucket, but the upper
     bound is exclusive for a *generated* bucket: a window ending exactly on a

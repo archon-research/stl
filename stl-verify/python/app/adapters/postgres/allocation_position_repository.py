@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres._time_window import (
     clamp_limit,
+    gapfill_series_cte,
     required_time_window_clause,
     time_bucket_expr,
 )
@@ -79,7 +80,7 @@ _ANCHORAGE_STALE_AFTER = timedelta(hours=1)
 # The identity of an allocation_position row: allocation_position_pkey minus
 # processing_version, and minus created_at. created_at is the block timestamp and
 # a correction copies it unchanged, so it does NOT distinguish one version from
-# another -- which is precisely what makes the last()/locf reads below unsafe.
+# another -- which is precisely what makes the bucketed reads below unsafe.
 #
 # The table is append-only: a correction is a new row sharing this identity and
 # created_at but differing in a value column (balance, underlying_value, ...) --
@@ -88,7 +89,7 @@ _ANCHORAGE_STALE_AFTER = timedelta(hours=1)
 # (get_latest_total_capital_usd, the direct-holdings and USD-exposure CTEs, the
 # tier-2 nearest-ratio laterals). The reads below are the ones that see MULTIPLE
 # rows per identity before that tiebreak can apply: a SUM over raw history
-# double-counts, and a last()-by-time tie-breaks arbitrarily between the original
+# double-counts, and a latest-by-time aggregate tie-breaks arbitrarily between the original
 # and the correction. Both are fixed by collapsing to the newest version per
 # identity first (VEC-758).
 #
@@ -914,6 +915,7 @@ class AllocationRepository:
         subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
         distinct_on, version_order = _DISTINCT_ON_AP, _VERSION_ORDER_AP
         time_window = required_time_window_clause("ap.created_at")
+        bucket_expr = time_bucket_expr("ap.created_at")
         query = text(
             f"""
             WITH target AS (
@@ -924,8 +926,9 @@ class AllocationRepository:
             ),
             -- One row per identity, newest processing_version, BEFORE the
             -- bucketing below picks a per-bucket winner by time. A correction
-            -- shares its original's created_at exactly, so last() cannot break
-            -- that tie and would otherwise return either row arbitrarily.
+            -- shares its original's created_at exactly, so the aggregate
+            -- cannot break that tie and would otherwise return either row
+            -- arbitrarily.
             latest AS (
                 SELECT {distinct_on} ap.balance, ap.created_at
                 FROM allocation_position ap
@@ -935,18 +938,25 @@ class AllocationRepository:
                   AND t.address = decode(:usds_hex, 'hex')
                   {time_window}
                 ORDER BY {version_order}
+            ),
+            {gapfill_series_cte()},
+            data AS (
+                SELECT
+                    {bucket_expr} AS bucket_start,
+                    (array_agg(ap.balance ORDER BY ap.created_at DESC))[1] AS balance
+                FROM latest ap
+                GROUP BY 1
+            ),
+            filled AS (
+                SELECT gs.bucket, d.balance,
+                       count(d.balance) OVER (ORDER BY gs.bucket) AS grp
+                FROM gs LEFT JOIN data d ON d.bucket_start = gs.bucket
             )
             SELECT
-                time_bucket_gapfill(
-                    make_interval(secs => :bucket_seconds),
-                    ap.created_at,
-                    CAST(:from_timestamp AS TIMESTAMPTZ),
-                    CAST(:to_timestamp AS TIMESTAMPTZ)
-                ) AS bucket_start,
-                locf(last(ap.balance, ap.created_at)) AS total_capital_usd
-            FROM latest ap
-            GROUP BY bucket_start
-            ORDER BY bucket_start DESC
+                bucket AS bucket_start,
+                first_value(balance) OVER (PARTITION BY grp ORDER BY bucket) AS total_capital_usd
+            FROM filled
+            ORDER BY bucket DESC
             LIMIT :limit
             """
         ).bindparams(bindparam("subproxy_addrs", expanding=True))
@@ -1250,8 +1260,9 @@ class AllocationRepository:
 # different unit, so every valuation read refuses to price it (NULL) rather
 # than producing a plausible wrong number. The positions list surfaces the
 # refusal via ``_record_receipt_valuation_gaps``; the exposure-buckets read
-# nulls the divergent observation before ``last()``, so ``locf`` carries the
-# last pre-divergence value (stale but unit-correct) without telemetry.
+# nulls the divergent observation before the aggregate, so the count-group
+# LOCF carries the last pre-divergence value (stale but unit-correct)
+# without telemetry.
 _RECEIPT_TOKEN_POSITIONS_SQL = text(f"""
     WITH latest_receipt_positions AS (
         SELECT
@@ -1848,9 +1859,9 @@ _BALANCE_SEED_REACH = timedelta(days=30)
 _ALLOCATION_BALANCE_BUCKETS_SQL = text(f"""
 WITH window_rows AS MATERIALIZED (
     -- Deduped to the newest processing_version per identity for the same reason
-    -- the flow read is (VEC-758): last() below picks a per-bucket winner by
-    -- created_at, and a correction copies its original's created_at exactly, so
-    -- the tie is unbreakable and would resolve arbitrarily.
+    -- the flow read is (VEC-758): the per-bucket aggregate picks a winner by
+    -- created_at, and a correction copies its original's created_at exactly,
+    -- so the tie is unbreakable and would resolve arbitrarily.
     SELECT {_DISTINCT_ON_AP}
         ap.chain_id,
         ap.token_id,
@@ -2046,23 +2057,21 @@ observations AS (
     FROM valued_rows
     WHERE created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
     UNION ALL
-    -- Each entity's carry-in, anchored at the window start so it becomes a real
-    -- row in the first bucket rather than an argument to locf().
-    --
-    -- The seed enters as a row in the row set, timestamped at the window
+    -- Each entity's carry-in, anchored at the window start so it becomes a
+    -- real row in the first bucket. The seed enters timestamped at the window
     -- start, so every entity with a prior observation owns at least one row
-    -- inside the window. time_bucket_gapfill emits a bucket series per group
-    -- that has a row, and locf then carries this value across the buckets
-    -- before the entity's first in-window observation. One scan, evaluated
-    -- once, rather than per (bucket, entity) group.
+    -- inside the window and joins onto the bucket grid; the count-group LOCF
+    -- then carries this value across the buckets before the entity's first
+    -- in-window observation. One scan, evaluated once, rather than per
+    -- (bucket, entity) group.
     SELECT proxy_address, chain_id, token_id, block_number, block_version, log_index,
            direction, tx_hash, CAST(:from_timestamp AS TIMESTAMPTZ) AS created_at, value_usd
     FROM seed
 ),
 deduped_observations AS (
     -- A flow row and a same-block sweep snapshot for one entity share
-    -- created_at exactly, so last() below (ordered on created_at alone) would
-    -- pick between them arbitrarily. The tiebreak matches
+    -- created_at exactly, so the aggregate below (ordered on created_at
+    -- alone) would pick between them arbitrarily. The tiebreak matches
     -- allocation_position_current's newer-wins order (db/migrations
     -- 20260825_120000): block/version/log_index, then direction/tx_hash for
     -- the log_index-0 pair a same-block flow row and sweep row both carry.
@@ -2073,32 +2082,57 @@ deduped_observations AS (
              block_number DESC, block_version DESC, log_index DESC,
              direction DESC, tx_hash DESC
 ),
-per_entity AS (
+{gapfill_series_cte()},
+entity_keys AS (
+    SELECT DISTINCT proxy_address, chain_id, token_id
+    FROM deduped_observations
+),
+bucketed AS (
     SELECT
-        time_bucket_gapfill(
-            make_interval(secs => :bucket_seconds),
-            o.created_at,
-            CAST(:from_timestamp AS TIMESTAMPTZ),
-            CAST(:to_timestamp AS TIMESTAMPTZ)
-        ) AS bucket_start,
+        {time_bucket_expr("o.created_at")} AS bucket_start,
         o.proxy_address,
         o.chain_id,
         o.token_id,
-        -- gapfill + locf, not the plain time_bucket the other bucketed reads
-        -- use: a bucket with no observation of its own has to report the last
-        -- known value, not nothing. The FILTER carries the newest PRICED value;
-        -- priced_at and last_event_at below are what tell the aggregate whether
-        -- that value is still the entity's current state.
-        locf(last(o.value_usd, o.created_at) FILTER (WHERE o.value_usd IS NOT NULL)) AS priced_value,
+        -- A bucket with no observation of its own has to report the last
+        -- known value, not nothing. The FILTER carries the newest PRICED
+        -- value; priced_at and last_event_at below are what tell the
+        -- aggregate whether that value is still the entity's current state.
+        (array_agg(o.value_usd ORDER BY o.created_at DESC)
+            FILTER (WHERE o.value_usd IS NOT NULL))[1] AS priced_value,
         -- The created_at of that same latest-priced observation, and of the
         -- latest observation of ANY kind. Comparing the two separates "not
         -- observed yet" (both NULL) from "observed, but its current state is
-        -- unpriceable" (the any-kind one is newer). locf on value_usd alone
-        -- cannot: both read as NULL there.
-        locf(last(o.created_at, o.created_at) FILTER (WHERE o.value_usd IS NOT NULL)) AS priced_at,
-        locf(last(o.created_at, o.created_at)) AS last_event_at
+        -- unpriceable" (the any-kind one is newer).
+        MAX(o.created_at) FILTER (WHERE o.value_usd IS NOT NULL) AS priced_at,
+        MAX(o.created_at) AS last_event_at
     FROM deduped_observations o
-    GROUP BY bucket_start, o.proxy_address, o.chain_id, o.token_id
+    GROUP BY 1, o.proxy_address, o.chain_id, o.token_id
+),
+filled AS (
+    SELECT gs.bucket,
+           ek.proxy_address, ek.chain_id, ek.token_id,
+           b.priced_value, b.priced_at, b.last_event_at,
+           count(b.priced_value) OVER w AS grp_priced,
+           count(b.last_event_at) OVER w AS grp_event
+    FROM entity_keys ek
+    CROSS JOIN gs
+    LEFT JOIN bucketed b
+        ON b.bucket_start = gs.bucket
+        AND b.proxy_address = ek.proxy_address
+        AND b.chain_id = ek.chain_id
+        AND b.token_id = ek.token_id
+    WINDOW w AS (PARTITION BY ek.proxy_address, ek.chain_id, ek.token_id ORDER BY gs.bucket)
+),
+per_entity AS (
+    SELECT
+        bucket AS bucket_start,
+        proxy_address, chain_id, token_id,
+        first_value(priced_value) OVER wp AS priced_value,
+        first_value(priced_at) OVER wp AS priced_at,
+        first_value(last_event_at) OVER we AS last_event_at
+    FROM filled
+    WINDOW wp AS (PARTITION BY proxy_address, chain_id, token_id, grp_priced ORDER BY bucket),
+           we AS (PARTITION BY proxy_address, chain_id, token_id, grp_event ORDER BY bucket)
 )
 SELECT
     bucket_start,
@@ -2108,7 +2142,7 @@ SELECT
     -- The total of the entities this bucket can currently price, and how many
     -- of the entities it knows about that is. An entity counts as priced only
     -- when its NEWEST recorded state is the one that carries the price: an
-    -- older priced observation locf'd past a newer unpriceable one is a stale
+    -- older priced observation carried past a newer unpriceable one is a stale
     -- number for a position whose current state is unknown, so it is excluded
     -- from the total and counted as unpriced rather than quietly standing in.
     --
@@ -2306,47 +2340,69 @@ LIMIT :limit
 # Priced receipt-token exposure per time bucket; semantics on
 # ``AllocationRepository.list_exposure_buckets``.
 _EXPOSURE_BUCKETS_SQL = text(f"""
-WITH position_buckets AS (
+WITH {gapfill_series_cte()},
+deduped_positions AS (
+    -- Newest processing_version per identity, before the aggregate picks a
+    -- per-bucket winner. A correction copies its original's created_at
+    -- exactly, so the aggregate has no tie to break and would return either
+    -- row arbitrarily -- the correction silently not applying, or flipping
+    -- between plans (VEC-758).
+    SELECT {_DISTINCT_ON_D}
+        d.chain_id, d.token_id, d.created_at, d.balance,
+        d.underlying_value, d.underlying_token_id
+    FROM allocation_position d
+    -- Prime-wide, like the headline figure beside it: a prime holds
+    -- receipt tokens through one proxy per chain, so scoping to one
+    -- address prices a single chain against a prime-wide total.
+    WHERE d.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[]))
+      AND d.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
+      AND d.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
+    ORDER BY {_VERSION_ORDER_D}
+),
+position_data AS (
     SELECT
         rt.id AS receipt_token_id,
         rt.underlying_token_id,
         rt.protocol_id,
-        time_bucket_gapfill(
-            make_interval(secs => :bucket_seconds),
-            ap.created_at,
-            CAST(:from_timestamp AS TIMESTAMPTZ),
-            CAST(:to_timestamp AS TIMESTAMPTZ)
-        ) AS bucket,
-        locf(last(
+        {time_bucket_expr("ap.created_at")} AS bucket,
+        (array_agg(
             CASE
                 WHEN ap.underlying_token_id IS NOT NULL
                  AND ap.underlying_token_id <> rt.underlying_token_id
                 THEN NULL
                 ELSE COALESCE(ap.underlying_value, ap.balance)
-            END,
-            ap.created_at)) AS valuation_units
-    FROM (
-        -- Newest processing_version per identity, before last() picks a
-        -- per-bucket winner. A correction copies its original's created_at
-        -- exactly, so last() has no tie to break and would return either row
-        -- arbitrarily -- the correction silently not applying, or flipping
-        -- between plans (VEC-758).
-        SELECT {_DISTINCT_ON_D}
-            d.chain_id, d.token_id, d.created_at, d.balance,
-            d.underlying_value, d.underlying_token_id
-        FROM allocation_position d
-        -- Prime-wide, like the headline figure beside it: a prime holds
-        -- receipt tokens through one proxy per chain, so scoping to one
-        -- address prices a single chain against a prime-wide total.
-        WHERE d.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[]))
-          AND d.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
-          AND d.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
-        ORDER BY {_VERSION_ORDER_D}
-    ) ap
+            END
+            ORDER BY ap.created_at DESC
+        ))[1] AS valuation_units
+    FROM deduped_positions ap
     JOIN token t ON t.id = ap.token_id
     JOIN receipt_token rt
         ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
     GROUP BY rt.id, rt.underlying_token_id, rt.protocol_id, bucket
+),
+position_keys AS (
+    SELECT DISTINCT receipt_token_id, underlying_token_id, protocol_id
+    FROM position_data
+),
+filled_positions AS (
+    SELECT gs.bucket,
+           pk.receipt_token_id, pk.underlying_token_id, pk.protocol_id,
+           pd.valuation_units,
+           count(pd.valuation_units) OVER (
+               PARTITION BY pk.receipt_token_id ORDER BY gs.bucket
+           ) AS grp
+    FROM position_keys pk
+    CROSS JOIN gs
+    LEFT JOIN position_data pd
+        ON pd.receipt_token_id = pk.receipt_token_id
+        AND pd.bucket = gs.bucket
+),
+position_buckets AS (
+    SELECT receipt_token_id, underlying_token_id, protocol_id, bucket,
+           first_value(valuation_units) OVER (
+               PARTITION BY receipt_token_id, grp ORDER BY bucket
+           ) AS valuation_units
+    FROM filled_positions
 ),
 -- The latest price does not vary by bucket, so it is resolved once per
 -- (underlying, protocol) pair instead of inside the per-bucket join.
