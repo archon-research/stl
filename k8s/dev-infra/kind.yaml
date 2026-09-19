@@ -4,7 +4,7 @@ name: KIND_CLUSTER_NAME
 nodes:
   - role: control-plane
     extraPortMappings:
-      - containerPort: 30432   # timescaledb
+      - containerPort: 30432   # postgres
         hostPort: KIND_HOST_PORT_5432
         listenAddress: "127.0.0.1"
       - containerPort: 30433   # temporal-db
@@ -35,7 +35,7 @@ nodes:
         hostPort: KIND_HOST_PORT_8547
         listenAddress: "127.0.0.1"
     extraMounts:
-      - hostPath: STL_DATA_DIR/timescaledb
-        containerPath: /data/timescaledb
+      - hostPath: STL_DATA_DIR/postgres
+        containerPath: /data/postgres
       - hostPath: STL_DATA_DIR/temporal-db
         containerPath: /data/temporal-db

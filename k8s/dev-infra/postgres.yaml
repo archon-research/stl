@@ -1,21 +1,21 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: timescaledb
+  name: postgres
 spec:
-  serviceName: timescaledb
+  serviceName: postgres
   replicas: 1
   selector:
     matchLabels:
-      app: timescaledb
+      app: postgres
   template:
     metadata:
       labels:
-        app: timescaledb
+        app: postgres
     spec:
       containers:
-        - name: timescaledb
-          image: timescale/timescaledb:2.25.1-pg17
+        - name: postgres
+          image: postgres:18
           env:
             - name: POSTGRES_USER
               value: postgres
@@ -33,17 +33,17 @@ spec:
       volumes:
         - name: data
           hostPath:
-            path: /data/timescaledb
+            path: /data/postgres
             type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: timescaledb
+  name: postgres
 spec:
   type: NodePort
   selector:
-    app: timescaledb
+    app: postgres
   ports:
     - port: 5432
       targetPort: 5432

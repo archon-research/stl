@@ -9,11 +9,11 @@ spec:
       restartPolicy: Never
       initContainers:
         - name: wait-for-db
-          image: postgres:16-alpine
+          image: postgres:18
           command:
             - sh
             - -c
-            - until pg_isready -h timescaledb -U postgres; do echo "waiting for timescaledb..."; sleep 2; done
+            - until pg_isready -h postgres -U postgres; do echo "waiting for postgres..."; sleep 2; done
       containers:
         - name: migrate
           image: localhost/stl-migrate:local

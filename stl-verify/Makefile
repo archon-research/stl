@@ -622,9 +622,9 @@ dev-db:
 	$(MAKE) kind-create
 	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	$(MAKE) kind-config kind-secrets
-	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/timescaledb.yaml -n $(KUBE_NS)
-	@echo "==> Waiting for timescaledb to be ready..."
-	kubectl --context=$(KUBE_CONTEXT) rollout status statefulset/timescaledb -n $(KUBE_NS) --timeout=300s
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/postgres.yaml -n $(KUBE_NS)
+	@echo "==> Waiting for postgres to be ready..."
+	kubectl --context=$(KUBE_CONTEXT) rollout status statefulset/postgres -n $(KUBE_NS) --timeout=300s
 	$(call build-if-needed,stl-migrate:$(LOCAL_TAG),docker-build-migrate)
 	$(MAKE) kind-load-migrate kind-migrate
 	@echo "==> Database ready."
@@ -2159,7 +2159,7 @@ kind-create:
 	    exit 1; \
 	  }; \
 	}
-	@mkdir -p $$HOME/.$(KIND_CLUSTER)/timescaledb $$HOME/.$(KIND_CLUSTER)/temporal-db
+	@mkdir -p $$HOME/.$(KIND_CLUSTER)/postgres $$HOME/.$(KIND_CLUSTER)/temporal-db
 	@OTHERS=$$(kind get clusters 2>/dev/null | grep -v '^$(KIND_CLUSTER)$$' || true); \
 	if [ -n "$$OTHERS" ]; then \
 	  echo ""; \
@@ -2206,9 +2206,9 @@ kind-infra:
 	sed "s/__LOCALSTACK_MANIFEST_SHA__/$$(cat ../k8s/dev-infra/localstack.yaml localstack-init/init-aws.sh | shasum -a 256 | cut -c1-16)/" ../k8s/dev-infra/localstack.yaml \
 	  | kubectl --context=$(KUBE_CONTEXT) apply -f - -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/redis.yaml        -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/timescaledb.yaml  -n $(KUBE_NS)
-	@echo "==> Waiting for timescaledb to be ready (may take a moment on first run — image pull)..."
-	kubectl --context=$(KUBE_CONTEXT) rollout status statefulset/timescaledb -n $(KUBE_NS) --timeout=300s
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/postgres.yaml  -n $(KUBE_NS)
+	@echo "==> Waiting for postgres to be ready (may take a moment on first run — image pull)..."
+	kubectl --context=$(KUBE_CONTEXT) rollout status statefulset/postgres -n $(KUBE_NS) --timeout=300s
 	@echo "==> Waiting for localstack to be ready..."
 	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/localstack   -n $(KUBE_NS) --timeout=300s
 
@@ -2797,7 +2797,7 @@ endif
 #   make k6-stress-test REORG=1 REORG_DEPTH=10 REORG_INTERVAL_S=15
 #   make k6-stress-test TARGET=staging DURATION=5m
 k6-stress-test:
-	kubectl --context=$(KUBE_CONTEXT) exec -n $(KUBE_NS) timescaledb-0 -- psql -U postgres -d stl_verify -c "TRUNCATE block_states CASCADE;" -q
+	kubectl --context=$(KUBE_CONTEXT) exec -n $(KUBE_NS) postgres-0 -- psql -U postgres -d stl_verify -c "TRUNCATE block_states CASCADE;" -q
 	kubectl --context=$(KUBE_CONTEXT) exec -n $(KUBE_NS) deployment/redis -- redis-cli FLUSHDB
 ifeq ($(TARGET),staging)
 	aws --region $(AWS_REGION) sqs purge-queue \
@@ -2824,7 +2824,7 @@ endif
 	kubectl --context=$(KUBE_CONTEXT) logs job/k6-stress-test -n $(KUBE_NS) -f
 	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/k6-stress-test -n $(KUBE_NS) --timeout=10s
 	@echo "==> Verifying chain correctness..."
-	kubectl --context=$(KUBE_CONTEXT) exec -n $(KUBE_NS) timescaledb-0 -- psql -U postgres -d stl_verify \
+	kubectl --context=$(KUBE_CONTEXT) exec -n $(KUBE_NS) postgres-0 -- psql -U postgres -d stl_verify \
 	  -c "SELECT count(*) AS gaps FROM generate_series((SELECT min(number) FROM block_states WHERE chain_id = 1 AND NOT is_orphaned),(SELECT max(number) FROM block_states WHERE chain_id = 1 AND NOT is_orphaned)) AS s(n) LEFT JOIN block_states b ON b.number = s.n AND b.chain_id = 1 AND NOT b.is_orphaned WHERE b.number IS NULL;" \
 	  -c "SELECT count(*) AS unexpected_orphans FROM block_states WHERE chain_id = 1 AND is_orphaned AND number > (SELECT max(number) - $(shell echo $$(( 64 + $(if $(REORG),$(or $(REORG_DEPTH),5),0) ))) FROM block_states WHERE chain_id = 1);" \
 	  -c "SELECT count(*) AS broken_parent_links FROM block_states b JOIN block_states p ON p.number = b.number - 1 AND p.chain_id = b.chain_id AND NOT p.is_orphaned WHERE NOT b.is_orphaned AND b.chain_id = 1 AND b.parent_hash != p.hash;"
