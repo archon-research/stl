@@ -29,12 +29,10 @@ from enum import StrEnum
 
 from app.domain.time_series import TimeSeriesQuery
 
-# ``time_bucket`` cuts on multiples of the bucket width measured from the
-# Postgres epoch, so the grid below is anchored there too. A width that does not
-# divide a day evenly, or a week multiple (which TimescaleDB anchors on Monday
-# 2000-01-03 instead), would need the origin it actually uses rather than this
-# one; ``_reject_uncovered_observations`` turns that disagreement into a loud
-# error rather than a shifted series.
+# ``date_bin`` cuts on multiples of the bucket width measured from its origin
+# (``'2000-01-01'::timestamptz`` in ``_time_window._BUCKET_ORIGIN``); the Python
+# grid is anchored at the same point. ``_reject_uncovered_observations`` turns a
+# disagreement into a loud error rather than a shifted series.
 _BUCKET_ORIGIN = datetime(2000, 1, 1, tzinfo=UTC)
 
 

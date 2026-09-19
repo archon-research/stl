@@ -91,7 +91,7 @@ func quoteIdent(name string) string {
 // workListArms derives the arms for one run. The partition column is looked up per table, so a table
 // that is not a hypertable, or whose dimension changed, fails loudly here rather than enumerating on a
 // column that no longer partitions it.
-func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, error) {
+func (r *BlockMetaRepository) workListArms(ctx context.Context, tsdb bool) ([]workListArm, error) {
 	register, err := schemamaster.Load()
 	if err != nil {
 		return nil, fmt.Errorf("loading the column register: %w", err)
@@ -116,7 +116,7 @@ func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, 
 
 	arms := make([]workListArm, 0, len(tables))
 	for _, table := range tables {
-		partCol, err := r.partitionColumn(ctx, table)
+		partCol, err := r.partitionColumn(ctx, table, tsdb)
 		if err != nil {
 			return nil, err
 		}
@@ -130,13 +130,44 @@ func (r *BlockMetaRepository) workListArms(ctx context.Context) ([]workListArm, 
 	return arms, nil
 }
 
-// partitionColumn reads a hypertable's primary dimension from the catalogue.
-func (r *BlockMetaRepository) partitionColumn(ctx context.Context, table string) (string, error) {
+// hasTimescaleDB reports whether the timescaledb extension is installed in the connected database.
+func (r *BlockMetaRepository) hasTimescaleDB(ctx context.Context) (bool, error) {
+	var has bool
+	if err := r.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')`).Scan(&has); err != nil {
+		return false, fmt.Errorf("checking for timescaledb extension: %w", err)
+	}
+	return has, nil
+}
+
+// partitionColumn reads a hypertable's primary dimension from the catalogue when
+// TimescaleDB is present. On vanilla PostgreSQL, it falls back to the table's primary
+// key columns — block_number or created_at or block_timestamp — which are the same
+// columns TimescaleDB partitions on.
+func (r *BlockMetaRepository) partitionColumn(ctx context.Context, table string, tsdb bool) (string, error) {
+	if tsdb {
+		var col string
+		if err := r.pool.QueryRow(ctx, `
+			SELECT column_name FROM timescaledb_information.dimensions
+			 WHERE hypertable_name = $1 AND dimension_number = 1`, table).Scan(&col); err != nil {
+			return "", fmt.Errorf("reading %s's partition column: %w", table, err)
+		}
+		return col, nil
+	}
+	// On vanilla PG, infer from the table's columns: the first of block_number,
+	// created_at, block_timestamp that exists is the time-series key.
 	var col string
 	if err := r.pool.QueryRow(ctx, `
-		SELECT column_name FROM timescaledb_information.dimensions
-		 WHERE hypertable_name = $1 AND dimension_number = 1`, table).Scan(&col); err != nil {
-		return "", fmt.Errorf("reading %s's partition column: %w", table, err)
+		SELECT column_name FROM information_schema.columns
+		 WHERE table_schema = 'public' AND table_name = $1
+		   AND column_name IN ('block_number', 'created_at', 'block_timestamp')
+		 ORDER BY CASE column_name
+		            WHEN 'block_number' THEN 1
+		            WHEN 'created_at' THEN 2
+		            WHEN 'block_timestamp' THEN 3
+		          END
+		 LIMIT 1`, table).Scan(&col); err != nil {
+		return "", fmt.Errorf("inferring %s's partition column: %w", table, err)
 	}
 	return col, nil
 }
@@ -165,7 +196,11 @@ const chunkRangeWithTieredSQL = chunkRangeSQL + `
 		  FROM timescaledb_osm.tiered_chunks
 		 WHERE hypertable_name = $1`
 
-func (r *BlockMetaRepository) windowPredicates(ctx context.Context, table, partCol string) ([]string, error) {
+func (r *BlockMetaRepository) windowPredicates(ctx context.Context, table, partCol string, tsdb bool) ([]string, error) {
+	if !tsdb {
+		// On vanilla PG there are no chunks to window over — one unbounded pass per arm.
+		return []string{"TRUE"}, nil
+	}
 	var tieredVisible bool
 	if err := r.pool.QueryRow(ctx,
 		`SELECT to_regclass('timescaledb_osm.tiered_chunks') IS NOT NULL`).Scan(&tieredVisible); err != nil {
@@ -209,22 +244,19 @@ func (r *BlockMetaRepository) windowPredicates(ctx context.Context, table, partC
 	return out, nil
 }
 
-// enumerateWindow runs one arm over one window, in its own transaction, with tiered reads on.
-//
-// Four of the six source tables carry a one-year tiering policy. The chunk catalogue still lists a
-// tiered chunk, so a window would be built for it and then read with timescaledb.enable_tiered_reads
-// at its default of off — returning nothing, silently, for exactly the deep-tail blocks this loader
-// exists to cover. Nothing is a year old yet; this is set before that becomes true rather than after.
-// SET LOCAL, so it lasts the statement's transaction and no longer.
-func (r *BlockMetaRepository) enumerateWindow(ctx context.Context, arm workListArm, where string, chainID int64) error {
+// enumerateWindow runs one arm over one window, in its own transaction. When TimescaleDB
+// is present, tiered reads are enabled so S3-tiered chunks are visible.
+func (r *BlockMetaRepository) enumerateWindow(ctx context.Context, arm workListArm, where string, chainID int64, tsdb bool) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin enumeration of %s: %w", arm.table, err)
 	}
 	defer rollback(ctx, tx, r.logger)
 
-	if _, err := tx.Exec(ctx, `SET LOCAL timescaledb.enable_tiered_reads = on`); err != nil {
-		return fmt.Errorf("enabling tiered reads for %s: %w", arm.table, err)
+	if tsdb {
+		if _, err := tx.Exec(ctx, `SET LOCAL timescaledb.enable_tiered_reads = on`); err != nil {
+			return fmt.Errorf("enabling tiered reads for %s: %w", arm.table, err)
+		}
 	}
 	if _, err := tx.Exec(ctx, fmt.Sprintf(arm.sql, where), chainID); err != nil {
 		return fmt.Errorf("enumerating %s for chain %d: %w", arm.table, chainID, err)
@@ -266,17 +298,21 @@ func (r *BlockMetaRepository) OpenWorkList(ctx context.Context, chainID int64, h
 		`DELETE FROM block_meta_worklist WHERE chain_id = $1`, chainID); err != nil {
 		return nil, fmt.Errorf("clearing the work list for chain %d: %w", chainID, err)
 	}
-	arms, err := r.workListArms(ctx)
+	tsdb, err := r.hasTimescaleDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	arms, err := r.workListArms(ctx, tsdb)
 	if err != nil {
 		return nil, err
 	}
 	for _, arm := range arms {
-		windows, err := r.windowPredicates(ctx, arm.table, arm.partCol)
+		windows, err := r.windowPredicates(ctx, arm.table, arm.partCol, tsdb)
 		if err != nil {
 			return nil, err
 		}
 		for _, where := range windows {
-			if err := r.enumerateWindow(ctx, arm, where, chainID); err != nil {
+			if err := r.enumerateWindow(ctx, arm, where, chainID, tsdb); err != nil {
 				return nil, err
 			}
 		}

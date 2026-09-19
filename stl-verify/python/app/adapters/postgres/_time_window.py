@@ -22,7 +22,7 @@ def required_time_window_clause(column: str) -> str:
     """Predicate filtering ``column`` to a required ``[from, to]`` window.
 
     Both bounds must be non-NULL. Used by the aggregated queries, where the
-    window always has explicit bounds (needed by ``time_bucket_gapfill``).
+    window always has explicit bounds.
     """
     return (
         f"AND {column} >= CAST(:from_timestamp AS TIMESTAMPTZ)\n"
@@ -30,9 +30,34 @@ def required_time_window_clause(column: str) -> str:
     )
 
 
+_BUCKET_ORIGIN = "'2000-01-01'::timestamptz"
+
+
 def time_bucket_expr(column: str) -> str:
-    """``time_bucket`` expression over ``column`` using the ``bucket_seconds`` bind."""
-    return f"time_bucket(make_interval(secs => :bucket_seconds), {column})"
+    """``date_bin`` expression over ``column`` using the ``bucket_seconds`` bind.
+
+    Anchored at the Postgres epoch (2000-01-01) to match ``gap_policy._BUCKET_ORIGIN``.
+    """
+    return f"date_bin(make_interval(secs => :bucket_seconds), {column}, {_BUCKET_ORIGIN})"
+
+
+def gapfill_series_cte(alias: str = "gs") -> str:
+    """CTE generating a complete bucket grid for gapfill queries.
+
+    Callers LEFT JOIN their aggregated data onto this grid and use the count-group
+    LOCF pattern (``count(d.bucket) OVER ... AS grp`` then ``first_value(agg) OVER
+    (PARTITION BY ..., grp ORDER BY bucket)``) for last-observation-carried-forward.
+    Bind parameters: ``:from_timestamp``, ``:to_timestamp``, ``:bucket_seconds``.
+    """
+    return (
+        f"{alias} AS (\n"
+        f"    SELECT bucket FROM generate_series(\n"
+        f"        date_bin(make_interval(secs => :bucket_seconds), CAST(:from_timestamp AS TIMESTAMPTZ), {_BUCKET_ORIGIN}),\n"
+        f"        CAST(:to_timestamp AS TIMESTAMPTZ),\n"
+        f"        make_interval(secs => :bucket_seconds)\n"
+        f"    ) AS bucket\n"
+        f")"
+    )
 
 
 def clamp_limit(limit: int, maximum: int) -> int:
