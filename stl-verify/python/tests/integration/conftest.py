@@ -1,6 +1,6 @@
 """Shared fixtures for integration tests.
 
-A single TimescaleDB container is started once per test session.  Each test
+A single PostgreSQL container is started once per test session.  Each test
 module that needs database access requests its own isolated database within
 that container via the ``module_db`` fixture.  This gives every module a
 clean schema (migrations are applied independently) while avoiding the cost
@@ -20,7 +20,7 @@ from temporalio.testing import WorkflowEnvironment
 from testcontainers.postgres import PostgresContainer
 
 MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parents[3] / "db" / "migrations"
-TIMESCALEDB_IMAGE = "timescale/timescaledb:2.29.2-pg18"
+POSTGRES_IMAGE = "postgres:18"
 
 
 # ---------------------------------------------------------------------------
@@ -30,9 +30,9 @@ TIMESCALEDB_IMAGE = "timescale/timescaledb:2.29.2-pg18"
 
 @pytest.fixture(scope="session")
 def pg_container():
-    """Start a single TimescaleDB container for the entire test session."""
+    """Start a single PostgreSQL container for the entire test session."""
     with PostgresContainer(
-        image=TIMESCALEDB_IMAGE,
+        image=POSTGRES_IMAGE,
         username="postgres",
         password="postgres",
         dbname="postgres",

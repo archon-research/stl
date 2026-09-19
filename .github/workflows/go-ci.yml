@@ -106,8 +106,8 @@ jobs:
     # `services:` also pulls during job setup, replacing the explicit pull step.
     # LocalStack needs the union of every service set the packages request.
     services:
-      timescaledb:
-        image: timescale/timescaledb:2.29.2-pg18 # keep in sync with internal/testutil/images.go
+      postgres:
+        image: postgres:18 # keep in sync with internal/testutil/images.go
         env:
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test

@@ -94,13 +94,13 @@ jobs:
       # stl-verify/python/tests/integration/conftest.py.
       - name: Pull container images
         run: |
-          IMAGE=$(grep -oP 'TIMESCALEDB_IMAGE\s*=\s*"\K[^"]+' tests/integration/conftest.py)
+          IMAGE=$(grep -oP 'POSTGRES_IMAGE\s*=\s*"\K[^"]+' tests/integration/conftest.py)
           if [ -z "$IMAGE" ]; then
-            echo "::error::No TIMESCALEDB_IMAGE constant found in stl-verify/python/tests/integration/conftest.py — check the grep pattern"
+            echo "::error::No POSTGRES_IMAGE constant found in stl-verify/python/tests/integration/conftest.py — check the grep pattern"
             exit 1
           fi
           docker pull "$IMAGE"
 
-      # Integration tests require Docker (testcontainers spins up TimescaleDB automatically)
+      # Integration tests require Docker (testcontainers spins up PostgreSQL automatically)
       - name: Integration tests
         run: make test-integration
