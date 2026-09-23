@@ -1145,6 +1145,11 @@
       "type": "text",
       "class": "R"
     },
+    "security_id": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
+    },
     "seed_source": {
       "type": "text",
       "class": "R"
@@ -1563,6 +1568,10 @@
       "type": "raw_pipeline",
       "owner": "prime",
       "transform_defer": "VEC-494: bucket 3 (no natural PK, keyed via transform_config)"
+    },
+    "asset": {
+      "type": "dimension",
+      "owner": "pricing"
     },
     "asset_price": {
       "type": "raw_pipeline",
