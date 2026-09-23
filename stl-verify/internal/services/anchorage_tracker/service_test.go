@@ -15,9 +15,11 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockClient struct {
-	packages   []Package
-	operations []Operation
-	fetchErr   error
+	packages []Package
+	// operationPages is served one page per callback, mirroring the client
+	// following page.next.
+	operationPages [][]Operation
+	fetchErr       error
 }
 
 func (m *mockClient) FetchPackages(_ context.Context) ([]Package, error) {
@@ -27,12 +29,14 @@ func (m *mockClient) FetchPackages(_ context.Context) ([]Package, error) {
 	return m.packages, nil
 }
 
-func (m *mockClient) ForEachOperationsPage(_ context.Context, _ string, fn func([]Operation) error) error {
+func (m *mockClient) ForEachOperationsPage(_ context.Context, fn func([]Operation) error) error {
 	if m.fetchErr != nil {
 		return m.fetchErr
 	}
-	if len(m.operations) > 0 {
-		return fn(m.operations)
+	for _, page := range m.operationPages {
+		if err := fn(page); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -62,8 +66,12 @@ func (m *mockSnapshotRepo) count() int {
 type mockOperationRepo struct {
 	mu         sync.Mutex
 	operations []entity.AnchorageOperation
-	cursor     string
-	saveErr    error
+	// known seeds KnownOperationIDs with ids "already in the database".
+	known    []string
+	saveErr  error
+	knownErr error
+	// saveCalls counts SaveOperations invocations that reached the store.
+	saveCalls int
 }
 
 func (m *mockOperationRepo) SaveOperations(_ context.Context, ops []entity.AnchorageOperation) error {
@@ -72,12 +80,27 @@ func (m *mockOperationRepo) SaveOperations(_ context.Context, ops []entity.Ancho
 	if m.saveErr != nil {
 		return m.saveErr
 	}
+	m.saveCalls++
 	m.operations = append(m.operations, ops...)
 	return nil
 }
 
-func (m *mockOperationRepo) GetLastCursor(_ context.Context, _ int64) (string, error) {
-	return m.cursor, nil
+// KnownOperationIDs returns a fresh map each call so the service's own
+// bookkeeping cannot leak back into the mock between runs.
+func (m *mockOperationRepo) KnownOperationIDs(_ context.Context, _ int64) (map[string]struct{}, error) {
+	if m.knownErr != nil {
+		return nil, m.knownErr
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	known := make(map[string]struct{}, len(m.known)+len(m.operations))
+	for _, id := range m.known {
+		known[id] = struct{}{}
+	}
+	for _, op := range m.operations {
+		known[op.OperationID] = struct{}{}
+	}
+	return known, nil
 }
 
 func (m *mockOperationRepo) GetPrimeIDByName(_ context.Context, name string) (int64, error) {
@@ -307,8 +330,8 @@ func newTestOperation() Operation {
 
 func TestService_Run(t *testing.T) {
 	client := &mockClient{
-		packages:   []Package{newTestPackage()},
-		operations: []Operation{newTestOperation()},
+		packages:       []Package{newTestPackage()},
+		operationPages: [][]Operation{{newTestOperation()}},
 	}
 	snapRepo := &mockSnapshotRepo{}
 	opRepo := &mockOperationRepo{}
@@ -339,8 +362,8 @@ func TestService_RunSkipsInactivePackages(t *testing.T) {
 		CurrentLTV:   "",
 	}
 	client := &mockClient{
-		packages:   []Package{inactive, newTestPackage()},
-		operations: []Operation{newTestOperation()},
+		packages:       []Package{inactive, newTestPackage()},
+		operationPages: [][]Operation{{newTestOperation()}},
 	}
 	snapRepo := &mockSnapshotRepo{}
 	opRepo := &mockOperationRepo{}
@@ -368,7 +391,7 @@ func TestService_RunFailsOnAPIError(t *testing.T) {
 
 func TestService_BackfillOperations(t *testing.T) {
 	client := &mockClient{
-		operations: []Operation{newTestOperation()},
+		operationPages: [][]Operation{{newTestOperation()}},
 	}
 	opRepo := &mockOperationRepo{}
 
@@ -390,6 +413,103 @@ func TestService_BackfillOperations(t *testing.T) {
 	assertField(t, "OperationID", opRepo.operations[0].OperationID, "op-1")
 	assertField(t, "OperationType", opRepo.operations[0].OperationType, "COLLATERAL_PACKAGE")
 	opRepo.mu.Unlock()
+}
+
+// The sync re-reads the whole feed every run (no afterId cursor, VEC-826), so
+// everything already stored must be filtered out before SaveOperations and
+// only genuinely new ids may reach the store.
+func TestService_SyncOperationsStoresOnlyUnknownIDs(t *testing.T) {
+	old := newTestOperation()
+	fresh := newTestOperation()
+	fresh.ID = "op-2"
+	fresh.Action = "TOP_UP"
+	fresh.CreatedAt = "2026-04-08T02:30:00.000000Z"
+
+	client := &mockClient{
+		operationPages: [][]Operation{{old, fresh}},
+	}
+	opRepo := &mockOperationRepo{known: []string{old.ID}}
+
+	svc := NewService(client, &mockSnapshotRepo{}, opRepo, 1, nil)
+
+	n, err := svc.syncOperations(context.Background())
+	if err != nil {
+		t.Fatalf("syncOperations failed: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 new operation stored, got %d", n)
+	}
+	if opRepo.count() != 1 {
+		t.Fatalf("expected 1 operation in repo, got %d", opRepo.count())
+	}
+	opRepo.mu.Lock()
+	assertField(t, "OperationID", opRepo.operations[0].OperationID, "op-2")
+	opRepo.mu.Unlock()
+}
+
+// A page made only of known ids must not produce an empty SaveOperations
+// call, and an id repeated across pages is stored once.
+func TestService_SyncOperationsSkipsKnownPagesAndDuplicates(t *testing.T) {
+	known := newTestOperation()
+	fresh := newTestOperation()
+	fresh.ID = "op-2"
+
+	client := &mockClient{
+		operationPages: [][]Operation{{known}, {fresh}, {fresh}},
+	}
+	opRepo := &mockOperationRepo{known: []string{known.ID}}
+
+	svc := NewService(client, &mockSnapshotRepo{}, opRepo, 1, nil)
+
+	n, err := svc.syncOperations(context.Background())
+	if err != nil {
+		t.Fatalf("syncOperations failed: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 stored, got %d", n)
+	}
+	opRepo.mu.Lock()
+	defer opRepo.mu.Unlock()
+	if opRepo.saveCalls != 1 {
+		t.Errorf("expected exactly 1 SaveOperations call, got %d", opRepo.saveCalls)
+	}
+	if len(opRepo.operations) != 1 || opRepo.operations[0].OperationID != "op-2" {
+		t.Errorf("expected only op-2 stored, got %+v", opRepo.operations)
+	}
+}
+
+// Two consecutive runs over an unchanged feed store nothing on the second
+// run: the ids written by run one are known to run two.
+func TestService_SyncOperationsIsIdempotentAcrossRuns(t *testing.T) {
+	client := &mockClient{
+		operationPages: [][]Operation{{newTestOperation()}},
+	}
+	opRepo := &mockOperationRepo{}
+	svc := NewService(client, &mockSnapshotRepo{}, opRepo, 1, nil)
+
+	for run := 1; run <= 2; run++ {
+		if _, err := svc.syncOperations(context.Background()); err != nil {
+			t.Fatalf("run %d: %v", run, err)
+		}
+	}
+	if opRepo.count() != 1 {
+		t.Errorf("expected 1 operation after two runs, got %d", opRepo.count())
+	}
+}
+
+func TestService_SyncOperationsFailsWhenKnownIDsUnavailable(t *testing.T) {
+	client := &mockClient{
+		operationPages: [][]Operation{{newTestOperation()}},
+	}
+	opRepo := &mockOperationRepo{knownErr: fmt.Errorf("db down")}
+	svc := NewService(client, &mockSnapshotRepo{}, opRepo, 1, nil)
+
+	if _, err := svc.syncOperations(context.Background()); err == nil {
+		t.Fatal("expected error when known ids cannot be listed")
+	}
+	if opRepo.count() != 0 {
+		t.Errorf("expected nothing stored, got %d", opRepo.count())
+	}
 }
 
 // ---------------------------------------------------------------------------

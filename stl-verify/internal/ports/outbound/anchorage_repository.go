@@ -16,5 +16,8 @@ type AnchorageSnapshotRepository interface {
 // collateral management operations (deposits, paydowns, margin returns, etc.).
 type AnchorageOperationRepository interface {
 	SaveOperations(ctx context.Context, operations []entity.AnchorageOperation) error
-	GetLastCursor(ctx context.Context, primeID int64) (string, error)
+	// KnownOperationIDs returns every operation_id already stored for the
+	// prime. The sync fetches the full operation list from Anchorage on
+	// every run and uses this set to insert only what is new.
+	KnownOperationIDs(ctx context.Context, primeID int64) (map[string]struct{}, error)
 }

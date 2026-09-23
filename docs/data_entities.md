@@ -20,7 +20,7 @@ This inventory reflects data products currently persisted by STL Verify as of Ma
 | Prime Debt Snapshots | Sky/Maker vault debt readers | Ethereum | Periodic reads and block-aware snapshot writes | PostgreSQL `prime_debt` |
 | Morpho Market State and Positions | Morpho indexer | Ethereum | Event + state indexing | PostgreSQL `morpho_market`, `morpho_market_state`, `morpho_market_position`, `morpho_vault`, `morpho_vault_state`, `morpho_vault_position` |
 | Anchorage Package Snapshots | Anchorage API | N/A (prime-level collateral feed) | API polling | PostgreSQL `anchorage_package_snapshot` |
-| Anchorage Operations | Anchorage API | N/A (prime-level collateral feed) | API polling and cursor backfill | PostgreSQL `anchorage_operation` |
+| Anchorage Operations | Anchorage API | N/A (prime-level collateral feed) | API polling; full list each run, new operation ids only | PostgreSQL `anchorage_operation` |
 | Raw Blocks | Alchemy WS + Erigon RPC | Multi-chain (for example Ethereum, Avalanche, Base, Optimism, Arbitrum, Unichain) | WebSocket (live), HTTP RPC (backfill) | PostgreSQL `block_states` + Redis + S3 |
 | Raw Receipts | Alchemy WS + Erigon RPC | Multi-chain | WebSocket (live), HTTP RPC (backfill) | PostgreSQL + Redis + S3 |
 | Raw Traces | Alchemy WS + Erigon RPC | Chain-dependent | WebSocket (live), `trace_block` RPC (backfill) | PostgreSQL + Redis + S3 |
