@@ -11,6 +11,7 @@ const explorerCases = [
   [137, 'https://polygonscan.com'],
   [324, 'https://explorer.zksync.io'],
   [130, 'https://uniscan.xyz'],
+  [4663, 'https://robinhoodchain.blockscout.com'],
   [8453, 'https://basescan.org'],
   [42161, 'https://arbiscan.io'],
   [43114, 'https://snowtrace.io'],

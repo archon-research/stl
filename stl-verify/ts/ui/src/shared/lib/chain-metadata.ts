@@ -34,6 +34,11 @@ const CHAIN_METADATA: Record<number, ChainMetadata | undefined> = {
     explorerUrl: 'https://explorer.zksync.io/',
     nativeSymbol: 'ETH',
   },
+  4663: {
+    name: 'Robinhood Chain',
+    explorerUrl: 'https://robinhoodchain.blockscout.com',
+    nativeSymbol: 'ETH',
+  },
   8453: {
     name: 'Base',
     explorerUrl: 'https://basescan.org',

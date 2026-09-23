@@ -15,6 +15,7 @@ const LLAMA_CHAIN_SLUGS: Record<number, string> = {
   137: 'polygon',
   250: 'fantom',
   324: 'zksync',
+  4663: 'robinhood',
   8453: 'base',
   42161: 'arbitrum',
   43114: 'avalanche',
