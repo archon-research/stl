@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.10@sha256:865e5dd094beca432e8c0a1d5e1c465db5f998dca4e439981029b3b81fb39ed5
+# syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
 
 # Build UI on the native builder architecture — the output is static JS/HTML/CSS,
 # so there's no reason to run npm under QEMU arm64 emulation (which crashes node).
